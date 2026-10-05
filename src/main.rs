@@ -35,7 +35,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, FindWindowW, GetClassNameW, GetCursorPos, GetForegroundWindow, GetSystemMetrics,
     GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, IsWindow, IsWindowVisible,
     PostMessageW, SetCursorPos, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    GWL_EXSTYLE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE,
+    GWL_EXSTYLE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE, SW_MINIMIZE,
     SW_RESTORE, WM_CLOSE,
 };
 
@@ -116,6 +116,73 @@ fn send_paste() {
     }
 }
 
+#[cfg(windows)]
+fn send_hotkey(modifiers: &[VIRTUAL_KEY], key: VIRTUAL_KEY) {
+    let mut inputs = Vec::new();
+
+    // Enfoncer les modificateurs dans l'ordre
+    for &m in modifiers {
+        inputs.push(INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: m,
+                    wScan: 0,
+                    dwFlags: KEYBD_EVENT_FLAGS(0),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        });
+    }
+
+    // Enfoncer puis relâcher la touche principale
+    inputs.push(INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: key,
+                wScan: 0,
+                dwFlags: KEYBD_EVENT_FLAGS(0),
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    });
+    inputs.push(INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: key,
+                wScan: 0,
+                dwFlags: KEYEVENTF_KEYUP,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    });
+
+    // Relâcher les modificateurs dans l'ordre inverse
+    for &m in modifiers.iter().rev() {
+        inputs.push(INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: m,
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        });
+    }
+
+    unsafe {
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStatus {
     Idle,
@@ -135,6 +202,7 @@ pub enum ChatRole {
 pub struct ChatEntry {
     pub role: ChatRole,
     pub text: String,
+    pub timestamp: String,
 }
 
 #[derive(Debug, Clone)]
@@ -198,6 +266,9 @@ pub enum AgentAction {
         y: i32,
         width: i32,
         height: i32,
+    },
+    AccessibilityShortcut {
+        shortcut: String,
     },
 }
 
@@ -312,6 +383,37 @@ fn is_show_command(text: &str) -> bool {
     has_verb && has_target
 }
 
+fn current_time_str() -> String {
+    #[cfg(windows)]
+    unsafe {
+        #[repr(C)]
+        struct SystemTimeWin {
+            year: u16,
+            month: u16,
+            day_of_week: u16,
+            day: u16,
+            hour: u16,
+            minute: u16,
+            second: u16,
+            milliseconds: u16,
+        }
+        extern "system" {
+            fn GetLocalTime(st: *mut SystemTimeWin);
+        }
+        let mut st = SystemTimeWin {
+            year: 0, month: 0, day_of_week: 0, day: 0,
+            hour: 0, minute: 0, second: 0, milliseconds: 0,
+        };
+        GetLocalTime(&mut st);
+        format!("{:02}:{:02}", st.hour, st.minute)
+    }
+    #[cfg(not(windows))]
+    {
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        format!("{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60)
+    }
+}
+
 #[cfg(windows)]
 fn spawn_tts_worker(event_tx: Sender<AgentEvent>) -> Sender<TtsCommand> {
     let (tx, rx) = channel::<TtsCommand>();
@@ -423,6 +525,7 @@ impl OverlayApp {
             chat_history: vec![ChatEntry {
                 role: ChatRole::Agent,
                 text: initial_subtitle,
+                timestamp: current_time_str(),
             }],
             live_transcript: String::new(),
             input_text: String::new(),
@@ -492,6 +595,7 @@ impl OverlayApp {
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
             text: stop_msg.clone(),
+            timestamp: current_time_str(),
         });
         let _ = self.tts_sender.send(TtsCommand::Stop);
         let _ = self.tts_sender.send(TtsCommand::Speak(stop_msg));
@@ -616,12 +720,14 @@ impl eframe::App for OverlayApp {
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: chunk,
+                                timestamp: current_time_str(),
                             });
                         }
                     } else {
                         self.chat_history.push(ChatEntry {
                             role: ChatRole::Agent,
                             text: chunk,
+                            timestamp: current_time_str(),
                         });
                     }
                 }
@@ -629,6 +735,7 @@ impl eframe::App for OverlayApp {
                     self.chat_history.push(ChatEntry {
                         role: ChatRole::Agent,
                         text: full_text.clone(),
+                        timestamp: current_time_str(),
                     });
                     let _ = self.tts_sender.send(TtsCommand::Speak(full_text));
                 }
@@ -648,11 +755,13 @@ impl eframe::App for OverlayApp {
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::User,
                                 text: prompt,
+                                timestamp: current_time_str(),
                             });
                             let reply = "Me revoilà, overlay réaffiché.".to_string();
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
+                                timestamp: current_time_str(),
                             });
                             let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                             self.continuous_mode = true;
@@ -667,11 +776,13 @@ impl eframe::App for OverlayApp {
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::User,
                                 text: prompt,
+                                timestamp: current_time_str(),
                             });
                             let reply = "Overlay masqué. Je reste à l'écoute pour « groq ouvre toi ».".to_string();
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
+                                timestamp: current_time_str(),
                             });
                             let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                             self.continuous_mode = true;
@@ -680,6 +791,7 @@ impl eframe::App for OverlayApp {
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
+                                timestamp: current_time_str(),
                             });
                             let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                         } else if self.status != AgentStatus::Thinking && !prompt.trim().is_empty() {
@@ -688,6 +800,7 @@ impl eframe::App for OverlayApp {
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::User,
                                 text: prompt.clone(),
+                                timestamp: current_time_str(),
                             });
                             let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
                         }
@@ -760,37 +873,58 @@ impl eframe::App for OverlayApp {
                                 .stick_to_bottom(true)
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| {
-                                    for entry in &self.chat_history {
-                                        match entry.role {
-                                            ChatRole::User => {
-                                                ui.horizontal_wrapped(|ui| {
-                                                    ui.add(
-                                                        egui::Label::new(
-                                                            egui::RichText::new(format!("🗣 {}", entry.text))
-                                                                .size(13.0)
-                                                                .line_height(Some(18.0))
-                                                                .color(egui::Color32::from_rgb(255, 220, 130))
-                                                                .strong(),
-                                                        )
-                                                        .wrap(),
-                                                    );
-                                                });
+                                    let last_user_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::User);
+                                    let last_agent_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::Agent);
+
+                                    for (idx, entry) in self.chat_history.iter().enumerate() {
+                                        let is_highlighted = Some(idx) == last_user_idx || Some(idx) == last_agent_idx;
+
+                                        ui.vertical(|ui| {
+                                            ui.horizontal(|ui| {
+                                                let (label_name, label_color) = match entry.role {
+                                                    ChatRole::User => ("🗣 Vous", egui::Color32::from_rgb(255, 215, 120)),
+                                                    ChatRole::Agent => ("Groq", egui::Color32::from_rgb(0, 195, 255)),
+                                                };
+                                                ui.label(
+                                                    egui::RichText::new(label_name)
+                                                        .size(if is_highlighted { 11.5 } else { 10.0 })
+                                                        .color(label_color)
+                                                        .strong(),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(&entry.timestamp)
+                                                        .size(if is_highlighted { 10.0 } else { 9.0 })
+                                                        .color(egui::Color32::from_rgba_unmultiplied(170, 185, 205, 140)),
+                                                );
+                                            });
+
+                                            let (text_size, line_height, text_color, is_strong) = match entry.role {
+                                                ChatRole::User => {
+                                                    if is_highlighted {
+                                                        (14.5, 20.0, egui::Color32::from_rgb(255, 230, 150), true)
+                                                    } else {
+                                                        (12.0, 16.5, egui::Color32::from_rgba_unmultiplied(225, 210, 160, 185), false)
+                                                    }
+                                                }
+                                                ChatRole::Agent => {
+                                                    if is_highlighted {
+                                                        (15.5, 22.0, egui::Color32::from_rgb(255, 255, 255), true)
+                                                    } else {
+                                                        (12.5, 17.5, egui::Color32::from_rgba_unmultiplied(200, 210, 225, 180), false)
+                                                    }
+                                                }
+                                            };
+
+                                            let mut rich = egui::RichText::new(&entry.text)
+                                                .size(text_size)
+                                                .line_height(Some(line_height))
+                                                .color(text_color);
+                                            if is_strong {
+                                                rich = rich.strong();
                                             }
-                                            ChatRole::Agent => {
-                                                ui.horizontal_wrapped(|ui| {
-                                                    ui.add(
-                                                        egui::Label::new(
-                                                            egui::RichText::new(&entry.text)
-                                                                .size(13.5)
-                                                                .line_height(Some(19.0))
-                                                                .color(egui::Color32::from_rgb(240, 245, 255)),
-                                                        )
-                                                        .wrap(),
-                                                    );
-                                                });
-                                            }
-                                        }
-                                        ui.add_space(4.0);
+                                            ui.add(egui::Label::new(rich).wrap());
+                                        });
+                                        ui.add_space(if is_highlighted { 8.0 } else { 5.0 });
                                     }
                                 });
                         });
@@ -891,6 +1025,7 @@ impl eframe::App for OverlayApp {
                                             self.chat_history.push(ChatEntry {
                                                 role: ChatRole::User,
                                                 text: prompt.clone(),
+                                                timestamp: current_time_str(),
                                             });
                                             if is_hide_command(&prompt) {
                                                 self.is_hidden = true;
@@ -899,6 +1034,7 @@ impl eframe::App for OverlayApp {
                                                 self.chat_history.push(ChatEntry {
                                                     role: ChatRole::Agent,
                                                     text: reply.clone(),
+                                                    timestamp: current_time_str(),
                                                 });
                                                 let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                                             } else {
@@ -915,6 +1051,7 @@ impl eframe::App for OverlayApp {
                                             self.chat_history.push(ChatEntry {
                                                 role: ChatRole::Agent,
                                                 text: "Mémoire contextuelle réinitialisée.".to_string(),
+                                                timestamp: current_time_str(),
                                             });
                                             self.live_transcript.clear();
                                             let _ = self.tts_sender.send(TtsCommand::Stop);
@@ -1024,41 +1161,179 @@ fn encode_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
     cursor.into_inner()
 }
 
+/// Rééchantillonneur linéaire continu vers mono 16 kHz sans dépendance externe
+struct ContinuousResampler {
+    in_rate: f64,
+    out_rate: f64,
+    channels: usize,
+    buffer: Vec<f32>,
+    phase: f64,
+}
+
+impl ContinuousResampler {
+    fn new(in_rate: u32, channels: u16, out_rate: u32) -> Self {
+        Self {
+            in_rate: in_rate as f64,
+            out_rate: out_rate as f64,
+            channels: (channels as usize).max(1),
+            buffer: Vec::with_capacity(4096),
+            phase: 0.0,
+        }
+    }
+
+    fn push_interleaved_f32(&mut self, data: &[f32]) {
+        let ch = self.channels;
+        for frame in data.chunks(ch) {
+            let mono: f32 = frame.iter().sum::<f32>() / ch as f32;
+            self.buffer.push(mono);
+        }
+    }
+
+    fn drain_resampled(&mut self, out: &mut Vec<f32>) {
+        if self.buffer.len() < 2 {
+            return;
+        }
+        let step = self.in_rate / self.out_rate;
+        let max_idx = self.buffer.len() - 1;
+        while self.phase < max_idx as f64 {
+            let idx = self.phase.floor() as usize;
+            let frac = (self.phase - idx as f64) as f32;
+            let s0 = self.buffer[idx];
+            let s1 = self.buffer[idx + 1];
+            out.push(s0 + frac * (s1 - s0));
+            self.phase += step;
+        }
+        let consumed = self.phase.floor() as usize;
+        if consumed > 0 {
+            self.buffer.drain(0..consumed);
+            self.phase -= consumed as f64;
+        }
+    }
+}
+
+/// Filtre adaptatif NLMS (Normalized Least Mean Squares) avec détecteur de double parole (DTD)
+/// Modélise la réponse impulsionnelle acoustique de la pièce (~48 ms à 16 kHz = 768 taps)
+struct NlmsAec {
+    taps: usize,
+    weights: Vec<f32>,
+    x_buf: Vec<f32>,
+    x_head: usize,
+    step_size: f32,
+    x_power: f32,
+    d_power: f32,
+    e_power: f32,
+}
+
+impl NlmsAec {
+    fn new(taps: usize) -> Self {
+        Self {
+            taps,
+            weights: vec![0.0; taps],
+            x_buf: vec![0.0; taps],
+            x_head: 0,
+            step_size: 0.20,
+            x_power: 0.0,
+            d_power: 0.0,
+            e_power: 0.0,
+        }
+    }
+
+    fn process(&mut self, mic_sample: f32, spk_sample: f32) -> f32 {
+        let x = spk_sample;
+        let d = mic_sample;
+
+        // Insertion du signal haut-parleur dans le tampon circulaire de référence
+        self.x_buf[self.x_head] = x;
+
+        // Estimation lissée des puissances des signaux (alpha = 0.005)
+        const ALPHA: f32 = 0.005;
+        self.x_power = (1.0 - ALPHA) * self.x_power + ALPHA * (x * x);
+        self.d_power = (1.0 - ALPHA) * self.d_power + ALPHA * (d * d);
+
+        // Si aucun son significatif ne sort des haut-parleurs, contourner le filtrage
+        if self.x_power < 1e-5 {
+            self.x_head = if self.x_head + 1 >= self.taps { 0 } else { self.x_head + 1 };
+            return d;
+        }
+
+        // Écho estimé y_chapeau = sum(w_i * x_{n-i})
+        let mut y_hat: f32 = 0.0;
+        let mut norm: f32 = 1e-4;
+        let taps = self.taps;
+        let head = self.x_head;
+
+        for i in 0..taps {
+            let idx = if head >= i { head - i } else { head + taps - i };
+            let xi = self.x_buf[idx];
+            y_hat += self.weights[i] * xi;
+            norm += xi * xi;
+        }
+
+        // Signal nettoyé (soustraction de l'écho acoustique estimé)
+        let e = d - y_hat;
+        self.e_power = (1.0 - ALPHA) * self.e_power + ALPHA * (e * e);
+
+        // Détecteur de double parole (DTD) :
+        // Si l'utilisateur parle en même temps, figer l'adaptation pour ne pas déformer la voix
+        let is_double_talk = self.d_power > 0.0008 && self.e_power > 0.45 * self.d_power;
+        if !is_double_talk {
+            let adapt = (self.step_size / norm) * e;
+            const LEAKAGE: f32 = 0.99998;
+            for i in 0..taps {
+                let idx = if head >= i { head - i } else { head + taps - i };
+                self.weights[i] = self.weights[i] * LEAKAGE + adapt * self.x_buf[idx];
+            }
+        }
+
+        self.x_head = if self.x_head + 1 >= self.taps { 0 } else { self.x_head + 1 };
+        e.clamp(-1.0, 1.0)
+    }
+}
+
 async fn transcribe_audio(
     api_key: &str,
     wav_data: Vec<u8>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::new();
-    let part = reqwest::multipart::Part::bytes(wav_data)
-        .file_name("speech.wav")
-        .mime_str("audio/wav")?;
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let part = reqwest::multipart::Part::bytes(wav_data.clone())
+            .file_name("speech.wav")
+            .mime_str("audio/wav")?;
 
-    let form = reqwest::multipart::Form::new()
-        .part("file", part)
-        .text("model", "whisper-large-v3-turbo")
-        .text("language", "fr")
-        .text("prompt", "Transcription en français uniquement.")
-        .text("response_format", "json");
+        let form = reqwest::multipart::Form::new()
+            .part("file", part)
+            .text("model", "whisper-large-v3-turbo")
+            .text("language", "fr")
+            .text("prompt", "Transcription en français uniquement.")
+            .text("response_format", "json");
 
-    let res = client
-        .post("https://api.groq.com/openai/v1/audio/transcriptions")
-        .bearer_auth(api_key)
-        .multipart(form)
-        .send()
-        .await?;
+        let res = client
+            .post("https://api.groq.com/openai/v1/audio/transcriptions")
+            .bearer_auth(api_key)
+            .multipart(form)
+            .send()
+            .await?;
 
-    if !res.status().is_success() {
-        let err = res.text().await.unwrap_or_default();
-        return Err(format!("Erreur transcription: {err}").into());
+        if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempts <= 2 {
+            tokio::time::sleep(Duration::from_millis(2500)).await;
+            continue;
+        }
+
+        if !res.status().is_success() {
+            let err = res.text().await.unwrap_or_default();
+            return Err(format!("Erreur transcription: {err}").into());
+        }
+
+        #[derive(Deserialize)]
+        struct TranscribeResp {
+            text: String,
+        }
+
+        let body = res.json::<TranscribeResp>().await?;
+        return Ok(body.text.trim().to_string());
     }
-
-    #[derive(Deserialize)]
-    struct TranscribeResp {
-        text: String,
-    }
-
-    let body = res.json::<TranscribeResp>().await?;
-    Ok(body.text.trim().to_string())
 }
 
 fn spawn_audio_worker(event_tx: Sender<AgentEvent>, groq_key: String) -> Sender<AudioCommand> {
@@ -1097,42 +1372,97 @@ fn spawn_audio_worker(event_tx: Sender<AgentEvent>, groq_key: String) -> Sender<
                 continue;
             };
 
-            let sample_rate = config.sample_rate().0;
-            let channels = config.channels();
-            let audio_buffer = Arc::new(Mutex::new(Vec::<f32>::new()));
-            let buf_clone = audio_buffer.clone();
+            let mic_sr = config.sample_rate().0;
+            let mic_ch = config.channels();
+            let mic_raw_buffer = Arc::new(Mutex::new(Vec::<f32>::new()));
+            let mic_buf_clone = mic_raw_buffer.clone();
 
-            let stream_res = match config.sample_format() {
+            let mic_stream_res = match config.sample_format() {
                 cpal::SampleFormat::F32 => device.build_input_stream(
                     &config.into(),
                     move |data: &[f32], _| {
-                        if let Ok(mut b) = buf_clone.lock() {
+                        if let Ok(mut b) = mic_buf_clone.lock() {
                             b.extend_from_slice(data);
                         }
                     },
                     |_| {},
                     None,
                 ),
-                cpal::SampleFormat::I16 => {
-                    let buf_clone = audio_buffer.clone();
-                    device.build_input_stream(
-                        &config.into(),
-                        move |data: &[i16], _| {
-                            if let Ok(mut b) = buf_clone.lock() {
-                                for &s in data {
-                                    b.push(s as f32 / i16::MAX as f32);
-                                }
+                cpal::SampleFormat::I16 => device.build_input_stream(
+                    &config.into(),
+                    move |data: &[i16], _| {
+                        if let Ok(mut b) = mic_buf_clone.lock() {
+                            for &s in data {
+                                b.push(s as f32 / i16::MAX as f32);
                             }
-                        },
-                        |_| {},
-                        None,
-                    )
-                }
+                        }
+                    },
+                    |_| {},
+                    None,
+                ),
                 _ => continue,
             };
 
-            let Ok(stream) = stream_res else { continue; };
-            let _ = stream.play();
+            let Ok(mic_stream) = mic_stream_res else { continue; };
+            let _ = mic_stream.play();
+
+            // Capture simultanée en boucle de retour WASAPI sur les haut-parleurs
+            let spk_raw_buffer = Arc::new(Mutex::new(Vec::<f32>::new()));
+            let (spk_stream, spk_sr, spk_ch) = if let Some(out_dev) = host.default_output_device() {
+                let config_res = out_dev.default_output_config().or_else(|_| out_dev.default_input_config());
+                if let Ok(spk_conf) = config_res {
+                    let sr = spk_conf.sample_rate().0;
+                    let ch = spk_conf.channels();
+                    let spk_clone = spk_raw_buffer.clone();
+                    let s = match spk_conf.sample_format() {
+                        cpal::SampleFormat::F32 => out_dev.build_input_stream(
+                            &spk_conf.into(),
+                            move |data: &[f32], _| {
+                                if let Ok(mut b) = spk_clone.lock() {
+                                    b.extend_from_slice(data);
+                                }
+                            },
+                            |_| {},
+                            None,
+                        ).ok(),
+                        cpal::SampleFormat::I16 => {
+                            let spk_clone = spk_raw_buffer.clone();
+                            out_dev.build_input_stream(
+                                &spk_conf.into(),
+                                move |data: &[i16], _| {
+                                    if let Ok(mut b) = spk_clone.lock() {
+                                        for &s in data {
+                                            b.push(s as f32 / i16::MAX as f32);
+                                        }
+                                    }
+                                },
+                                |_| {},
+                                None,
+                            ).ok()
+                        }
+                        _ => None,
+                    };
+                    (s, sr, ch)
+                } else {
+                    (None, 48000, 2)
+                }
+            } else {
+                (None, 48000, 2)
+            };
+
+            if let Some(ref s) = spk_stream {
+                let _ = s.play();
+            }
+
+            // Rééchantillonneurs 16 kHz et filtre AEC (768 coefficients = ~48 ms)
+            const TARGET_SAMPLE_RATE: u32 = 16000;
+            let mut mic_resampler = ContinuousResampler::new(mic_sr, mic_ch, TARGET_SAMPLE_RATE);
+            let mut spk_resampler = ContinuousResampler::new(spk_sr, spk_ch, TARGET_SAMPLE_RATE);
+            let mut aec = NlmsAec::new(768);
+
+            let mut mic_16k = Vec::new();
+            let mut spk_16k = Vec::new();
+            let mut cleaned_audio = Vec::<f32>::new();
 
             let mut last_voice_instant = Instant::now();
             let mut has_spoken = false;
@@ -1141,23 +1471,43 @@ fn spawn_audio_worker(event_tx: Sender<AgentEvent>, groq_key: String) -> Sender<
 
             loop {
                 std::thread::sleep(Duration::from_millis(100));
-
                 if let Ok(AudioCommand::Stop) = cmd_rx.try_recv() {
                     break;
                 }
 
-                let (current_len, recent_rms) = {
-                    let b = audio_buffer.lock().unwrap();
-                    let len = b.len();
-                    if len > last_processed_len {
-                        let slice = &b[last_processed_len..];
-                        let sum_sq: f32 = slice.iter().map(|&x| x * x).sum();
-                        let rms = (sum_sq / slice.len().max(1) as f32).sqrt();
-                        (len, rms)
-                    } else {
-                        (len, 0.0)
-                    }
+                // Dépouillement des échantillons bruts du microphone et des haut-parleurs
+                let raw_mic = {
+                    let mut lock = mic_raw_buffer.lock().unwrap();
+                    std::mem::take(&mut *lock)
                 };
+                let raw_spk = {
+                    let mut lock = spk_raw_buffer.lock().unwrap();
+                    std::mem::take(&mut *lock)
+                };
+
+                mic_resampler.push_interleaved_f32(&raw_mic);
+                spk_resampler.push_interleaved_f32(&raw_spk);
+
+                mic_resampler.drain_resampled(&mut mic_16k);
+                spk_resampler.drain_resampled(&mut spk_16k);
+
+                // Si les haut-parleurs n'émettent aucun flux audio, aligner avec des zéros
+                while spk_16k.len() < mic_16k.len() {
+                    spk_16k.push(0.0);
+                }
+
+                let process_count = mic_16k.len();
+                for i in 0..process_count {
+                    let cleaned = aec.process(mic_16k[i], spk_16k[i]);
+                    cleaned_audio.push(cleaned);
+                }
+                mic_16k.clear();
+                spk_16k.drain(0..process_count);
+
+                let current_len = cleaned_audio.len();
+                let slice = &cleaned_audio[last_processed_len..];
+                let sum_sq: f32 = slice.iter().map(|&x| x * x).sum();
+                let recent_rms = if !slice.is_empty() { (sum_sq / slice.len() as f32).sqrt() } else { 0.0 };
                 last_processed_len = current_len;
 
                 if recent_rms > 0.015 {
@@ -1166,11 +1516,11 @@ fn spawn_audio_worker(event_tx: Sender<AgentEvent>, groq_key: String) -> Sender<
                 }
 
                 // Retranscription intermédiaire en temps réel pendant l'élocution
-                if has_spoken && last_interim_instant.elapsed() >= Duration::from_millis(1100) {
+                if has_spoken && last_interim_instant.elapsed() >= Duration::from_millis(1500) {
                     last_interim_instant = Instant::now();
-                    let snapshot = audio_buffer.lock().unwrap().clone();
+                    let snapshot = cleaned_audio.clone();
                     if !snapshot.is_empty() {
-                        let wav = encode_wav(&snapshot, sample_rate, channels);
+                        let wav = encode_wav(&snapshot, TARGET_SAMPLE_RATE, 1);
                         let key = groq_key.clone();
                         let tx_clone = event_tx.clone();
                         rt.spawn(async move {
@@ -1189,11 +1539,11 @@ fn spawn_audio_worker(event_tx: Sender<AgentEvent>, groq_key: String) -> Sender<
                 }
             }
 
-            drop(stream);
+            drop(mic_stream);
+            drop(spk_stream);
 
-            let final_samples = audio_buffer.lock().unwrap().clone();
-            if has_spoken && !final_samples.is_empty() {
-                let wav = encode_wav(&final_samples, sample_rate, channels);
+            if has_spoken && !cleaned_audio.is_empty() {
+                let wav = encode_wav(&cleaned_audio, TARGET_SAMPLE_RATE, 1);
                 if let Ok(final_text) = rt.block_on(transcribe_audio(&groq_key, wav)) {
                     if !final_text.is_empty() {
                         let _ = event_tx.send(AgentEvent::VoicePromptReady(final_text));
@@ -1474,46 +1824,86 @@ fn list_user_windows() -> Vec<(HWND, String)> {
 }
 
 #[cfg(windows)]
+fn get_desktop_work_area() -> RECT {
+    extern "system" {
+        fn SystemParametersInfoW(uiAction: u32, uiParam: u32, pvParam: *mut std::ffi::c_void, fWinIni: u32) -> BOOL;
+    }
+    const SPI_GETWORKAREA: u32 = 0x0030;
+    let mut rect = RECT::default();
+    unsafe {
+        if SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut rect as *mut _ as *mut std::ffi::c_void, 0).as_bool()
+            && rect.right > rect.left
+            && rect.bottom > rect.top
+        {
+            return rect;
+        }
+    }
+    let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN).max(800) };
+    let screen_h = unsafe { (GetSystemMetrics(SM_CYSCREEN) - 48).max(600) };
+    RECT { left: 0, top: 0, right: screen_w, bottom: screen_h }
+}
+
+#[cfg(windows)]
+fn window_matches_keyword(hwnd: HWND, title: &str, kw: &str) -> bool {
+    let t_lower = title.to_lowercase();
+    let is_generic_browser = kw == "browser" || kw == "navigateur" || kw == "web" || kw == "internet";
+    if is_generic_browser {
+        return is_browser_hwnd(hwnd, title)
+            || t_lower.contains("chrome")
+            || t_lower.contains("edge")
+            || t_lower.contains("firefox")
+            || t_lower.contains("brave");
+    }
+
+    if kw == "google" || kw == "chrome" || kw == "google chrome" {
+        return t_lower.contains("chrome") || t_lower.contains("google");
+    }
+
+    t_lower.contains(kw)
+}
+
+#[cfg(windows)]
 fn find_windows_matching(
     keyword: &str,
     user_windows: &[(HWND, String)],
     preferred_hwnd: Option<HWND>,
 ) -> Vec<HWND> {
-    let kw = keyword.to_lowercase();
-    let is_browser = kw == "browser" || kw == "navigateur" || kw == "web" || kw == "internet";
-    let is_terminal = kw == "cmd" || kw == "terminal" || kw == "console" || kw.contains("invite");
+    let kw = keyword.trim().to_lowercase();
+    let is_active_kw = kw.is_empty()
+        || kw == "cette"
+        || kw == "cette fenetre"
+        || kw == "cette fenêtre"
+        || kw == "active"
+        || kw == "courante"
+        || kw == "en cours"
+        || kw == "actuelle"
+        || kw == "premier plan";
+
+    if is_active_kw {
+        if let Some(pref) = preferred_hwnd {
+            return vec![pref];
+        }
+        if let Some((first_hwnd, _)) = user_windows.first() {
+            return vec![*first_hwnd];
+        }
+        return Vec::new();
+    }
     let mut matches = Vec::new();
 
+    // On ne priorise la fenêtre active QUE si elle correspond effectivement au mot-clé demandé
     if let Some(pref) = preferred_hwnd {
-        if is_browser || user_windows.iter().any(|(h, _)| *h == pref) {
-            matches.push(pref);
+        if let Some((_, title)) = user_windows.iter().find(|(h, _)| *h == pref) {
+            if window_matches_keyword(pref, title, &kw) {
+                matches.push(pref);
+            }
         }
     }
 
     for &(hwnd, ref title) in user_windows {
-        if Some(hwnd) == preferred_hwnd {
+        if Some(hwnd) == preferred_hwnd && matches.contains(&hwnd) {
             continue;
         }
-        let t_lower = title.to_lowercase();
-        if is_browser
-            && (t_lower.contains("edge")
-                || t_lower.contains("chrome")
-                || t_lower.contains("firefox")
-                || t_lower.contains("brave"))
-        {
-            matches.push(hwnd);
-            continue;
-        }
-        if is_terminal
-            && (t_lower.contains("cmd")
-                || t_lower.contains("terminal")
-                || t_lower.contains("powershell")
-                || t_lower.contains("invite"))
-        {
-            matches.push(hwnd);
-            continue;
-        }
-        if t_lower.contains(&kw) {
+        if window_matches_keyword(hwnd, title, &kw) && !matches.contains(&hwnd) {
             matches.push(hwnd);
         }
     }
@@ -1524,6 +1914,7 @@ fn find_windows_matching(
 #[derive(Clone)]
 struct UiaElementInfo {
     element: IUIAutomationElement,
+    automation_id: String,
     name: String,
     class_name: String,
     localized_type: String,
@@ -1575,6 +1966,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let loc_type = item.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
                     let raw_name = item.CurrentName().map(|b| b.to_string()).unwrap_or_default();
                     let name = raw_name.trim().to_string();
+                    let automation_id = item.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default();
 
                     let is_explicit_textarea = class_name.contains("textarea")
                         || loc_type.contains("textarea")
@@ -1587,7 +1979,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || loc_type.contains("edit")
                         || loc_type.contains("saisie");
 
-                    if name.is_empty() && !is_edit_or_textarea {
+                    if name.is_empty() && automation_id.is_empty() && !is_edit_or_textarea {
                         continue;
                     }
 
@@ -1599,6 +1991,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let area = (width as i64) * (height as i64);
                     results.push(UiaElementInfo {
                         element: item,
+                        automation_id,
                         name,
                         class_name,
                         localized_type: loc_type,
@@ -1852,45 +2245,22 @@ fn write_to_browser_or_txt(text: &str) -> String {
         user_windows.first().map(|(h, _)| *h)
     };
 
-    // Si un éditeur texte a déjà été ouvert et qu'il est en focus ou toujours existant
-    if let Ok(lock) = LAST_TXT_HWND.lock() {
-        if let Some(raw_h) = *lock {
-            let tracked = HWND(raw_h as *mut _);
-            if unsafe { IsWindow(tracked).as_bool() } {
-                if active_hwnd == Some(tracked) || active_hwnd.map(|h| !is_browser_hwnd(h, "")).unwrap_or(true) {
-                    return append_to_window(tracked, text);
-                }
-            }
+    if let Some(target_hwnd) = active_hwnd {
+        unsafe {
+            let _ = ShowWindow(target_hwnd, SW_RESTORE);
+            let _ = SetForegroundWindow(target_hwnd);
         }
+        std::thread::sleep(Duration::from_millis(80));
+
+        // Coller directement le texte dans la fenêtre ou le champ actif
+        clipboard::set_text(text);
+        std::thread::sleep(Duration::from_millis(40));
+        send_paste();
+
+        return "Texte collé dans la fenêtre active.".to_string();
     }
 
-    let (is_browser, target_hwnd) = if let Some(hwnd) = active_hwnd {
-        let title = user_windows
-            .iter()
-            .find(|(h, _)| *h == hwnd)
-            .map(|(_, t)| t.as_str())
-            .unwrap_or("");
-        (is_browser_hwnd(hwnd, title), hwnd)
-    } else {
-        return write_to_temp_txt_file(text);
-    };
-
-    if !is_browser {
-        return write_to_temp_txt_file(text);
-    }
-
-    unsafe {
-        let _ = ShowWindow(target_hwnd, SW_RESTORE);
-        let _ = SetForegroundWindow(target_hwnd);
-    }
-    std::thread::sleep(Duration::from_millis(80));
-
-    // Injection par copier-coller direct sans modifier le focus de la page
-    clipboard::set_text(text);
-    std::thread::sleep(Duration::from_millis(40));
-    send_paste();
-
-    "Texte collé dans le champ actif.".to_string()
+    write_to_temp_txt_file(text)
 }
 
 #[cfg(not(windows))]
@@ -1904,11 +2274,30 @@ fn write_to_browser_or_txt(text: &str) -> String {
 fn parse_write_command(prompt: &str) -> Option<String> {
     let trimmed = prompt.trim();
     let lower = trimmed.to_lowercase();
-    let prefixes = ["ecris ", "écris ", "ecris :", "écris :", "ecrire ", "écrire "];
+    let prefixes = [
+        "ecris :", "écris :", "ecrit :", "écrit :",
+        "ecris ", "écris ", "ecrit ", "écrit ", "ecrire ", "écrire ",
+    ];
     for prefix in prefixes {
         if lower.starts_with(prefix) {
             let rest = trimmed[prefix.len()..].trim();
             let clean = rest.strip_prefix(':').unwrap_or(rest).trim();
+            let clean_lower = clean.to_lowercase();
+
+            // Si c'est une requête complexe en langage naturel (ex: "la suite de ce fichier", "un email..."),
+            // laisser le LLM analyser la consigne et extraire le texte exact à insérer.
+            if clean_lower.starts_with("la suite")
+                || clean_lower.starts_with("un ")
+                || clean_lower.starts_with("une ")
+                || clean_lower.starts_with("dans ")
+                || clean_lower.starts_with("sur ")
+                || clean_lower.starts_with("a ")
+                || clean_lower.starts_with("à ")
+                || clean_lower.starts_with("pour ")
+            {
+                return None;
+            }
+
             if !clean.is_empty() {
                 return Some(clean.to_string());
             }
@@ -1986,6 +2375,7 @@ fn rank_button_match(button_name: &str, target_name: &str) -> Option<usize> {
 fn apply_window_rect(hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {
     unsafe {
         let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = SetForegroundWindow(hwnd);
         let _ = SetWindowPos(
             hwnd,
             HWND(std::ptr::null_mut()),
@@ -1996,6 +2386,53 @@ fn apply_window_rect(hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {
             SWP_NOZORDER | SWP_SHOWWINDOW,
         );
     }
+}
+
+#[cfg(windows)]
+fn snap_window_pair(left_hwnd: HWND, right_hwnd: HWND) {
+    const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
+    const VK_LEFT: VIRTUAL_KEY = VIRTUAL_KEY(0x25);
+    const VK_RIGHT: VIRTUAL_KEY = VIRTUAL_KEY(0x27);
+    const VK_ESCAPE: VIRTUAL_KEY = VIRTUAL_KEY(0x1B);
+
+    // 1. Activer et ancrer la fenêtre de gauche
+    unsafe {
+        let _ = ShowWindow(left_hwnd, SW_RESTORE);
+        let _ = SetForegroundWindow(left_hwnd);
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    send_hotkey(&[VK_LWIN], VK_LEFT);
+    std::thread::sleep(Duration::from_millis(120));
+    send_hotkey(&[], VK_ESCAPE);
+    std::thread::sleep(Duration::from_millis(60));
+
+    // 2. Activer et ancrer la fenêtre de droite
+    unsafe {
+        let _ = ShowWindow(right_hwnd, SW_RESTORE);
+        let _ = SetForegroundWindow(right_hwnd);
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    send_hotkey(&[VK_LWIN], VK_RIGHT);
+    std::thread::sleep(Duration::from_millis(120));
+    send_hotkey(&[], VK_ESCAPE);
+}
+
+#[cfg(windows)]
+fn snap_window_native(hwnd: HWND, is_right: bool) {
+    const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
+    const VK_LEFT: VIRTUAL_KEY = VIRTUAL_KEY(0x25);
+    const VK_RIGHT: VIRTUAL_KEY = VIRTUAL_KEY(0x27);
+    const VK_ESCAPE: VIRTUAL_KEY = VIRTUAL_KEY(0x1B);
+
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = SetForegroundWindow(hwnd);
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let key = if is_right { VK_RIGHT } else { VK_LEFT };
+    send_hotkey(&[VK_LWIN], key);
+    std::thread::sleep(Duration::from_millis(120));
+    send_hotkey(&[], VK_ESCAPE);
 }
 
 #[cfg(windows)]
@@ -2100,9 +2537,23 @@ fn execute_system_actions(actions: &[AgentAction]) {
         }
     }
 
-    let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN).max(800) };
-    let screen_h = unsafe { (GetSystemMetrics(SM_CYSCREEN) - 48).max(600) };
+    let work_area = get_desktop_work_area();
+    let wa_x = work_area.left;
+    let wa_y = work_area.top;
+    let wa_w = (work_area.right - work_area.left).max(800);
+    let wa_h = (work_area.bottom - work_area.top).max(600);
+
+    let overlay_hwnd = unsafe {
+        FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()))
+    };
+    let fg = unsafe { GetForegroundWindow() };
     let user_windows = list_user_windows();
+    let active_user_hwnd = if !fg.0.is_null() && fg != overlay_hwnd {
+        Some(fg)
+    } else {
+        user_windows.first().map(|(h, _)| *h)
+    };
+    let preferred_target_hwnd = newly_spawned_hwnd.or(active_user_hwnd);
 
     for action in actions {
         match action {
@@ -2132,16 +2583,6 @@ fn execute_system_actions(actions: &[AgentAction]) {
                 }
             }
             AgentAction::ClickButton { window, button_name } => {
-                let overlay_hwnd = unsafe {
-                    FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()))
-                };
-                let fg = unsafe { GetForegroundWindow() };
-                let active_user_hwnd = if !fg.0.is_null() && fg != overlay_hwnd {
-                    Some(fg)
-                } else {
-                    user_windows.first().map(|(h, _)| *h)
-                };
-
                 let target_hwnd = match window.as_deref() {
                     Some(w) if !w.trim().is_empty() => {
                         find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
@@ -2192,15 +2633,17 @@ fn execute_system_actions(actions: &[AgentAction]) {
                         let target_elem = if !filter_words.is_empty() {
                             candidates.iter().copied().find(|elem| {
                                 let n = elem.name.to_lowercase();
+                                let id = elem.automation_id.to_lowercase();
                                 let c = &elem.class_name;
                                 let l = &elem.localized_type;
-                                filter_words.iter().all(|w| n.contains(w) || c.contains(w) || l.contains(w))
+                                filter_words.iter().all(|w| n.contains(w) || id.contains(w) || c.contains(w) || l.contains(w))
                             }).or_else(|| {
                                 candidates.iter().copied().find(|elem| {
                                     let n = elem.name.to_lowercase();
+                                    let id = elem.automation_id.to_lowercase();
                                     let c = &elem.class_name;
                                     let l = &elem.localized_type;
-                                    filter_words.iter().any(|w| n.contains(w) || c.contains(w) || l.contains(w))
+                                    filter_words.iter().any(|w| n.contains(w) || id.contains(w) || c.contains(w) || l.contains(w))
                                 })
                             }).or_else(|| candidates.first().copied())
                         } else {
@@ -2214,8 +2657,10 @@ fn execute_system_actions(actions: &[AgentAction]) {
                     } else {
                         let mut matches: Vec<_> = elements
                             .iter()
-                            .filter_map(|elem| {
-                                rank_button_match(&elem.name, button_name)
+                            .filter_map(|elem| {                                let name_score = rank_button_match(&elem.name, button_name);
+                                let id_score = rank_button_match(&elem.automation_id, button_name);
+                                let best_score = name_score.into_iter().chain(id_score).min();
+                                best_score
                                     .map(|score| (score, elem))
                             })
                             .collect();
@@ -2234,20 +2679,94 @@ fn execute_system_actions(actions: &[AgentAction]) {
             }
             AgentAction::OpenBrowser { .. } => {}
             AgentAction::ArrangeWindow { title, position } => {
-                let targets = find_windows_matching(title, &user_windows, newly_spawned_hwnd);
+                let targets = find_windows_matching(title, &user_windows, preferred_target_hwnd);
                 if let Some(&hwnd) = targets.first() {
-                    match position.to_lowercase().as_str() {
-                        "left" | "left_half" => apply_window_rect(hwnd, 0, 0, screen_w / 2, screen_h),
-                        "right" | "right_half" => apply_window_rect(hwnd, screen_w / 2, 0, screen_w / 2, screen_h),
-                        "top" | "top_half" => apply_window_rect(hwnd, 0, 0, screen_w, screen_h / 2),
-                        "bottom" | "bottom_half" => apply_window_rect(hwnd, 0, screen_h / 2, screen_w, screen_h / 2),
-                        "maximize" => unsafe { let _ = ShowWindow(hwnd, SW_MAXIMIZE); },
-                        "center" => {
-                            let w = (screen_w * 2) / 3;
-                            let h = (screen_h * 2) / 3;
-                            apply_window_rect(hwnd, (screen_w - w) / 2, (screen_h - h) / 2, w, h);
+                    let pos = position.to_lowercase();
+                    let p = pos.trim();
+                    let is_right = p == "right" || p == "right_half" || p == "droite" || p == "droit" || p.contains("droit") || p.ends_with("right");
+                    let is_left = p == "left" || p == "left_half" || p == "gauche" || p.contains("gauche") || p.ends_with("left");
+
+                    if is_right {
+                        // Détection de la fenêtre compagne à gauche pour fusionner avec le slider central
+                        let screen_mid_x = wa_x + wa_w / 2;
+                        let companion = user_windows
+                            .iter()
+                            .map(|(h, _)| *h)
+                            .find(|&h| {
+                                if h == hwnd { return false; }
+                                let mut r = RECT::default();
+                                if unsafe { GetWindowRect(h, &mut r).is_ok() } {
+                                    let center_x = (r.left + r.right) / 2;
+                                    center_x < screen_mid_x
+                                } else {
+                                    false
+                                }
+                            })
+                            .or_else(|| active_user_hwnd.filter(|&h| h != hwnd));
+
+                        if let Some(comp_hwnd) = companion {
+                            snap_window_pair(comp_hwnd, hwnd);
+                        } else {
+                            snap_window_native(hwnd, true);
                         }
-                        _ => apply_window_rect(hwnd, 0, 0, screen_w / 2, screen_h),
+                    } else if is_left {
+                        // Détection de la fenêtre compagne à droite pour fusionner avec le slider central
+                        let screen_mid_x = wa_x + wa_w / 2;
+                        let companion = user_windows
+                            .iter()
+                            .map(|(h, _)| *h)
+                            .find(|&h| {
+                                if h == hwnd { return false; }
+                                let mut r = RECT::default();
+                                if unsafe { GetWindowRect(h, &mut r).is_ok() } {
+                                    let center_x = (r.left + r.right) / 2;
+                                    center_x >= screen_mid_x
+                                } else {
+                                    false
+                                }
+                            })
+                            .or_else(|| active_user_hwnd.filter(|&h| h != hwnd));
+
+                        if let Some(comp_hwnd) = companion {
+                            snap_window_pair(hwnd, comp_hwnd);
+                        } else {
+                            snap_window_native(hwnd, false);
+                        }
+                    } else if p == "top" || p == "top_half" || p == "haut" {
+                        apply_window_rect(hwnd, wa_x, wa_y, wa_w, wa_h / 2);
+                    } else if p == "bottom" || p == "bottom_half" || p == "bas" {
+                        apply_window_rect(hwnd, wa_x, wa_y + wa_h / 2, wa_w, wa_h / 2);
+                    } else if p == "top_left" || p == "quarter_top_left" || p == "haut_gauche" {
+                        apply_window_rect(hwnd, wa_x, wa_y, wa_w / 2, wa_h / 2);
+                    } else if p == "top_right" || p == "quarter_top_right" || p == "haut_droite" {
+                        apply_window_rect(hwnd, wa_x + wa_w / 2, wa_y, wa_w / 2, wa_h / 2);
+                    } else if p == "bottom_left" || p == "quarter_bottom_left" || p == "bas_gauche" {
+                        apply_window_rect(hwnd, wa_x, wa_y + wa_h / 2, wa_w / 2, wa_h / 2);
+                    } else if p == "bottom_right" || p == "quarter_bottom_right" || p == "bas_droite" {
+                        apply_window_rect(hwnd, wa_x + wa_w / 2, wa_y + wa_h / 2, wa_w / 2, wa_h / 2);
+                    } else if p == "left_two_thirds" || p == "deux_tiers_gauche" {
+                        apply_window_rect(hwnd, wa_x, wa_y, (wa_w * 2) / 3, wa_h);
+                    } else if p == "right_one_third" || p == "un_tiers_droite" {
+                        apply_window_rect(hwnd, wa_x + (wa_w * 2) / 3, wa_y, wa_w / 3, wa_h);
+                    } else if p == "left_one_third" || p == "un_tiers_gauche" {
+                        apply_window_rect(hwnd, wa_x, wa_y, wa_w / 3, wa_h);
+                    } else if p == "right_two_thirds" || p == "deux_tiers_droite" {
+                        apply_window_rect(hwnd, wa_x + wa_w / 3, wa_y, (wa_w * 2) / 3, wa_h);
+                    } else if p == "maximize" || p == "plein_ecran" || p == "agrandir" {
+                        unsafe {
+                            let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+                            let _ = SetForegroundWindow(hwnd);
+                        }
+                    } else if p == "minimize" || p == "reduire" {
+                        unsafe {
+                            let _ = ShowWindow(hwnd, SW_MINIMIZE);
+                        }
+                    } else if p == "center" || p == "centre" {
+                        let w = (wa_w * 7) / 10;
+                        let h = (wa_h * 8) / 10;
+                        apply_window_rect(hwnd, wa_x + (wa_w - w) / 2, wa_y + (wa_h - h) / 2, w, h);
+                    } else {
+                        apply_window_rect(hwnd, wa_x + wa_w / 2, wa_y, wa_w / 2, wa_h);
                     }
                 }
             }
@@ -2256,7 +2775,7 @@ fn execute_system_actions(actions: &[AgentAction]) {
                 let mut target_hwnds = Vec::new();
 
                 for win_key in windows {
-                    let hits = find_windows_matching(win_key, &user_windows, newly_spawned_hwnd);
+                    let hits = find_windows_matching(win_key, &user_windows, preferred_target_hwnd);
                     if let Some(&h) = hits.first() {
                         if !target_hwnds.contains(&h) {
                             target_hwnds.push(h);
@@ -2276,21 +2795,137 @@ fn execute_system_actions(actions: &[AgentAction]) {
                 }
 
                 let count = target_hwnds.len().max(1) as i32;
-                for (idx, &hwnd) in target_hwnds.iter().enumerate() {
-                    let i = idx as i32;
-                    if layout_mode == "split_vertical" {
-                        let h = screen_h / count;
-                        apply_window_rect(hwnd, 0, i * h, screen_w, h);
-                    } else {
-                        let w = screen_w / count;
-                        apply_window_rect(hwnd, i * w, 0, w, screen_h);
+                match layout_mode {
+                    "grid" | "quad" | "grid_2x2" => {
+                        let half_w = wa_w / 2;
+                        let half_h = wa_h / 2;
+                        let coords = [
+                            (wa_x, wa_y),
+                            (wa_x + half_w, wa_y),
+                            (wa_x, wa_y + half_h),
+                            (wa_x + half_w, wa_y + half_h),
+                        ];
+                        for (idx, &hwnd) in target_hwnds.iter().take(4).enumerate() {
+                            let (x, y) = coords[idx];
+                            apply_window_rect(hwnd, x, y, half_w, half_h);
+                        }
+                    }
+                    "master_stack" | "focus_side" => {
+                        if let Some(&first) = target_hwnds.first() {
+                            let master_w = (wa_w * 65) / 100;
+                            apply_window_rect(first, wa_x, wa_y, master_w, wa_h);
+                            let rest = &target_hwnds[1..];
+                            let rest_count = rest.len().max(1) as i32;
+                            let stack_h = wa_h / rest_count;
+                            let stack_w = wa_w - master_w;
+                            for (i, &hwnd) in rest.iter().enumerate() {
+                                apply_window_rect(
+                                    hwnd,
+                                    wa_x + master_w,
+                                    wa_y + (i as i32 * stack_h),
+                                    stack_w,
+                                    stack_h,
+                                );
+                            }
+                        }
+                    }
+                    "split_vertical" => {
+                        let h = wa_h / count;
+                        for (idx, &hwnd) in target_hwnds.iter().enumerate() {
+                            apply_window_rect(hwnd, wa_x, wa_y + (idx as i32 * h), wa_w, h);
+                        }
+                    }
+                    _ => {
+                        if target_hwnds.len() == 2 {
+                            snap_window_pair(target_hwnds[0], target_hwnds[1]);
+                        } else {
+                        let w = wa_w / count;
+                        for (idx, &hwnd) in target_hwnds.iter().enumerate() {
+                            apply_window_rect(hwnd, wa_x + (idx as i32 * w), wa_y, w, wa_h);
+                        }
+                        }
                     }
                 }
             }
             AgentAction::MoveWindow { title, x, y, width, height } => {
-                let targets = find_windows_matching(title, &user_windows, newly_spawned_hwnd);
+                let targets = find_windows_matching(title, &user_windows, preferred_target_hwnd);
                 if let Some(&hwnd) = targets.first() {
                     apply_window_rect(hwnd, *x, *y, *width, *height);
+                }
+            }
+            AgentAction::AccessibilityShortcut { shortcut } => {
+                const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
+                const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+                const VK_SHIFT: VIRTUAL_KEY = VIRTUAL_KEY(0x10);
+                const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12); // Alt
+                const VK_TAB: VIRTUAL_KEY = VIRTUAL_KEY(0x09);
+                const VK_HOME: VIRTUAL_KEY = VIRTUAL_KEY(0x24);
+                const VK_UP: VIRTUAL_KEY = VIRTUAL_KEY(0x26);
+                const VK_DOWN: VIRTUAL_KEY = VIRTUAL_KEY(0x28);
+                const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
+                const VK_ESCAPE: VIRTUAL_KEY = VIRTUAL_KEY(0x1B);
+                const VK_OEM_PLUS: VIRTUAL_KEY = VIRTUAL_KEY(0xBB);
+                const VK_OEM_MINUS: VIRTUAL_KEY = VIRTUAL_KEY(0xBD);
+                const VK_OEM_PERIOD: VIRTUAL_KEY = VIRTUAL_KEY(0xBE);
+                const VK_LEFT: VIRTUAL_KEY = VIRTUAL_KEY(0x25);
+                const VK_RIGHT: VIRTUAL_KEY = VIRTUAL_KEY(0x27);
+                const VK_F4: VIRTUAL_KEY = VIRTUAL_KEY(0x73);
+                const VK_F5: VIRTUAL_KEY = VIRTUAL_KEY(0x74);
+
+                match shortcut.as_str() {
+                    "magnifier_zoom_in" => send_hotkey(&[VK_LWIN], VK_OEM_PLUS),
+                    "magnifier_zoom_out" => send_hotkey(&[VK_LWIN], VK_OEM_MINUS),
+                    "magnifier_close" => send_hotkey(&[VK_LWIN], VK_ESCAPE),
+                    "snap_left" => send_hotkey(&[VK_LWIN], VK_LEFT),
+                    "snap_right" => send_hotkey(&[VK_LWIN], VK_RIGHT),
+                    "snap_up" => send_hotkey(&[VK_LWIN], VK_UP),
+                    "snap_down" => send_hotkey(&[VK_LWIN], VK_DOWN),
+                    "snap_top_half" => send_hotkey(&[VK_LWIN, VK_MENU], VK_UP),
+                    "snap_bottom_half" => send_hotkey(&[VK_LWIN, VK_MENU], VK_DOWN),
+                    "minimize_others" => send_hotkey(&[VK_LWIN], VK_HOME),
+                    "restore_window" => send_hotkey(&[VK_LWIN, VK_SHIFT], VK_DOWN),
+                    "narrator_toggle" => send_hotkey(&[VK_LWIN, VK_CONTROL], VK_RETURN),
+                    "color_filter_toggle" => send_hotkey(&[VK_LWIN, VK_CONTROL], VIRTUAL_KEY(0x43)), // C
+                    "accessibility_settings" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x55)),          // U
+                    "clipboard_history" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x56)),               // V
+                    "mute_mic" => send_hotkey(&[VK_LWIN, VK_MENU], VIRTUAL_KEY(0x4B)),               // K
+                    "toggle_desktop" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x44)),                  // D
+                    "snap_layouts" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x5A)),                    // Z
+                    "task_manager" => send_hotkey(&[VK_CONTROL, VK_SHIFT], VK_ESCAPE),
+                    "snip_screenshot" => send_hotkey(&[VK_LWIN, VK_SHIFT], VIRTUAL_KEY(0x53)),      // S
+                    "action_center" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x41)),                   // A
+                    "notification_center" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x4E)),             // N
+                    "task_view" => send_hotkey(&[VK_LWIN], VK_TAB),
+                    "open_search" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x53)),                     // S
+                    "open_run" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x52)),                        // R
+                    "open_settings" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x49)),                   // I
+                    "lock_screen" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x4C)),                     // L
+                    "emoji_panel" => send_hotkey(&[VK_LWIN], VK_OEM_PERIOD),
+                    "minimize_all" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x4D)),                    // M
+                    "restore_minimized" => send_hotkey(&[VK_LWIN, VK_SHIFT], VIRTUAL_KEY(0x4D)),     // M
+                    "new_desktop" => send_hotkey(&[VK_LWIN, VK_CONTROL], VIRTUAL_KEY(0x44)),         // D
+                    "next_desktop" => send_hotkey(&[VK_LWIN, VK_CONTROL], VK_RIGHT),
+                    "prev_desktop" => send_hotkey(&[VK_LWIN, VK_CONTROL], VK_LEFT),
+                    "close_desktop" => send_hotkey(&[VK_LWIN, VK_CONTROL], VK_F4),
+                    "move_window_monitor_left" => send_hotkey(&[VK_LWIN, VK_SHIFT], VK_LEFT),
+                    "move_window_monitor_right" => send_hotkey(&[VK_LWIN, VK_SHIFT], VK_RIGHT),
+                    "voice_dictation" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x48)),               // H
+                    "file_explorer" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x45)),                 // E
+                    "quick_link_menu" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x58)),               // X
+                    "project_display" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x50)),               // P
+                    "cast_display" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x4B)),                  // K
+                    "screen_recording" => send_hotkey(&[VK_LWIN, VK_SHIFT], VIRTUAL_KEY(0x52)),   // R
+                    "select_all" => send_hotkey(&[VK_CONTROL], VIRTUAL_KEY(0x41)),                 // A
+                    "copy" => send_hotkey(&[VK_CONTROL], VIRTUAL_KEY(0x43)),                       // C
+                    "undo" => send_hotkey(&[VK_CONTROL], VIRTUAL_KEY(0x5A)),                       // Z
+                    "redo" => send_hotkey(&[VK_CONTROL], VIRTUAL_KEY(0x59)),                       // Y
+                    "find_in_page" => send_hotkey(&[VK_CONTROL], VIRTUAL_KEY(0x46)),               // F
+                    "close_tab" => send_hotkey(&[VK_CONTROL], VIRTUAL_KEY(0x57)),                  // W
+                    "reopen_tab" => send_hotkey(&[VK_CONTROL, VK_SHIFT], VIRTUAL_KEY(0x54)),       // T
+                    "refresh_page" => send_hotkey(&[], VK_F5),
+                    "next_field" => send_hotkey(&[], VK_TAB),
+                    "previous_field" => send_hotkey(&[VK_SHIFT], VK_TAB),
+                    _ => {}
                 }
             }
         }
@@ -2312,6 +2947,7 @@ async fn call_groq_prompt(
     user_prompt: String,
     history: &mut Vec<ChatMessage>,
     event_tx: Sender<AgentEvent>,
+    last_call_time: &mut Option<Instant>,
 ) {
     let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
 
@@ -2321,6 +2957,15 @@ async fn call_groq_prompt(
         ));
         let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
         return;
+    }
+
+    // Debounce : attendre au moins 2,0 s entre deux appels consécutifs à Groq
+    let min_debounce = Duration::from_millis(2000);
+    if let Some(prev) = *last_call_time {
+        let elapsed = prev.elapsed();
+        if elapsed < min_debounce {
+            tokio::time::sleep(min_debounce - elapsed).await;
+        }
     }
 
     let client = reqwest::Client::new();
@@ -2333,8 +2978,63 @@ Règles d'action importantes :
 - Si l'utilisateur demande d'ouvrir une application, un outil ou un logiciel (ex: invite de commande, terminal, bloc-notes, messagerie, calculatrice, etc.), détermine TOI-MÊME le nom exact de son exécutable Windows binaire (ex: "cmd", "wt", "notepad", "calc", "thunderbird", "explorer", "code", "mspaint", etc.) et utilise l'action "open_app" avec ce nom direct d'exécutable dans "name".
 - Si l'utilisateur demande de fermer une application ou une fenêtre, utilise l'action "close_app" avec le nom de l'exécutable ou un mot-clé du titre dans "name".
 - Si l'utilisateur demande d'ouvrir le navigateur sans préciser d'adresse ou pour une page vierge, renseigne toujours "url": "https://www.google.com".
-- Si l'utilisateur demande d'écrire ou de saisir du texte, utilise l'action "write_text" avec le texte dans "text".
+- Pour la disposition et l'agencement des fenêtres :
+  * Si l'utilisateur nomme une application ou une fenêtre précise (ex: "google", "chrome", "navigateur", "notepad", "terminal"), utilise TOUJOURS "arrange_window" avec "title" correspondant à ce nom et "position" ("right" pour la droite, "left" pour la gauche). N'utilise JAMAIS "accessibility_shortcut" pour une fenêtre nommée.
+  * Si l'utilisateur demande de mettre côte à côte deux fenêtres, de scinder l'écran ou de fusionner avec le slider, utilise "tile_windows" avec "layout": "split_horizontal" et "windows": ["fenetre_gauche", "fenetre_droite"].
+  * Utilise "arrange_window" avec "title" (le mot-clé du logiciel ou "active" / "cette" pour la fenêtre courante) et "position" :
+    - "left" (moitié gauche), "right" (moitié droite), "top" (moitié haute), "bottom" (moitié basse).
+    - "top_left", "top_right", "bottom_left", "bottom_right" (quarts d'écran aux 4 coins).
+    - "left_two_thirds" (2/3 écran gauche pour lecture/code), "right_one_third" (1/3 écran droit pour notes/outils), "left_one_third", "right_two_thirds".
+    - "center" (centré confortable à 70% de l'écran), "maximize" (plein écran), "minimize" (réduire).
+  * Utilise "tile_windows" pour plusieurs fenêtres avec "layout" : "split_horizontal" (côte à côte), "split_vertical" (superposées), "grid_2x2" (quadrillage 4 quadrants), ou "master_stack" (1 grande fenêtre principale à gauche 65% et les autres empilées à droite).
+  * Pour les raccourcis d'ancrage rapide Windows Snap directs, utilise "accessibility_shortcut" avec "snap_left", "snap_right", "snap_up", "snap_down", "snap_top_half", "snap_bottom_half", "minimize_others" (isoler la fenêtre active en masquant toutes les autres), ou "restore_window".
+- Si l'utilisateur demande d'écrire ou de saisir du texte (ex: "écris bonjour", "écris la suite...", "tape ce texte"), extrait uniquement le texte réel à insérer dans "text" (et non la consigne elle-même), puis utilise l'action "write_text".
 - Si l'utilisateur demande de cliquer sur un bouton, un lien ou une zone de texte/saisie (ex: "clic sur imaginary world", "clique sur le champ textarea"), utilise l'action "click_button" avec les mots-clés ou le type d'élément dans "button_name" (ex: "champ textarea", "imaginary world") et optionnellement la fenêtre dans "window" si mentionnée (sinon null pour la fenêtre active au premier plan).
+- Pour l'accessibilité, l'assistance visuelle, sonore ou ergonomique, utilise l'action "accessibility_shortcut" avec l'un des identifiants suivants dans "shortcut" :
+  * "magnifier_zoom_in" : activer ou agrandir le zoom de la loupe Windows (Win + +).
+  * "magnifier_zoom_out" : réduire le zoom de la loupe Windows (Win + -).
+  * "magnifier_close" : quitter/fermer la loupe Windows (Win + Échap).
+  * "narrator_toggle" : activer ou désactiver la lecture d'écran par le Narrateur (Win + Ctrl + Entrée).
+  * "color_filter_toggle" : basculer les filtres de couleurs ou contraste élevé (Win + Ctrl + C).
+  * "accessibility_settings" : ouvrir les options et paramètres d'accessibilité Windows (Win + U).
+  * "clipboard_history" : ouvrir le panneau d'historique du presse-papiers (Win + V).
+  * "mute_mic" : couper ou réactiver le microphone système (Win + Alt + K).
+  * "toggle_desktop" : afficher ou masquer le bureau (Win + D).
+  * "snap_layouts" : ouvrir l'agencement ancré des fenêtres (Win + Z).
+  * "task_manager" : ouvrir le Gestionnaire des tâches (Ctrl + Shift + Échap).
+  * "snip_screenshot" : ouvrir la capture d'écran / outil Capture d'écran (Win + Shift + S).
+  * "action_center" : ouvrir le centre de contrôle et réglages rapides (Win + A).
+  * "notification_center" : ouvrir le volet des notifications et calendrier (Win + N).
+  * "task_view" : ouvrir la vue des tâches / Task View (Win + Tab).
+  * "open_search" : ouvrir la recherche Windows (Win + S).
+  * "open_run" : ouvrir la boîte de dialogue Exécuter (Win + R).
+  * "open_settings" : ouvrir les paramètres généraux Windows (Win + I).
+  * "lock_screen" : verrouiller la session / l'ordinateur (Win + L).
+  * "emoji_panel" : ouvrir le panneau d'émoticônes et symboles (Win + .).
+  * "minimize_all" : réduire toutes les fenêtres ouvertes (Win + M).
+  * "restore_minimized" : restaurer toutes les fenêtres réduites (Win + Shift + M).
+  * "new_desktop" : créer un nouveau bureau virtuel (Win + Ctrl + D).
+  * "next_desktop" : basculer vers le bureau virtuel suivant à droite (Win + Ctrl + Flèche droite).
+  * "prev_desktop" : basculer vers le bureau virtuel précédent à gauche (Win + Ctrl + Flèche gauche).
+  * "close_desktop" : fermer le bureau virtuel actif (Win + Ctrl + F4).
+  * "move_window_monitor_left" : déplacer la fenêtre active vers l'écran de gauche (Win + Shift + Flèche gauche).
+  * "move_window_monitor_right" : déplacer la fenêtre active vers l'écran de droite (Win + Shift + Flèche droite).
+  * "voice_dictation" : ouvrir ou démarrer la saisie vocale Windows (Win + H).
+  * "file_explorer" : ouvrir l'Explorateur de fichiers Windows (Win + E).
+  * "quick_link_menu" : ouvrir le menu Liens rapides / menu Démarrer avancé (Win + X).
+  * "project_display" : ouvrir les options de projection et affichage multi-écran (Win + P).
+  * "cast_display" : ouvrir la connexion et diffusion sans fil d'écran (Win + K).
+  * "screen_recording" : ouvrir la capture vidéo d'écran de zone (Win + Shift + R).
+  * "select_all" : tout sélectionner dans le champ ou document actif (Ctrl + A).
+  * "copy" : copier la sélection (Ctrl + C).
+  * "undo" : annuler la dernière action ou frappe (Ctrl + Z).
+  * "redo" : rétablir la dernière action annulée (Ctrl + Y).
+  * "find_in_page" : ouvrir la recherche dans la page ou le document (Ctrl + F).
+  * "close_tab" : fermer l'onglet actif du navigateur ou de la fenêtre (Ctrl + W).
+  * "reopen_tab" : rouvrir le dernier onglet fermé (Ctrl + Shift + T).
+  * "refresh_page" : rafraîchir ou actualiser la page ou fenêtre active (F5).
+  * "next_field" : aller au prochain champ, zone de saisie ou élément suivant (Tab).
+  * "previous_field" : revenir au champ ou élément de saisie précédent (Shift + Tab).
 - N'utilise JAMAIS d'adresse interne de type "about:blank" ou "about:".
 - Pour une recherche, utilise l'URL Google correspondante.
 - Ne formule aucune réflexion intermédiaire : la narration doit annoncer directement l'action à l'oral (ex: "J'ouvre le navigateur.").
@@ -2348,9 +3048,10 @@ Format json obligatoire :
     {"action": "write_text", "text": "texte à écrire"},
     {"action": "close_app", "name": "nom_ou_titre"},
     {"action": "open_browser", "url": "https://..."},
-    {"action": "tile_windows", "layout": "split_horizontal", "windows": ["titre_fenetre_1", "titre_fenetre_2"]},
-    {"action": "arrange_window", "title": "mot_cle", "position": "left" | "right" | "top" | "bottom" | "maximize" | "center"},
-    {"action": "move_window", "title": "mot_cle", "x": 0, "y": 0, "width": 960, "height": 1040}
+    {"action": "tile_windows", "layout": "split_horizontal" | "split_vertical" | "grid_2x2" | "master_stack", "windows": ["titre_fenetre_1", "titre_fenetre_2"]},
+    {"action": "arrange_window", "title": "mot_cle_ou_active", "position": "left" | "right" | "top" | "bottom" | "top_left" | "top_right" | "bottom_left" | "bottom_right" | "left_two_thirds" | "right_one_third" | "left_one_third" | "right_two_thirds" | "center" | "maximize" | "minimize"},
+    {"action": "move_window", "title": "mot_cle", "x": 0, "y": 0, "width": 960, "height": 1040},
+    {"action": "accessibility_shortcut", "shortcut": "snap_left" | "snap_right" | "snap_up" | "snap_down" | "snap_top_half" | "snap_bottom_half" | "minimize_others" | "restore_window" | "magnifier_zoom_in" | "magnifier_zoom_out" | "magnifier_close" | "narrator_toggle" | "color_filter_toggle" | "accessibility_settings" | "clipboard_history" | "mute_mic" | "toggle_desktop" | "snap_layouts" | "task_manager" | "snip_screenshot" | "action_center" | "notification_center" | "task_view" | "open_search" | "open_run" | "open_settings" | "lock_screen" | "emoji_panel" | "minimize_all" | "restore_minimized" | "new_desktop" | "next_desktop" | "prev_desktop" | "close_desktop" | "move_window_monitor_left" | "move_window_monitor_right" | "voice_dictation" | "file_explorer" | "quick_link_menu" | "project_display" | "cast_display" | "screen_recording" | "select_all" | "copy" | "undo" | "redo" | "find_in_page" | "close_tab" | "reopen_tab" | "refresh_page" | "next_field" | "previous_field"}
   ]
 }
 
@@ -2382,42 +3083,79 @@ Si l'utilisateur demande d'ouvrir un site, un sujet de recherche ou d'organiser 
         stream: false,
     };
 
-    let response = client
-        .post("https://api.groq.com/openai/v1/chat/completions")
-        .bearer_auth(api_key)
-        .json(&request)
-        .send()
-        .await;
+    let mut attempts = 0;
+    const MAX_RETRIES: usize = 3;
+    const DEFAULT_RETRY_DELAY: Duration = Duration::from_millis(3500);
 
-    match response {
-        Ok(res) if res.status().is_success() => {
-            if let Ok(body) = res.json::<GroqChatResponse>().await {
-                if let Some(choice) = body.choices.first() {
-                    history.push(ChatMessage {
-                        role: "assistant".to_string(),
-                        content: choice.message.content.clone(),
-                    });
+    loop {
+        attempts += 1;
+        *last_call_time = Some(Instant::now());
 
-                    let payload = parse_agent_response(&choice.message.content);
-                    let _ = event_tx.send(AgentEvent::ReplaceNarration(payload.narration));
+        let response = client
+            .post("https://api.groq.com/openai/v1/chat/completions")
+            .bearer_auth(&api_key)
+            .json(&request)
+            .send()
+            .await;
 
-                    tokio::task::spawn_blocking(move || {
-                        execute_system_actions(&payload.actions);
-                    }).await.ok();
-                    return;
+        match response {
+            Ok(res) if res.status().is_success() => {
+                if let Ok(body) = res.json::<GroqChatResponse>().await {
+                    if let Some(choice) = body.choices.first() {
+                        history.push(ChatMessage {
+                            role: "assistant".to_string(),
+                            content: choice.message.content.clone(),
+                        });
+
+                        let payload = parse_agent_response(&choice.message.content);
+                        let _ = event_tx.send(AgentEvent::ReplaceNarration(payload.narration));
+
+                        tokio::task::spawn_blocking(move || {
+                            execute_system_actions(&payload.actions);
+                        }).await.ok();
+                        return;
+                    }
                 }
+                history.pop();
+                let _ = event_tx.send(AgentEvent::ReplaceNarration("Format de réponse inattendu.".into()));
+                break;
             }
-            history.pop();
-            let _ = event_tx.send(AgentEvent::ReplaceNarration("Format de réponse inattendu.".into()));
-        }
-        Ok(res) => {
-            history.pop();
-            let status = res.status();
-            let _ = event_tx.send(AgentEvent::ReplaceNarration(format!("Erreur API Groq : {status}")));
-        }
-        Err(err) => {
-            history.pop();
-            let _ = event_tx.send(AgentEvent::ReplaceNarration(format!("Erreur réseau : {err}")));
+            Ok(res) if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempts <= MAX_RETRIES => {
+                let wait_duration = if let Some(retry_after) = res.headers().get("retry-after") {
+                    if let Ok(secs) = retry_after.to_str().unwrap_or("").parse::<u64>() {
+                        Duration::from_secs(secs.max(3))
+                    } else {
+                        DEFAULT_RETRY_DELAY
+                    }
+                } else {
+                    DEFAULT_RETRY_DELAY
+                };
+
+                let secs_display = wait_duration.as_secs_f32().ceil() as u64;
+                let _ = event_tx.send(AgentEvent::ReplaceNarration(format!(
+                    "Limite d'appels Groq atteinte. Pause de {secs_display} secondes avant réessai..."
+                )));
+                tokio::time::sleep(wait_duration).await;
+                continue;
+            }
+            Ok(res) => {
+                history.pop();
+                let status = res.status();
+                let _ = event_tx.send(AgentEvent::ReplaceNarration(format!("Erreur API Groq : {status}")));
+                break;
+            }
+            Err(err) if attempts <= MAX_RETRIES => {
+                let _ = event_tx.send(AgentEvent::ReplaceNarration(
+                    "Connexion interrompue, nouvelle tentative dans 3 secondes...".into(),
+                ));
+                tokio::time::sleep(DEFAULT_RETRY_DELAY).await;
+                continue;
+            }
+            Err(err) => {
+                history.pop();
+                let _ = event_tx.send(AgentEvent::ReplaceNarration(format!("Erreur réseau : {err}")));
+                break;
+            }
         }
     }
 
@@ -2437,6 +3175,7 @@ fn main() -> eframe::Result<()> {
         let rt = tokio::runtime::Runtime::new().expect("Échec d'initialisation du runtime Tokio");
         rt.block_on(async move {
             let mut history: Vec<ChatMessage> = Vec::new();
+            let mut last_call_time: Option<Instant> = None;
 
             while let Ok(cmd) = cmd_rx.recv() {
                 match cmd {
@@ -2449,7 +3188,7 @@ fn main() -> eframe::Result<()> {
                             let _ = event_tx.send(AgentEvent::ReplaceNarration(narration));
                             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                         } else {
-                            call_groq_prompt(groq_chat_key.clone(), prompt, &mut history, event_tx.clone()).await;
+                            call_groq_prompt(groq_chat_key.clone(), prompt, &mut history, event_tx.clone(), &mut last_call_time).await;
                         }
                     }
                     AgentCommand::ClearHistory => {
