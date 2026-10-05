@@ -250,6 +250,7 @@ pub struct OverlayApp {
     position_initialized: bool,
     window_pos: Option<egui::Pos2>,
     drag_offset: Option<egui::Vec2>,
+    is_hidden: bool,
     mouse_passthrough: bool,
 }
 
@@ -276,6 +277,39 @@ fn sanitize_for_tts(text: &str) -> String {
     text.chars()
         .filter(|&c| c != '*' && c != '#' && c != '`' && c != '_' && c != '~')
         .collect()
+}
+
+fn clean_words(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_string())
+        .collect()
+}
+
+fn is_hide_command(text: &str) -> bool {
+    let words = clean_words(text);
+    let has_verb = words.iter().any(|w| {
+        w == "ferme" || w == "fermer" || w == "cache" || w == "cacher" || w == "masque" || w == "masquer" || w == "disparais"
+    });
+    let has_target = words.iter().any(|w| {
+        w == "toi" || w == "overlay" || w == "groq" || w == "libertide"
+    });
+    has_verb && has_target
+}
+
+fn is_show_command(text: &str) -> bool {
+    let words = clean_words(text);
+    let has_verb = words.iter().any(|w| {
+        w == "ouvre" || w == "ouvrir" || w == "affiche" || w == "afficher" || w == "montre" || w == "montrer" || w == "reveille" || w == "réveille" || w == "reveiller" || w == "réveiller"
+    });
+    let has_target = words.iter().any(|w| {
+        w == "toi" || w == "overlay" || w == "groq" || w == "libertide"
+    });
+    has_verb && has_target
 }
 
 #[cfg(windows)]
@@ -401,6 +435,7 @@ impl OverlayApp {
             position_initialized: false,
             window_pos: None,
             drag_offset: None,
+            is_hidden: false,
             mouse_passthrough: false,
         }
     }
@@ -451,6 +486,7 @@ impl OverlayApp {
         self.is_recording = false;
         let _ = self.audio_sender.send(AudioCommand::Stop);
         self.live_transcript.clear();
+        self.is_hidden = false;
         self.status = AgentStatus::EmergencyStopped;
         let stop_msg = "Arrêt d'urgence : contrôle rendu à l'utilisateur.".to_string();
         self.chat_history.push(ChatEntry {
@@ -470,7 +506,11 @@ impl OverlayApp {
         self.status = AgentStatus::Listening;
         self.input_text.clear();
         let _ = self.tts_sender.send(TtsCommand::Stop);
-        self.live_transcript = "Écoute en direct... parlez, la retranscription s'affiche en temps réel.".to_string();
+        if !self.is_hidden {
+            self.live_transcript = "Écoute en direct... parlez, la retranscription s'affiche en temps réel.".to_string();
+        } else {
+            self.live_transcript.clear();
+        }
         let _ = self.audio_sender.send(AudioCommand::Start);
     }
 
@@ -536,7 +576,9 @@ impl eframe::App for OverlayApp {
         // seuls les contrôles inférieurs et l'en-tête de glissement capturent la souris.
         let win_pos = self.window_pos.unwrap_or(egui::pos2(0.0, 0.0));
         let cursor_screen = get_screen_cursor_pos(ctx);
-        let wants_interaction = if self.drag_offset.is_some() {
+        let wants_interaction = if self.is_hidden {
+            false
+        } else if self.drag_offset.is_some() {
             true
         } else if let Some(cursor) = cursor_screen {
             let rel_x = cursor.x - win_pos.x;
@@ -591,7 +633,7 @@ impl eframe::App for OverlayApp {
                     let _ = self.tts_sender.send(TtsCommand::Speak(full_text));
                 }
                 AgentEvent::TranscriptionPartial(text) => {
-                    if self.is_recording {
+                    if self.is_recording && !self.is_hidden {
                         self.input_text = text.clone();
                         self.live_transcript = text;
                     }
@@ -599,14 +641,56 @@ impl eframe::App for OverlayApp {
                 AgentEvent::VoicePromptReady(prompt) => {
                     self.is_recording = false;
                     self.live_transcript.clear();
-                    if self.status != AgentStatus::Thinking && !prompt.trim().is_empty() {
-                        self.status = AgentStatus::Thinking;
-                        self.input_text.clear();
-                        self.chat_history.push(ChatEntry {
-                            role: ChatRole::User,
-                            text: prompt.clone(),
-                        });
-                        let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
+                    if self.is_hidden {
+                        if is_show_command(&prompt) {
+                            self.is_hidden = false;
+                            self.status = AgentStatus::Idle;
+                            self.chat_history.push(ChatEntry {
+                                role: ChatRole::User,
+                                text: prompt,
+                            });
+                            let reply = "Me revoilà, overlay réaffiché.".to_string();
+                            self.chat_history.push(ChatEntry {
+                                role: ChatRole::Agent,
+                                text: reply.clone(),
+                            });
+                            let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                            self.continuous_mode = true;
+                        } else if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            // Tout autre message est ignoré lorsque l'overlay est masqué
+                            self.start_recording();
+                        }
+                    } else {
+                        if is_hide_command(&prompt) {
+                            self.is_hidden = true;
+                            self.status = AgentStatus::Idle;
+                            self.chat_history.push(ChatEntry {
+                                role: ChatRole::User,
+                                text: prompt,
+                            });
+                            let reply = "Overlay masqué. Je reste à l'écoute pour « groq ouvre toi ».".to_string();
+                            self.chat_history.push(ChatEntry {
+                                role: ChatRole::Agent,
+                                text: reply.clone(),
+                            });
+                            let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                            self.continuous_mode = true;
+                        } else if is_show_command(&prompt) {
+                            let reply = "L'overlay est déjà actif et visible.".to_string();
+                            self.chat_history.push(ChatEntry {
+                                role: ChatRole::Agent,
+                                text: reply.clone(),
+                            });
+                            let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                        } else if self.status != AgentStatus::Thinking && !prompt.trim().is_empty() {
+                            self.status = AgentStatus::Thinking;
+                            self.input_text.clear();
+                            self.chat_history.push(ChatEntry {
+                                role: ChatRole::User,
+                                text: prompt.clone(),
+                            });
+                            let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
+                        }
                     }
                 }
                 AgentEvent::TtsFinished => {
@@ -624,7 +708,7 @@ impl eframe::App for OverlayApp {
 
         // Raccourci clavier 'R' pour basculer le micro (autorisé pour couper le micro même avec focus)
         let is_typing = ctx.memory(|m| m.focused().is_some()) && !self.is_recording;
-        if !is_typing && ctx.input(|i| i.key_pressed(egui::Key::R)) {
+        if !self.is_hidden && !is_typing && ctx.input(|i| i.key_pressed(egui::Key::R)) {
             self.toggle_recording();
         }
 
@@ -638,6 +722,13 @@ impl eframe::App for OverlayApp {
 
         let time = ctx.input(|i| i.time);
         ctx.request_repaint_after(Duration::from_millis(16));
+
+        if self.is_hidden {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none().fill(egui::Color32::TRANSPARENT))
+                .show(ctx, |_ui| {});
+            return;
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(egui::Color32::TRANSPARENT))
@@ -801,7 +892,18 @@ impl eframe::App for OverlayApp {
                                                 role: ChatRole::User,
                                                 text: prompt.clone(),
                                             });
-                                            let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
+                                            if is_hide_command(&prompt) {
+                                                self.is_hidden = true;
+                                                self.status = AgentStatus::Idle;
+                                                let reply = "Overlay masqué. Je reste à l'écoute pour « groq ouvre toi ».".to_string();
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::Agent,
+                                                    text: reply.clone(),
+                                                });
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                                            } else {
+                                                let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
+                                            }
                                         }
 
                                         let clear_btn = ui
@@ -1833,18 +1935,6 @@ fn click_element(x: i32, y: i32, invoke_pattern: Option<&IUIAutomationInvokePatt
         std::thread::sleep(Duration::from_millis(40));
         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
     }
-}
-
-#[cfg(windows)]
-fn clean_words(text: &str) -> Vec<String> {
-    text.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-        .collect::<String>()
-        .split_whitespace()
-        .filter(|w| !w.is_empty())
-        .map(|w| w.to_string())
-        .collect()
 }
 
 #[cfg(windows)]
