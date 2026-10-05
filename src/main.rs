@@ -1,11 +1,13 @@
+mod audio;
+mod types;
+
+use audio::spawn_audio_worker;
 use eframe::egui;
-use serde::{Deserialize, Serialize};
-use std::io::Cursor;
+use serde::Deserialize;
+use types::*;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
-
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -183,131 +185,11 @@ fn send_hotkey(modifiers: &[VIRTUAL_KEY], key: VIRTUAL_KEY) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentStatus {
-    Idle,
-    Thinking,
-    Speaking,
-    Listening,
-    EmergencyStopped,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChatRole {
-    User,
-    Agent,
-}
-
-#[derive(Debug, Clone)]
-pub struct ChatEntry {
-    pub role: ChatRole,
-    pub text: String,
-    pub timestamp: String,
-}
-
-#[derive(Debug, Clone)]
-pub enum AgentEvent {
-    StatusChanged(AgentStatus),
-    NarrationChunk(String),
-    ReplaceNarration(String),
-    TranscriptionPartial(String),
-    VoicePromptReady(String),
-    TtsFinished,
-}
-
-#[derive(Debug, Clone)]
-pub enum AudioCommand {
-    Start,
-    Stop,
-}
-
-#[derive(Debug, Clone)]
-pub enum TtsCommand {
-    Speak(String),
-    Stop,
-}
-
-#[derive(Debug, Clone)]
-pub enum AgentCommand {
-    Prompt(String),
-    ClearHistory,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "action", rename_all = "snake_case")]
-pub enum AgentAction {
-    OpenApp {
-        name: String,
-    },
-    CloseApp {
-        name: String,
-    },
-    ClickButton {
-        window: Option<String>,
-        button_name: String,
-    },
-    OpenBrowser {
-        url: Option<String>,
-    },
-    WriteText {
-        text: String,
-    },
-    ArrangeWindow {
-        title: String,
-        position: String,
-    },
-    TileWindows {
-        layout: Option<String>,
-        windows: Vec<String>,
-    },
-    MoveWindow {
-        title: String,
-        x: i32,
-        y: i32,
-        width: i32,
-        height: i32,
-    },
-    AccessibilityShortcut {
-        shortcut: String,
-    },
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct AgentResponsePayload {
-    pub narration: String,
-    #[serde(default)]
-    pub actions: Vec<AgentAction>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct ChatMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Serialize, Debug)]
-struct GroqChatRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-    temperature: f32,
-    max_completion_tokens: u32,
-    top_p: f32,
-    stream: bool,
-}
-
-#[derive(Deserialize, Debug)]
-struct GroqChoice {
-    message: ChatMessage,
-}
-
-#[derive(Deserialize, Debug)]
-struct GroqChatResponse {
-    choices: Vec<GroqChoice>,
-}
-
 pub struct OverlayApp {
     status: AgentStatus,
     chat_history: Vec<ChatEntry>,
+    active_tab: ActiveTab,
+    twitch_messages: Vec<TwitchMessage>,
     live_transcript: String,
     input_text: String,
     is_recording: bool,
@@ -318,6 +200,10 @@ pub struct OverlayApp {
     command_sender: Sender<AgentCommand>,
     tts_sender: Sender<TtsCommand>,
     audio_sender: Sender<AudioCommand>,
+    twitch_channel_sender: Sender<String>,
+    current_twitch_channel: String,
+    twitch_search_query: String,
+    twitch_search_results: Vec<TwitchChannelItem>,
     position_initialized: bool,
     window_pos: Option<egui::Pos2>,
     drag_offset: Option<egui::Vec2>,
@@ -509,6 +395,150 @@ fn spawn_tts_worker(_event_tx: Sender<AgentEvent>) -> Sender<TtsCommand> {
     tx
 }
 
+fn spawn_twitch_worker(event_tx: Sender<AgentEvent>, channel_rx: Receiver<String>) {
+    std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, ErrorKind, Write};
+        use std::net::TcpStream;
+
+        let mut current_channel = String::new();
+
+        loop {
+            // En attente d'un salon si aucun n'est configuré
+            if current_channel.is_empty() {
+                match channel_rx.recv() {
+                    Ok(ch) => {
+                        current_channel = ch.trim().to_lowercase().trim_start_matches('#').to_string();
+                        if current_channel.is_empty() {
+                            continue;
+                        }
+                    }
+                    Err(_) => return,
+                }
+            }
+
+            // Récupérer le dernier salon demandé s'il y a eu plusieurs bascules
+            while let Ok(ch) = channel_rx.try_recv() {
+                let clean = ch.trim().to_lowercase().trim_start_matches('#').to_string();
+                if !clean.is_empty() {
+                    current_channel = clean;
+                }
+            }
+
+            if let Ok(mut stream) = TcpStream::connect("irc.chat.twitch.tv:6667") {
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                let mut writer = match stream.try_clone() {
+                    Ok(w) => w,
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_secs(3));
+                        continue;
+                    }
+                };
+
+                // Mode invité Twitch (anonyme sans OAuth en lecture seule)
+                let _ = write!(writer, "PASS oauth:justinfan12345\r\n");
+                let _ = write!(writer, "NICK justinfan12345\r\n");
+                let _ = write!(writer, "JOIN #{current_channel}\r\n");
+                let _ = writer.flush();
+
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+
+                loop {
+                    // Interrompre la connexion active si un nouveau salon est demandé
+                    if let Ok(new_ch) = channel_rx.try_recv() {
+                        let clean = new_ch.trim().to_lowercase().trim_start_matches('#').to_string();
+                        if !clean.is_empty() && clean != current_channel {
+                            current_channel = clean;
+                            break;
+                        }
+                    }
+
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            let line_str = line.trim_end();
+                            if line_str.starts_with("PING") {
+                                let _ = write!(writer, "PONG :tmi.twitch.tv\r\n");
+                                let _ = writer.flush();
+                            } else if line_str.contains("PRIVMSG") {
+                                if let Some(idx_privmsg) = line_str.find(" PRIVMSG ") {
+                                    let prefix = &line_str[..idx_privmsg];
+                                    let author = prefix.strip_prefix(':').unwrap_or(prefix).split('!').next().unwrap_or("anonyme");
+                                    let msg_payload = &line_str[idx_privmsg + 9..];
+                                    if let Some(colon_pos) = msg_payload.find(" :") {
+                                        let msg = &msg_payload[colon_pos + 2..];
+                                        let _ = event_tx.send(AgentEvent::TwitchChatReceived(TwitchMessage {
+                                            author: author.to_string(),
+                                            text: msg.to_string(),
+                                            timestamp: current_time_str(),
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                        Err(ref e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
+                            continue;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    });
+}
+
+async fn search_twitch_channels(query: &str) -> Vec<TwitchChannelItem> {
+    let clean = query.trim().trim_start_matches('#');
+    if clean.is_empty() {
+        return Vec::new();
+    }
+
+    let client = reqwest::Client::new();
+    let gql_body = serde_json::json!({
+        "query": format!(
+            r#"query {{ searchFor(userQuery: "{}", platform: "web") {{ channels {{ items {{ id login displayName profileImageURL(width: 70) }} }} }} }}"#,
+            clean.replace('"', "\\\"")
+        )
+    });
+
+    let res = client
+        .post("https://gql.twitch.tv/gql")
+        .header("Client-Id", "kimne78kx3ncx6brgo4mv6wki5h1ko")
+        .json(&gql_body)
+        .send()
+        .await;
+
+    if let Ok(resp) = res {
+        if resp.status().is_success() {
+            if let Ok(v) = resp.json::<serde_json::Value>().await {
+                let mut results = Vec::new();
+                if let Some(items) = v.pointer("/data/searchFor/channels/items").and_then(|i| i.as_array()) {
+                    for item in items {
+                        let login = item.get("login").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                        let display_name = item.get("displayName").and_then(|s| s.as_str()).unwrap_or(&login).to_string();
+                        let profile_image_url = item.get("profileImageURL").and_then(|s| s.as_str()).map(|s| s.to_string());
+                        if !login.is_empty() {
+                            results.push(TwitchChannelItem { login, display_name, profile_image_url });
+                        }
+                    }
+                }
+                if !results.is_empty() {
+                    return results;
+                }
+            }
+        }
+    }
+
+    // Repli automatique avec les informations saisies
+    vec![TwitchChannelItem {
+        login: clean.to_lowercase(),
+        display_name: clean.to_string(),
+        profile_image_url: None,
+    }]
+}
+
 impl OverlayApp {
     pub fn new(
         _cc: &eframe::CreationContext<'_>,
@@ -516,6 +546,8 @@ impl OverlayApp {
         command_sender: Sender<AgentCommand>,
         tts_sender: Sender<TtsCommand>,
         audio_sender: Sender<AudioCommand>,
+        twitch_channel_sender: Sender<String>,
+        initial_twitch_channel: String,
     ) -> Self {
         let initial_subtitle = "En attente d'instructions d'exploration...".to_string();
         let _ = tts_sender.send(TtsCommand::Speak(initial_subtitle.clone()));
@@ -527,6 +559,8 @@ impl OverlayApp {
                 text: initial_subtitle,
                 timestamp: current_time_str(),
             }],
+            active_tab: ActiveTab::Assistance,
+            twitch_messages: Vec::new(),
             live_transcript: String::new(),
             input_text: String::new(),
             is_recording: false,
@@ -535,6 +569,10 @@ impl OverlayApp {
             command_sender,
             tts_sender,
             audio_sender,
+            twitch_channel_sender,
+            current_twitch_channel: initial_twitch_channel,
+            twitch_search_query: String::new(),
+            twitch_search_results: Vec::new(),
             position_initialized: false,
             window_pos: None,
             drag_offset: None,
@@ -688,9 +726,10 @@ impl eframe::App for OverlayApp {
             let rel_x = cursor.x - win_pos.x;
             let rel_y = cursor.y - win_pos.y;
             let in_window_x = rel_x >= 0.0 && rel_x <= win_w;
-            let in_drag_header = in_window_x && rel_y >= 0.0 && rel_y <= 28.0;
+            let in_drag_header = in_window_x && rel_y >= 0.0 && rel_y <= 38.0;
+            let in_chat_view = self.active_tab == ActiveTab::Chat && in_window_x && rel_y <= response_h;
             let in_control_panel = in_window_x && rel_y >= (response_h + 4.0) && rel_y <= win_h;
-            in_drag_header || in_control_panel
+            in_drag_header || in_chat_view || in_control_panel
         } else {
             false
         };
@@ -811,6 +850,15 @@ impl eframe::App for OverlayApp {
                         self.start_recording();
                     }
                 }
+                AgentEvent::TwitchChatReceived(twitch_msg) => {
+                    self.twitch_messages.push(twitch_msg);
+                    if self.twitch_messages.len() > 300 {
+                        self.twitch_messages.drain(0..self.twitch_messages.len() - 300);
+                    }
+                }
+                AgentEvent::TwitchSearchResults(results) => {
+                    self.twitch_search_results = results;
+                }
             }
         }
 
@@ -862,6 +910,7 @@ impl eframe::App for OverlayApp {
                 );
 
                 // 1. Zone supérieure transparente (70 %) pour l'historique du chat
+                let mut tab_bar_max_x = total_rect.min.x + 210.0;
                 ui.allocate_ui_at_rect(response_rect, |ui| {
                     egui::Frame::none()
                         .fill(egui::Color32::from_rgba_unmultiplied(16, 18, 24, 45))
@@ -869,6 +918,27 @@ impl eframe::App for OverlayApp {
                         .rounding(14.0)
                         .inner_margin(egui::Margin::symmetric(14.0, 10.0))
                         .show(ui, |ui| {
+                            // Barre d'onglets
+                            ui.horizontal(|ui| {
+                                let tab_assist = ui.selectable_label(self.active_tab == ActiveTab::Assistance, "🤖 Assistance");
+                                if tab_assist.clicked() {
+                                    self.active_tab = ActiveTab::Assistance;
+                                }
+                                let chat_title = if self.twitch_messages.is_empty() {
+                                    "💬 Chat twitch".to_string()
+                                } else {
+                                    format!("💬 Chat ({})", self.twitch_messages.len())
+                                };
+                                let tab_chat = ui.selectable_label(self.active_tab == ActiveTab::Chat, chat_title);
+                                if tab_chat.clicked() {
+                                    self.active_tab = ActiveTab::Chat;
+                                }
+                                tab_bar_max_x = tab_assist.rect.max.x.max(tab_chat.rect.max.x);
+                            });
+                            ui.separator();
+
+                            match self.active_tab {
+                                ActiveTab::Assistance => {
                             egui::ScrollArea::vertical()
                                 .stick_to_bottom(true)
                                 .auto_shrink([false, false])
@@ -927,6 +997,102 @@ impl eframe::App for OverlayApp {
                                         ui.add_space(if is_highlighted { 8.0 } else { 5.0 });
                                     }
                                 });
+                                }
+                                ActiveTab::Chat => {
+                                    // Barre de recherche et salon actif
+                                    ui.horizontal(|ui| {
+                                        if !self.current_twitch_channel.is_empty() {
+                                            ui.label(
+                                                egui::RichText::new("Salon :")
+                                                    .size(11.0)
+                                                    .color(egui::Color32::from_rgb(170, 185, 205)),
+                                            );
+                                            ui.hyperlink_to(
+                                                egui::RichText::new(format!("#{}", self.current_twitch_channel))
+                                                    .size(11.0)
+                                                    .color(egui::Color32::from_rgb(0, 195, 255))
+                                                    .underline(),
+                                                format!("https://twitch.tv/{}", self.current_twitch_channel),
+                                            );
+                                            ui.separator();
+                                        }
+
+                                        let search_edit = ui.add_sized(
+                                            [110.0, 18.0],
+                                            egui::TextEdit::singleline(&mut self.twitch_search_query)
+                                                .hint_text("Chaîne..."),
+                                        );
+                                        let enter_pressed = search_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                        if (ui.small_button("🔍").clicked() || enter_pressed) && !self.twitch_search_query.trim().is_empty() {
+                                            let _ = self.command_sender.send(AgentCommand::SearchTwitch(
+                                                self.twitch_search_query.trim().to_string(),
+                                            ));
+                                        }
+                                    });
+
+                                    if !self.twitch_search_results.is_empty() {
+                                        ui.add_space(2.0);
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("Résultats :")
+                                                    .size(10.5)
+                                                    .color(egui::Color32::from_rgb(255, 215, 120)),
+                                            );
+                                            let mut selected_channel = None;
+                                            for ch in &self.twitch_search_results {
+                                                if ui.small_button(format!("▶ {}", ch.display_name)).on_hover_text("Rejoindre ce salon IRC").clicked() {
+                                                    selected_channel = Some(ch.login.clone());
+                                                }
+                                                if ui.small_button("↗").on_hover_text("Ouvrir sur Twitch").clicked() {
+                                                    ui.ctx().open_url(egui::OpenUrl::new_tab(format!("https://twitch.tv/{}", ch.login)));
+                                                }
+                                            }
+                                            if let Some(ch) = selected_channel {
+                                                self.current_twitch_channel = ch.clone();
+                                                let _ = self.twitch_channel_sender.send(ch);
+                                                self.twitch_messages.clear();
+                                                self.twitch_search_results.clear();
+                                            }
+                                        });
+                                    }
+                                    ui.separator();
+                                    egui::ScrollArea::vertical()
+                                        .stick_to_bottom(true)
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            if self.twitch_messages.is_empty() {
+                                                ui.label(
+                                                    egui::RichText::new("En attente de messages twitch...")
+                                                        .size(12.0)
+                                                        .italics()
+                                                        .color(egui::Color32::from_rgba_unmultiplied(180, 190, 205, 150)),
+                                                );
+                                            } else {
+                                                for msg in &self.twitch_messages {
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        ui.label(
+                                                            egui::RichText::new(&msg.timestamp)
+                                                                .size(9.0)
+                                                                .color(egui::Color32::from_rgba_unmultiplied(140, 150, 170, 140)),
+                                                        );
+                                                        ui.label(
+                                                            egui::RichText::new(format!("{}:", msg.author))
+                                                                .size(12.0)
+                                                                .color(egui::Color32::from_rgb(169, 112, 255))
+                                                                .strong(),
+                                                        );
+                                                        ui.label(
+                                                            egui::RichText::new(&msg.text)
+                                                                .size(12.5)
+                                                                .color(egui::Color32::WHITE),
+                                                        );
+                                                    });
+                                                    ui.add_space(3.0);
+                                                }
+                                            }
+                                        });
+                                }
+                            }
                         });
                 });
 
@@ -1062,10 +1228,10 @@ impl eframe::App for OverlayApp {
                         });
                 });
 
-                // Zone de déplacement restreinte à l'en-tête supérieur
+                // Zone de déplacement restreinte à l'en-tête supérieur en donnant priorité aux contrôles
                 let drag_rect = egui::Rect::from_min_max(
-                    total_rect.min,
-                    egui::pos2(total_rect.max.x, total_rect.min.y + 28.0),
+                    egui::pos2(tab_bar_max_x + 8.0, total_rect.min.y),
+                    egui::pos2(total_rect.max.x, total_rect.min.y + 36.0),
                 );
                 let drag_response = ui.interact(drag_rect, ui.id().with("capsule_drag"), egui::Sense::drag());
                 if drag_response.hovered() {
@@ -1139,423 +1305,6 @@ fn resolve_groq_key() -> String {
     }
 
     String::new()
-}
-
-fn encode_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut cursor = Cursor::new(Vec::new());
-    if let Ok(mut writer) = hound::WavWriter::new(&mut cursor, spec) {
-        let ch = channels as usize;
-        for chunk in samples.chunks(ch) {
-            let mono: f32 = chunk.iter().sum::<f32>() / ch as f32;
-            let sample_i16 = (mono.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-            let _ = writer.write_sample(sample_i16);
-        }
-        let _ = writer.finalize();
-    }
-    cursor.into_inner()
-}
-
-/// Rééchantillonneur linéaire continu vers mono 16 kHz sans dépendance externe
-struct ContinuousResampler {
-    in_rate: f64,
-    out_rate: f64,
-    channels: usize,
-    buffer: Vec<f32>,
-    phase: f64,
-}
-
-impl ContinuousResampler {
-    fn new(in_rate: u32, channels: u16, out_rate: u32) -> Self {
-        Self {
-            in_rate: in_rate as f64,
-            out_rate: out_rate as f64,
-            channels: (channels as usize).max(1),
-            buffer: Vec::with_capacity(4096),
-            phase: 0.0,
-        }
-    }
-
-    fn push_interleaved_f32(&mut self, data: &[f32]) {
-        let ch = self.channels;
-        for frame in data.chunks(ch) {
-            let mono: f32 = frame.iter().sum::<f32>() / ch as f32;
-            self.buffer.push(mono);
-        }
-    }
-
-    fn drain_resampled(&mut self, out: &mut Vec<f32>) {
-        if self.buffer.len() < 2 {
-            return;
-        }
-        let step = self.in_rate / self.out_rate;
-        let max_idx = self.buffer.len() - 1;
-        while self.phase < max_idx as f64 {
-            let idx = self.phase.floor() as usize;
-            let frac = (self.phase - idx as f64) as f32;
-            let s0 = self.buffer[idx];
-            let s1 = self.buffer[idx + 1];
-            out.push(s0 + frac * (s1 - s0));
-            self.phase += step;
-        }
-        let consumed = self.phase.floor() as usize;
-        if consumed > 0 {
-            self.buffer.drain(0..consumed);
-            self.phase -= consumed as f64;
-        }
-    }
-}
-
-/// Filtre adaptatif NLMS (Normalized Least Mean Squares) avec détecteur de double parole (DTD)
-/// Modélise la réponse impulsionnelle acoustique de la pièce (~48 ms à 16 kHz = 768 taps)
-struct NlmsAec {
-    taps: usize,
-    weights: Vec<f32>,
-    x_buf: Vec<f32>,
-    x_head: usize,
-    step_size: f32,
-    x_power: f32,
-    d_power: f32,
-    e_power: f32,
-}
-
-impl NlmsAec {
-    fn new(taps: usize) -> Self {
-        Self {
-            taps,
-            weights: vec![0.0; taps],
-            x_buf: vec![0.0; taps],
-            x_head: 0,
-            step_size: 0.20,
-            x_power: 0.0,
-            d_power: 0.0,
-            e_power: 0.0,
-        }
-    }
-
-    fn process(&mut self, mic_sample: f32, spk_sample: f32) -> f32 {
-        let x = spk_sample;
-        let d = mic_sample;
-
-        // Insertion du signal haut-parleur dans le tampon circulaire de référence
-        self.x_buf[self.x_head] = x;
-
-        // Estimation lissée des puissances des signaux (alpha = 0.005)
-        const ALPHA: f32 = 0.005;
-        self.x_power = (1.0 - ALPHA) * self.x_power + ALPHA * (x * x);
-        self.d_power = (1.0 - ALPHA) * self.d_power + ALPHA * (d * d);
-
-        // Si aucun son significatif ne sort des haut-parleurs, contourner le filtrage
-        if self.x_power < 1e-5 {
-            self.x_head = if self.x_head + 1 >= self.taps { 0 } else { self.x_head + 1 };
-            return d;
-        }
-
-        // Écho estimé y_chapeau = sum(w_i * x_{n-i})
-        let mut y_hat: f32 = 0.0;
-        let mut norm: f32 = 1e-4;
-        let taps = self.taps;
-        let head = self.x_head;
-
-        for i in 0..taps {
-            let idx = if head >= i { head - i } else { head + taps - i };
-            let xi = self.x_buf[idx];
-            y_hat += self.weights[i] * xi;
-            norm += xi * xi;
-        }
-
-        // Signal nettoyé (soustraction de l'écho acoustique estimé)
-        let e = d - y_hat;
-        self.e_power = (1.0 - ALPHA) * self.e_power + ALPHA * (e * e);
-
-        // Détecteur de double parole (DTD) :
-        // Si l'utilisateur parle en même temps, figer l'adaptation pour ne pas déformer la voix
-        let is_double_talk = self.d_power > 0.0008 && self.e_power > 0.45 * self.d_power;
-        if !is_double_talk {
-            let adapt = (self.step_size / norm) * e;
-            const LEAKAGE: f32 = 0.99998;
-            for i in 0..taps {
-                let idx = if head >= i { head - i } else { head + taps - i };
-                self.weights[i] = self.weights[i] * LEAKAGE + adapt * self.x_buf[idx];
-            }
-        }
-
-        self.x_head = if self.x_head + 1 >= self.taps { 0 } else { self.x_head + 1 };
-        e.clamp(-1.0, 1.0)
-    }
-}
-
-async fn transcribe_audio(
-    api_key: &str,
-    wav_data: Vec<u8>,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::new();
-    let mut attempts = 0;
-    loop {
-        attempts += 1;
-        let part = reqwest::multipart::Part::bytes(wav_data.clone())
-            .file_name("speech.wav")
-            .mime_str("audio/wav")?;
-
-        let form = reqwest::multipart::Form::new()
-            .part("file", part)
-            .text("model", "whisper-large-v3-turbo")
-            .text("language", "fr")
-            .text("prompt", "Transcription en français uniquement.")
-            .text("response_format", "json");
-
-        let res = client
-            .post("https://api.groq.com/openai/v1/audio/transcriptions")
-            .bearer_auth(api_key)
-            .multipart(form)
-            .send()
-            .await?;
-
-        if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempts <= 2 {
-            tokio::time::sleep(Duration::from_millis(2500)).await;
-            continue;
-        }
-
-        if !res.status().is_success() {
-            let err = res.text().await.unwrap_or_default();
-            return Err(format!("Erreur transcription: {err}").into());
-        }
-
-        #[derive(Deserialize)]
-        struct TranscribeResp {
-            text: String,
-        }
-
-        let body = res.json::<TranscribeResp>().await?;
-        return Ok(body.text.trim().to_string());
-    }
-}
-
-fn spawn_audio_worker(event_tx: Sender<AgentEvent>, groq_key: String) -> Sender<AudioCommand> {
-    let (cmd_tx, cmd_rx) = channel::<AudioCommand>();
-
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Échec runtime audio");
-
-        let host = cpal::default_host();
-
-        while let Ok(cmd) = cmd_rx.recv() {
-            if !matches!(cmd, AudioCommand::Start) {
-                continue;
-            }
-
-            if groq_key.is_empty() {
-                let _ = event_tx.send(AgentEvent::ReplaceNarration(
-                    "Veuillez renseigner GROQ_API_KEY dans le fichier .env pour activer Whisper.".into(),
-                ));
-                let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
-                continue;
-            }
-
-            let Some(device) = host.default_input_device() else {
-                let _ = event_tx.send(AgentEvent::ReplaceNarration(
-                    "Aucun microphone disponible.".into(),
-                ));
-                let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
-                continue;
-            };
-
-            let Ok(config) = device.default_input_config() else {
-                continue;
-            };
-
-            let mic_sr = config.sample_rate().0;
-            let mic_ch = config.channels();
-            let mic_raw_buffer = Arc::new(Mutex::new(Vec::<f32>::new()));
-            let mic_buf_clone = mic_raw_buffer.clone();
-
-            let mic_stream_res = match config.sample_format() {
-                cpal::SampleFormat::F32 => device.build_input_stream(
-                    &config.into(),
-                    move |data: &[f32], _| {
-                        if let Ok(mut b) = mic_buf_clone.lock() {
-                            b.extend_from_slice(data);
-                        }
-                    },
-                    |_| {},
-                    None,
-                ),
-                cpal::SampleFormat::I16 => device.build_input_stream(
-                    &config.into(),
-                    move |data: &[i16], _| {
-                        if let Ok(mut b) = mic_buf_clone.lock() {
-                            for &s in data {
-                                b.push(s as f32 / i16::MAX as f32);
-                            }
-                        }
-                    },
-                    |_| {},
-                    None,
-                ),
-                _ => continue,
-            };
-
-            let Ok(mic_stream) = mic_stream_res else { continue; };
-            let _ = mic_stream.play();
-
-            // Capture simultanée en boucle de retour WASAPI sur les haut-parleurs
-            let spk_raw_buffer = Arc::new(Mutex::new(Vec::<f32>::new()));
-            let (spk_stream, spk_sr, spk_ch) = if let Some(out_dev) = host.default_output_device() {
-                let config_res = out_dev.default_output_config().or_else(|_| out_dev.default_input_config());
-                if let Ok(spk_conf) = config_res {
-                    let sr = spk_conf.sample_rate().0;
-                    let ch = spk_conf.channels();
-                    let spk_clone = spk_raw_buffer.clone();
-                    let s = match spk_conf.sample_format() {
-                        cpal::SampleFormat::F32 => out_dev.build_input_stream(
-                            &spk_conf.into(),
-                            move |data: &[f32], _| {
-                                if let Ok(mut b) = spk_clone.lock() {
-                                    b.extend_from_slice(data);
-                                }
-                            },
-                            |_| {},
-                            None,
-                        ).ok(),
-                        cpal::SampleFormat::I16 => {
-                            let spk_clone = spk_raw_buffer.clone();
-                            out_dev.build_input_stream(
-                                &spk_conf.into(),
-                                move |data: &[i16], _| {
-                                    if let Ok(mut b) = spk_clone.lock() {
-                                        for &s in data {
-                                            b.push(s as f32 / i16::MAX as f32);
-                                        }
-                                    }
-                                },
-                                |_| {},
-                                None,
-                            ).ok()
-                        }
-                        _ => None,
-                    };
-                    (s, sr, ch)
-                } else {
-                    (None, 48000, 2)
-                }
-            } else {
-                (None, 48000, 2)
-            };
-
-            if let Some(ref s) = spk_stream {
-                let _ = s.play();
-            }
-
-            // Rééchantillonneurs 16 kHz et filtre AEC (768 coefficients = ~48 ms)
-            const TARGET_SAMPLE_RATE: u32 = 16000;
-            let mut mic_resampler = ContinuousResampler::new(mic_sr, mic_ch, TARGET_SAMPLE_RATE);
-            let mut spk_resampler = ContinuousResampler::new(spk_sr, spk_ch, TARGET_SAMPLE_RATE);
-            let mut aec = NlmsAec::new(768);
-
-            let mut mic_16k = Vec::new();
-            let mut spk_16k = Vec::new();
-            let mut cleaned_audio = Vec::<f32>::new();
-
-            let mut last_voice_instant = Instant::now();
-            let mut has_spoken = false;
-            let mut last_interim_instant = Instant::now();
-            let mut last_processed_len = 0;
-
-            loop {
-                std::thread::sleep(Duration::from_millis(100));
-                if let Ok(AudioCommand::Stop) = cmd_rx.try_recv() {
-                    break;
-                }
-
-                // Dépouillement des échantillons bruts du microphone et des haut-parleurs
-                let raw_mic = {
-                    let mut lock = mic_raw_buffer.lock().unwrap();
-                    std::mem::take(&mut *lock)
-                };
-                let raw_spk = {
-                    let mut lock = spk_raw_buffer.lock().unwrap();
-                    std::mem::take(&mut *lock)
-                };
-
-                mic_resampler.push_interleaved_f32(&raw_mic);
-                spk_resampler.push_interleaved_f32(&raw_spk);
-
-                mic_resampler.drain_resampled(&mut mic_16k);
-                spk_resampler.drain_resampled(&mut spk_16k);
-
-                // Si les haut-parleurs n'émettent aucun flux audio, aligner avec des zéros
-                while spk_16k.len() < mic_16k.len() {
-                    spk_16k.push(0.0);
-                }
-
-                let process_count = mic_16k.len();
-                for i in 0..process_count {
-                    let cleaned = aec.process(mic_16k[i], spk_16k[i]);
-                    cleaned_audio.push(cleaned);
-                }
-                mic_16k.clear();
-                spk_16k.drain(0..process_count);
-
-                let current_len = cleaned_audio.len();
-                let slice = &cleaned_audio[last_processed_len..];
-                let sum_sq: f32 = slice.iter().map(|&x| x * x).sum();
-                let recent_rms = if !slice.is_empty() { (sum_sq / slice.len() as f32).sqrt() } else { 0.0 };
-                last_processed_len = current_len;
-
-                if recent_rms > 0.015 {
-                    last_voice_instant = Instant::now();
-                    has_spoken = true;
-                }
-
-                // Retranscription intermédiaire en temps réel pendant l'élocution
-                if has_spoken && last_interim_instant.elapsed() >= Duration::from_millis(1500) {
-                    last_interim_instant = Instant::now();
-                    let snapshot = cleaned_audio.clone();
-                    if !snapshot.is_empty() {
-                        let wav = encode_wav(&snapshot, TARGET_SAMPLE_RATE, 1);
-                        let key = groq_key.clone();
-                        let tx_clone = event_tx.clone();
-                        rt.spawn(async move {
-                            if let Ok(text) = transcribe_audio(&key, wav).await {
-                                if !text.is_empty() {
-                                    let _ = tx_clone.send(AgentEvent::TranscriptionPartial(text));
-                                }
-                            }
-                        });
-                    }
-                }
-
-                // Si l'utilisateur s'arrête de parler pendant 1,4 s, la consigne est validée
-                if has_spoken && last_voice_instant.elapsed() >= Duration::from_millis(1400) {
-                    break;
-                }
-            }
-
-            drop(mic_stream);
-            drop(spk_stream);
-
-            if has_spoken && !cleaned_audio.is_empty() {
-                let wav = encode_wav(&cleaned_audio, TARGET_SAMPLE_RATE, 1);
-                if let Ok(final_text) = rt.block_on(transcribe_audio(&groq_key, wav)) {
-                    if !final_text.is_empty() {
-                        let _ = event_tx.send(AgentEvent::VoicePromptReady(final_text));
-                        continue;
-                    }
-                }
-            }
-            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
-        }
-    });
-
-    cmd_tx
 }
 
 fn parse_agent_response(raw: &str) -> AgentResponsePayload {
@@ -3166,8 +2915,12 @@ fn main() -> eframe::Result<()> {
     let (event_tx, event_rx) = channel::<AgentEvent>();
     let (cmd_tx, cmd_rx) = channel::<AgentCommand>();
     let tts_tx = spawn_tts_worker(event_tx.clone());
+    let (twitch_ch_tx, twitch_ch_rx) = channel::<String>();
+    spawn_twitch_worker(event_tx.clone(), twitch_ch_rx);
     let groq_key = resolve_groq_key();
     let audio_tx = spawn_audio_worker(event_tx.clone(), groq_key.clone());
+
+    let initial_twitch_channel = std::env::var("TWITCH_CHANNEL").unwrap_or_default();
 
     // Runtime Tokio en arrière-plan pour requêter Groq
     let groq_chat_key = groq_key.clone();
@@ -3194,6 +2947,10 @@ fn main() -> eframe::Result<()> {
                     AgentCommand::ClearHistory => {
                         history.clear();
                     }
+                    AgentCommand::SearchTwitch(query) => {
+                        let results = search_twitch_channels(&query).await;
+                        let _ = event_tx.send(AgentEvent::TwitchSearchResults(results));
+                    }
                 }
             }
         });
@@ -3214,6 +2971,16 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Libertide overlay",
         native_options,
-        Box::new(|cc| Ok(Box::new(OverlayApp::new(cc, event_rx, cmd_tx, tts_tx, audio_tx)))),
+        Box::new(move |cc| {
+            Ok(Box::new(OverlayApp::new(
+                cc,
+                event_rx,
+                cmd_tx,
+                tts_tx,
+                audio_tx,
+                twitch_ch_tx,
+                initial_twitch_channel,
+            )))
+        }),
     )
 }
