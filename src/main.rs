@@ -328,6 +328,8 @@ fn spawn_tts_worker(event_tx: Sender<AgentEvent>) -> Sender<TtsCommand> {
                     TtsCommand::Speak(raw_text) => {
                         let clean_text = sanitize_for_tts(&raw_text);
                         if clean_text.trim().is_empty() {
+                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                            let _ = event_tx.send(AgentEvent::TtsFinished);
                             continue;
                         }
 
@@ -378,9 +380,14 @@ fn spawn_tts_worker(event_tx: Sender<AgentEvent>) -> Sender<TtsCommand> {
                                         break;
                                     }
                                 } else {
+                                    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                                    let _ = event_tx.send(AgentEvent::TtsFinished);
                                     break;
                                 }
                             }
+                        } else {
+                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                            let _ = event_tx.send(AgentEvent::TtsFinished);
                         }
                     }
                 }
@@ -393,7 +400,14 @@ fn spawn_tts_worker(event_tx: Sender<AgentEvent>) -> Sender<TtsCommand> {
 
 #[cfg(not(windows))]
 fn spawn_tts_worker(_event_tx: Sender<AgentEvent>) -> Sender<TtsCommand> {
-    let (tx, _rx) = channel::<TtsCommand>();
+    let (tx, rx) = channel::<TtsCommand>();
+    std::thread::spawn(move || {
+        while let Ok(cmd) = rx.recv() {
+            if let TtsCommand::Speak(_) = cmd {
+                let _ = _event_tx.send(AgentEvent::TtsFinished);
+            }
+        }
+    });
     tx
 }
 
@@ -566,7 +580,7 @@ impl OverlayApp {
             live_transcript: String::new(),
             input_text: String::new(),
             is_recording: false,
-            continuous_mode: false,
+            continuous_mode: true,
             event_receiver,
             command_sender,
             tts_sender,
@@ -652,7 +666,7 @@ impl OverlayApp {
         self.input_text.clear();
         let _ = self.tts_sender.send(TtsCommand::Stop);
         if !self.is_hidden {
-            self.live_transcript = "Écoute SAPI active... parlez à votre micro.".to_string();
+            self.live_transcript = "Écoute Whisper active... parlez à votre micro.".to_string();
         } else {
             self.live_transcript.clear();
         }
@@ -844,8 +858,10 @@ impl eframe::App for OverlayApp {
                                 timestamp: current_time_str(),
                             });
                             let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                            self.continuous_mode = true;
                         } else if self.status != AgentStatus::Thinking && !prompt.trim().is_empty() {
                             self.status = AgentStatus::Thinking;
+                            self.continuous_mode = true;
                             self.input_text.clear();
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::User,
@@ -853,6 +869,8 @@ impl eframe::App for OverlayApp {
                                 timestamp: current_time_str(),
                             });
                             let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
+                        } else if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(ctx);
                         }
                     }
                 }
@@ -869,6 +887,17 @@ impl eframe::App for OverlayApp {
                 }
                 AgentEvent::TwitchSearchResults(results) => {
                     self.twitch_search_results = results;
+                }
+                AgentEvent::RequestIgnored => {
+                    if let Some(last) = self.chat_history.last() {
+                        if last.role == ChatRole::User {
+                            self.chat_history.pop();
+                        }
+                    }
+                    self.live_transcript.clear();
+                    if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                        self.start_recording(ctx);
+                    }
                 }
             }
         }
@@ -1185,7 +1214,7 @@ impl eframe::App for OverlayApp {
                                             egui::TextEdit::singleline(&mut self.input_text)
                                                 .id(input_id)
                                                 .hint_text(if self.is_recording {
-                                                    "Écoute SAPI active... parlez ou tapez"
+                                                    "Écoute Whisper active... parlez ou tapez"
                                                 } else {
                                                     "Consigne d'exploration... (entrée)"
                                                 }),
@@ -1322,6 +1351,14 @@ fn resolve_deepseek_key() -> String {
 fn parse_agent_response(raw: &str) -> AgentResponsePayload {
     let clean = raw.trim();
 
+    if clean.eq_ignore_ascii_case("invalid_request") {
+        return AgentResponsePayload {
+            narration: String::new(),
+            actions: Vec::new(),
+            invalid_request: true,
+        };
+    }
+
     if let Ok(payload) = serde_json::from_str::<AgentResponsePayload>(clean) {
         return payload;
     }
@@ -1356,9 +1393,18 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
         }
     }
 
+    if clean.contains("invalid_request") {
+        return AgentResponsePayload {
+            narration: String::new(),
+            actions: Vec::new(),
+            invalid_request: true,
+        };
+    }
+
     AgentResponsePayload {
         narration: clean.to_string(),
         actions: Vec::new(),
+        invalid_request: false,
     }
 }
 
@@ -4381,6 +4427,12 @@ Tu dois IMPÉRATIVEMENT répondre uniquement avec un JSON strict sans texte auto
 Exprime-toi exclusivement en français dans la narration.
 Prends en compte l'historique des échanges pour assurer la continuité de la conversation et adapter tes actions.
 
+Règle de filtrage strict et silence ("invalid_request") :
+- Tu dois être STRICT et NON PERMISSIF : n'exécute aucune action et ne brode rien si la commande est incomplète, inintelligible, tronquée, s'il s'agit d'un bruit parasite ou si l'intention n'est pas claire et explicite.
+- Si tu ne comprends pas exactement la demande, si elle est incomplète ou sans action intelligible, retourne IMMÉDIATEMENT ce JSON exact en mode silencieux :
+  {"invalid_request": true, "narration": "", "actions": []}
+- Ne tente JAMAIS de deviner des paramètres manquants ni d'inventer une réponse d'assistance polie si la demande n'a pas de sens.
+
 Règles d'autonomie et de ciblage :
 - Navigation web directe : Si l'utilisateur demande d'aller sur un site, d'accéder à un domaine, d'effectuer une recherche ou d'ouvrir une page web (ex: "aller sur google.fr", "navigue vers github.com", "cherche la météo", "ouvre le navigateur") : utilise TOUJOURS directement l'action "navigate_to_url" avec l'adresse complète dans "url". Ne passe JAMAIS par une saisie manuelle dans la barre d'adresse ni par des raccourcis Ctrl+L, le système traite nativement "navigate_to_url".
 - Saisie et zone de texte : Pour toute commande demandant d'écrire ou remplacer du texte sans cible spécifique ou visant une « zone de texte », un champ ou le document en cours, renseigne TOUJOURS "target": null dans "write_text" ou "replace_field_text". Cela déclenchera immédiatement la sélection automatique de la plus vaste zone de saisie à l'écran.
@@ -4389,7 +4441,7 @@ Règles d'autonomie et de ciblage :
 - Si l'utilisateur demande d'ouvrir une application, un outil ou un logiciel (ex: invite de commande, terminal, bloc-notes, messagerie, calculatrice, etc.), détermine TOI-MÊME le nom exact de son exécutable Windows binaire (ex: "cmd", "wt", "notepad", "calc", "thunderbird", "explorer", "code", "mspaint", etc.) et utilise l'action "open_app" avec ce nom direct d'exécutable dans "name".
 - Si l'utilisateur demande de fermer une application ou une fenêtre, utilise l'action "close_app" avec le nom de l'exécutable ou un mot-clé du titre dans "name".
 - Si l'utilisateur demande de lancer une commande directe ou un script shell/cmd (ex: "ipconfig", "ping", "git status", etc.), utilise l'action "run_command" avec la commande complète dans "command".
-- La reconnaissance vocale est assurée localement par SAPI. Réserve tes réponses à l'analyse et à la planification des actions.
+- La reconnaissance vocale est assurée localement par Whisper. Réserve tes réponses à l'analyse et à la planification des actions.
 - Pour effacer ou réinitialiser le texte du champ ou document actif, utilise l'action "clear_text" avec optionnellement "window".
 - Si l'utilisateur demande de cliquer sur un bouton ou un lien, utilise l'action "click_button" avec les mots-clés dans "button_name".
 - Pour cibler ou pointer un élément précis sans cliquer, utilise l'action "focus_element" avec "target_name".
@@ -4560,6 +4612,14 @@ Format json obligatoire :
             break;
         };
 
+        if payload.invalid_request || payload.narration.trim().eq_ignore_ascii_case("invalid_request") {
+            println!("[Agent] Requête incomplète ou incomprise : mode silencieux activé (aucun affichage ni TTS).");
+            history.pop();
+            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+            let _ = event_tx.send(AgentEvent::RequestIgnored);
+            return;
+        }
+
         println!("[Agent] Narration (Passe {}) : \"{}\"", pass, payload.narration);
         println!("[Agent] {} action(s) planifiée(s) :", payload.actions.len());
         for (i, act) in payload.actions.iter().enumerate() {
@@ -4621,15 +4681,12 @@ fn main() -> eframe::Result<()> {
                     AgentCommand::Prompt(prompt) => {
                         if let Some(cli_feedback) = try_execute_direct_cli(&prompt) {
                             let _ = event_tx.send(AgentEvent::ReplaceNarration(cli_feedback.clone()));
-                            let _ = tts_worker_tx.send(TtsCommand::Speak(cli_feedback));
-                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                         } else if let Some(text_to_write) = parse_write_command(&prompt) {
                             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
                             let narration = tokio::task::spawn_blocking(move || {
                                 write_to_browser_or_txt(&text_to_write)
                             }).await.unwrap_or_else(|_| "Erreur lors de l'écriture.".to_string());
                             let _ = event_tx.send(AgentEvent::ReplaceNarration(narration));
-                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                         } else {
                             let field_content = tokio::task::spawn_blocking(|| {
                                 #[cfg(windows)]

@@ -1,26 +1,11 @@
 use std::io::Cursor;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-#[cfg(windows)]
-use windows::core::w;
-#[cfg(windows)]
-use windows::Win32::Foundation::BOOL;
-#[cfg(windows)]
-use windows::Win32::Media::Speech::{
-    ISpAudio, ISpRecoContext, ISpRecoGrammar, ISpRecoResult, ISpRecognizer,
-    SpInprocRecognizer, SpMMAudioIn, SpSharedRecognizer, SPEVENT, SPEI_HYPOTHESIS,
-    SPEI_RECOGNITION, SPLO_STATIC, SPRS_ACTIVE, SPRS_INACTIVE,
-};
-#[cfg(windows)]
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
-};
-#[cfg(windows)]
-use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_HIDE};
 use serde::Deserialize;
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 use crate::types::{AgentEvent, AgentStatus, AudioCommand};
 
@@ -219,170 +204,311 @@ pub async fn transcribe_audio(
     }
 }
 
-#[cfg(windows)]
-unsafe fn hide_speech_bar() {
-    if let Ok(hwnd) = FindWindowW(w!("MS:SpeechTopLevel"), None) {
-        if !hwnd.0.is_null() {
-            let _ = ShowWindow(hwnd, SW_HIDE);
+pub struct WhisperEngine {
+    ctx: WhisperContext,
+}
+
+impl WhisperEngine {
+    pub fn load(model_path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let path_str = model_path.to_str().ok_or("Chemin du modèle introuvable")?;
+        let ctx = WhisperContext::new_with_params(path_str, WhisperContextParameters::default())
+            .map_err(|e| format!("Erreur initialisation whisper.cpp: {e}"))?;
+        Ok(Self { ctx })
+    }
+
+    pub fn transcribe(&mut self, samples_16k: &[f32]) -> Result<String, String> {
+        if samples_16k.is_empty() {
+            return Ok(String::new());
         }
+
+        let max_abs = samples_16k.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        if max_abs < 0.005 {
+            return Ok(String::new());
+        }
+
+        let mut state = self.ctx.create_state()
+            .map_err(|e| format!("Erreur création état Whisper: {e}"))?;
+
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_language(Some("fr"));
+        params.set_translate(false);
+        params.set_no_context(true);
+        params.set_single_segment(false);
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+
+        state.full(params, samples_16k)
+            .map_err(|e| format!("Erreur inférence whisper.cpp: {e}"))?;
+
+        let num_segments = state.full_n_segments();
+
+        let mut result = String::new();
+        for i in 0..num_segments {
+            if let Some(segment) = state.get_segment(i) {
+                result.push_str(&segment.to_string());
+            }
+        }
+
+        Ok(result.trim().to_string())
     }
 }
 
-#[cfg(windows)]
-pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _deepseek_key: String) -> Sender<AudioCommand> {
+pub fn find_whisper_model_file() -> Option<PathBuf> {
+    if let Ok(env_path) = std::env::var("WHISPER_MODEL_PATH") {
+        let p = PathBuf::from(env_path.trim());
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+
+    let candidates = [
+        "models/ggml-base.bin",
+        "models/ggml-tiny.bin",
+        "ggml-base.bin",
+        "ggml-tiny.bin",
+    ];
+
+    for candidate in &candidates {
+        let p = PathBuf::from(candidate);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+
+    None
+}
+
+fn ensure_model_downloaded(event_tx: &Sender<AgentEvent>) -> Result<PathBuf, String> {
+    if let Some(existing) = find_whisper_model_file() {
+        return Ok(existing);
+    }
+
+    let target_dir = PathBuf::from("models");
+    let _ = std::fs::create_dir_all(&target_dir);
+    let model_path = target_dir.join("ggml-base.bin");
+
+    if model_path.exists() {
+        return Ok(model_path);
+    }
+
+    let url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
+    let _ = event_tx.send(AgentEvent::TranscriptionPartial(
+        "Téléchargement du modèle Whisper ggml-base (148 Mo)...".into(),
+    ));
+    println!("[Whisper] Téléchargement de ggml-base.bin depuis Hugging Face...");
+
+    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("Runtime tokio: {e}"))?;
+    let client = reqwest::Client::new();
+    let resp = rt.block_on(async {
+        client.get(url).send().await?.bytes().await
+    }).map_err(|e| format!("Échec téléchargement modèle GGML: {e}"))?;
+
+    std::fs::write(&model_path, &resp).map_err(|e| format!("Échec écriture modèle GGML: {e}"))?;
+    Ok(model_path)
+}
+
+pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sender<AudioCommand> {
     let (cmd_tx, cmd_rx) = channel::<AudioCommand>();
 
     std::thread::spawn(move || {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            hide_speech_bar();
-
-            // 1. Instanciation in-process pour une exécution interne sans interface globale
-            let inproc_res: Result<ISpRecognizer, _> =
-                CoCreateInstance(&SpInprocRecognizer, None, CLSCTX_ALL);
-            let (recognizer, is_inproc): (ISpRecognizer, bool) = match inproc_res {
-                Ok(inproc) => {
-                    // 2. Connexion du micro par défaut (SpMMAudioIn)
-                    let audio_input: Result<ISpAudio, _> = CoCreateInstance(&SpMMAudioIn, None, CLSCTX_ALL);
-                    if let Ok(audio) = audio_input {
-                        let _ = inproc.SetInput(&audio, BOOL(1));
-                    } else {
-                        eprintln!("Avertissement: impossible d'instancier SpMMAudioIn pour le micro");
-                    }
-                    (inproc, true)
+        let mut whisper_instance: Option<WhisperEngine> = match ensure_model_downloaded(&event_tx) {
+            Ok(path) => match WhisperEngine::load(&path) {
+                Ok(m) => {
+                    println!("[Whisper] Modèle Whisper chargé avec succès depuis {}", path.display());
+                    Some(m)
                 }
                 Err(err) => {
-                    eprintln!("Avertissement: SpInprocRecognizer indisponible ({:?}), tentative via SpSharedRecognizer", err);
-                    let shared_res: Result<ISpRecognizer, _> =
-                        CoCreateInstance(&SpSharedRecognizer, None, CLSCTX_ALL);
-                    match shared_res {
-                        Ok(shared) => (shared, false),
-                        Err(e) => {
-                            eprintln!("Échec de l'initialisation du moteur de reconnaissance vocale SAPI: {:?}", e);
-                            return;
-                        }
-                    }
+                    eprintln!("[Whisper] Erreur lors du chargement de Whisper: {err}");
+                    None
                 }
-            };
+            },
+            Err(err) => {
+                eprintln!("[Whisper] Modèle introuvable et échec de téléchargement: {err}");
+                None
+            }
+        };
 
-            if !is_inproc {
-                hide_speech_bar();
+        while let Ok(cmd) = cmd_rx.recv() {
+            if !matches!(cmd, AudioCommand::Start) {
+                continue;
             }
 
-            let Ok(reco_context) = recognizer.CreateRecoContext() else {
-                eprintln!("Échec de création du contexte de reconnaissance SAPI");
-                return;
-            };
-
-            let Ok(grammar) = reco_context.CreateGrammar(1) else {
-                eprintln!("Échec de création de la grammaire SAPI");
-                return;
-            };
-
-            // Chargement de la grammaire de dictée SAPI par défaut
-            if let Err(err) = grammar.LoadDictation(windows::core::PCWSTR::null(), SPLO_STATIC) {
-                eprintln!("Avertissement: impossible de charger la dictée SAPI : {:?}", err);
-            }
-
-            let _ = reco_context.SetNotifyWin32Event();
-            const SPFEI_HYPOTHESIS: u64 = 1u64 << (SPEI_HYPOTHESIS.0 as u64);
-            const SPFEI_RECOGNITION: u64 = 1u64 << (SPEI_RECOGNITION.0 as u64);
-            let interest = SPFEI_HYPOTHESIS | SPFEI_RECOGNITION;
-            let _ = reco_context.SetInterest(interest, interest);
-
-            extern "system" {
-                fn CoTaskMemFree(pv: *mut std::ffi::c_void);
-            }
-
-            while let Ok(cmd) = cmd_rx.recv() {
-                if !matches!(cmd, AudioCommand::Start) {
-                    continue;
-                }
-
-                if grammar.SetDictationState(SPRS_ACTIVE).is_err() {
+            let whisper = match &mut whisper_instance {
+                Some(w) => w,
+                None => {
                     let _ = event_tx.send(AgentEvent::TranscriptionPartial(
-                        "Reconnaissance vocale SAPI non active sur ce système.".to_string(),
+                        "Modèle Whisper Candle non initialisé.".into(),
                     ));
                     let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                     continue;
                 }
+            };
 
-                hide_speech_bar();
-                let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Listening));
+            let host = cpal::default_host();
+            let device = match host.default_input_device() {
+                Some(d) => d,
+                None => {
+                    let _ = event_tx.send(AgentEvent::TranscriptionPartial(
+                        "Aucun microphone d'entrée détecté par le système audio.".into(),
+                    ));
+                    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                    continue;
+                }
+            };
 
-                let mut is_listening = true;
-                while is_listening {
-                    if let Ok(AudioCommand::Stop) = cmd_rx.try_recv() {
-                        let _ = grammar.SetDictationState(SPRS_INACTIVE);
-                        let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
-                        break;
+            let config = match device.default_input_config() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = event_tx.send(AgentEvent::TranscriptionPartial(format!(
+                        "Erreur configuration audio micro : {e}"
+                    )));
+                    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                    continue;
+                }
+            };
+
+            let sample_rate = config.sample_rate();
+            let channels = config.channels();
+            let sample_format = config.sample_format();
+            let stream_config: cpal::StreamConfig = config.into();
+            let (audio_tx, audio_rx) = channel::<Vec<f32>>();
+            let err_fn = |err| eprintln!("Erreur de capture audio cpal : {err}");
+
+            let stream = match sample_format {
+                cpal::SampleFormat::F32 => device.build_input_stream(
+                    stream_config.clone(),
+                    move |data: &[f32], _| {
+                        let _ = audio_tx.send(data.to_vec());
+                    },
+                    err_fn,
+                    None,
+                ).ok(),
+                cpal::SampleFormat::I16 => device.build_input_stream(
+                    stream_config.clone(),
+                    move |data: &[i16], _| {
+                        let converted: Vec<f32> =
+                            data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                        let _ = audio_tx.send(converted);
+                    },
+                    err_fn,
+                    None,
+                ).ok(),
+                cpal::SampleFormat::U16 => device.build_input_stream(
+                    stream_config,
+                    move |data: &[u16], _| {
+                        let converted: Vec<f32> =
+                            data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect();
+                        let _ = audio_tx.send(converted);
+                    },
+                    err_fn,
+                    None,
+                ).ok(),
+                _ => None,
+            };
+
+            let Some(stream) = stream else {
+                let _ = event_tx.send(AgentEvent::TranscriptionPartial(
+                    "Format de capture microphone non pris en charge.".into(),
+                ));
+                let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                continue;
+            };
+
+            if stream.play().is_err() {
+                let _ = event_tx.send(AgentEvent::TranscriptionPartial(
+                    "Impossible de lancer le flux d'enregistrement audio.".into(),
+                ));
+                let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                continue;
+            }
+
+            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Listening));
+            let mut resampler = ContinuousResampler::new(sample_rate, channels, 16000);
+            let mut audio_16k_buffer: Vec<f32> = Vec::with_capacity(16000 * 10);
+            let mut speech_detected = false;
+            let mut last_speech_time = Instant::now();
+            let mut start_recording_time = Instant::now();
+            const SPEECH_ENERGY_THRESHOLD: f32 = 0.015;
+            const SILENCE_TIMEOUT: Duration = Duration::from_millis(900);
+            const MAX_RECORDING_DURATION: Duration = Duration::from_secs(12);
+
+            let mut is_listening = true;
+            while is_listening {
+                if let Ok(AudioCommand::Stop) = cmd_rx.try_recv() {
+                    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                    break;
+                }
+
+                while let Ok(chunk) = audio_rx.try_recv() {
+                    resampler.push_interleaved_f32(&chunk);
+                }
+
+                let mut new_16k = Vec::new();
+                resampler.drain_resampled(&mut new_16k);
+
+                if !new_16k.is_empty() {
+                    let sum_sq: f32 = new_16k.iter().map(|&s| s * s).sum();
+                    let rms = (sum_sq / new_16k.len() as f32).sqrt();
+
+                    if rms > SPEECH_ENERGY_THRESHOLD {
+                        if !speech_detected {
+                            speech_detected = true;
+                            start_recording_time = Instant::now();
+                            let _ = event_tx.send(AgentEvent::TranscriptionPartial(
+                                "Écoute de votre voix...".into(),
+                            ));
+                        }
+                        last_speech_time = Instant::now();
                     }
 
-                    let _ = reco_context.WaitForNotifyEvent(100);
+                    if speech_detected {
+                        audio_16k_buffer.extend_from_slice(&new_16k);
+                    } else {
+                        // Pré-tampon de 300 ms pour conserver le début de phrase
+                        audio_16k_buffer.extend_from_slice(&new_16k);
+                        if audio_16k_buffer.len() > 4800 {
+                            let overflow = audio_16k_buffer.len() - 4800;
+                            audio_16k_buffer.drain(0..overflow);
+                        }
+                    }
+                }
 
-                    let mut events = [SPEVENT::default(); 8];
-                    let mut fetched = 0u32;
-                    if reco_context
-                        .GetEvents(events.len() as u32, events.as_mut_ptr(), &mut fetched)
-                        .is_ok()
-                        && fetched > 0
+                if speech_detected {
+                    let silence_elapsed = last_speech_time.elapsed();
+                    let total_elapsed = start_recording_time.elapsed();
+
+                    if (silence_elapsed >= SILENCE_TIMEOUT && audio_16k_buffer.len() >= 8000)
+                        || total_elapsed >= MAX_RECORDING_DURATION
                     {
-                        for ev in events.iter().take(fetched as usize) {
-                            if ev.lParam.0 != 0 {
-                                let reco_result: ISpRecoResult =
-                                    std::mem::transmute(ev.lParam.0 as *mut std::ffi::c_void);
+                        let _ = event_tx.send(AgentEvent::TranscriptionPartial(
+                            "Transcription locale en cours...".into(),
+                        ));
 
-                                let mut text_ptr = windows::core::PWSTR::null();
-                                const SP_GETWHOLEPHRASE: u32 = 0xFFFFFFFF;
-
-                                if reco_result
-                                    .GetText(
-                                        SP_GETWHOLEPHRASE,
-                                        SP_GETWHOLEPHRASE,
-                                        BOOL(1),
-                                        &mut text_ptr,
-                                        None,
-                                    )
-                                    .is_ok()
-                                    && !text_ptr.is_null()
-                                {
-                                    let text = text_ptr.to_string().unwrap_or_default();
-                                    CoTaskMemFree(text_ptr.0 as *mut std::ffi::c_void);
-
-                                    let clean = text.trim();
-                                    if !clean.is_empty() {
-                                        let event_id = (ev._bitfield & 0xFFFF) as i32;
-                                        if event_id == SPEI_HYPOTHESIS.0 {
-                                            let _ = event_tx.send(AgentEvent::TranscriptionPartial(clean.to_string()));
-                                        } else if event_id == SPEI_RECOGNITION.0 {
-                                            let _ = event_tx.send(AgentEvent::VoicePromptReady(clean.to_string()));
-                                            let _ = grammar.SetDictationState(SPRS_INACTIVE);
-                                            is_listening = false;
-                                            break;
-                                        }
-                                    }
-                                }
+                        match whisper.transcribe(&audio_16k_buffer) {
+                            Ok(text) if !text.trim().is_empty() => {
+                                let _ = event_tx.send(AgentEvent::VoicePromptReady(text));
+                                is_listening = false;
+                                break;
+                            }
+                            Ok(_) => {
+                                speech_detected = false;
+                                audio_16k_buffer.clear();
+                                let _ = event_tx.send(AgentEvent::TranscriptionPartial(
+                                    "Écoute Whisper active...".into(),
+                                ));
+                            }
+                            Err(err) => {
+                                eprintln!("[Whisper] Erreur de transcription : {err}");
+                                speech_detected = false;
+                                audio_16k_buffer.clear();
                             }
                         }
                     }
                 }
-            }
-        }
-    });
 
-    cmd_tx
-}
-
-#[cfg(not(windows))]
-pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _deepseek_key: String) -> Sender<AudioCommand> {
-    let (cmd_tx, cmd_rx) = channel::<AudioCommand>();
-    std::thread::spawn(move || {
-        while let Ok(cmd) = cmd_rx.recv() {
-            if matches!(cmd, AudioCommand::Start) {
-                let _ = event_tx.send(AgentEvent::TranscriptionPartial(
-                    "SAPI est disponible uniquement sous Windows.".to_string(),
-                ));
-                let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                std::thread::sleep(Duration::from_millis(20));
             }
         }
     });

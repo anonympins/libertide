@@ -53,6 +53,7 @@ pub enum AgentEvent {
     TtsFinished,
     TwitchChatReceived(TwitchMessage),
     TwitchSearchResults(Vec<TwitchChannelItem>),
+    RequestIgnored,
 }
 
 #[derive(Debug, Clone)]
@@ -147,9 +148,12 @@ pub enum AgentAction {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AgentResponsePayload {
+    #[serde(default)]
     pub narration: String,
     #[serde(default)]
     pub actions: Vec<AgentAction>,
+    #[serde(default)]
+    pub invalid_request: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
