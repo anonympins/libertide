@@ -90,6 +90,11 @@ pub enum AgentAction {
     OpenBrowser {
         url: Option<String>,
     },
+    NavigateToUrl {
+        url: String,
+        #[serde(default)]
+        window: Option<String>,
+    },
     WriteText {
         text: String,
         #[serde(default, alias = "target_name")]

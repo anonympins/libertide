@@ -1711,6 +1711,62 @@ fn is_address_bar_target(target: &str) -> bool {
         || t.contains("adresse web")
 }
 
+fn is_generic_textarea_target(target: &str) -> bool {
+    let t = target.trim().to_lowercase().replace('’', "'");
+    t.is_empty()
+        || t == "zone de texte"
+        || t == "la zone de texte"
+        || t == "une zone de texte"
+        || t == "champ"
+        || t == "le champ"
+        || t == "un champ"
+        || t == "textarea"
+        || t == "input"
+        || t == "champ de texte"
+        || t == "zone de saisie"
+        || t == "texte"
+}
+
+fn format_url_for_navigation(raw_url: &str) -> String {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() || trimmed.starts_with("about:") {
+        return "https://www.google.com".to_string();
+    }
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        if trimmed.contains('.') && !trimmed.contains(' ') {
+            format!("https://{trimmed}")
+        } else {
+            format!("https://www.google.com/search?q={}", urlencoding_simple(trimmed))
+        }
+    } else {
+        trimmed.to_string()
+    }
+}
+
+#[cfg(windows)]
+fn navigate_browser_address_bar(hwnd: HWND, url: &str) {
+    let formatted_url = format_url_for_navigation(url);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = SetForegroundWindow(hwnd);
+    }
+    std::thread::sleep(Duration::from_millis(80));
+
+    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+    const VK_L: VIRTUAL_KEY = VIRTUAL_KEY(0x4C);
+    const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
+
+    send_hotkey(&[VK_CONTROL], VK_L);
+    std::thread::sleep(Duration::from_millis(60));
+
+    clipboard::set_text(&formatted_url);
+    std::thread::sleep(Duration::from_millis(40));
+    send_paste();
+    std::thread::sleep(Duration::from_millis(40));
+    send_hotkey(&[], VK_RETURN);
+    println!("[Actions] Navigation vers {} effectuée avec succès via barre d'adresse", formatted_url);
+}
+
 #[derive(Clone, Debug)]
 enum CharClass {
     Any,
@@ -2214,6 +2270,14 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let name = raw_name.trim().to_string();
                     let automation_id = item.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default();
                     let help_text = item.CurrentHelpText().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
+
+                    let is_root_web_area = class_name.contains("rootwebarea")
+                        || loc_type.contains("rootwebarea")
+                        || automation_id.to_lowercase().contains("rootwebarea");
+                    if is_root_web_area {
+                        continue;
+                    }
+
                     let value_text = item
                         .GetCurrentPattern(UIA_ValuePatternId)
                         .ok()
@@ -2296,7 +2360,15 @@ fn has_focused_textarea(hwnd: HWND) -> bool {
         let is_edit = ctype == UIA_EditControlTypeId || ctype == UIA_DocumentControlTypeId;
         let class_name = focused.CurrentClassName().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
         let loc_type = focused.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+        let automation_id = focused.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
         let height = focused.CurrentBoundingRectangle().map(|r| r.bottom - r.top).unwrap_or(0);
+
+        let is_root_web_area = class_name.contains("rootwebarea")
+            || loc_type.contains("rootwebarea")
+            || automation_id.contains("rootwebarea");
+        if is_root_web_area {
+            return false;
+        }
 
         class_name.contains("textarea")
             || loc_type.contains("textarea")
@@ -2356,6 +2428,76 @@ fn refocus_largest_textarea_or_fallback(hwnd: HWND) -> bool {
     }
 
     false
+}
+
+#[cfg(windows)]
+fn find_largest_textarea(hwnd: HWND) -> Option<UiaElementInfo> {
+    let mut elements = list_interactive_elements(hwnd);
+    if elements.is_empty() {
+        std::thread::sleep(Duration::from_millis(100));
+        elements = list_interactive_elements(hwnd);
+    }
+    if elements.is_empty() {
+        return None;
+    }
+
+    let mut textareas: Vec<UiaElementInfo> = elements
+        .into_iter()
+        .filter(|e| e.is_explicit_textarea || e.is_edit_or_textarea || e.is_input)
+        .collect();
+
+    textareas.sort_by(|a, b| {
+        if a.is_explicit_textarea != b.is_explicit_textarea {
+            return b.is_explicit_textarea.cmp(&a.is_explicit_textarea);
+        }
+        b.area.cmp(&a.area)
+    });
+
+    textareas.into_iter().next()
+}
+
+#[cfg(windows)]
+fn find_largest_textarea_on_screen(
+    user_windows: &[(HWND, String)],
+    preferred_hwnd: Option<HWND>,
+) -> Option<(HWND, UiaElementInfo)> {
+    let mut best_explicit: Option<(HWND, UiaElementInfo)> = None;
+    let mut best_fallback: Option<(HWND, UiaElementInfo)> = None;
+
+    let mut ordered: Vec<HWND> = Vec::new();
+    if let Some(pref) = preferred_hwnd {
+        ordered.push(pref);
+    }
+    for &(h, _) in user_windows {
+        if !ordered.contains(&h) {
+            ordered.push(h);
+        }
+    }
+
+    for hwnd in ordered {
+        let elements = list_interactive_elements(hwnd);
+        for elem in elements {
+            if elem.is_explicit_textarea {
+                let replace = match &best_explicit {
+                    Some((_, cur)) => elem.area > cur.area,
+                    None => true,
+                };
+                if replace {
+                    best_explicit = Some((hwnd, elem));
+                }
+            } else if elem.is_edit_or_textarea || elem.is_input {
+                let replace = match &best_fallback {
+                    Some((_, cur)) => elem.area > cur.area,
+                    None => true,
+                };
+                if replace {
+                    best_fallback = Some((hwnd, elem));
+                }
+            }
+        }
+    }
+
+    best_explicit.or(best_fallback)
 }
 
 #[cfg(windows)]
@@ -2595,7 +2737,13 @@ fn write_to_browser_or_txt(text: &str) -> String {
         }
         std::thread::sleep(Duration::from_millis(80));
 
-        ensure_window_textarea_focus(target_hwnd);
+        if let Some(elem) = find_largest_textarea(target_hwnd) {
+            unsafe { let _ = elem.element.SetFocus(); }
+            click_element(elem.click_x, elem.click_y, elem.pattern.as_ref());
+            std::thread::sleep(Duration::from_millis(50));
+        } else {
+            ensure_window_textarea_focus(target_hwnd);
+        }
         std::thread::sleep(Duration::from_millis(50));
 
         // Coller directement le texte dans la fenêtre ou le champ actif
@@ -2664,7 +2812,11 @@ fn get_active_field_content() -> Option<String> {
                 false
             };
 
-            if !is_overlay {
+            let class_name = focused.CurrentClassName().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+            let loc_type = focused.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+            let is_root_web_area = class_name.contains("rootwebarea") || loc_type.contains("rootwebarea");
+
+            if !is_overlay && !is_root_web_area {
                 if let Some(text) = extract_element_text(&focused) {
                     if !text.is_empty() {
                         return Some(text);
@@ -3069,12 +3221,13 @@ fn snap_window_native(hwnd: HWND, is_right: bool) {
 }
 
 #[cfg(windows)]
-fn execute_system_actions(actions: &[AgentAction]) {
+fn execute_system_actions(actions: &[AgentAction]) -> String {
     if actions.is_empty() {
         println!("[Actions] Aucune action système à exécuter.");
-        return;
+        return "Aucune action système à exécuter.".to_string();
     }
 
+    let mut feedback = Vec::new();
     println!("[Actions] Exécution de {} action(s) système...", actions.len());
 
     let mut newly_spawned_hwnd: Option<HWND> = None;
@@ -3109,6 +3262,7 @@ fn execute_system_actions(actions: &[AgentAction]) {
                 let search_url = format!("https://www.google.com/search?q={}", urlencoding_simple(name));
                 println!("[Actions] Exécutable introuvable, ouverture de la recherche : {}", search_url);
                 launch_browser_new_window(&search_url);
+                feedback.push(format!("Application non trouvée localement ; recherche web lancée pour '{}'.", name));
             }
 
             for _ in 0..25 {
@@ -3197,6 +3351,7 @@ fn execute_system_actions(actions: &[AgentAction]) {
         match action {
             AgentAction::OpenApp { .. } => {}
             AgentAction::CloseApp { name } => {
+                feedback.push(format!("Demande de fermeture de l'application ou fenêtre '{}'.", name));
                 let kw = name.trim();
                 if !kw.is_empty() {
                     let targets = find_windows_matching(kw, &user_windows, None);
@@ -3248,8 +3403,10 @@ fn execute_system_actions(actions: &[AgentAction]) {
                         println!("[Actions] Bouton trouvé : name='{}', id='{}', clic en ({}, {})", elem.name, elem.automation_id, elem.click_x, elem.click_y);
                         unsafe { let _ = elem.element.SetFocus(); }
                         click_element(elem.click_x, elem.click_y, elem.pattern.as_ref());
+                        feedback.push(format!("Clic effectué sur '{}'.", button_name));
                     } else {
                         println!("[Actions] Aucun bouton correspondant trouvé pour '{}'", button_name);
+                        feedback.push(format!("Bouton '{}' introuvable à l'écran.", button_name));
                     }
                 }
             }
@@ -3293,8 +3450,10 @@ fn execute_system_actions(actions: &[AgentAction]) {
                             println!("[Actions] Repli focus textarea/champ principal");
                             refocus_largest_textarea_or_fallback(hwnd);
                         }
+                        feedback.push(format!("Focus positionné sur '{}'.", target_name));
                     }
                 }
+                feedback.push(format!("Focus demandé sur '{}'.", target_name));
             }
             AgentAction::ClearText { window, target } => {
                 let target_hwnd = match window.as_deref() {
@@ -3328,14 +3487,18 @@ fn execute_system_actions(actions: &[AgentAction]) {
                     } else {
                         clear_window_text(hwnd);
                     }
+                    feedback.push("Champ de texte réinitialisé.".to_string());
                 }
             }
             AgentAction::RunCommand { command } => {
-                run_system_command(command);
+                let ok = run_system_command(command);
+                let status = if ok { "exécutée avec succès" } else { "échec d'exécution" };
+                feedback.push(format!("Commande système '{}' ({status}).", command));
             }
             AgentAction::WriteText { text, target, window } => {
                 let target_desc_opt = target.as_deref().filter(|s| !s.trim().is_empty());
                 let is_address_bar = target_desc_opt.map_or(false, is_address_bar_target);
+                let is_generic = target_desc_opt.map_or(true, is_generic_textarea_target);
 
                 let target_hwnd = match window.as_deref() {
                     Some(w) if !w.trim().is_empty() => {
@@ -3387,6 +3550,35 @@ fn execute_system_actions(actions: &[AgentAction]) {
                         launch_browser_new_window(text);
                         handled = true;
                     }
+                } else if is_generic {
+                    let largest_target = if let Some(hwnd) = window.as_deref().and_then(|w| {
+                        if !w.trim().is_empty() {
+                            find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
+                        } else {
+                            None
+                        }
+                    }) {
+                        find_largest_textarea(hwnd).map(|elem| (hwnd, elem))
+                    } else {
+                        find_largest_textarea_on_screen(&user_windows, preferred_target_hwnd)
+                    };
+
+                    if let Some((hwnd, elem)) = largest_target {
+                        println!("[Actions] Sélection de la plus grande zone de texte à l'écran : [HWND {:?}] name='{}', id='{}', area={}, clic en ({}, {})", hwnd.0, elem.name, elem.automation_id, elem.area, elem.click_x, elem.click_y);
+                        unsafe {
+                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                            let _ = SetForegroundWindow(hwnd);
+                        }
+                        std::thread::sleep(Duration::from_millis(80));
+                        unsafe { let _ = elem.element.SetFocus(); }
+                        click_element(elem.click_x, elem.click_y, elem.pattern.as_ref());
+                        std::thread::sleep(Duration::from_millis(50));
+                        clipboard::set_text(text);
+                        std::thread::sleep(Duration::from_millis(30));
+                        send_paste();
+                        println!("[Actions] Texte inséré avec succès dans la plus grande zone de texte : {:?}", text);
+                        handled = true;
+                    }
                 } else if let (Some(hwnd), Some(target_desc)) = (target_hwnd, target_desc_opt) {
                     unsafe {
                         let _ = ShowWindow(hwnd, SW_RESTORE);
@@ -3405,20 +3597,39 @@ fn execute_system_actions(actions: &[AgentAction]) {
                         std::thread::sleep(Duration::from_millis(30));
                         send_paste();
                         println!("[Actions] Texte inséré avec succès : {:?}", text);
+                        feedback.push(format!("Texte inséré avec succès ({} caractères).", text.len()));
                         handled = true;
                     } else {
                         println!("[Actions] Aucun champ d'entrée trouvé pour {:?}", target_desc);
+                        if let Some((fallback_hwnd, elem)) = find_largest_textarea_on_screen(&user_windows, preferred_target_hwnd) {
+                            println!("[Actions] Repli sur la plus grande zone de texte : [HWND {:?}], clic en ({}, {})", fallback_hwnd.0, elem.click_x, elem.click_y);
+                            unsafe {
+                                let _ = ShowWindow(fallback_hwnd, SW_RESTORE);
+                                let _ = SetForegroundWindow(fallback_hwnd);
+                            }
+                            std::thread::sleep(Duration::from_millis(80));
+                            unsafe { let _ = elem.element.SetFocus(); }
+                            click_element(elem.click_x, elem.click_y, elem.pattern.as_ref());
+                            std::thread::sleep(Duration::from_millis(50));
+                            clipboard::set_text(text);
+                            std::thread::sleep(Duration::from_millis(30));
+                            send_paste();
+                            feedback.push(format!("Texte inséré dans la zone principale ({} caractères).", text.len()));
+                            handled = true;
+                        }
                     }
                 }
 
                 if !handled {
                     println!("[Actions] Repli d'écriture dans le document ou fenêtre de repli");
                     let _ = write_to_browser_or_txt(text);
+                    feedback.push(format!("Texte écrit via repli système ({} caractères).", text.len()));
                 }
             }
             AgentAction::ReplaceFieldText { text, target, window } => {
                 let target_desc_opt = target.as_deref().filter(|s| !s.trim().is_empty());
                 let is_address_bar = target_desc_opt.map_or(false, is_address_bar_target);
+                let is_generic = target_desc_opt.map_or(true, is_generic_textarea_target);
 
                 let target_hwnd = match window.as_deref() {
                     Some(w) if !w.trim().is_empty() => {
@@ -3469,6 +3680,39 @@ fn execute_system_actions(actions: &[AgentAction]) {
                         launch_browser_new_window(text);
                         handled = true;
                     }
+                } else if is_generic {
+                    let largest_target = if let Some(hwnd) = window.as_deref().and_then(|w| {
+                        if !w.trim().is_empty() {
+                            find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
+                        } else {
+                            None
+                        }
+                    }) {
+                        find_largest_textarea(hwnd).map(|elem| (hwnd, elem))
+                    } else {
+                        find_largest_textarea_on_screen(&user_windows, preferred_target_hwnd)
+                    };
+
+                    if let Some((hwnd, elem)) = largest_target {
+                        println!("[Actions] Remplacement dans la plus grande zone de texte : [HWND {:?}], area={}, clic en ({}, {})", hwnd.0, elem.area, elem.click_x, elem.click_y);
+                        unsafe {
+                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                            let _ = SetForegroundWindow(hwnd);
+                        }
+                        std::thread::sleep(Duration::from_millis(80));
+                        unsafe { let _ = elem.element.SetFocus(); }
+                        click_element(elem.click_x, elem.click_y, elem.pattern.as_ref());
+                        std::thread::sleep(Duration::from_millis(50));
+                        const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+                        const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
+                        send_hotkey(&[VK_CONTROL], VK_A);
+                        std::thread::sleep(Duration::from_millis(30));
+                        clipboard::set_text(text);
+                        std::thread::sleep(Duration::from_millis(30));
+                        send_paste();
+                        println!("[Actions] Texte remplacé avec succès dans la zone de texte : {:?}", text);
+                        handled = true;
+                    }
                 } else if let (Some(hwnd), Some(target_desc)) = (target_hwnd, target_desc_opt) {
                     unsafe {
                         let _ = ShowWindow(hwnd, SW_RESTORE);
@@ -3490,6 +3734,7 @@ fn execute_system_actions(actions: &[AgentAction]) {
                         clipboard::set_text(text);
                         std::thread::sleep(Duration::from_millis(30));
                         send_paste();
+                        feedback.push(format!("Texte du champ mis à jour avec succès ({} caractères).", text.len()));
                         handled = true;
                     }
                 }
@@ -3499,6 +3744,34 @@ fn execute_system_actions(actions: &[AgentAction]) {
                 }
             }
             AgentAction::OpenBrowser { .. } => {}
+            AgentAction::NavigateToUrl { url, window } => {
+                let target = format_url_for_navigation(url);
+                let target_hwnd = match window.as_deref() {
+                    Some(w) if !w.trim().is_empty() => {
+                        find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
+                    }
+                    _ => {
+                        user_windows
+                            .iter()
+                            .find(|(h, t)| is_browser_hwnd(*h, t))
+                            .map(|(h, _)| *h)
+                            .or(active_user_hwnd)
+                    }
+                };
+
+                let existing_browser = target_hwnd
+                    .filter(|h| user_windows.iter().any(|(wh, t)| *wh == *h && is_browser_hwnd(*wh, t)))
+                    .or_else(|| user_windows.iter().find(|(h, t)| is_browser_hwnd(*h, t)).map(|(h, _)| *h));
+
+                if let Some(hwnd) = existing_browser {
+                    println!("[Actions] Navigateur ouvert trouvé [HWND {:?}], navigation via barre d'adresse vers : {}", hwnd.0, target);
+                    navigate_browser_address_bar(hwnd, &target);
+                } else {
+                    println!("[Actions] Aucun navigateur ouvert trouvé, ouverture d'une nouvelle fenêtre vers : {}", target);
+                    launch_browser_new_window(&target);
+                }
+                feedback.push(format!("Navigation effectuée vers '{}'.", target));
+            }
             AgentAction::ArrangeWindow { title, position } => {
                 let targets = find_windows_matching(title, &user_windows, preferred_target_hwnd);
                 if let Some(&hwnd) = targets.first() {
@@ -3589,6 +3862,7 @@ fn execute_system_actions(actions: &[AgentAction]) {
                     } else {
                         apply_window_rect(hwnd, wa_x + wa_w / 2, wa_y, wa_w / 2, wa_h);
                     }
+                    feedback.push(format!("Fenêtre '{}' agencée en '{}'.", title, position));
                 }
             }
             AgentAction::TileWindows { layout, windows } => {
@@ -3667,12 +3941,14 @@ fn execute_system_actions(actions: &[AgentAction]) {
                         }
                     }
                 }
+                feedback.push(format!("Disposition en mosaïque ({layout_mode}) appliquée sur {} fenêtres.", count));
             }
             AgentAction::MoveWindow { title, x, y, width, height } => {
                 let targets = find_windows_matching(title, &user_windows, preferred_target_hwnd);
                 if let Some(&hwnd) = targets.first() {
                     apply_window_rect(hwnd, *x, *y, *width, *height);
                 }
+                feedback.push(format!("Fenêtre '{}' déplacée en ({}, {}) [{}x{}].", title, x, y, width, height));
             }
             AgentAction::AccessibilityShortcut { shortcut } => {
                 const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
@@ -3747,13 +4023,22 @@ fn execute_system_actions(actions: &[AgentAction]) {
                     "previous_field" => send_hotkey(&[VK_SHIFT], VK_TAB),
                     _ => {}
                 }
+                feedback.push(format!("Raccourci système '{}' envoyé.", shortcut));
             }
         }
+    }
+
+    if feedback.is_empty() {
+        "Actions système exécutées avec succès.".to_string()
+    } else {
+        feedback.join("\n")
     }
 }
 
 #[cfg(not(windows))]
-fn execute_system_actions(_actions: &[AgentAction]) {}
+fn execute_system_actions(_actions: &[AgentAction]) -> String {
+    "Actions simulées (environnement non-Windows).".to_string()
+}
 
 fn urlencoding_simple(query: &str) -> String {
     query
@@ -3779,93 +4064,31 @@ async fn call_groq_prompt(
         return;
     }
 
-    // Debounce : attendre au moins 2,0 s entre deux appels consécutifs à Groq
-    let min_debounce = Duration::from_millis(2000);
-    if let Some(prev) = *last_call_time {
-        let elapsed = prev.elapsed();
-        if elapsed < min_debounce {
-            tokio::time::sleep(min_debounce - elapsed).await;
-        }
-    }
-
     let client = reqwest::Client::new();
     let system_instructions = r#"Tu es l'agent d'exploration Libertide pour Windows.
 Tu dois IMPÉRATIVEMENT répondre uniquement avec un JSON strict sans texte autour.
 Exprime-toi exclusivement en français dans la narration.
 Prends en compte l'historique des échanges pour assurer la continuité de la conversation et adapter tes actions.
 
-Règles d'action importantes :
+Règles d'autonomie et de ciblage :
+- Navigation web directe : Si l'utilisateur demande d'aller sur un site, d'accéder à un domaine, d'effectuer une recherche ou d'ouvrir une page web (ex: "aller sur google.fr", "navigue vers github.com", "cherche la météo", "ouvre le navigateur") : utilise TOUJOURS directement l'action "navigate_to_url" avec l'adresse complète dans "url". Ne passe JAMAIS par une saisie manuelle dans la barre d'adresse ni par des raccourcis Ctrl+L, le système traite nativement "navigate_to_url".
+- Saisie et zone de texte : Pour toute commande demandant d'écrire ou remplacer du texte sans cible spécifique ou visant une « zone de texte », un champ ou le document en cours, renseigne TOUJOURS "target": null dans "write_text" ou "replace_field_text". Cela déclenchera immédiatement la sélection automatique de la plus vaste zone de saisie à l'écran.
 - Si l'utilisateur demande d'ouvrir une application, un outil ou un logiciel (ex: invite de commande, terminal, bloc-notes, messagerie, calculatrice, etc.), détermine TOI-MÊME le nom exact de son exécutable Windows binaire (ex: "cmd", "wt", "notepad", "calc", "thunderbird", "explorer", "code", "mspaint", etc.) et utilise l'action "open_app" avec ce nom direct d'exécutable dans "name".
 - Si l'utilisateur demande de fermer une application ou une fenêtre, utilise l'action "close_app" avec le nom de l'exécutable ou un mot-clé du titre dans "name".
-- Si l'utilisateur demande d'ouvrir le navigateur sans préciser d'adresse ou pour une page vierge, renseigne toujours "url": "https://www.google.com".
 - Si l'utilisateur demande de lancer une commande directe ou un script shell/cmd (ex: "ipconfig", "ping", "git status", etc.), utilise l'action "run_command" avec la commande complète dans "command".
-- Pour cibler ou pointer un élément précis sans cliquer, utilise l'action "focus_element" avec "target_name" et optionnellement "window".
 - N'utilise JAMAIS la saisie vocale Windows (Win + H) : la transcription vocale est directement gérée en interne par Groq Whisper.
 - Pour effacer ou réinitialiser le texte du champ ou document actif, utilise l'action "clear_text" avec optionnellement "window".
+- Si l'utilisateur demande de cliquer sur un bouton ou un lien, utilise l'action "click_button" avec les mots-clés dans "button_name".
+- Pour cibler ou pointer un élément précis sans cliquer, utilise l'action "focus_element" avec "target_name".
 - Pour la disposition et l'agencement des fenêtres :
-  * Si l'utilisateur nomme une application ou une fenêtre précise (ex: "google", "chrome", "navigateur", "notepad", "terminal"), utilise TOUJOURS "arrange_window" avec "title" correspondant à ce nom et "position" ("right" pour la droite, "left" pour la gauche). N'utilise JAMAIS "accessibility_shortcut" pour une fenêtre nommée.
+  * Si l'utilisateur nomme une application ou une fenêtre précise, utilise TOUJOURS "arrange_window" avec "title" correspondant à ce nom et "position" ("right" pour la droite, "left" pour la gauche).
   * Si l'utilisateur demande de mettre côte à côte deux fenêtres, de scinder l'écran ou de fusionner avec le slider, utilise "tile_windows" avec "layout": "split_horizontal" et "windows": ["fenetre_gauche", "fenetre_droite"].
-  * Utilise "arrange_window" avec "title" (le mot-clé du logiciel ou "active" / "cette" pour la fenêtre courante) et "position" :
-    - "left" (moitié gauche), "right" (moitié droite), "top" (moitié haute), "bottom" (moitié basse).
-    - "top_left", "top_right", "bottom_left", "bottom_right" (quarts d'écran aux 4 coins).
-    - "left_two_thirds" (2/3 écran gauche pour lecture/code), "right_one_third" (1/3 écran droit pour notes/outils), "left_one_third", "right_two_thirds".
-    - "center" (centré confortable à 70% de l'écran), "maximize" (plein écran), "minimize" (réduire).
-  * Utilise "tile_windows" pour plusieurs fenêtres avec "layout" : "split_horizontal" (côte à côte), "split_vertical" (superposées), "grid_2x2" (quadrillage 4 quadrants), ou "master_stack" (1 grande fenêtre principale à gauche 65% et les autres empilées à droite).
-  * Pour les raccourcis d'ancrage rapide Windows Snap directs, utilise "accessibility_shortcut" avec "snap_left", "snap_right", "snap_up", "snap_down", "snap_top_half", "snap_bottom_half", "minimize_others" (isoler la fenêtre active en masquant toutes les autres), ou "restore_window".
-- Si l'utilisateur demande d'écrire ou de saisir du texte (ex: "écris bonjour", "écris la suite...", "tape ce texte"), extrait uniquement le texte réel à insérer dans "text" (et non la consigne elle-même), puis utilise l'action "write_text".
-- Si l'utilisateur demande de cliquer sur un bouton, un lien ou une zone de texte/saisie (ex: "clic sur imaginary world", "clique sur le champ textarea"), utilise l'action "click_button" avec les mots-clés ou le type d'élément dans "button_name" (ex: "champ textarea", "imaginary world") et optionnellement la fenêtre dans "window" si mentionnée (sinon null pour la fenêtre active au premier plan).
-- Pour la saisie et modification intelligente de texte (ex: "insérer avant X Y", "insérer après X Y", "insérer X après Y", "insérer X avant Y", "insérer entre X et Y", "remplacer X par Y", etc.) :
-  * Tu reçois le contenu existant du champ de saisie sous la balise [Contenu actuel du champ de saisie].
-  * Analyse attentivement le texte existant et positionne ou remplace exactement selon la consigne demandée.
-  * Détermine le texte complet final résultant et utilise TOUJOURS l'action "replace_field_text" avec ce texte intégral dans "text".
-  * Dans "narration", confirme oralement de façon brève et claire en français l'action effectuée.
-- Pour l'accessibilité, l'assistance visuelle, sonore ou ergonomique, utilise l'action "accessibility_shortcut" avec l'un des identifiants suivants dans "shortcut" :
-  * "magnifier_zoom_in" : activer ou agrandir le zoom de la loupe Windows (Win + +).
-  * "magnifier_zoom_out" : réduire le zoom de la loupe Windows (Win + -).
-  * "magnifier_close" : quitter/fermer la loupe Windows (Win + Échap).
-  * "narrator_toggle" : activer ou désactiver la lecture d'écran par le Narrateur (Win + Ctrl + Entrée).
-  * "color_filter_toggle" : basculer les filtres de couleurs ou contraste élevé (Win + Ctrl + C).
-  * "accessibility_settings" : ouvrir les options et paramètres d'accessibilité Windows (Win + U).
-  * "clipboard_history" : ouvrir le panneau d'historique du presse-papiers (Win + V).
-  * "mute_mic" : couper ou réactiver le microphone système (Win + Alt + K).
-  * "toggle_desktop" : afficher ou masquer le bureau (Win + D).
-  * "snap_layouts" : ouvrir l'agencement ancré des fenêtres (Win + Z).
-  * "task_manager" : ouvrir le Gestionnaire des tâches (Ctrl + Shift + Échap).
-  * "snip_screenshot" : ouvrir la capture d'écran / outil Capture d'écran (Win + Shift + S).
-  * "action_center" : ouvrir le centre de contrôle et réglages rapides (Win + A).
-  * "notification_center" : ouvrir le volet des notifications et calendrier (Win + N).
-  * "task_view" : ouvrir la vue des tâches / Task view (Win + Tab).
-  * "open_search" : ouvrir la recherche Windows (Win + S).
-  * "open_run" : ouvrir la boîte de dialogue Exécuter (Win + R).
-  * "open_settings" : ouvrir les paramètres généraux Windows (Win + I).
-  * "lock_screen" : verrouiller la session / l'ordinateur (Win + L).
-  * "emoji_panel" : ouvrir le panneau d'émoticônes et symboles (Win + .).
-  * "minimize_all" : réduire toutes les fenêtres ouvertes (Win + M).
-  * "restore_minimized" : restaurer toutes les fenêtres réduites (Win + Shift + M).
-  * "new_desktop" : créer un nouveau bureau virtuel (Win + Ctrl + D).
-  * "next_desktop" : basculer vers le bureau virtuel suivant à droite (Win + Ctrl + Flèche droite).
-  * "prev_desktop" : basculer vers le bureau virtuel précédent à gauche (Win + Ctrl + Flèche gauche).
-  * "close_desktop" : fermer le bureau virtuel actif (Win + Ctrl + F4).
-  * "move_window_monitor_left" : déplacer la fenêtre active vers l'écran de gauche (Win + Shift + Flèche gauche).
-  * "move_window_monitor_right" : déplacer la fenêtre active vers l'écran de droite (Win + Shift + Flèche droite).
-  * "file_explorer" : ouvrir l'Explorateur de fichiers Windows (Win + E).
-  * "quick_link_menu" : ouvrir le menu Liens rapides / menu Démarrer avancé (Win + X).
-  * "project_display" : ouvrir les options de projection et affichage multi-écran (Win + P).
-  * "cast_display" : ouvrir la connexion et diffusion sans fil d'écran (Win + K).
-  * "screen_recording" : ouvrir la capture vidéo d'écran de zone (Win + Shift + R).
-  * "select_all" : tout sélectionner dans le champ ou document actif (Ctrl + A).
-  * "copy" : copier la sélection (Ctrl + C).
-  * "undo" : annuler la dernière action ou frappe (Ctrl + Z).
-  * "redo" : rétablir la dernière action annulée (Ctrl + Y).
-  * "find_in_page" : ouvrir la recherche dans la page ou le document (Ctrl + F).
-  * "close_tab" : fermer l'onglet actif du navigateur ou de la fenêtre (Ctrl + W).
-  * "reopen_tab" : rouvrir le dernier onglet fermé (Ctrl + Shift + T).
-  * "refresh_page" : rafraîchir ou actualiser la page ou fenêtre active (F5).
-  * "next_field" : aller au prochain champ, zone de saisie ou élément suivant (Tab).
-  * "previous_field" : revenir au champ ou élément de saisie précédent (Shift + Tab).
-- N'utilise JAMAIS d'adresse interne de type "about:blank" ou "about:".
-- Pour une recherche, utilise l'URL Google correspondante.
-- Ne formule aucune réflexion intermédiaire : la narration doit annoncer directement l'action à l'oral (ex: "J'ouvre le navigateur.").
+
+Boucle récursive d'exécution multi-étapes (3 passes max) :
+Tu opères dans un cycle récursif. Dès que tu renvoies des actions, le système les exécute immédiatement et te fournit un rapport d'exécution sous la forme `[Retour d'exécution étape X]`.
+- Analyse attentivement ce retour d'exécution.
+- Si la demande initiale est entièrement complétée ou qu'aucune action subséquente n'est nécessaire : renvoie OBLIGATOIREMENT "actions": [] avec ta narration de confirmation finale.
+- Si une étape suivante est requise pour mener à terme l'instruction : renvoie l'action suivante dans "actions".
 
 Format json obligatoire :
 {
@@ -3876,129 +4099,166 @@ Format json obligatoire :
     {"action": "focus_element", "window": "titre_optionnel", "target_name": "nom_ou_id_element"},
     {"action": "clear_text", "window": "titre_optionnel"},
     {"action": "run_command", "command": "commande_ou_outil"},
-    {"action": "write_text", "text": "texte à écrire"},
-    {"action": "replace_field_text", "text": "texte complet modifié"},
+    {"action": "write_text", "text": "texte à écrire", "target": null},
+    {"action": "replace_field_text", "text": "texte complet modifié", "target": null},
     {"action": "close_app", "name": "nom_ou_titre"},
     {"action": "open_browser", "url": "https://..."},
+    {"action": "navigate_to_url", "url": "https://..."},
     {"action": "tile_windows", "layout": "split_horizontal" | "split_vertical" | "grid_2x2" | "master_stack", "windows": ["titre_fenetre_1", "titre_fenetre_2"]},
     {"action": "arrange_window", "title": "mot_cle_ou_active", "position": "left" | "right" | "top" | "bottom" | "top_left" | "top_right" | "bottom_left" | "bottom_right" | "left_two_thirds" | "right_one_third" | "left_one_third" | "right_two_thirds" | "center" | "maximize" | "minimize"},
     {"action": "move_window", "title": "mot_cle", "x": 0, "y": 0, "width": 960, "height": 1040},
     {"action": "accessibility_shortcut", "shortcut": "snap_left" | "snap_right" | "snap_up" | "snap_down" | "snap_top_half" | "snap_bottom_half" | "minimize_others" | "restore_window" | "magnifier_zoom_in" | "magnifier_zoom_out" | "magnifier_close" | "narrator_toggle" | "color_filter_toggle" | "accessibility_settings" | "clipboard_history" | "mute_mic" | "toggle_desktop" | "snap_layouts" | "task_manager" | "snip_screenshot" | "action_center" | "notification_center" | "task_view" | "open_search" | "open_run" | "open_settings" | "lock_screen" | "emoji_panel" | "minimize_all" | "restore_minimized" | "new_desktop" | "next_desktop" | "prev_desktop" | "close_desktop" | "move_window_monitor_left" | "move_window_monitor_right" | "file_explorer" | "quick_link_menu" | "project_display" | "cast_display" | "screen_recording" | "select_all" | "copy" | "undo" | "redo" | "find_in_page" | "close_tab" | "reopen_tab" | "refresh_page" | "next_field" | "previous_field"}
   ]
-}
-
-Si aucune action système n'est requise, laisse "actions": [].
-Si l'utilisateur demande d'ouvrir un site, un sujet de recherche ou d'organiser son espace, choisis les actions adéquates."#;
+}"#;
 
     history.push(ChatMessage {
         role: "user".to_string(),
         content: user_prompt,
     });
 
-    if history.len() > 20 {
-        history.drain(0..history.len() - 20);
-    }
+    const MAX_AGENT_PASSES: usize = 3;
 
-    let mut messages = Vec::with_capacity(history.len() + 1);
-    messages.push(ChatMessage {
-        role: "system".to_string(),
-        content: system_instructions.to_string(),
-    });
-    messages.extend(history.iter().cloned());
+    for pass in 1..=MAX_AGENT_PASSES {
+        let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
 
-    let request = GroqChatRequest {
-        model: "openai/gpt-oss-20b".to_string(),
-        messages,
-        temperature: 1.0,
-        max_completion_tokens: 2048,
-        top_p: 1.0,
-        stream: false,
-    };
-
-    let mut attempts = 0;
-    const MAX_RETRIES: usize = 3;
-    const DEFAULT_RETRY_DELAY: Duration = Duration::from_millis(3500);
-
-    loop {
-        attempts += 1;
-        *last_call_time = Some(Instant::now());
-
-        let response = client
-            .post("https://api.groq.com/openai/v1/chat/completions")
-            .bearer_auth(&api_key)
-            .json(&request)
-            .send()
-            .await;
-
-        match response {
-            Ok(res) if res.status().is_success() => {
-                if let Ok(body) = res.json::<GroqChatResponse>().await {
-                    if let Some(choice) = body.choices.first() {
-                        let raw_content = &choice.message.content;
-                        println!("\n=================== [RÉPONSE GROQ BRUTE] ===================");
-                        println!("{}", raw_content.trim());
-                        println!("============================================================");
-
-                        history.push(ChatMessage {
-                            role: "assistant".to_string(),
-                            content: raw_content.clone(),
-                        });
-
-                        let payload = parse_agent_response(raw_content);
-                        println!("[Agent] Narration : \"{}\"", payload.narration);
-                        println!("[Agent] {} action(s) planifiée(s) :", payload.actions.len());
-                        for (i, act) in payload.actions.iter().enumerate() {
-                            println!("  [{}] {:?}", i + 1, act);
-                        }
-
-                        let _ = event_tx.send(AgentEvent::ReplaceNarration(payload.narration));
-
-                        tokio::task::spawn_blocking(move || {
-                            execute_system_actions(&payload.actions);
-                        }).await.ok();
-                        return;
-                    }
-                }
-                history.pop();
-                let _ = event_tx.send(AgentEvent::ReplaceNarration("Format de réponse inattendu.".into()));
-                break;
+        // Debounce : attendre au moins 2,0 s entre deux appels consécutifs à Groq
+        let min_debounce = Duration::from_millis(2000);
+        if let Some(prev) = *last_call_time {
+            let elapsed = prev.elapsed();
+            if elapsed < min_debounce {
+                tokio::time::sleep(min_debounce - elapsed).await;
             }
-            Ok(res) if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempts <= MAX_RETRIES => {
-                let wait_duration = if let Some(retry_after) = res.headers().get("retry-after") {
-                    if let Ok(secs) = retry_after.to_str().unwrap_or("").parse::<u64>() {
-                        Duration::from_secs(secs.max(3))
+        }
+
+        if history.len() > 20 {
+            history.drain(0..history.len() - 20);
+        }
+
+        let mut messages = Vec::with_capacity(history.len() + 1);
+        messages.push(ChatMessage {
+            role: "system".to_string(),
+            content: system_instructions.to_string(),
+        });
+        messages.extend(history.iter().cloned());
+
+        let request = GroqChatRequest {
+            model: "openai/gpt-oss-20b".to_string(),
+            messages,
+            temperature: 1.0,
+            max_completion_tokens: 2048,
+            top_p: 1.0,
+            stream: false,
+        };
+
+        let mut attempts = 0;
+        const MAX_RETRIES: usize = 3;
+        const DEFAULT_RETRY_DELAY: Duration = Duration::from_millis(3500);
+        let mut success_payload: Option<AgentResponsePayload> = None;
+
+        loop {
+            attempts += 1;
+            *last_call_time = Some(Instant::now());
+
+            let response = client
+                .post("https://api.groq.com/openai/v1/chat/completions")
+                .bearer_auth(&api_key)
+                .json(&request)
+                .send()
+                .await;
+
+            match response {
+                Ok(res) if res.status().is_success() => {
+                    if let Ok(body) = res.json::<GroqChatResponse>().await {
+                        if let Some(choice) = body.choices.first() {
+                            let raw_content = &choice.message.content;
+                            println!("\n=================== [RÉPONSE GROQ BRUTE (PASSE {}/{})] ===================", pass, MAX_AGENT_PASSES);
+                            println!("{}", raw_content.trim());
+                            println!("============================================================");
+
+                            history.push(ChatMessage {
+                                role: "assistant".to_string(),
+                                content: raw_content.clone(),
+                            });
+
+                            let payload = parse_agent_response(raw_content);
+                            success_payload = Some(payload);
+                            break;
+                        }
+                    }
+                    history.pop();
+                    let _ = event_tx.send(AgentEvent::ReplaceNarration("Format de réponse inattendu.".into()));
+                    break;
+                }
+                Ok(res) if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempts <= MAX_RETRIES => {
+                    let wait_duration = if let Some(retry_after) = res.headers().get("retry-after") {
+                        if let Ok(secs) = retry_after.to_str().unwrap_or("").parse::<u64>() {
+                            Duration::from_secs(secs.max(3))
+                        } else {
+                            DEFAULT_RETRY_DELAY
+                        }
                     } else {
                         DEFAULT_RETRY_DELAY
-                    }
-                } else {
-                    DEFAULT_RETRY_DELAY
-                };
+                    };
 
-                let secs_display = wait_duration.as_secs_f32().ceil() as u64;
-                let _ = event_tx.send(AgentEvent::SilentNarration(format!(
-                    "Limite d'appels Groq atteinte. Pause de {secs_display} secondes avant réessai..."
-                )));
-                tokio::time::sleep(wait_duration).await;
-                continue;
+                    let secs_display = wait_duration.as_secs_f32().ceil() as u64;
+                    let _ = event_tx.send(AgentEvent::SilentNarration(format!(
+                        "Limite d'appels Groq atteinte. Pause de {secs_display} secondes avant réessai..."
+                    )));
+                    tokio::time::sleep(wait_duration).await;
+                    continue;
+                }
+                Ok(res) => {
+                    history.pop();
+                    let status = res.status();
+                    let _ = event_tx.send(AgentEvent::ReplaceNarration(format!("Erreur api groq : {status}")));
+                    break;
+                }
+                Err(err) if attempts <= MAX_RETRIES => {
+                    let _ = event_tx.send(AgentEvent::SilentNarration(
+                        "Connexion interrompue, nouvelle tentative dans 3 secondes...".into(),
+                    ));
+                    tokio::time::sleep(DEFAULT_RETRY_DELAY).await;
+                    continue;
+                }
+                Err(err) => {
+                    history.pop();
+                    let _ = event_tx.send(AgentEvent::ReplaceNarration(format!("Erreur réseau : {err}")));
+                    break;
+                }
             }
-            Ok(res) => {
-                history.pop();
-                let status = res.status();
-                let _ = event_tx.send(AgentEvent::ReplaceNarration(format!("Erreur api groq : {status}")));
-                break;
-            }
-            Err(err) if attempts <= MAX_RETRIES => {
-                let _ = event_tx.send(AgentEvent::SilentNarration(
-                    "Connexion interrompue, nouvelle tentative dans 3 secondes...".into(),
-                ));
-                tokio::time::sleep(DEFAULT_RETRY_DELAY).await;
-                continue;
-            }
-            Err(err) => {
-                history.pop();
-                let _ = event_tx.send(AgentEvent::ReplaceNarration(format!("Erreur réseau : {err}")));
-                break;
-            }
+        }
+
+        let Some(payload) = success_payload else {
+            break;
+        };
+
+        println!("[Agent] Narration (Passe {}) : \"{}\"", pass, payload.narration);
+        println!("[Agent] {} action(s) planifiée(s) :", payload.actions.len());
+        for (i, act) in payload.actions.iter().enumerate() {
+            println!("  [{}] {:?}", i + 1, act);
+        }
+
+        let _ = event_tx.send(AgentEvent::ReplaceNarration(payload.narration.clone()));
+
+        if payload.actions.is_empty() {
+            println!("[Agent] Tâche accomplie : aucune action supplémentaire. Fin de la séquence après {} passe(s).", pass);
+            break;
+        }
+
+        let actions_to_run = payload.actions;
+        let report = tokio::task::spawn_blocking(move || {
+            execute_system_actions(&actions_to_run)
+        }).await.unwrap_or_else(|_| "Erreur d'exécution.".to_string());
+
+        if pass < MAX_AGENT_PASSES {
+            history.push(ChatMessage {
+                role: "user".to_string(),
+                content: format!(
+                    "[Retour d'exécution étape {pass}] :\n{report}\n\nSi la tâche demandée est achevée, réponds avec \"actions\": [] et la narration finale. Sinon, transmets les actions nécessaires suivantes."
+                ),
+            });
+        } else {
+            println!("[Agent] Nombre maximal de passes ({MAX_AGENT_PASSES}) atteint.");
         }
     }
 
