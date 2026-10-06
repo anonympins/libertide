@@ -626,8 +626,9 @@ impl OverlayApp {
 
     fn trigger_emergency_stop(&mut self, ctx: &egui::Context) {
         self.continuous_mode = false;
-        self.is_recording = false;
-        let _ = self.audio_sender.send(AudioCommand::Stop);
+        if self.is_recording {
+            self.stop_recording();
+        }
         self.live_transcript.clear();
         self.is_hidden = false;
         self.status = AgentStatus::EmergencyStopped;
@@ -641,7 +642,7 @@ impl OverlayApp {
         let _ = self.tts_sender.send(TtsCommand::Speak(stop_msg));
     }
 
-    fn start_recording(&mut self) {
+    fn start_recording(&mut self, ctx: &egui::Context) {
         if self.status == AgentStatus::EmergencyStopped {
             return;
         }
@@ -651,14 +652,29 @@ impl OverlayApp {
         self.input_text.clear();
         let _ = self.tts_sender.send(TtsCommand::Stop);
         if !self.is_hidden {
-            self.live_transcript = "Écoute en direct... parlez, la retranscription s'affiche en temps réel.".to_string();
+            self.live_transcript = "Dictée vocale Windows active (Win + H)... parlez, puis validez (Entrée).".to_string();
         } else {
             self.live_transcript.clear();
         }
-        let _ = self.audio_sender.send(AudioCommand::Start);
+        // Placer le focus sur le champ de saisie pour accueillir la dictée Windows
+        ctx.memory_mut(|m| m.request_focus(egui::Id::new("prompt_input_text")));
+        #[cfg(windows)]
+        {
+            const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
+            const VK_H: VIRTUAL_KEY = VIRTUAL_KEY(0x48);
+            send_hotkey(&[VK_LWIN], VK_H);
+        }
     }
 
     fn stop_recording(&mut self) {
+        if self.is_recording {
+            #[cfg(windows)]
+            {
+                const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
+                const VK_H: VIRTUAL_KEY = VIRTUAL_KEY(0x48);
+                send_hotkey(&[VK_LWIN], VK_H);
+            }
+        }
         self.is_recording = false;
         self.continuous_mode = false;
         let _ = self.audio_sender.send(AudioCommand::Stop);
@@ -667,11 +683,11 @@ impl OverlayApp {
         self.status = AgentStatus::Idle;
     }
 
-    fn toggle_recording(&mut self) {
+    fn toggle_recording(&mut self, ctx: &egui::Context) {
         if self.is_recording {
             self.stop_recording();
         } else {
-            self.start_recording();
+            self.start_recording(ctx);
         }
     }
 }
@@ -815,7 +831,7 @@ impl eframe::App for OverlayApp {
                             self.continuous_mode = true;
                         } else if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             // Tout autre message est ignoré lorsque l'overlay est masqué
-                            self.start_recording();
+                            self.start_recording(ctx);
                         }
                     } else {
                         if is_hide_command(&prompt) {
@@ -856,7 +872,7 @@ impl eframe::App for OverlayApp {
                 }
                 AgentEvent::TtsFinished => {
                     if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                        self.start_recording();
+                        self.start_recording(ctx);
                     }
                 }
                 AgentEvent::TwitchChatReceived(twitch_msg) => {
@@ -879,7 +895,7 @@ impl eframe::App for OverlayApp {
         // Raccourci clavier 'R' pour basculer le micro (autorisé pour couper le micro même avec focus)
         let is_typing = ctx.memory(|m| m.focused().is_some()) && !self.is_recording;
         if !self.is_hidden && !is_typing && ctx.input(|i| i.key_pressed(egui::Key::R)) {
-            self.toggle_recording();
+            self.toggle_recording(ctx);
         }
 
         // Retranscription en temps réel : mise à jour du texte d'écoute
@@ -1173,15 +1189,17 @@ impl eframe::App for OverlayApp {
                                         );
 
                                         if mic_btn.clicked() {
-                                            self.toggle_recording();
+                                            self.toggle_recording(ui.ctx());
                                         }
 
                                         let edit_width = (ui.available_width() - 124.0).max(80.0);
+                                        let input_id = egui::Id::new("prompt_input_text");
                                         let response = ui.add_sized(
                                             [edit_width, 24.0],
                                             egui::TextEdit::singleline(&mut self.input_text)
+                                                .id(input_id)
                                                 .hint_text(if self.is_recording {
-                                                    "Écoute active... saisissez ou validez"
+                                                    "Dictée Windows active... parlez ou tapez"
                                                 } else {
                                                     "Consigne d'exploration... (entrée)"
                                                 }),
@@ -1191,8 +1209,7 @@ impl eframe::App for OverlayApp {
                                             && ctx.input(|i| i.key_pressed(egui::Key::Enter));
                                         if (ui.button("Envoyer").clicked() || enter_hit) && !self.input_text.trim().is_empty() {
                                             if self.is_recording {
-                                                self.is_recording = false;
-                                                let _ = self.audio_sender.send(AudioCommand::Stop);
+                                                self.stop_recording();
                                             }
                                             self.continuous_mode = true;
                                             let prompt = std::mem::take(&mut self.input_text).trim().to_string();
@@ -4205,6 +4222,7 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                     "close_desktop" => send_hotkey(&[VK_LWIN, VK_CONTROL], VK_F4),
                     "move_window_monitor_left" => send_hotkey(&[VK_LWIN, VK_SHIFT], VK_LEFT),
                     "move_window_monitor_right" => send_hotkey(&[VK_LWIN, VK_SHIFT], VK_RIGHT),
+                    "voice_typing" | "dictation" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x48)),     // H
                     "file_explorer" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x45)),                 // E
                     "quick_link_menu" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x58)),               // X
                     "project_display" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x50)),               // P
@@ -4282,7 +4300,7 @@ Règles d'autonomie et de ciblage :
 - Si l'utilisateur demande d'ouvrir une application, un outil ou un logiciel (ex: invite de commande, terminal, bloc-notes, messagerie, calculatrice, etc.), détermine TOI-MÊME le nom exact de son exécutable Windows binaire (ex: "cmd", "wt", "notepad", "calc", "thunderbird", "explorer", "code", "mspaint", etc.) et utilise l'action "open_app" avec ce nom direct d'exécutable dans "name".
 - Si l'utilisateur demande de fermer une application ou une fenêtre, utilise l'action "close_app" avec le nom de l'exécutable ou un mot-clé du titre dans "name".
 - Si l'utilisateur demande de lancer une commande directe ou un script shell/cmd (ex: "ipconfig", "ping", "git status", etc.), utilise l'action "run_command" avec la commande complète dans "command".
-- N'utilise JAMAIS la saisie vocale Windows (Win + H) : la transcription vocale est directement gérée en interne par Groq Whisper.
+- La dictée vocale est assurée nativement par Windows (Win + H). Réserve tes réponses à l'analyse et à la planification des actions.
 - Pour effacer ou réinitialiser le texte du champ ou document actif, utilise l'action "clear_text" avec optionnellement "window".
 - Si l'utilisateur demande de cliquer sur un bouton ou un lien, utilise l'action "click_button" avec les mots-clés dans "button_name".
 - Pour cibler ou pointer un élément précis sans cliquer, utilise l'action "focus_element" avec "target_name".
@@ -4352,7 +4370,7 @@ Format json obligatoire :
             model: "openai/gpt-oss-20b".to_string(),
             messages,
             temperature: 1.0,
-            max_completion_tokens: 2048,
+            max_completion_tokens: 600,
             top_p: 1.0,
             stream: false,
         };
@@ -4405,12 +4423,14 @@ Format json obligatoire :
 
                     let safe_wait_secs = (wait_secs + 1).max(4);
 
-                    // Si le délai dépasse 12 secondes, il s'agit d'une saturation de jetons (TPM) : ne pas bloquer l'agent pendant 7 minutes
+                    // Si le délai dépasse 12 secondes, il s'agit d'une saturation de jetons (TPM) : ne pas bloquer l'agent
                     if wait_secs > 12 {
+                        let err_body = res.text().await.unwrap_or_default();
+                        println!("[Groq 429] Détails renvoyés par l'API : {}", err_body);
                         history.pop();
                         let mins = (wait_secs + 59) / 60;
                         let _ = event_tx.send(AgentEvent::ReplaceNarration(format!(
-                            "Quota de jetons Groq saturé (pause requise de {mins} min). L'historique a été allégé pour réinitialiser la consommation."
+                            "Plafond instantané Groq atteint (pause requise par l'API : {mins} min). Historique réinitialisé."
                         )));
                         history.clear();
                         break;
