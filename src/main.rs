@@ -2903,14 +2903,7 @@ fn parse_write_command(prompt: &str) -> Option<String> {
     let trimmed = prompt.trim();
     let lower = trimmed.to_lowercase();
 
-    let is_smart_edit = lower.contains("avant")
-        || lower.contains("après")
-        || lower.contains("apres")
-        || lower.contains("entre")
-        || lower.contains("remplace")
-        || lower.contains("remplacer")
-        || lower.contains("insère")
-        || lower.contains("insérer");
+    let is_smart_edit = true;
 
     if is_smart_edit {
         return None;
@@ -2939,8 +2932,13 @@ fn parse_write_command(prompt: &str) -> Option<String> {
                 return None;
             }
 
-            if !clean.is_empty() {
-                return Some(clean.to_string());
+            let unquoted = clean
+                .strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+                .or_else(|| clean.strip_prefix('«').and_then(|s| s.strip_suffix('»')))
+                .unwrap_or(clean)
+                .trim();
+            if !unquoted.is_empty() {
+                return Some(unquoted.to_string());
             }
         }
     }
@@ -4073,6 +4071,7 @@ Prends en compte l'historique des échanges pour assurer la continuité de la co
 Règles d'autonomie et de ciblage :
 - Navigation web directe : Si l'utilisateur demande d'aller sur un site, d'accéder à un domaine, d'effectuer une recherche ou d'ouvrir une page web (ex: "aller sur google.fr", "navigue vers github.com", "cherche la météo", "ouvre le navigateur") : utilise TOUJOURS directement l'action "navigate_to_url" avec l'adresse complète dans "url". Ne passe JAMAIS par une saisie manuelle dans la barre d'adresse ni par des raccourcis Ctrl+L, le système traite nativement "navigate_to_url".
 - Saisie et zone de texte : Pour toute commande demandant d'écrire ou remplacer du texte sans cible spécifique ou visant une « zone de texte », un champ ou le document en cours, renseigne TOUJOURS "target": null dans "write_text" ou "replace_field_text". Cela déclenchera immédiatement la sélection automatique de la plus vaste zone de saisie à l'écran.
+- Extraction stricte du texte : Sépare TOUJOURS le texte à écrire de sa cible d'UI ou de sa destination. Par exemple, si la consigne est "écris bonjour dans la zone de texte", le texte à saisir est STRICTEMENT "bonjour" ("text": "bonjour") et la cible est "target": null. Ne recopie JAMAIS les compléments de lieu ou d'interface ("dans la zone de texte", "dans le champ...") à l'intérieur du champ "text".
 - Si l'utilisateur demande d'ouvrir une application, un outil ou un logiciel (ex: invite de commande, terminal, bloc-notes, messagerie, calculatrice, etc.), détermine TOI-MÊME le nom exact de son exécutable Windows binaire (ex: "cmd", "wt", "notepad", "calc", "thunderbird", "explorer", "code", "mspaint", etc.) et utilise l'action "open_app" avec ce nom direct d'exécutable dans "name".
 - Si l'utilisateur demande de fermer une application ou une fenêtre, utilise l'action "close_app" avec le nom de l'exécutable ou un mot-clé du titre dans "name".
 - Si l'utilisateur demande de lancer une commande directe ou un script shell/cmd (ex: "ipconfig", "ping", "git status", etc.), utilise l'action "run_command" avec la commande complète dans "command".
