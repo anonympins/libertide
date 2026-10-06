@@ -1804,6 +1804,34 @@ fn is_textarea_query(target: &str) -> (bool, Vec<String>) {
 }
 
 #[cfg(windows)]
+fn clear_window_text(hwnd: HWND) {
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = SetForegroundWindow(hwnd);
+    }
+    std::thread::sleep(Duration::from_millis(60));
+    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+    const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
+    const VK_BACK: VIRTUAL_KEY = VIRTUAL_KEY(0x08);
+    send_hotkey(&[VK_CONTROL], VK_A);
+    std::thread::sleep(Duration::from_millis(40));
+    send_hotkey(&[], VK_BACK);
+}
+
+#[cfg(windows)]
+fn run_system_command(command: &str) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    std::process::Command::new("cmd")
+        .args(["/C", trimmed])
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .spawn()
+        .is_ok()
+}
+
+#[cfg(windows)]
 static LAST_TXT_HWND: Mutex<Option<isize>> = Mutex::new(None);
 
 #[cfg(windows)]
@@ -2052,6 +2080,36 @@ fn parse_write_command(prompt: &str) -> Option<String> {
             }
         }
     }
+    None
+}
+
+fn try_execute_direct_cli(prompt: &str) -> Option<String> {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Préfixe forcé en ligne de commande (> ou $)
+    let (is_forced, cmd_str) = if let Some(stripped) = trimmed.strip_prefix('>') {
+        (true, stripped.trim())
+    } else if let Some(stripped) = trimmed.strip_prefix('$') {
+        (true, stripped.trim())
+    } else {
+        (false, trimmed)
+    };
+
+    let first_token = cmd_str.split_whitespace().next().unwrap_or("");
+    if first_token.is_empty() {
+        return None;
+    }
+
+    #[cfg(windows)]
+    if is_forced || find_executable_in_path(first_token).is_some() {
+        if run_system_command(cmd_str) {
+            return Some(format!("Commande exécutée : {cmd_str}"));
+        }
+    }
+
     None
 }
 
@@ -2423,6 +2481,52 @@ fn execute_system_actions(actions: &[AgentAction]) {
                     }
                 }
             }
+            AgentAction::FocusElement { window, target_name } => {
+                let target_hwnd = match window.as_deref() {
+                    Some(w) if !w.trim().is_empty() => {
+                        find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
+                    }
+                    _ => active_user_hwnd,
+                };
+
+                if let Some(hwnd) = target_hwnd {
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                        let _ = SetForegroundWindow(hwnd);
+                    }
+                    std::thread::sleep(Duration::from_millis(60));
+
+                    let elements = list_interactive_elements(hwnd);
+                    let mut matches: Vec<_> = elements
+                        .iter()
+                        .filter_map(|elem| {
+                            let name_score = rank_button_match(&elem.name, target_name);
+                            let id_score = rank_button_match(&elem.automation_id, target_name);
+                            let best_score = name_score.into_iter().chain(id_score).min();
+                            best_score.map(|score| (score, elem))
+                        })
+                        .collect();
+
+                    matches.sort_by_key(|(score, elem)| (*score, elem.area));
+                    if let Some((_, elem)) = matches.first() {
+                        unsafe { let _ = elem.element.SetFocus(); }
+                    }
+                }
+            }
+            AgentAction::ClearText { window } => {
+                let target_hwnd = match window.as_deref() {
+                    Some(w) if !w.trim().is_empty() => {
+                        find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
+                    }
+                    _ => active_user_hwnd,
+                };
+                if let Some(hwnd) = target_hwnd {
+                    clear_window_text(hwnd);
+                }
+            }
+            AgentAction::RunCommand { command } => {
+                run_system_command(command);
+            }
             AgentAction::WriteText { text } => {
                 let _ = write_to_browser_or_txt(text);
             }
@@ -2727,6 +2831,9 @@ Règles d'action importantes :
 - Si l'utilisateur demande d'ouvrir une application, un outil ou un logiciel (ex: invite de commande, terminal, bloc-notes, messagerie, calculatrice, etc.), détermine TOI-MÊME le nom exact de son exécutable Windows binaire (ex: "cmd", "wt", "notepad", "calc", "thunderbird", "explorer", "code", "mspaint", etc.) et utilise l'action "open_app" avec ce nom direct d'exécutable dans "name".
 - Si l'utilisateur demande de fermer une application ou une fenêtre, utilise l'action "close_app" avec le nom de l'exécutable ou un mot-clé du titre dans "name".
 - Si l'utilisateur demande d'ouvrir le navigateur sans préciser d'adresse ou pour une page vierge, renseigne toujours "url": "https://www.google.com".
+- Si l'utilisateur demande de lancer une commande directe ou un script shell/cmd (ex: "ipconfig", "ping", "git status", etc.), utilise l'action "run_command" avec la commande complète dans "command".
+- Pour cibler ou pointer un élément précis sans cliquer, utilise l'action "focus_element" avec "target_name" et optionnellement "window".
+- Pour effacer ou réinitialiser le texte du champ ou document actif, utilise l'action "clear_text" avec optionnellement "window".
 - Pour la disposition et l'agencement des fenêtres :
   * Si l'utilisateur nomme une application ou une fenêtre précise (ex: "google", "chrome", "navigateur", "notepad", "terminal"), utilise TOUJOURS "arrange_window" avec "title" correspondant à ce nom et "position" ("right" pour la droite, "left" pour la gauche). N'utilise JAMAIS "accessibility_shortcut" pour une fenêtre nommée.
   * Si l'utilisateur demande de mettre côte à côte deux fenêtres, de scinder l'écran ou de fusionner avec le slider, utilise "tile_windows" avec "layout": "split_horizontal" et "windows": ["fenetre_gauche", "fenetre_droite"].
@@ -2794,6 +2901,9 @@ Format json obligatoire :
   "actions": [
     {"action": "open_app", "name": "nom_executable"},
     {"action": "click_button", "window": "titre_optionnel", "button_name": "nom_du_bouton"},
+    {"action": "focus_element", "window": "titre_optionnel", "target_name": "nom_ou_id_element"},
+    {"action": "clear_text", "window": "titre_optionnel"},
+    {"action": "run_command", "command": "commande_ou_outil"},
     {"action": "write_text", "text": "texte à écrire"},
     {"action": "close_app", "name": "nom_ou_titre"},
     {"action": "open_browser", "url": "https://..."},
@@ -2933,7 +3043,11 @@ fn main() -> eframe::Result<()> {
             while let Ok(cmd) = cmd_rx.recv() {
                 match cmd {
                     AgentCommand::Prompt(prompt) => {
-                        if let Some(text_to_write) = parse_write_command(&prompt) {
+                        if let Some(cli_feedback) = try_execute_direct_cli(&prompt) {
+                            let _ = event_tx.send(AgentEvent::ReplaceNarration(cli_feedback.clone()));
+                            let _ = tts_tx.send(TtsCommand::Speak(cli_feedback));
+                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                        } else if let Some(text_to_write) = parse_write_command(&prompt) {
                             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
                             let narration = tokio::task::spawn_blocking(move || {
                                 write_to_browser_or_txt(&text_to_write)

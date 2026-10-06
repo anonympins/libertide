@@ -92,6 +92,16 @@ pub enum AgentAction {
     WriteText {
         text: String,
     },
+    ClearText {
+        window: Option<String>,
+    },
+    FocusElement {
+        window: Option<String>,
+        target_name: String,
+    },
+    RunCommand {
+        command: String,
+    },
     ArrangeWindow {
         title: String,
         position: String,
