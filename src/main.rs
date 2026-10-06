@@ -1612,6 +1612,75 @@ fn get_desktop_work_area() -> RECT {
     RECT { left: 0, top: 0, right: screen_w, bottom: screen_h }
 }
 
+#[cfg(windows)]
+fn find_largest_and_most_centered_window(user_windows: &[(HWND, String)]) -> Option<HWND> {
+    if user_windows.is_empty() {
+        return None;
+    }
+
+    let wa = get_desktop_work_area();
+    let sw = (wa.right - wa.left).max(1) as f32;
+    let sh = (wa.bottom - wa.top).max(1) as f32;
+    let screen_cx = (wa.left + wa.right) as f32 / 2.0;
+    let screen_cy = (wa.top + wa.bottom) as f32 / 2.0;
+    let max_dist = (sw * sw + sh * sh).sqrt() / 2.0;
+
+    let mut best_hwnd = None;
+    let mut best_score = -1.0f32;
+
+    for (z_idx, &(hwnd, _)) in user_windows.iter().enumerate() {
+        unsafe {
+            if IsIconic(hwnd).as_bool() {
+                continue;
+            }
+            let mut r = RECT::default();
+            if GetWindowRect(hwnd, &mut r).is_ok() {
+                let w = (r.right - r.left).max(0) as f32;
+                let h = (r.bottom - r.top).max(0) as f32;
+                let area = w * h;
+                if area <= 100.0 {
+                    continue;
+                }
+
+                let win_cx = (r.left + r.right) as f32 / 2.0;
+                let win_cy = (r.top + r.bottom) as f32 / 2.0;
+                let dx = win_cx - screen_cx;
+                let dy = win_cy - screen_cy;
+                let dist = (dx * dx + dy * dy).sqrt();
+
+                let center_factor = (1.0 - (dist / max_dist.max(1.0)).min(1.0)).max(0.05);
+
+                // Pondération Z-order : EnumWindows retourne les fenêtres du premier plan vers l'arrière.
+                // Les fenêtres situées le plus en avant (z_idx faible) sont fortement favorisées.
+                let z_factor = 1.0 / (1.0 + 0.35 * (z_idx as f32));
+
+                // Score combiné : surface, proximité au centre et élévation au premier plan (Z-order)
+                let score = area * center_factor * z_factor;
+
+                if score > best_score {
+                    best_score = score;
+                    best_hwnd = Some(hwnd);
+                }
+            }
+        }
+    }
+
+    best_hwnd.or_else(|| user_windows.first().map(|(h, _)| *h))
+}
+
+#[cfg(windows)]
+fn get_active_or_best_window(user_windows: &[(HWND, String)]) -> Option<HWND> {
+    let overlay_hwnd = unsafe {
+        FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()))
+    };
+    let fg = unsafe { GetForegroundWindow() };
+    if !fg.0.is_null() && fg != overlay_hwnd && user_windows.iter().any(|(h, _)| *h == fg) {
+        Some(fg)
+    } else {
+        find_largest_and_most_centered_window(user_windows)
+    }
+}
+
 fn split_propositions(input: &str) -> Vec<String> {
     let mut results = Vec::new();
     let mut current = String::new();
@@ -2210,8 +2279,8 @@ fn find_windows_matching(
         if let Some(pref) = preferred_hwnd {
             return vec![pref];
         }
-        if let Some((first_hwnd, _)) = user_windows.first() {
-            return vec![*first_hwnd];
+        if let Some(best) = find_largest_and_most_centered_window(user_windows) {
+            return vec![best];
         }
         return Vec::new();
     }
@@ -2748,16 +2817,8 @@ fn write_to_temp_txt_file(text: &str) -> String {
 
 #[cfg(windows)]
 fn write_to_browser_or_txt(text: &str) -> String {
-    let overlay_hwnd = unsafe {
-        FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()))
-    };
-    let fg = unsafe { GetForegroundWindow() };
     let user_windows = list_user_windows();
-    let active_hwnd = if !fg.0.is_null() && fg != overlay_hwnd {
-        Some(fg)
-    } else {
-        user_windows.first().map(|(h, _)| *h)
-    };
+    let active_hwnd = get_active_or_best_window(&user_windows);
 
     if let Some(target_hwnd) = active_hwnd {
         unsafe {
@@ -2854,13 +2915,8 @@ fn get_active_field_content() -> Option<String> {
             }
         }
 
-        let fg = GetForegroundWindow();
         let user_windows = list_user_windows();
-        let target_hwnd = if !fg.0.is_null() && fg != overlay_hwnd {
-            Some(fg)
-        } else {
-            user_windows.first().map(|(h, _)| *h)
-        };
+        let target_hwnd = get_active_or_best_window(&user_windows);
 
         if let Some(hwnd) = target_hwnd {
             let mut elements = list_interactive_elements(hwnd);
@@ -2883,13 +2939,8 @@ fn replace_active_field_text(new_text: &str) -> String {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let uia: Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
         let overlay_hwnd = FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()));
-        let fg = GetForegroundWindow();
         let user_windows = list_user_windows();
-        let target_hwnd = if !fg.0.is_null() && fg != overlay_hwnd {
-            Some(fg)
-        } else {
-            user_windows.first().map(|(h, _)| *h)
-        };
+        let target_hwnd = get_active_or_best_window(&user_windows);
 
         if let Some(hwnd) = target_hwnd {
             let _ = ShowWindow(hwnd, SW_RESTORE);
@@ -3280,8 +3331,8 @@ fn summarize_screen_state(target_window: Option<&str>) -> String {
     }
 
     if inspect_hwnds.is_empty() {
-        if !fg.0.is_null() && user_windows.iter().any(|(h, _)| *h == fg) {
-            inspect_hwnds.push(fg);
+        if let Some(best) = get_active_or_best_window(&user_windows) {
+            inspect_hwnds.push(best);
         }
         for (h, _) in &user_windows {
             if !inspect_hwnds.contains(h) && inspect_hwnds.len() < 3 {
@@ -3490,16 +3541,8 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
     let wa_w = (work_area.right - work_area.left).max(800);
     let wa_h = (work_area.bottom - work_area.top).max(600);
 
-    let overlay_hwnd = unsafe {
-        FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()))
-    };
-    let fg = unsafe { GetForegroundWindow() };
     let user_windows = list_user_windows();
-    let active_user_hwnd = if !fg.0.is_null() && fg != overlay_hwnd {
-        Some(fg)
-    } else {
-        user_windows.first().map(|(h, _)| *h)
-    };
+    let active_user_hwnd = get_active_or_best_window(&user_windows);
     let preferred_target_hwnd = newly_spawned_hwnd.or(active_user_hwnd);
 
     for (idx, action) in actions.iter().enumerate() {
@@ -4286,7 +4329,7 @@ Format json obligatoire :
         let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
 
         // Debounce : garantir au moins 3,0 s de repos réel entre deux requêtes à Groq
-        let min_debounce = Duration::from_millis(5000);
+        let min_debounce = Duration::from_millis(8000);
         if let Some(prev) = *last_call_time {
             let elapsed = prev.elapsed();
             if elapsed < min_debounce {
