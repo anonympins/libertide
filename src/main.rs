@@ -37,7 +37,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, FindWindowW, GetClassNameW, GetCursorPos, GetForegroundWindow, GetSystemMetrics,
-    GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, IsWindow, IsWindowVisible,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, IsIconic, IsWindow, IsWindowVisible,
     PostMessageW, SetCursorPos, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     GWL_EXSTYLE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE, SW_MINIMIZE,
     SW_RESTORE, WM_CLOSE,
@@ -1400,7 +1400,14 @@ fn find_in_program_dirs(name: &str, extensions: &[String]) -> Option<std::path::
         base_dirs.push(std::path::PathBuf::from(pfw64));
     }
     if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
-        base_dirs.push(std::path::PathBuf::from(localappdata).join("Programs"));
+        let p = std::path::PathBuf::from(localappdata);
+        base_dirs.push(p.join("Programs"));
+        base_dirs.push(p);
+    }
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let p = std::path::PathBuf::from(appdata);
+        base_dirs.push(p.join("Programs"));
+        base_dirs.push(p);
     }
 
     let stem = std::path::Path::new(name)
@@ -1408,7 +1415,11 @@ fn find_in_program_dirs(name: &str, extensions: &[String]) -> Option<std::path::
         .and_then(|s| s.to_str())
         .unwrap_or(name)
         .to_lowercase();
-    let clean_stems = [stem];
+    let no_spaces = stem.replace(' ', "").replace('-', "").replace('_', "");
+    let mut clean_stems = vec![stem.clone()];
+    if no_spaces != stem {
+        clean_stems.push(no_spaces);
+    }
 
     for base in &base_dirs {
         let entries = match std::fs::read_dir(base) {
@@ -2113,13 +2124,24 @@ fn matches_pattern(pattern: &str, text: &str) -> bool {
 }
 
 #[cfg(windows)]
+fn strip_spaces_and_symbols(s: &str) -> String {
+    s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+#[cfg(windows)]
 fn window_matches_keyword(hwnd: HWND, title: &str, kw: &str) -> bool {
     let propositions = extract_target_propositions(kw);
     let t_lower = title.to_lowercase();
+    let t_norm = strip_spaces_and_symbols(title);
 
     for prop in &propositions {
         let p_clean = prop.trim();
         let p_lower = p_clean.to_lowercase();
+        let p_stem = std::path::Path::new(p_clean)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(p_clean);
+        let p_norm = strip_spaces_and_symbols(p_stem);
 
         let is_generic_browser = p_lower == "browser" || p_lower == "navigateur" || p_lower == "web" || p_lower == "internet";
         if is_generic_browser {
@@ -2141,7 +2163,10 @@ fn window_matches_keyword(hwnd: HWND, title: &str, kw: &str) -> bool {
             continue;
         }
 
-        if matches_pattern(p_clean, title) || t_lower.contains(&p_lower) {
+        if matches_pattern(p_clean, title)
+            || t_lower.contains(&p_lower)
+            || (!p_norm.is_empty() && (t_norm.contains(&p_norm) || (t_norm.len() >= 3 && p_norm.contains(&t_norm))))
+        {
             return true;
         }
 
@@ -2150,7 +2175,11 @@ fn window_matches_keyword(hwnd: HWND, title: &str, kw: &str) -> bool {
             let len = GetClassNameW(hwnd, &mut class_buf);
             if len > 0 {
                 let class_name = String::from_utf16_lossy(&class_buf[..len as usize]);
-                if matches_pattern(p_clean, &class_name) || class_name.to_lowercase().contains(&p_lower) {
+                let c_norm = strip_spaces_and_symbols(&class_name);
+                if matches_pattern(p_clean, &class_name)
+                    || class_name.to_lowercase().contains(&p_lower)
+                    || (!p_norm.is_empty() && (c_norm.contains(&p_norm) || (c_norm.len() >= 3 && p_norm.contains(&c_norm))))
+                {
                     return true;
                 }
             }
@@ -3219,6 +3248,120 @@ fn snap_window_native(hwnd: HWND, is_right: bool) {
 }
 
 #[cfg(windows)]
+fn summarize_screen_state(target_window: Option<&str>) -> String {
+    let work_area = get_desktop_work_area();
+    let wa_w = work_area.right - work_area.left;
+    let wa_h = work_area.bottom - work_area.top;
+
+    let user_windows = list_user_windows();
+    let fg = unsafe { GetForegroundWindow() };
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "=== Rapport d'analyse de l'écran ===\nEspace de travail : {}x{}\n",
+        wa_w, wa_h
+    ));
+
+    let fg_title = user_windows
+        .iter()
+        .find(|(h, _)| *h == fg)
+        .map(|(_, t)| t.as_str())
+        .unwrap_or("Inconnue ou overlay");
+    out.push_str(&format!("Fenêtre au premier plan : \"{}\"\n\n", fg_title));
+
+    out.push_str("Fenêtres ouvertes visibles :\n");
+    let mut inspect_hwnds = Vec::new();
+
+    if let Some(target) = target_window.filter(|t| !t.trim().is_empty()) {
+        let matched = find_windows_matching(target, &user_windows, Some(fg));
+        if let Some(&h) = matched.first() {
+            inspect_hwnds.push(h);
+        }
+    }
+
+    if inspect_hwnds.is_empty() {
+        if !fg.0.is_null() && user_windows.iter().any(|(h, _)| *h == fg) {
+            inspect_hwnds.push(fg);
+        }
+        for (h, _) in &user_windows {
+            if !inspect_hwnds.contains(h) && inspect_hwnds.len() < 3 {
+                inspect_hwnds.push(*h);
+            }
+        }
+    }
+
+    for (hwnd, title) in &user_windows {
+        let mut r = RECT::default();
+        let rect_str = if unsafe { GetWindowRect(*hwnd, &mut r).is_ok() } {
+            let w = r.right - r.left;
+            let h = r.bottom - r.top;
+            format!("pos: ({}, {}), taille: {}x{}", r.left, r.top, w, h)
+        } else {
+            "position inconnue".to_string()
+        };
+
+        let is_minimized = unsafe { IsIconic(*hwnd).as_bool() };
+        let state = if is_minimized {
+            "réduite"
+        } else if *hwnd == fg {
+            "active/premier plan"
+        } else {
+            "visible"
+        };
+
+        out.push_str(&format!("- \"{}\" [{}] ({})\n", title, state, rect_str));
+    }
+
+    out.push_str("\n=== Contenu détaillé des fenêtres principales ===\n");
+    for hwnd in inspect_hwnds {
+        let win_title = user_windows
+            .iter()
+            .find(|(h, _)| *h == hwnd)
+            .map(|(_, t)| t.as_str())
+            .unwrap_or("Fenêtre");
+
+        out.push_str(&format!("\n--- Fenêtre : \"{}\" ---\n", win_title));
+        let elements = list_interactive_elements(hwnd);
+        if elements.is_empty() {
+            out.push_str("  (Aucun élément UI interactif accessible)\n");
+            continue;
+        }
+
+        let edits: Vec<&UiaElementInfo> = elements.iter().filter(|e| e.is_edit_or_textarea || e.is_input).collect();
+        if !edits.is_empty() {
+            out.push_str("  [Champs de texte / saisie] :\n");
+            for edit in edits.iter().take(5) {
+                let label = if !edit.name.is_empty() { &edit.name } else { "Champ" };
+                let val = if !edit.value_text.is_empty() {
+                    format!(" = \"{}\"", edit.value_text.chars().take(100).collect::<String>())
+                } else {
+                    String::new()
+                };
+                out.push_str(&format!("  • {}{}\n", label, val));
+            }
+        }
+
+        let mut buttons: Vec<String> = elements
+            .iter()
+            .filter(|e| !e.is_edit_or_textarea && !e.name.is_empty() && (e.pattern.is_some() || e.localized_type.contains("bouton") || e.localized_type.contains("button")))
+            .map(|e| e.name.clone())
+            .collect();
+        buttons.dedup();
+        if !buttons.is_empty() {
+            let display_btns: Vec<String> = buttons.into_iter().take(10).collect();
+            out.push_str(&format!("  [Boutons / actions] : {}\n", display_btns.join(", ")));
+        }
+    }
+
+    out
+}
+
+#[cfg(not(windows))]
+fn summarize_screen_state(_target_window: Option<&str>) -> String {
+    "[Analyse de l'écran] Environnement non-Windows (simulation).".to_string()
+}
+
+#[cfg(windows)]
 fn execute_system_actions(actions: &[AgentAction]) -> String {
     if actions.is_empty() {
         println!("[Actions] Aucune action système à exécuter.");
@@ -3232,7 +3375,20 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
 
     for action in actions {
         if let AgentAction::OpenApp { name } = action {
-            let initial_hwnds: std::collections::HashSet<isize> = list_user_windows()
+            let current_windows = list_user_windows();
+            let matched_hwnds = find_windows_matching(name, &current_windows, None);
+            if let Some(&hwnd) = matched_hwnds.first() {
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                    let _ = SetForegroundWindow(hwnd);
+                }
+                println!("[Actions] Fenêtre déjà existante pour '{}' [HWND {:?}], restaurée et placée au premier plan.", name, hwnd.0);
+                newly_spawned_hwnd = Some(hwnd);
+                feedback.push(format!("Application '{}' déjà ouverte : fenêtre restaurée et placée au premier plan.", name));
+                continue;
+            }
+
+            let initial_hwnds: std::collections::HashSet<isize> = current_windows
                 .into_iter()
                 .map(|(h, _)| h.0 as isize)
                 .collect();
@@ -3261,6 +3417,8 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                 println!("[Actions] Exécutable introuvable, ouverture de la recherche : {}", search_url);
                 launch_browser_new_window(&search_url);
                 feedback.push(format!("Application non trouvée localement ; recherche web lancée pour '{}'.", name));
+            } else {
+                feedback.push(format!("Application '{}' lancée.", name));
             }
 
             for _ in 0..25 {
@@ -4023,6 +4181,11 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                 }
                 feedback.push(format!("Raccourci système '{}' envoyé.", shortcut));
             }
+            AgentAction::SummarizeScreen { window } => {
+                println!("[Actions] Analyse de l'écran en cours (fenêtre : {:?})", window);
+                let summary = summarize_screen_state(window.as_deref());
+                feedback.push(summary);
+            }
         }
     }
 
@@ -4071,6 +4234,7 @@ Prends en compte l'historique des échanges pour assurer la continuité de la co
 Règles d'autonomie et de ciblage :
 - Navigation web directe : Si l'utilisateur demande d'aller sur un site, d'accéder à un domaine, d'effectuer une recherche ou d'ouvrir une page web (ex: "aller sur google.fr", "navigue vers github.com", "cherche la météo", "ouvre le navigateur") : utilise TOUJOURS directement l'action "navigate_to_url" avec l'adresse complète dans "url". Ne passe JAMAIS par une saisie manuelle dans la barre d'adresse ni par des raccourcis Ctrl+L, le système traite nativement "navigate_to_url".
 - Saisie et zone de texte : Pour toute commande demandant d'écrire ou remplacer du texte sans cible spécifique ou visant une « zone de texte », un champ ou le document en cours, renseigne TOUJOURS "target": null dans "write_text" ou "replace_field_text". Cela déclenchera immédiatement la sélection automatique de la plus vaste zone de saisie à l'écran.
+- Résumé et analyse visuelle de l'écran : Si l'utilisateur demande de résumer, décrire ou analyser ce qui est affiché ou visible à l'écran ou dans une fenêtre (ex: "résume ce qu'il y a à l'écran", "qu'est-ce qui est ouvert ?", "lis ce qui est affiché") : utilise TOUJOURS l'action "summarize_screen" (avec "window": null ou le titre ciblé). Le système inspectera automatiquement les fenêtres et l'arbre UIA puis te fournira le rapport complet à l'étape suivante pour que tu le synthétises à l'utilisateur.
 - Extraction stricte du texte : Sépare TOUJOURS le texte à écrire de sa cible d'UI ou de sa destination. Par exemple, si la consigne est "écris bonjour dans la zone de texte", le texte à saisir est STRICTEMENT "bonjour" ("text": "bonjour") et la cible est "target": null. Ne recopie JAMAIS les compléments de lieu ou d'interface ("dans la zone de texte", "dans le champ...") à l'intérieur du champ "text".
 - Si l'utilisateur demande d'ouvrir une application, un outil ou un logiciel (ex: invite de commande, terminal, bloc-notes, messagerie, calculatrice, etc.), détermine TOI-MÊME le nom exact de son exécutable Windows binaire (ex: "cmd", "wt", "notepad", "calc", "thunderbird", "explorer", "code", "mspaint", etc.) et utilise l'action "open_app" avec ce nom direct d'exécutable dans "name".
 - Si l'utilisateur demande de fermer une application ou une fenêtre, utilise l'action "close_app" avec le nom de l'exécutable ou un mot-clé du titre dans "name".
@@ -4106,7 +4270,8 @@ Format json obligatoire :
     {"action": "tile_windows", "layout": "split_horizontal" | "split_vertical" | "grid_2x2" | "master_stack", "windows": ["titre_fenetre_1", "titre_fenetre_2"]},
     {"action": "arrange_window", "title": "mot_cle_ou_active", "position": "left" | "right" | "top" | "bottom" | "top_left" | "top_right" | "bottom_left" | "bottom_right" | "left_two_thirds" | "right_one_third" | "left_one_third" | "right_two_thirds" | "center" | "maximize" | "minimize"},
     {"action": "move_window", "title": "mot_cle", "x": 0, "y": 0, "width": 960, "height": 1040},
-    {"action": "accessibility_shortcut", "shortcut": "snap_left" | "snap_right" | "snap_up" | "snap_down" | "snap_top_half" | "snap_bottom_half" | "minimize_others" | "restore_window" | "magnifier_zoom_in" | "magnifier_zoom_out" | "magnifier_close" | "narrator_toggle" | "color_filter_toggle" | "accessibility_settings" | "clipboard_history" | "mute_mic" | "toggle_desktop" | "snap_layouts" | "task_manager" | "snip_screenshot" | "action_center" | "notification_center" | "task_view" | "open_search" | "open_run" | "open_settings" | "lock_screen" | "emoji_panel" | "minimize_all" | "restore_minimized" | "new_desktop" | "next_desktop" | "prev_desktop" | "close_desktop" | "move_window_monitor_left" | "move_window_monitor_right" | "file_explorer" | "quick_link_menu" | "project_display" | "cast_display" | "screen_recording" | "select_all" | "copy" | "undo" | "redo" | "find_in_page" | "close_tab" | "reopen_tab" | "refresh_page" | "next_field" | "previous_field"}
+    {"action": "accessibility_shortcut", "shortcut": "snap_left" | "snap_right" | "snap_up" | "snap_down" | "snap_top_half" | "snap_bottom_half" | "minimize_others" | "restore_window" | "magnifier_zoom_in" | "magnifier_zoom_out" | "magnifier_close" | "narrator_toggle" | "color_filter_toggle" | "accessibility_settings" | "clipboard_history" | "mute_mic" | "toggle_desktop" | "snap_layouts" | "task_manager" | "snip_screenshot" | "action_center" | "notification_center" | "task_view" | "open_search" | "open_run" | "open_settings" | "lock_screen" | "emoji_panel" | "minimize_all" | "restore_minimized" | "new_desktop" | "next_desktop" | "prev_desktop" | "close_desktop" | "move_window_monitor_left" | "move_window_monitor_right" | "file_explorer" | "quick_link_menu" | "project_display" | "cast_display" | "screen_recording" | "select_all" | "copy" | "undo" | "redo" | "find_in_page" | "close_tab" | "reopen_tab" | "refresh_page" | "next_field" | "previous_field"},
+    {"action": "summarize_screen", "window": "titre_optionnel"}
   ]
 }"#;
 
@@ -4129,8 +4294,8 @@ Format json obligatoire :
             }
         }
 
-        if history.len() > 20 {
-            history.drain(0..history.len() - 20);
+        if history.len() > 8 {
+            history.drain(0..history.len() - 8);
         }
 
         let mut messages = Vec::with_capacity(history.len() + 1);
@@ -4189,21 +4354,27 @@ Format json obligatoire :
                     break;
                 }
                 Ok(res) if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempts <= MAX_RETRIES => {
-                    let wait_duration = if let Some(retry_after) = res.headers().get("retry-after") {
-                        if let Ok(secs) = retry_after.to_str().unwrap_or("").parse::<u64>() {
-                            Duration::from_secs(secs.max(3))
-                        } else {
-                            DEFAULT_RETRY_DELAY
-                        }
-                    } else {
-                        DEFAULT_RETRY_DELAY
-                    };
+                    let wait_secs = res.headers()
+                        .get("retry-after")
+                        .and_then(|h| h.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(3);
 
-                    let secs_display = wait_duration.as_secs_f32().ceil() as u64;
+                    // Si le délai dépasse 12 secondes, il s'agit d'une saturation de jetons (TPM) : ne pas bloquer l'agent pendant 7 minutes
+                    if wait_secs > 12 {
+                        history.pop();
+                        let mins = (wait_secs + 59) / 60;
+                        let _ = event_tx.send(AgentEvent::ReplaceNarration(format!(
+                            "Quota de jetons Groq saturé (pause requise de {mins} min). L'historique a été allégé pour réinitialiser la consommation."
+                        )));
+                        history.clear();
+                        break;
+                    }
+
                     let _ = event_tx.send(AgentEvent::SilentNarration(format!(
-                        "Limite d'appels Groq atteinte. Pause de {secs_display} secondes avant réessai..."
+                        "Limite de requêtes atteinte. Pause de {wait_secs} s avant réessai..."
                     )));
-                    tokio::time::sleep(wait_duration).await;
+                    tokio::time::sleep(Duration::from_secs(wait_secs.max(2))).await;
                     continue;
                 }
                 Ok(res) => {
@@ -4250,10 +4421,16 @@ Format json obligatoire :
         }).await.unwrap_or_else(|_| "Erreur d'exécution.".to_string());
 
         if pass < MAX_AGENT_PASSES {
+            // Tronquer le rapport pour éviter de saturer le quota de jetons par minute (TPM)
+            let compact_report = if report.len() > 1500 {
+                format!("{}...\n[Rapport tronqué]", &report[..1500])
+            } else {
+                report
+            };
             history.push(ChatMessage {
                 role: "user".to_string(),
                 content: format!(
-                    "[Retour d'exécution étape {pass}] :\n{report}\n\nSi la tâche demandée est achevée, réponds avec \"actions\": [] et la narration finale. Sinon, transmets les actions nécessaires suivantes."
+                    "[Retour d'exécution étape {pass}] :\n{compact_report}\n\nSi la tâche demandée est achevée, réponds avec \"actions\": [] et la narration finale. Sinon, transmets les actions nécessaires suivantes."
                 ),
             });
         } else {

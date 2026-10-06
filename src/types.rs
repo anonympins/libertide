@@ -139,6 +139,10 @@ pub enum AgentAction {
     AccessibilityShortcut {
         shortcut: String,
     },
+    SummarizeScreen {
+        #[serde(default)]
+        window: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
