@@ -73,6 +73,7 @@ pub enum AgentCommand {
     Prompt(String),
     ClearHistory,
     SearchTwitch(String),
+    PeriodicScreenCheck,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -144,6 +145,13 @@ pub enum AgentAction {
         #[serde(default)]
         window: Option<String>,
     },
+    ActivateImmersion {
+        #[serde(default)]
+        apps: Vec<String>,
+        #[serde(default)]
+        layout: Option<String>,
+    },
+    DeactivateImmersion,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

@@ -6,6 +6,7 @@ use eframe::egui;
 use serde::Deserialize;
 use types::*;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -640,6 +641,7 @@ impl OverlayApp {
 
     fn trigger_emergency_stop(&mut self, ctx: &egui::Context) {
         self.continuous_mode = false;
+        IS_EMERGENCY_STOPPED.store(true, Ordering::SeqCst);
         if self.is_recording {
             self.stop_recording();
         }
@@ -660,6 +662,7 @@ impl OverlayApp {
         if self.status == AgentStatus::EmergencyStopped {
             return;
         }
+        IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
         self.continuous_mode = true;
         self.is_recording = true;
         self.status = AgentStatus::Listening;
@@ -2686,6 +2689,16 @@ fn run_system_command(command: &str) -> bool {
 
 #[cfg(windows)]
 static LAST_TXT_HWND: Mutex<Option<isize>> = Mutex::new(None);
+static LAST_SCREEN_SUMMARY: Mutex<Option<String>> = Mutex::new(None);
+static AGENT_BUSY: AtomicBool = AtomicBool::new(false);
+static IS_EMERGENCY_STOPPED: AtomicBool = AtomicBool::new(false);
+
+struct BusyGuard;
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        AGENT_BUSY.store(false, Ordering::SeqCst);
+    }
+}
 
 #[cfg(windows)]
 fn send_unicode_text(text: &str) {
@@ -4285,8 +4298,139 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
             }
             AgentAction::SummarizeScreen { window } => {
                 println!("[Actions] Analyse de l'écran en cours (fenêtre : {:?})", window);
-                let summary = summarize_screen_state(window.as_deref());
-                feedback.push(summary);
+                let current_summary = summarize_screen_state(window.as_deref());
+                let prev_summary = {
+                    let mut lock = LAST_SCREEN_SUMMARY.lock().unwrap_or_else(|e| e.into_inner());
+                    let prev = lock.clone();
+                    *lock = Some(current_summary.clone());
+                    prev
+                };
+
+                if let Some(prev) = prev_summary {
+                    let comparison = format!(
+                        "=== Analyse différentielle d'écran ===\n\n[État d'écran précédent] :\n{}\n\n[État d'écran actuel] :\n{}\n\n[Instruction d'analyse comparative] : Compare minutieusement les deux états fournis (fenêtre au premier plan, fenêtres ouvertes ou fermées, contenu des champs de saisie, boutons disponibles). Explique clairement les changements survenus à l'utilisateur et propose la suite d'actions la plus pertinente.",
+                        truncate_with_notice(&prev, 1500),
+                        truncate_with_notice(&current_summary, 1500)
+                    );
+                    feedback.push(comparison);
+                } else {
+                    feedback.push(current_summary);
+                }
+            }
+            AgentAction::ActivateImmersion { apps, layout } => {
+                println!("[Actions] Activation du mode immersion (apps: {:?}, layout: {:?})", apps, layout);
+
+                // 1. Analyse préalable de l'état de l'écran
+                let initial_summary = summarize_screen_state(None);
+                feedback.push(format!("Analyse pré-immersion :\n{}", truncate_with_notice(&initial_summary, 600)));
+
+                // 2. Création et bascule vers un nouveau bureau virtuel (Win + Ctrl + D)
+                const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
+                const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+                const VK_D: VIRTUAL_KEY = VIRTUAL_KEY(0x44);
+                send_hotkey(&[VK_LWIN, VK_CONTROL], VK_D);
+                std::thread::sleep(Duration::from_millis(400));
+
+                // 3. Lancement des applications spécifiées pour l'immersion
+                let mut spawned_windows = Vec::new();
+                for app in apps {
+                    let app_trimmed = app.trim();
+                    if app_trimmed.is_empty() {
+                        continue;
+                    }
+                    let before_windows = list_user_windows();
+                    let before_hwnds: std::collections::HashSet<isize> = before_windows.iter().map(|(h, _)| h.0 as isize).collect();
+
+                    if let Some(exe_path) = find_executable_in_path(app_trimmed) {
+                        let mut cmd = std::process::Command::new(exe_path);
+                        let _ = cmd.spawn();
+                    } else {
+                        let mut cmd = std::process::Command::new(app_trimmed);
+                        let _ = cmd.spawn();
+                    }
+
+                    for _ in 0..15 {
+                        std::thread::sleep(Duration::from_millis(100));
+                        let after_windows = list_user_windows();
+                        if let Some((h, _)) = after_windows.iter().find(|(h, _)| !before_hwnds.contains(&(h.0 as isize))) {
+                            spawned_windows.push(*h);
+                            break;
+                        }
+                    }
+                }
+
+                // 4. Disposition et tuilage automatique des fenêtres
+                let layout_mode = layout.as_deref().unwrap_or("split_horizontal");
+                let current_windows = list_user_windows();
+                let target_hwnds: Vec<HWND> = if !spawned_windows.is_empty() {
+                    spawned_windows
+                } else {
+                    current_windows.iter().take(2).map(|(h, _)| *h).collect()
+                };
+
+                let count = target_hwnds.len().max(1) as i32;
+                if count >= 2 {
+                    match layout_mode {
+                        "grid" | "quad" | "grid_2x2" => {
+                            let half_w = wa_w / 2;
+                            let half_h = wa_h / 2;
+                            let coords = [
+                                (wa_x, wa_y),
+                                (wa_x + half_w, wa_y),
+                                (wa_x, wa_y + half_h),
+                                (wa_x + half_w, wa_y + half_h),
+                            ];
+                            for (idx, &h) in target_hwnds.iter().take(4).enumerate() {
+                                let (x, y) = coords[idx];
+                                apply_window_rect(h, x, y, half_w, half_h);
+                            }
+                        }
+                        "master_stack" | "focus_side" => {
+                            if let Some(&first) = target_hwnds.first() {
+                                let master_w = (wa_w * 65) / 100;
+                                apply_window_rect(first, wa_x, wa_y, master_w, wa_h);
+                                let rest = &target_hwnds[1..];
+                                let rest_count = rest.len().max(1) as i32;
+                                let stack_h = wa_h / rest_count;
+                                let stack_w = wa_w - master_w;
+                                for (i, &h) in rest.iter().enumerate() {
+                                    apply_window_rect(
+                                        h,
+                                        wa_x + master_w,
+                                        wa_y + (i as i32 * stack_h),
+                                        stack_w,
+                                        stack_h,
+                                    );
+                                }
+                            }
+                        }
+                        _ => {
+                            if target_hwnds.len() == 2 {
+                                snap_window_pair(target_hwnds[0], target_hwnds[1]);
+                            } else {
+                                let w = wa_w / count;
+                                for (idx, &h) in target_hwnds.iter().enumerate() {
+                                    apply_window_rect(h, wa_x + (idx as i32 * w), wa_y, w, wa_h);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 5. Analyse post-installation du nouvel espace immersif
+                std::thread::sleep(Duration::from_millis(200));
+                let post_summary = summarize_screen_state(None);
+                feedback.push(format!("Mode immersion actif (bureau virtuel créé, disposition : {}). Nouvel état d'écran :\n{}", layout_mode, truncate_with_notice(&post_summary, 800)));
+            }
+            AgentAction::DeactivateImmersion => {
+                println!("[Actions] Désactivation du mode immersion");
+                const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
+                const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+                const VK_F4: VIRTUAL_KEY = VIRTUAL_KEY(0x73);
+                send_hotkey(&[VK_LWIN, VK_CONTROL], VK_F4);
+                std::thread::sleep(Duration::from_millis(300));
+                let current_summary = summarize_screen_state(None);
+                feedback.push(format!("Mode immersion désactivé : bureau virtuel fermé. Retour à l'espace initial :\n{}", truncate_with_notice(&current_summary, 600)));
             }
         }
     }
@@ -4410,7 +4554,10 @@ async fn call_deepseek_prompt(
     history: &mut Vec<ChatMessage>,
     event_tx: Sender<AgentEvent>,
     last_call_time: &mut Option<Instant>,
+    is_periodic: bool,
 ) {
+    AGENT_BUSY.store(true, Ordering::SeqCst);
+    let _busy_guard = BusyGuard;
     let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
 
     if api_key.is_empty() {
@@ -4436,7 +4583,7 @@ Règle de filtrage strict et silence ("invalid_request") :
 Règles d'autonomie et de ciblage :
 - Navigation web directe : Si l'utilisateur demande d'aller sur un site, d'accéder à un domaine, d'effectuer une recherche ou d'ouvrir une page web (ex: "aller sur google.fr", "navigue vers github.com", "cherche la météo", "ouvre le navigateur") : utilise TOUJOURS directement l'action "navigate_to_url" avec l'adresse complète dans "url". Ne passe JAMAIS par une saisie manuelle dans la barre d'adresse ni par des raccourcis Ctrl+L, le système traite nativement "navigate_to_url".
 - Saisie et zone de texte : Pour toute commande demandant d'écrire ou remplacer du texte sans cible spécifique ou visant une « zone de texte », un champ ou le document en cours, renseigne TOUJOURS "target": null dans "write_text" ou "replace_field_text". Cela déclenchera immédiatement la sélection automatique de la plus vaste zone de saisie à l'écran.
-- Résumé et analyse visuelle de l'écran : Si l'utilisateur demande de résumer, décrire ou analyser ce qui est affiché ou visible à l'écran ou dans une fenêtre (ex: "résume ce qu'il y a à l'écran", "qu'est-ce qui est ouvert ?", "lis ce qui est affiché") : utilise TOUJOURS l'action "summarize_screen" (avec "window": null ou le titre ciblé). Le système inspectera automatiquement les fenêtres et l'arbre UIA puis te fournira le rapport complet à l'étape suivante pour que tu le synthétises à l'utilisateur.
+- Résumé et analyse différentielle de l'écran : Si l'utilisateur demande de résumer, d'observer ou de vérifier l'écran ou ce qui a changé (ex: "résume ce qu'il y a à l'écran", "qu'est-ce qui a changé ?", "vérifie si l'action a fonctionné") : utilise TOUJOURS l'action "summarize_screen" (avec "window": null ou le titre ciblé). Le système t'enverra à la fois l'état d'écran précédent et l'état actuel dès qu'un état antérieur est disponible. Exploite ces deux sources pour identifier les changements réels (apparition d'une fenêtre, modification d'un champ texte, nouveau focus) et décider de la meilleure proposition.
 - Extraction stricte du texte : Sépare TOUJOURS le texte à écrire de sa cible d'UI ou de sa destination. Par exemple, si la consigne est "écris bonjour dans la zone de texte", le texte à saisir est STRICTEMENT "bonjour" ("text": "bonjour") et la cible est "target": null. Ne recopie JAMAIS les compléments de lieu ou d'interface ("dans la zone de texte", "dans le champ...") à l'intérieur du champ "text".
 - Si l'utilisateur demande d'ouvrir une application, un outil ou un logiciel (ex: invite de commande, terminal, bloc-notes, messagerie, calculatrice, etc.), détermine TOI-MÊME le nom exact de son exécutable Windows binaire (ex: "cmd", "wt", "notepad", "calc", "thunderbird", "explorer", "code", "mspaint", etc.) et utilise l'action "open_app" avec ce nom direct d'exécutable dans "name".
 - Si l'utilisateur demande de fermer une application ou une fenêtre, utilise l'action "close_app" avec le nom de l'exécutable ou un mot-clé du titre dans "name".
@@ -4448,6 +4595,9 @@ Règles d'autonomie et de ciblage :
 - Pour la disposition et l'agencement des fenêtres :
   * Si l'utilisateur nomme une application ou une fenêtre précise, utilise TOUJOURS "arrange_window" avec "title" correspondant à ce nom et "position" ("right" pour la droite, "left" pour la gauche).
   * Si l'utilisateur demande de mettre côte à côte deux fenêtres, de scinder l'écran ou de fusionner avec le slider, utilise "tile_windows" avec "layout": "split_horizontal" et "windows": ["fenetre_gauche", "fenetre_droite"].
+- Mode immersion et espace de travail dédié :
+  * Pour activer le mode immersion (ex: "active l'immersion", "lance le mode immersion", "crée un espace immersif", "espace de concentration") : utilise TOUJOURS "activate_immersion" avec optionnellement "apps": ["app1", "app2"] et "layout": "split_horizontal" | "master_stack" | "grid_2x2". Le système analyse l'écran, crée un bureau virtuel dédié (Win+Ctrl+D) et dispose les fenêtres.
+  * Pour désactiver l'immersion (ex: "quitte l'immersion", "désactive le mode immersion", "reviens au bureau normal") : utilise l'action "deactivate_immersion" qui fermera le bureau virtuel (Win+Ctrl+F4) et te fournira l'état récapitulatif.
 
 Boucle récursive d'exécution multi-étapes (3 passes max) :
 Tu opères dans un cycle récursif. Dès que tu renvoies des actions, le système les exécute immédiatement et te fournit un rapport d'exécution sous la forme `[Retour d'exécution étape X]`.
@@ -4473,7 +4623,9 @@ Format json obligatoire :
     {"action": "arrange_window", "title": "mot_cle_ou_active", "position": "left" | "right" | "top" | "bottom" | "top_left" | "top_right" | "bottom_left" | "bottom_right" | "left_two_thirds" | "right_one_third" | "left_one_third" | "right_two_thirds" | "center" | "maximize" | "minimize"},
     {"action": "move_window", "title": "mot_cle", "x": 0, "y": 0, "width": 960, "height": 1040},
     {"action": "accessibility_shortcut", "shortcut": "snap_left" | "snap_right" | "snap_up" | "snap_down" | "snap_top_half" | "snap_bottom_half" | "minimize_others" | "restore_window" | "magnifier_zoom_in" | "magnifier_zoom_out" | "magnifier_close" | "narrator_toggle" | "color_filter_toggle" | "accessibility_settings" | "clipboard_history" | "mute_mic" | "toggle_desktop" | "snap_layouts" | "task_manager" | "snip_screenshot" | "action_center" | "notification_center" | "task_view" | "open_search" | "open_run" | "open_settings" | "lock_screen" | "emoji_panel" | "minimize_all" | "restore_minimized" | "new_desktop" | "next_desktop" | "prev_desktop" | "close_desktop" | "move_window_monitor_left" | "move_window_monitor_right" | "file_explorer" | "quick_link_menu" | "project_display" | "cast_display" | "screen_recording" | "select_all" | "copy" | "undo" | "redo" | "find_in_page" | "close_tab" | "reopen_tab" | "refresh_page" | "next_field" | "previous_field"},
-    {"action": "summarize_screen", "window": "titre_optionnel"}
+    {"action": "summarize_screen", "window": "titre_optionnel"},
+    {"action": "activate_immersion", "apps": ["code", "chrome"], "layout": "split_horizontal"},
+    {"action": "deactivate_immersion"}
   ]
 }"#;
 
@@ -4620,13 +4772,23 @@ Format json obligatoire :
             return;
         }
 
+        if is_periodic && payload.actions.is_empty() && payload.narration.trim().is_empty() {
+            println!("[Surveillance] L'IA a analysé l'écran : aucune action nécessaire.");
+            history.pop();
+            history.pop();
+            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+            return;
+        }
+
         println!("[Agent] Narration (Passe {}) : \"{}\"", pass, payload.narration);
         println!("[Agent] {} action(s) planifiée(s) :", payload.actions.len());
         for (i, act) in payload.actions.iter().enumerate() {
             println!("  [{}] {:?}", i + 1, act);
         }
 
-        let _ = event_tx.send(AgentEvent::ReplaceNarration(payload.narration.clone()));
+        if !payload.narration.trim().is_empty() {
+            let _ = event_tx.send(AgentEvent::ReplaceNarration(payload.narration.clone()));
+        }
 
         if payload.actions.is_empty() {
             println!("[Agent] Tâche accomplie : aucune action supplémentaire. Fin de la séquence après {} passe(s).", pass);
@@ -4667,6 +4829,15 @@ fn main() -> eframe::Result<()> {
 
     let initial_twitch_channel = std::env::var("TWITCH_CHANNEL").unwrap_or_default();
 
+    // Horloge d'analyse périodique d'écran toutes les 60 secondes
+    let periodic_cmd_tx = cmd_tx.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+            let _ = periodic_cmd_tx.send(AgentCommand::PeriodicScreenCheck);
+        }
+    });
+
     // Runtime Tokio en arrière-plan pour requêter DeepSeek
     let deepseek_chat_key = deepseek_key.clone();
     let tts_worker_tx = tts_tx.clone();
@@ -4679,6 +4850,7 @@ fn main() -> eframe::Result<()> {
             while let Ok(cmd) = cmd_rx.recv() {
                 match cmd {
                     AgentCommand::Prompt(prompt) => {
+                        IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
                         if let Some(cli_feedback) = try_execute_direct_cli(&prompt) {
                             let _ = event_tx.send(AgentEvent::ReplaceNarration(cli_feedback.clone()));
                         } else if let Some(text_to_write) = parse_write_command(&prompt) {
@@ -4710,15 +4882,66 @@ fn main() -> eframe::Result<()> {
                                 prompt
                             };
 
-                            call_deepseek_prompt(deepseek_chat_key.clone(), final_prompt, &mut history, event_tx.clone(), &mut last_call_time).await;
+                            call_deepseek_prompt(deepseek_chat_key.clone(), final_prompt, &mut history, event_tx.clone(), &mut last_call_time, false).await;
                         }
                     }
                     AgentCommand::ClearHistory => {
+                        IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
                         history.clear();
+                        if let Ok(mut lock) = LAST_SCREEN_SUMMARY.lock() {
+                            *lock = None;
+                        }
                     }
                     AgentCommand::SearchTwitch(query) => {
                         let results = search_twitch_channels(&query).await;
                         let _ = event_tx.send(AgentEvent::TwitchSearchResults(results));
+                    }
+                    AgentCommand::PeriodicScreenCheck => {
+                        if IS_EMERGENCY_STOPPED.load(Ordering::SeqCst) {
+                            continue;
+                        }
+                        if AGENT_BUSY.load(Ordering::SeqCst) {
+                            println!("[Surveillance] Agent occupé, analyse d'écran différée.");
+                            continue;
+                        }
+
+                        #[cfg(windows)]
+                        {
+                            let current_summary = tokio::task::spawn_blocking(|| {
+                                summarize_screen_state(None)
+                            }).await.unwrap_or_default();
+
+                            let prev_summary = {
+                                let mut lock = LAST_SCREEN_SUMMARY.lock().unwrap_or_else(|e| e.into_inner());
+                                let prev = lock.clone();
+                                *lock = Some(current_summary.clone());
+                                prev
+                            };
+
+                            if let Some(prev) = prev_summary {
+                                if prev.trim() == current_summary.trim() {
+                                    println!("[Surveillance] Aucun changement à l'écran.");
+                                    continue;
+                                }
+
+                                println!("[Surveillance] Changement détecté, transmission du différentiel au LLM...");
+                                let diff_prompt = format!(
+                                    "[Surveillance périodique automatique de l'écran]\n\n\
+                                    [État d'écran précédent] :\n{}\n\n\
+                                    [État d'écran actuel] :\n{}\n\n\
+                                    Instruction : Analyse les différences entre ces deux états d'écran. \
+                                    Détermine si une intervention ou une suite d'actions est nécessaire ou utile pour assister l'utilisateur.\n\
+                                    - Si aucune intervention n'est requise : réponds STRICTEMENT avec \"actions\": [] et \"narration\": \"\" pour préserver le silence.\n\
+                                    - Si une intervention est pertinente : renseigne \"narration\" pour expliquer ce que tu constates et fournis la suite d'actions à exécuter dans \"actions\".",
+                                    truncate_with_notice(&prev, 1500),
+                                    truncate_with_notice(&current_summary, 1500)
+                                );
+
+                                call_deepseek_prompt(deepseek_chat_key.clone(), diff_prompt, &mut history, event_tx.clone(), &mut last_call_time, true).await;
+                            } else {
+                                println!("[Surveillance] Premier instantané d'écran enregistré.");
+                            }
+                        }
                     }
                 }
             }
