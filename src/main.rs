@@ -4286,7 +4286,7 @@ Format json obligatoire :
         let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
 
         // Debounce : garantir au moins 3,0 s de repos réel entre deux requêtes à Groq
-        let min_debounce = Duration::from_millis(3000);
+        let min_debounce = Duration::from_millis(5000);
         if let Some(prev) = *last_call_time {
             let elapsed = prev.elapsed();
             if elapsed < min_debounce {
