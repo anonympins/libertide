@@ -165,15 +165,15 @@ pub async fn transcribe_audio(
     loop {
         attempts += 1;
         let part = reqwest::multipart::Part::bytes(wav_data.clone())
-            .file_name("speech.wav")
+            .file_name("audio.wav")
             .mime_str("audio/wav")?;
 
         let form = reqwest::multipart::Form::new()
             .part("file", part)
-            .text("model", "whisper-large-v3-turbo")
+            .text("model", "whisper-large-v3")
             .text("language", "fr")
-            .text("prompt", "Transcription en français uniquement.")
-            .text("response_format", "json");
+            .text("temperature", "0")
+            .text("response_format", "verbose_json");
 
         let res = client
             .post("https://api.groq.com/openai/v1/audio/transcriptions")
@@ -189,11 +189,12 @@ pub async fn transcribe_audio(
 
         if !res.status().is_success() {
             let err = res.text().await.unwrap_or_default();
-            return Err(format!("Erreur transcription: {err}").into());
+            return Err(format!("Erreur transcription : {err}").into());
         }
 
         #[derive(Deserialize)]
         struct TranscribeResp {
+            #[serde(default)]
             text: String,
         }
 
@@ -206,10 +207,10 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, groq_key: String) -> Sen
     let (cmd_tx, cmd_rx) = channel::<AudioCommand>();
 
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Échec runtime audio");
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
 
         let host = cpal::default_host();
 
@@ -376,44 +377,69 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, groq_key: String) -> Sen
                 let recent_rms = if !slice.is_empty() { (sum_sq / slice.len() as f32).sqrt() } else { 0.0 };
                 last_processed_len = current_len;
 
-                if recent_rms > 0.015 {
+                if recent_rms > 0.006 {
                     last_voice_instant = Instant::now();
                     has_spoken = true;
                 }
 
                 // Retranscription intermédiaire en temps réel pendant l'élocution
-                if has_spoken && last_interim_instant.elapsed() >= Duration::from_millis(1500) {
+                if has_spoken && last_interim_instant.elapsed() >= Duration::from_millis(1200) {
                     last_interim_instant = Instant::now();
                     let snapshot = cleaned_audio.clone();
-                    if !snapshot.is_empty() {
+                    if snapshot.len() >= 4800 {
                         let wav = encode_wav(&snapshot, TARGET_SAMPLE_RATE, 1);
                         let key = groq_key.clone();
                         let tx_clone = event_tx.clone();
                         rt.spawn(async move {
                             if let Ok(text) = transcribe_audio(&key, wav).await {
-                                if !text.is_empty() {
-                                    let _ = tx_clone.send(AgentEvent::TranscriptionPartial(text));
+                                let trimmed = text.trim();
+                                if !trimmed.is_empty() {
+                                    let _ = tx_clone.send(AgentEvent::TranscriptionPartial(trimmed.to_string()));
                                 }
                             }
                         });
                     }
                 }
 
-                // Si l'utilisateur s'arrête de parler pendant 1,4 s, la consigne est validée
-                if has_spoken && last_voice_instant.elapsed() >= Duration::from_millis(1400) {
-                    break;
+                // Détection de pause prononcée (~1,0 s) : transcription du segment vocal courant
+                if has_spoken && last_voice_instant.elapsed() >= Duration::from_millis(1000) {
+                    let chunk = std::mem::take(&mut cleaned_audio);
+                    last_processed_len = 0;
+                    has_spoken = false;
+
+                    if chunk.len() >= 4800 { // Au moins 300 ms de parole
+                        let wav = encode_wav(&chunk, TARGET_SAMPLE_RATE, 1);
+                        match rt.block_on(transcribe_audio(&groq_key, wav)) {
+                            Ok(text) => {
+                                let trimmed = text.trim();
+                                if trimmed.chars().any(|c| c.is_alphanumeric()) {
+                                    let _ = event_tx.send(AgentEvent::VoicePromptReady(trimmed.to_string()));
+                                    break;
+                                }
+                            }
+                            Err(err) => {
+                                let _ = event_tx.send(AgentEvent::SilentNarration(format!("Erreur transcription groq : {err}")));
+                            }
+                        }
+                    }
                 }
             }
 
             drop(mic_stream);
             drop(spk_stream);
 
-            if has_spoken && !cleaned_audio.is_empty() {
+            if has_spoken && !cleaned_audio.is_empty() && cleaned_audio.len() >= 4800 {
                 let wav = encode_wav(&cleaned_audio, TARGET_SAMPLE_RATE, 1);
-                if let Ok(final_text) = rt.block_on(transcribe_audio(&groq_key, wav)) {
-                    if !final_text.is_empty() {
-                        let _ = event_tx.send(AgentEvent::VoicePromptReady(final_text));
-                        continue;
+                match rt.block_on(transcribe_audio(&groq_key, wav)) {
+                    Ok(final_text) => {
+                        let trimmed = final_text.trim();
+                        if trimmed.chars().any(|c| c.is_alphanumeric()) {
+                            let _ = event_tx.send(AgentEvent::VoicePromptReady(trimmed.to_string()));
+                            continue;
+                        }
+                    }
+                    Err(err) => {
+                        let _ = event_tx.send(AgentEvent::SilentNarration(format!("Erreur transcription groq : {err}")));
                     }
                 }
             }

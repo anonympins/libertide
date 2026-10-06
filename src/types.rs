@@ -47,6 +47,7 @@ pub enum AgentEvent {
     StatusChanged(AgentStatus),
     NarrationChunk(String),
     ReplaceNarration(String),
+    SilentNarration(String),
     TranscriptionPartial(String),
     VoicePromptReady(String),
     TtsFinished,
@@ -91,9 +92,22 @@ pub enum AgentAction {
     },
     WriteText {
         text: String,
+        #[serde(default, alias = "target_name")]
+        target: Option<String>,
+        #[serde(default)]
+        window: Option<String>,
+    },
+    ReplaceFieldText {
+        text: String,
+        #[serde(default, alias = "target_name")]
+        target: Option<String>,
+        #[serde(default)]
+        window: Option<String>,
     },
     ClearText {
         window: Option<String>,
+        #[serde(default, alias = "target_name")]
+        target: Option<String>,
     },
     FocusElement {
         window: Option<String>,
