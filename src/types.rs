@@ -159,21 +159,21 @@ pub struct ChatMessage {
 }
 
 #[derive(Serialize, Debug)]
-pub struct GroqChatRequest {
+pub struct DeepSeekChatRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub temperature: f32,
-    pub max_completion_tokens: u32,
+    pub max_tokens: u32,
     pub top_p: f32,
     pub stream: bool,
 }
 
 #[derive(Deserialize, Debug)]
-pub struct GroqChoice {
+pub struct DeepSeekChoice {
     pub message: ChatMessage,
 }
 
 #[derive(Deserialize, Debug)]
-pub struct GroqChatResponse {
-    pub choices: Vec<GroqChoice>,
+pub struct DeepSeekChatResponse {
+    pub choices: Vec<DeepSeekChoice>,
 }

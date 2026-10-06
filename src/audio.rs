@@ -229,7 +229,7 @@ unsafe fn hide_speech_bar() {
 }
 
 #[cfg(windows)]
-pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _groq_key: String) -> Sender<AudioCommand> {
+pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _deepseek_key: String) -> Sender<AudioCommand> {
     let (cmd_tx, cmd_rx) = channel::<AudioCommand>();
 
     std::thread::spawn(move || {
@@ -374,7 +374,7 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _groq_key: String) -> Se
 }
 
 #[cfg(not(windows))]
-pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _groq_key: String) -> Sender<AudioCommand> {
+pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _deepseek_key: String) -> Sender<AudioCommand> {
     let (cmd_tx, cmd_rx) = channel::<AudioCommand>();
     std::thread::spawn(move || {
         while let Ok(cmd) = cmd_rx.recv() {

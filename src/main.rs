@@ -255,7 +255,7 @@ fn is_hide_command(text: &str) -> bool {
         w == "ferme" || w == "fermer" || w == "cache" || w == "cacher" || w == "masque" || w == "masquer" || w == "disparais"
     });
     let has_target = words.iter().any(|w| {
-        w == "toi" || w == "overlay" || w == "groq" || w == "libertide"
+        w == "toi" || w == "overlay" || w == "deepseek" || w == "groq" || w == "libertide"
     });
     has_verb && has_target
 }
@@ -266,7 +266,7 @@ fn is_show_command(text: &str) -> bool {
         w == "ouvre" || w == "ouvrir" || w == "affiche" || w == "afficher" || w == "montre" || w == "montrer" || w == "reveille" || w == "réveille" || w == "reveiller" || w == "réveiller"
     });
     let has_target = words.iter().any(|w| {
-        w == "toi" || w == "overlay" || w == "groq" || w == "libertide"
+        w == "toi" || w == "overlay" || w == "deepseek" || w == "groq" || w == "libertide"
     });
     has_verb && has_target
 }
@@ -828,7 +828,7 @@ impl eframe::App for OverlayApp {
                                 text: prompt,
                                 timestamp: current_time_str(),
                             });
-                            let reply = "Overlay masqué. Je reste à l'écoute pour « groq ouvre toi ».".to_string();
+                            let reply = "Overlay masqué. Je reste à l'écoute pour « deepseek ouvre toi ».".to_string();
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
@@ -964,7 +964,7 @@ impl eframe::App for OverlayApp {
                                             ui.horizontal(|ui| {
                                                 let (label_name, label_color) = match entry.role {
                                                     ChatRole::User => ("🗣 Vous", egui::Color32::from_rgb(255, 215, 120)),
-                                                    ChatRole::Agent => ("Groq", egui::Color32::from_rgb(0, 195, 255)),
+                                                    ChatRole::Agent => ("DeepSeek", egui::Color32::from_rgb(0, 195, 255)),
                                                 };
                                                 ui.label(
                                                     egui::RichText::new(label_name)
@@ -1127,10 +1127,10 @@ impl eframe::App for OverlayApp {
                             ui.allocate_ui_at_rect(content_area, |ui| {
                                 ui.vertical(|ui| {
                                     let status_badge = match self.status {
-                                        AgentStatus::Idle => "Groq · en veille",
-                                        AgentStatus::Thinking => "Groq · réflexion...",
-                                        AgentStatus::Speaking => "Groq · en direct",
-                                        AgentStatus::Listening => "Groq · écoute active (r)...",
+                                        AgentStatus::Idle => "DeepSeek · en veille",
+                                        AgentStatus::Thinking => "DeepSeek · réflexion...",
+                                        AgentStatus::Speaking => "DeepSeek · en direct",
+                                        AgentStatus::Listening => "DeepSeek · écoute active (r)...",
                                         AgentStatus::EmergencyStopped => "Système verrouillé",
                                     };
 
@@ -1208,7 +1208,7 @@ impl eframe::App for OverlayApp {
                                             if is_hide_command(&prompt) {
                                                 self.is_hidden = true;
                                                 self.status = AgentStatus::Idle;
-                                                let reply = "Overlay masqué. Je reste à l'écoute pour « groq ouvre toi ».".to_string();
+                                                let reply = "Overlay masqué. Je reste à l'écoute pour « deepseek ouvre toi ».".to_string();
                                                 self.chat_history.push(ChatEntry {
                                                     role: ChatRole::Agent,
                                                     text: reply.clone(),
@@ -1293,8 +1293,8 @@ impl eframe::App for OverlayApp {
     }
 }
 
-fn resolve_groq_key() -> String {
-    if let Ok(key) = std::env::var("GROQ_API_KEY") {
+fn resolve_deepseek_key() -> String {
+    if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
         let trimmed = key.trim();
         if !trimmed.is_empty() {
             return trimmed.to_string();
@@ -1307,7 +1307,7 @@ fn resolve_groq_key() -> String {
             if line.starts_with('#') {
                 continue;
             }
-            if let Some(rest) = line.strip_prefix("GROQ_API_KEY=") {
+            if let Some(rest) = line.strip_prefix("DEEPSEEK_API_KEY=") {
                 let val = rest.trim().trim_matches('"').trim_matches('\'');
                 if !val.is_empty() {
                     return val.to_string();
@@ -4301,8 +4301,8 @@ async fn compact_history_if_needed(
         }
     }
 
-    let summary_request = GroqChatRequest {
-        model: "openai/gpt-oss-20b".to_string(),
+    let summary_request = DeepSeekChatRequest {
+        model: "deepseek-chat".to_string(),
         messages: vec![
             ChatMessage {
                 role: "system".to_string(),
@@ -4314,13 +4314,13 @@ async fn compact_history_if_needed(
             },
         ],
         temperature: 0.2,
-        max_completion_tokens: 400,
+        max_tokens: 400,
         top_p: 1.0,
         stream: false,
     };
 
     let response = client
-        .post("https://api.groq.com/openai/v1/chat/completions")
+        .post("https://api.deepseek.com/chat/completions")
         .bearer_auth(api_key)
         .json(&summary_request)
         .send()
@@ -4330,7 +4330,7 @@ async fn compact_history_if_needed(
 
     if let Ok(res) = response {
         if res.status().is_success() {
-            if let Ok(body) = res.json::<GroqChatResponse>().await {
+            if let Ok(body) = res.json::<DeepSeekChatResponse>().await {
                 if let Some(choice) = body.choices.first() {
                     let summary = choice.message.content.trim();
                     if !summary.is_empty() {
@@ -4358,7 +4358,7 @@ async fn compact_history_if_needed(
     *history = recent;
 }
 
-async fn call_groq_prompt(
+async fn call_deepseek_prompt(
     api_key: String,
     user_prompt: String,
     history: &mut Vec<ChatMessage>,
@@ -4369,7 +4369,7 @@ async fn call_groq_prompt(
 
     if api_key.is_empty() {
         let _ = event_tx.send(AgentEvent::ReplaceNarration(
-            "Veuillez renseigner GROQ_API_KEY dans le fichier .env.".into(),
+            "Veuillez renseigner DEEPSEEK_API_KEY dans le fichier .env.".into(),
         ));
         let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
         return;
@@ -4439,7 +4439,7 @@ Format json obligatoire :
         // Compaction progressive de la mémoire si l'historique dépasse le seuil
         compact_history_if_needed(&api_key, history, &client, last_call_time).await;
 
-        // Debounce : garantir au moins 3,0 s de repos réel entre deux requêtes à Groq
+        // Debounce : pause minimale entre deux requêtes API
         let min_debounce = Duration::from_millis(8000);
         if let Some(prev) = *last_call_time {
             let elapsed = prev.elapsed();
@@ -4455,11 +4455,11 @@ Format json obligatoire :
         });
         messages.extend(history.iter().cloned());
 
-        let request = GroqChatRequest {
-            model: "openai/gpt-oss-20b".to_string(),
+        let request = DeepSeekChatRequest {
+            model: "deepseek-chat".to_string(),
             messages,
             temperature: 1.0,
-            max_completion_tokens: 600,
+            max_tokens: 600,
             top_p: 1.0,
             stream: false,
         };
@@ -4473,7 +4473,7 @@ Format json obligatoire :
             attempts += 1;
 
             let response = client
-                .post("https://api.groq.com/openai/v1/chat/completions")
+                .post("https://api.deepseek.com/chat/completions")
                 .bearer_auth(&api_key)
                 .json(&request)
                 .send()
@@ -4482,10 +4482,10 @@ Format json obligatoire :
             match response {
                 Ok(res) if res.status().is_success() => {
                     *last_call_time = Some(Instant::now());
-                    if let Ok(body) = res.json::<GroqChatResponse>().await {
+                    if let Ok(body) = res.json::<DeepSeekChatResponse>().await {
                         if let Some(choice) = body.choices.first() {
                             let raw_content = &choice.message.content;
-                            println!("\n=================== [RÉPONSE GROQ BRUTE (PASSE {}/{})] ===================", pass, MAX_AGENT_PASSES);
+                            println!("\n=================== [RÉPONSE DEEPSEEK BRUTE (PASSE {}/{})] ===================", pass, MAX_AGENT_PASSES);
                             println!("{}", raw_content.trim());
                             println!("============================================================");
 
@@ -4512,14 +4512,14 @@ Format json obligatoire :
 
                     let safe_wait_secs = (wait_secs + 1).max(4);
 
-                    // Si le délai dépasse 12 secondes, il s'agit d'une saturation de jetons (TPM) : ne pas bloquer l'agent
+                    // Si le délai dépasse 12 secondes, il s'agit d'une saturation de jetons : ne pas bloquer l'agent
                     if wait_secs > 12 {
                         let err_body = res.text().await.unwrap_or_default();
-                        println!("[Groq 429] Détails renvoyés par l'API : {}", err_body);
+                        println!("[DeepSeek 429] Détails renvoyés par l'API : {}", err_body);
                         history.pop();
                         let mins = (wait_secs + 59) / 60;
                         let _ = event_tx.send(AgentEvent::ReplaceNarration(format!(
-                            "Plafond instantané Groq atteint (pause requise par l'API : {mins} min). Historique réinitialisé."
+                            "Plafond instantané DeepSeek atteint (pause requise par l'API : {mins} min). Historique réinitialisé."
                         )));
                         history.clear();
                         break;
@@ -4536,7 +4536,7 @@ Format json obligatoire :
                     *last_call_time = Some(Instant::now());
                     history.pop();
                     let status = res.status();
-                    let _ = event_tx.send(AgentEvent::ReplaceNarration(format!("Erreur api groq : {status}")));
+                    let _ = event_tx.send(AgentEvent::ReplaceNarration(format!("Erreur api deepseek : {status}")));
                     break;
                 }
                 Err(err) if attempts <= MAX_RETRIES => {
@@ -4602,13 +4602,13 @@ fn main() -> eframe::Result<()> {
     let tts_tx = spawn_tts_worker(event_tx.clone());
     let (twitch_ch_tx, twitch_ch_rx) = channel::<String>();
     spawn_twitch_worker(event_tx.clone(), twitch_ch_rx);
-    let groq_key = resolve_groq_key();
-    let audio_tx = spawn_audio_worker(event_tx.clone(), groq_key.clone());
+    let deepseek_key = resolve_deepseek_key();
+    let audio_tx = spawn_audio_worker(event_tx.clone(), deepseek_key.clone());
 
     let initial_twitch_channel = std::env::var("TWITCH_CHANNEL").unwrap_or_default();
 
-    // Runtime Tokio en arrière-plan pour requêter Groq
-    let groq_chat_key = groq_key.clone();
+    // Runtime Tokio en arrière-plan pour requêter DeepSeek
+    let deepseek_chat_key = deepseek_key.clone();
     let tts_worker_tx = tts_tx.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("Échec d'initialisation du runtime Tokio");
@@ -4653,7 +4653,7 @@ fn main() -> eframe::Result<()> {
                                 prompt
                             };
 
-                            call_groq_prompt(groq_chat_key.clone(), final_prompt, &mut history, event_tx.clone(), &mut last_call_time).await;
+                            call_deepseek_prompt(deepseek_chat_key.clone(), final_prompt, &mut history, event_tx.clone(), &mut last_call_time).await;
                         }
                     }
                     AgentCommand::ClearHistory => {
