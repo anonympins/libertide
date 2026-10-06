@@ -4285,8 +4285,8 @@ Format json obligatoire :
     for pass in 1..=MAX_AGENT_PASSES {
         let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
 
-        // Debounce : attendre au moins 2,0 s entre deux appels consécutifs à Groq
-        let min_debounce = Duration::from_millis(2000);
+        // Debounce : garantir au moins 3,0 s de repos réel entre deux requêtes à Groq
+        let min_debounce = Duration::from_millis(3000);
         if let Some(prev) = *last_call_time {
             let elapsed = prev.elapsed();
             if elapsed < min_debounce {
@@ -4316,12 +4316,11 @@ Format json obligatoire :
 
         let mut attempts = 0;
         const MAX_RETRIES: usize = 3;
-        const DEFAULT_RETRY_DELAY: Duration = Duration::from_millis(3500);
+        const DEFAULT_RETRY_DELAY: Duration = Duration::from_millis(4000);
         let mut success_payload: Option<AgentResponsePayload> = None;
 
         loop {
             attempts += 1;
-            *last_call_time = Some(Instant::now());
 
             let response = client
                 .post("https://api.groq.com/openai/v1/chat/completions")
@@ -4332,6 +4331,7 @@ Format json obligatoire :
 
             match response {
                 Ok(res) if res.status().is_success() => {
+                    *last_call_time = Some(Instant::now());
                     if let Ok(body) = res.json::<GroqChatResponse>().await {
                         if let Some(choice) = body.choices.first() {
                             let raw_content = &choice.message.content;
@@ -4358,7 +4358,9 @@ Format json obligatoire :
                         .get("retry-after")
                         .and_then(|h| h.to_str().ok())
                         .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(3);
+                        .unwrap_or(4);
+
+                    let safe_wait_secs = (wait_secs + 1).max(4);
 
                     // Si le délai dépasse 12 secondes, il s'agit d'une saturation de jetons (TPM) : ne pas bloquer l'agent pendant 7 minutes
                     if wait_secs > 12 {
@@ -4372,12 +4374,14 @@ Format json obligatoire :
                     }
 
                     let _ = event_tx.send(AgentEvent::SilentNarration(format!(
-                        "Limite de requêtes atteinte. Pause de {wait_secs} s avant réessai..."
+                        "Limite de requêtes atteinte. Pause de {safe_wait_secs} s avant réessai..."
                     )));
-                    tokio::time::sleep(Duration::from_secs(wait_secs.max(2))).await;
+                    tokio::time::sleep(Duration::from_secs(safe_wait_secs)).await;
+                    *last_call_time = Some(Instant::now());
                     continue;
                 }
                 Ok(res) => {
+                    *last_call_time = Some(Instant::now());
                     history.pop();
                     let status = res.status();
                     let _ = event_tx.send(AgentEvent::ReplaceNarration(format!("Erreur api groq : {status}")));
@@ -4388,9 +4392,11 @@ Format json obligatoire :
                         "Connexion interrompue, nouvelle tentative dans 3 secondes...".into(),
                     ));
                     tokio::time::sleep(DEFAULT_RETRY_DELAY).await;
+                    *last_call_time = Some(Instant::now());
                     continue;
                 }
                 Err(err) => {
+                    *last_call_time = Some(Instant::now());
                     history.pop();
                     let _ = event_tx.send(AgentEvent::ReplaceNarration(format!("Erreur réseau : {err}")));
                     break;
@@ -4433,6 +4439,8 @@ Format json obligatoire :
                     "[Retour d'exécution étape {pass}] :\n{compact_report}\n\nSi la tâche demandée est achevée, réponds avec \"actions\": [] et la narration finale. Sinon, transmets les actions nécessaires suivantes."
                 ),
             });
+            // Marquer la fin de l'exécution pour que le debounce de la passe suivante s'applique bien
+            *last_call_time = Some(Instant::now());
         } else {
             println!("[Agent] Nombre maximal de passes ({MAX_AGENT_PASSES}) atteint.");
         }
