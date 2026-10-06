@@ -4,6 +4,22 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(windows)]
+use windows::core::w;
+#[cfg(windows)]
+use windows::Win32::Foundation::BOOL;
+#[cfg(windows)]
+use windows::Win32::Media::Speech::{
+    ISpAudio, ISpRecoContext, ISpRecoGrammar, ISpRecoResult, ISpRecognizer,
+    SpInprocRecognizer, SpMMAudioIn, SpSharedRecognizer, SPEVENT, SPEI_HYPOTHESIS,
+    SPEI_RECOGNITION, SPLO_STATIC, SPRS_ACTIVE, SPRS_INACTIVE,
+};
+#[cfg(windows)]
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
+};
+#[cfg(windows)]
+use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_HIDE};
 use serde::Deserialize;
 
 use crate::types::{AgentEvent, AgentStatus, AudioCommand};
@@ -203,32 +219,172 @@ pub async fn transcribe_audio(
     }
 }
 
-pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, groq_key: String) -> Sender<AudioCommand> {
+#[cfg(windows)]
+unsafe fn hide_speech_bar() {
+    if let Ok(hwnd) = FindWindowW(w!("MS:SpeechTopLevel"), None) {
+        if !hwnd.0.is_null() {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _groq_key: String) -> Sender<AudioCommand> {
     let (cmd_tx, cmd_rx) = channel::<AudioCommand>();
 
     std::thread::spawn(move || {
-        let rt = match tokio::runtime::Runtime::new() {
-            Ok(r) => r,
-            Err(_) => return,
-        };
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            hide_speech_bar();
 
-        let host = cpal::default_host();
+            // 1. Instanciation in-process pour une exécution interne sans interface globale
+            let inproc_res: Result<ISpRecognizer, _> =
+                CoCreateInstance(&SpInprocRecognizer, None, CLSCTX_ALL);
+            let (recognizer, is_inproc): (ISpRecognizer, bool) = match inproc_res {
+                Ok(inproc) => {
+                    // 2. Connexion du micro par défaut (SpMMAudioIn)
+                    let audio_input: Result<ISpAudio, _> = CoCreateInstance(&SpMMAudioIn, None, CLSCTX_ALL);
+                    if let Ok(audio) = audio_input {
+                        let _ = inproc.SetInput(&audio, BOOL(1));
+                    } else {
+                        eprintln!("Avertissement: impossible d'instancier SpMMAudioIn pour le micro");
+                    }
+                    (inproc, true)
+                }
+                Err(err) => {
+                    eprintln!("Avertissement: SpInprocRecognizer indisponible ({:?}), tentative via SpSharedRecognizer", err);
+                    let shared_res: Result<ISpRecognizer, _> =
+                        CoCreateInstance(&SpSharedRecognizer, None, CLSCTX_ALL);
+                    match shared_res {
+                        Ok(shared) => (shared, false),
+                        Err(e) => {
+                            eprintln!("Échec de l'initialisation du moteur de reconnaissance vocale SAPI: {:?}", e);
+                            return;
+                        }
+                    }
+                }
+            };
 
-        while let Ok(cmd) = cmd_rx.recv() {
-            if !matches!(cmd, AudioCommand::Start) {
-                continue;
+            if !is_inproc {
+                hide_speech_bar();
             }
 
-            // La dictée vocale est déléguée à Windows (Win + H) afin de réserver l'intégralité du quota à Groq LLM
-            loop {
-                std::thread::sleep(Duration::from_millis(150));
-                if let Ok(AudioCommand::Stop) = cmd_rx.try_recv() {
-                    break;
+            let Ok(reco_context) = recognizer.CreateRecoContext() else {
+                eprintln!("Échec de création du contexte de reconnaissance SAPI");
+                return;
+            };
+
+            let Ok(grammar) = reco_context.CreateGrammar(1) else {
+                eprintln!("Échec de création de la grammaire SAPI");
+                return;
+            };
+
+            // Chargement de la grammaire de dictée SAPI par défaut
+            if let Err(err) = grammar.LoadDictation(windows::core::PCWSTR::null(), SPLO_STATIC) {
+                eprintln!("Avertissement: impossible de charger la dictée SAPI : {:?}", err);
+            }
+
+            let _ = reco_context.SetNotifyWin32Event();
+            const SPFEI_HYPOTHESIS: u64 = 1u64 << (SPEI_HYPOTHESIS.0 as u64);
+            const SPFEI_RECOGNITION: u64 = 1u64 << (SPEI_RECOGNITION.0 as u64);
+            let interest = SPFEI_HYPOTHESIS | SPFEI_RECOGNITION;
+            let _ = reco_context.SetInterest(interest, interest);
+
+            extern "system" {
+                fn CoTaskMemFree(pv: *mut std::ffi::c_void);
+            }
+
+            while let Ok(cmd) = cmd_rx.recv() {
+                if !matches!(cmd, AudioCommand::Start) {
+                    continue;
+                }
+
+                if grammar.SetDictationState(SPRS_ACTIVE).is_err() {
+                    let _ = event_tx.send(AgentEvent::TranscriptionPartial(
+                        "Reconnaissance vocale SAPI non active sur ce système.".to_string(),
+                    ));
+                    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                    continue;
+                }
+
+                hide_speech_bar();
+                let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Listening));
+
+                let mut is_listening = true;
+                while is_listening {
+                    if let Ok(AudioCommand::Stop) = cmd_rx.try_recv() {
+                        let _ = grammar.SetDictationState(SPRS_INACTIVE);
+                        let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                        break;
+                    }
+
+                    let _ = reco_context.WaitForNotifyEvent(100);
+
+                    let mut events = [SPEVENT::default(); 8];
+                    let mut fetched = 0u32;
+                    if reco_context
+                        .GetEvents(events.len() as u32, events.as_mut_ptr(), &mut fetched)
+                        .is_ok()
+                        && fetched > 0
+                    {
+                        for ev in events.iter().take(fetched as usize) {
+                            if ev.lParam.0 != 0 {
+                                let reco_result: ISpRecoResult =
+                                    std::mem::transmute(ev.lParam.0 as *mut std::ffi::c_void);
+
+                                let mut text_ptr = windows::core::PWSTR::null();
+                                const SP_GETWHOLEPHRASE: u32 = 0xFFFFFFFF;
+
+                                if reco_result
+                                    .GetText(
+                                        SP_GETWHOLEPHRASE,
+                                        SP_GETWHOLEPHRASE,
+                                        BOOL(1),
+                                        &mut text_ptr,
+                                        None,
+                                    )
+                                    .is_ok()
+                                    && !text_ptr.is_null()
+                                {
+                                    let text = text_ptr.to_string().unwrap_or_default();
+                                    CoTaskMemFree(text_ptr.0 as *mut std::ffi::c_void);
+
+                                    let clean = text.trim();
+                                    if !clean.is_empty() {
+                                        let event_id = (ev._bitfield & 0xFFFF) as i32;
+                                        if event_id == SPEI_HYPOTHESIS.0 {
+                                            let _ = event_tx.send(AgentEvent::TranscriptionPartial(clean.to_string()));
+                                        } else if event_id == SPEI_RECOGNITION.0 {
+                                            let _ = event_tx.send(AgentEvent::VoicePromptReady(clean.to_string()));
+                                            let _ = grammar.SetDictationState(SPRS_INACTIVE);
+                                            is_listening = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
         }
     });
 
+    cmd_tx
+}
+
+#[cfg(not(windows))]
+pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _groq_key: String) -> Sender<AudioCommand> {
+    let (cmd_tx, cmd_rx) = channel::<AudioCommand>();
+    std::thread::spawn(move || {
+        while let Ok(cmd) = cmd_rx.recv() {
+            if matches!(cmd, AudioCommand::Start) {
+                let _ = event_tx.send(AgentEvent::TranscriptionPartial(
+                    "SAPI est disponible uniquement sous Windows.".to_string(),
+                ));
+                let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+            }
+        }
+    });
     cmd_tx
 }

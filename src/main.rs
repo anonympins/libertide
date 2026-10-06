@@ -652,29 +652,15 @@ impl OverlayApp {
         self.input_text.clear();
         let _ = self.tts_sender.send(TtsCommand::Stop);
         if !self.is_hidden {
-            self.live_transcript = "Dictée vocale Windows active (Win + H)... parlez, puis validez (Entrée).".to_string();
+            self.live_transcript = "Écoute SAPI active... parlez à votre micro.".to_string();
         } else {
             self.live_transcript.clear();
         }
-        // Placer le focus sur le champ de saisie pour accueillir la dictée Windows
         ctx.memory_mut(|m| m.request_focus(egui::Id::new("prompt_input_text")));
-        #[cfg(windows)]
-        {
-            const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
-            const VK_H: VIRTUAL_KEY = VIRTUAL_KEY(0x48);
-            send_hotkey(&[VK_LWIN], VK_H);
-        }
+        let _ = self.audio_sender.send(AudioCommand::Start);
     }
 
     fn stop_recording(&mut self) {
-        if self.is_recording {
-            #[cfg(windows)]
-            {
-                const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
-                const VK_H: VIRTUAL_KEY = VIRTUAL_KEY(0x48);
-                send_hotkey(&[VK_LWIN], VK_H);
-            }
-        }
         self.is_recording = false;
         self.continuous_mode = false;
         let _ = self.audio_sender.send(AudioCommand::Stop);
@@ -1199,7 +1185,7 @@ impl eframe::App for OverlayApp {
                                             egui::TextEdit::singleline(&mut self.input_text)
                                                 .id(input_id)
                                                 .hint_text(if self.is_recording {
-                                                    "Dictée Windows active... parlez ou tapez"
+                                                    "Écoute SAPI active... parlez ou tapez"
                                                 } else {
                                                     "Consigne d'exploration... (entrée)"
                                                 }),
@@ -3315,6 +3301,15 @@ fn snap_window_native(hwnd: HWND, is_right: bool) {
     send_hotkey(&[], VK_ESCAPE);
 }
 
+fn truncate_with_notice(text: &str, max_chars: usize) -> String {
+    if text.chars().count() > max_chars {
+        let truncated: String = text.chars().take(max_chars).collect();
+        format!("{truncated}\n[...sortie tronquée...]")
+    } else {
+        text.to_string()
+    }
+}
+
 #[cfg(windows)]
 fn summarize_screen_state(target_window: Option<&str>) -> String {
     let work_area = get_desktop_work_area();
@@ -3421,7 +3416,7 @@ fn summarize_screen_state(target_window: Option<&str>) -> String {
         }
     }
 
-    out
+    truncate_with_notice(&out, 2000)
 }
 
 #[cfg(not(windows))]
@@ -4253,7 +4248,7 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
     if feedback.is_empty() {
         "Actions système exécutées avec succès.".to_string()
     } else {
-        feedback.join("\n")
+        truncate_with_notice(&feedback.join("\n"), 2500)
     }
 }
 
@@ -4267,6 +4262,100 @@ fn urlencoding_simple(query: &str) -> String {
         .chars()
         .map(|c| if c.is_alphanumeric() { c.to_string() } else { format!("%{:02X}", c as u32) })
         .collect()
+}
+
+async fn compact_history_if_needed(
+    api_key: &str,
+    history: &mut Vec<ChatMessage>,
+    client: &reqwest::Client,
+    last_call_time: &mut Option<Instant>,
+) {
+    const COMPACTION_CHAR_THRESHOLD: usize = 6000;
+    const COMPACTION_MSG_THRESHOLD: usize = 8;
+    const KEEP_RECENT_COUNT: usize = 3;
+
+    let total_chars: usize = history.iter().map(|m| m.content.len()).sum();
+    if (history.len() < COMPACTION_MSG_THRESHOLD && total_chars < COMPACTION_CHAR_THRESHOLD)
+        || history.len() <= KEEP_RECENT_COUNT
+    {
+        return;
+    }
+
+    let split_idx = history.len().saturating_sub(KEEP_RECENT_COUNT);
+    let to_summarize = &history[..split_idx];
+    let recent = history[split_idx..].to_vec();
+
+    let mut conversation_text = String::new();
+    for msg in to_summarize {
+        conversation_text.push_str(&format!("{}: {}\n", msg.role, msg.content));
+    }
+
+    let safe_conversation_text = truncate_with_notice(&conversation_text, 8000);
+
+    // Respecter un délai de debounce avant l'appel de condensation
+    let min_debounce = Duration::from_millis(3000);
+    if let Some(prev) = *last_call_time {
+        let elapsed = prev.elapsed();
+        if elapsed < min_debounce {
+            tokio::time::sleep(min_debounce - elapsed).await;
+        }
+    }
+
+    let summary_request = GroqChatRequest {
+        model: "openai/gpt-oss-20b".to_string(),
+        messages: vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "Tu es un synthétiseur de mémoire conversationnelle. Résume fidèlement les points clés, décisions et actions passées en 250 mots maximum en français sous forme de points synthétiques.".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: format!("Voici les échanges passés à condenser :\n\n{}", safe_conversation_text),
+            },
+        ],
+        temperature: 0.2,
+        max_completion_tokens: 400,
+        top_p: 1.0,
+        stream: false,
+    };
+
+    let response = client
+        .post("https://api.groq.com/openai/v1/chat/completions")
+        .bearer_auth(api_key)
+        .json(&summary_request)
+        .send()
+        .await;
+
+    *last_call_time = Some(Instant::now());
+
+    if let Ok(res) = response {
+        if res.status().is_success() {
+            if let Ok(body) = res.json::<GroqChatResponse>().await {
+                if let Some(choice) = body.choices.first() {
+                    let summary = choice.message.content.trim();
+                    if !summary.is_empty() {
+                        println!("[Mémoire] Compaction contextuelle réussie ({} messages condensés).", to_summarize.len());
+                        let mut new_history = Vec::with_capacity(recent.len() + 2);
+                        new_history.push(ChatMessage {
+                            role: "user".to_string(),
+                            content: format!("[Note contextuelle - Résumé des échanges antérieurs] :\n{}", summary),
+                        });
+                        new_history.push(ChatMessage {
+                            role: "assistant".to_string(),
+                            content: "Contexte précédent bien assimilé.".to_string(),
+                        });
+                        new_history.extend(recent);
+                        *history = new_history;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // Repli de sécurité en cas d'erreur de condensation
+    println!("[Mémoire] Repli : éviction FIFO sans résumé.");
+    *history = recent;
 }
 
 async fn call_groq_prompt(
@@ -4300,7 +4389,7 @@ Règles d'autonomie et de ciblage :
 - Si l'utilisateur demande d'ouvrir une application, un outil ou un logiciel (ex: invite de commande, terminal, bloc-notes, messagerie, calculatrice, etc.), détermine TOI-MÊME le nom exact de son exécutable Windows binaire (ex: "cmd", "wt", "notepad", "calc", "thunderbird", "explorer", "code", "mspaint", etc.) et utilise l'action "open_app" avec ce nom direct d'exécutable dans "name".
 - Si l'utilisateur demande de fermer une application ou une fenêtre, utilise l'action "close_app" avec le nom de l'exécutable ou un mot-clé du titre dans "name".
 - Si l'utilisateur demande de lancer une commande directe ou un script shell/cmd (ex: "ipconfig", "ping", "git status", etc.), utilise l'action "run_command" avec la commande complète dans "command".
-- La dictée vocale est assurée nativement par Windows (Win + H). Réserve tes réponses à l'analyse et à la planification des actions.
+- La reconnaissance vocale est assurée localement par SAPI. Réserve tes réponses à l'analyse et à la planification des actions.
 - Pour effacer ou réinitialiser le texte du champ ou document actif, utilise l'action "clear_text" avec optionnellement "window".
 - Si l'utilisateur demande de cliquer sur un bouton ou un lien, utilise l'action "click_button" avec les mots-clés dans "button_name".
 - Pour cibler ou pointer un élément précis sans cliquer, utilise l'action "focus_element" avec "target_name".
@@ -4336,15 +4425,19 @@ Format json obligatoire :
   ]
 }"#;
 
+    let safe_user_prompt = truncate_with_notice(&user_prompt, 4000);
     history.push(ChatMessage {
         role: "user".to_string(),
-        content: user_prompt,
+        content: safe_user_prompt,
     });
 
     const MAX_AGENT_PASSES: usize = 3;
 
     for pass in 1..=MAX_AGENT_PASSES {
         let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
+
+        // Compaction progressive de la mémoire si l'historique dépasse le seuil
+        compact_history_if_needed(&api_key, history, &client, last_call_time).await;
 
         // Debounce : garantir au moins 3,0 s de repos réel entre deux requêtes à Groq
         let min_debounce = Duration::from_millis(8000);
@@ -4353,10 +4446,6 @@ Format json obligatoire :
             if elapsed < min_debounce {
                 tokio::time::sleep(min_debounce - elapsed).await;
             }
-        }
-
-        if history.len() > 8 {
-            history.drain(0..history.len() - 8);
         }
 
         let mut messages = Vec::with_capacity(history.len() + 1);
@@ -4490,12 +4579,7 @@ Format json obligatoire :
         }).await.unwrap_or_else(|_| "Erreur d'exécution.".to_string());
 
         if pass < MAX_AGENT_PASSES {
-            // Tronquer le rapport pour éviter de saturer le quota de jetons par minute (TPM)
-            let compact_report = if report.len() > 1500 {
-                format!("{}...\n[Rapport tronqué]", &report[..1500])
-            } else {
-                report
-            };
+            let compact_report = truncate_with_notice(&report, 2000);
             history.push(ChatMessage {
                 role: "user".to_string(),
                 content: format!(
@@ -4560,7 +4644,8 @@ fn main() -> eframe::Result<()> {
 
                             let final_prompt = if let Some(content) = field_content {
                                 if !content.trim().is_empty() {
-                                    format!("Contenu actuel du champ de saisie :\n\"\"\"\n{}\n\"\"\"\n\nCommande : {}", content.trim(), prompt)
+                                    let safe_content = truncate_with_notice(content.trim(), 2000);
+                                    format!("Contenu actuel du champ de saisie :\n\"\"\"\n{}\n\"\"\"\n\nCommande : {}", safe_content, prompt)
                                 } else {
                                     prompt
                                 }
