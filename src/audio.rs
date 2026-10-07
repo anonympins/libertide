@@ -211,7 +211,9 @@ pub struct WhisperEngine {
 impl WhisperEngine {
     pub fn load(model_path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let path_str = model_path.to_str().ok_or("Chemin du modèle introuvable")?;
-        let ctx = WhisperContext::new_with_params(path_str, WhisperContextParameters::default())
+        let mut params = WhisperContextParameters::default();
+        params.use_gpu(true);
+        let ctx = WhisperContext::new_with_params(path_str, params)
             .map_err(|e| format!("Erreur initialisation whisper.cpp: {e}"))?;
         Ok(Self { ctx })
     }

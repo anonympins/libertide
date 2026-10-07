@@ -40,13 +40,17 @@ pub struct ChatEntry {
     pub role: ChatRole,
     pub text: String,
     pub timestamp: String,
+    pub quick_suggestions: Vec<QuickSuggestionItem>,
 }
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     StatusChanged(AgentStatus),
     NarrationChunk(String),
-    ReplaceNarration(String),
+    ReplaceNarration {
+        text: String,
+        quick_suggestions: Vec<QuickSuggestionItem>,
+    },
     SilentNarration(String),
     TranscriptionPartial(String),
     VoicePromptReady(String),
@@ -84,6 +88,12 @@ pub enum AgentAction {
     },
     CloseApp {
         name: String,
+    },
+    ClickElement {
+        #[serde(default)]
+        window: Option<String>,
+        #[serde(alias = "name", alias = "element_name", alias = "link_name", alias = "target")]
+        target_name: String,
     },
     ClickButton {
         window: Option<String>,
@@ -127,6 +137,18 @@ pub enum AgentAction {
         title: String,
         position: String,
     },
+    FocusWindow {
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        pid: Option<u32>,
+    },
+    KillProcess {
+        #[serde(default)]
+        pid: Option<u32>,
+        #[serde(default)]
+        name: Option<String>,
+    },
     TileWindows {
         layout: Option<String>,
         windows: Vec<String>,
@@ -149,9 +171,49 @@ pub enum AgentAction {
         #[serde(default)]
         apps: Vec<String>,
         #[serde(default)]
+        urls: Vec<String>,
+        #[serde(default)]
         layout: Option<String>,
     },
     DeactivateImmersion,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum QuickSuggestionItem {
+    Text(String),
+    Action(AgentAction),
+    Value(serde_json::Value),
+}
+
+impl QuickSuggestionItem {
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            QuickSuggestionItem::Text(s) => Some(s.as_str()),
+            QuickSuggestionItem::Value(v) => v.as_str(),
+            _ => None,
+        }
+    }
+
+    pub fn to_display_string(&self) -> Option<String> {
+        match self {
+            QuickSuggestionItem::Text(s) => Some(s.clone()),
+            QuickSuggestionItem::Value(v) => {
+                if let Some(s) = v.as_str() {
+                    Some(s.to_string())
+                } else {
+                    Some(v.to_string())
+                }
+            }
+            QuickSuggestionItem::Action(act) => match act {
+                AgentAction::OpenApp { name } => Some(format!("Ouvrir {name}")),
+                AgentAction::ClickElement { target_name, .. } => Some(format!("Cliquer {target_name}")),
+                AgentAction::ClickButton { button_name, .. } => Some(format!("Cliquer {button_name}")),
+                AgentAction::CloseApp { name } => Some(format!("Fermer {name}")),
+                _ => None,
+            },
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -160,6 +222,8 @@ pub struct AgentResponsePayload {
     pub narration: String,
     #[serde(default)]
     pub actions: Vec<AgentAction>,
+    #[serde(default)]
+    pub quick_suggestions: Vec<QuickSuggestionItem>,
     #[serde(default)]
     pub invalid_request: bool,
 }

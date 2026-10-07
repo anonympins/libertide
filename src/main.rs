@@ -1,6 +1,8 @@
 mod audio;
+mod pattern;
 mod types;
 
+use pattern::{clean_words, extract_target_propositions, matches_pattern};
 use audio::spawn_audio_worker;
 use eframe::egui;
 use serde::Deserialize;
@@ -236,17 +238,6 @@ fn get_screen_cursor_pos(ctx: &egui::Context) -> Option<egui::Pos2> {
 fn sanitize_for_tts(text: &str) -> String {
     text.chars()
         .filter(|&c| c != '*' && c != '#' && c != '`' && c != '_' && c != '~')
-        .collect()
-}
-
-fn clean_words(text: &str) -> Vec<String> {
-    text.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-        .collect::<String>()
-        .split_whitespace()
-        .filter(|w| !w.is_empty())
-        .map(|w| w.to_string())
         .collect()
 }
 
@@ -575,6 +566,7 @@ impl OverlayApp {
                 role: ChatRole::Agent,
                 text: initial_subtitle,
                 timestamp: current_time_str(),
+                quick_suggestions: Vec::new(),
             }],
             active_tab: ActiveTab::Assistance,
             twitch_messages: Vec::new(),
@@ -653,6 +645,7 @@ impl OverlayApp {
             role: ChatRole::Agent,
             text: stop_msg.clone(),
             timestamp: current_time_str(),
+            quick_suggestions: Vec::new(),
         });
         let _ = self.tts_sender.send(TtsCommand::Stop);
         let _ = self.tts_sender.send(TtsCommand::Speak(stop_msg));
@@ -701,7 +694,8 @@ impl eframe::App for OverlayApp {
         [0.0, 0.0, 0.0, 0.0]
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = egui::Color32::TRANSPARENT;
         visuals.window_fill = egui::Color32::TRANSPARENT;
@@ -738,7 +732,7 @@ impl eframe::App for OverlayApp {
         // Gestion dynamique du clic traversant : la zone transparente laisse passer les événements,
         // seuls les contrôles inférieurs et l'en-tête de glissement capturent la souris.
         let win_pos = self.window_pos.unwrap_or(egui::pos2(0.0, 0.0));
-        let cursor_screen = get_screen_cursor_pos(ctx);
+        let cursor_screen = get_screen_cursor_pos(&ctx);
         let wants_interaction = if self.is_hidden {
             false
         } else if self.drag_offset.is_some() {
@@ -748,9 +742,9 @@ impl eframe::App for OverlayApp {
             let rel_y = cursor.y - win_pos.y;
             let in_window_x = rel_x >= 0.0 && rel_x <= win_w;
             let in_drag_header = in_window_x && rel_y >= 0.0 && rel_y <= 38.0;
-            let in_chat_view = self.active_tab == ActiveTab::Chat && in_window_x && rel_y <= response_h;
+            let in_response_area = in_window_x && rel_y >= 0.0 && rel_y <= response_h;
             let in_control_panel = in_window_x && rel_y >= (response_h + 4.0) && rel_y <= win_h;
-            in_drag_header || in_chat_view || in_control_panel
+            in_drag_header || in_response_area || in_control_panel
         } else {
             false
         };
@@ -781,6 +775,7 @@ impl eframe::App for OverlayApp {
                                 role: ChatRole::Agent,
                                 text: chunk,
                                 timestamp: current_time_str(),
+                                quick_suggestions: Vec::new(),
                             });
                         }
                     } else {
@@ -788,22 +783,25 @@ impl eframe::App for OverlayApp {
                             role: ChatRole::Agent,
                             text: chunk,
                             timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
                         });
                     }
                 }
-                AgentEvent::ReplaceNarration(full_text) => {
+                AgentEvent::ReplaceNarration { text, quick_suggestions } => {
                     self.chat_history.push(ChatEntry {
                         role: ChatRole::Agent,
-                        text: full_text.clone(),
+                        text: text.clone(),
                         timestamp: current_time_str(),
+                        quick_suggestions,
                     });
-                    let _ = self.tts_sender.send(TtsCommand::Speak(full_text));
+                    let _ = self.tts_sender.send(TtsCommand::Speak(text));
                 }
                 AgentEvent::SilentNarration(full_text) => {
                     self.chat_history.push(ChatEntry {
                         role: ChatRole::Agent,
                         text: full_text,
                         timestamp: current_time_str(),
+                        quick_suggestions: Vec::new(),
                     });
                 }
                 AgentEvent::TranscriptionPartial(text) => {
@@ -823,18 +821,20 @@ impl eframe::App for OverlayApp {
                                 role: ChatRole::User,
                                 text: prompt,
                                 timestamp: current_time_str(),
+                                quick_suggestions: Vec::new(),
                             });
                             let reply = "Me revoilà, overlay réaffiché.".to_string();
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
                                 timestamp: current_time_str(),
+                                quick_suggestions: Vec::new(),
                             });
                             let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                             self.continuous_mode = true;
                         } else if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             // Tout autre message est ignoré lorsque l'overlay est masqué
-                            self.start_recording(ctx);
+                            self.start_recording(&ctx);
                         }
                     } else {
                         if is_hide_command(&prompt) {
@@ -844,12 +844,14 @@ impl eframe::App for OverlayApp {
                                 role: ChatRole::User,
                                 text: prompt,
                                 timestamp: current_time_str(),
+                                quick_suggestions: Vec::new(),
                             });
                             let reply = "Overlay masqué. Je reste à l'écoute pour « deepseek ouvre toi ».".to_string();
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
                                 timestamp: current_time_str(),
+                                quick_suggestions: Vec::new(),
                             });
                             let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                             self.continuous_mode = true;
@@ -859,6 +861,7 @@ impl eframe::App for OverlayApp {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
                                 timestamp: current_time_str(),
+                                quick_suggestions: Vec::new(),
                             });
                             let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                             self.continuous_mode = true;
@@ -870,16 +873,17 @@ impl eframe::App for OverlayApp {
                                 role: ChatRole::User,
                                 text: prompt.clone(),
                                 timestamp: current_time_str(),
+                                quick_suggestions: Vec::new(),
                             });
                             let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
                         } else if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(ctx);
+                            self.start_recording(&ctx);
                         }
                     }
                 }
                 AgentEvent::TtsFinished => {
                     if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                        self.start_recording(ctx);
+                        self.start_recording(&ctx);
                     }
                 }
                 AgentEvent::TwitchChatReceived(twitch_msg) => {
@@ -899,7 +903,7 @@ impl eframe::App for OverlayApp {
                     }
                     self.live_transcript.clear();
                     if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                        self.start_recording(ctx);
+                        self.start_recording(&ctx);
                     }
                 }
             }
@@ -907,13 +911,13 @@ impl eframe::App for OverlayApp {
 
         // Raccourci clavier d'urgence global (Échap)
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.trigger_emergency_stop(ctx);
+            self.trigger_emergency_stop(&ctx);
         }
 
         // Raccourci clavier 'R' pour basculer le micro (autorisé pour couper le micro même avec focus)
         let is_typing = ctx.memory(|m| m.focused().is_some()) && !self.is_recording;
         if !self.is_hidden && !is_typing && ctx.input(|i| i.key_pressed(egui::Key::R)) {
-            self.toggle_recording(ctx);
+            self.toggle_recording(&ctx);
         }
 
         // Retranscription en temps réel : mise à jour du texte d'écoute
@@ -929,14 +933,14 @@ impl eframe::App for OverlayApp {
 
         if self.is_hidden {
             egui::CentralPanel::default()
-                .frame(egui::Frame::none().fill(egui::Color32::TRANSPARENT))
-                .show(ctx, |_ui| {});
+                .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
+                .show(ui, |_ui| {});
             return;
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(egui::Color32::TRANSPARENT))
-            .show(ctx, |ui| {
+            .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
+            .show(ui, |ui| {
                 let total_rect = ui.available_rect_before_wrap();
                 let total_h = total_rect.height();
 
@@ -954,12 +958,12 @@ impl eframe::App for OverlayApp {
 
                 // 1. Zone supérieure transparente (70 %) pour l'historique du chat
                 let mut tab_bar_max_x = total_rect.min.x + 210.0;
-                ui.allocate_ui_at_rect(response_rect, |ui| {
-                    egui::Frame::none()
-                        .fill(egui::Color32::from_rgba_unmultiplied(16, 18, 24, 45))
+                ui.scope_builder(egui::UiBuilder::new().max_rect(response_rect), |ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180))
                         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 55)))
-                        .rounding(14.0)
-                        .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+                        .corner_radius(egui::CornerRadius::same(14))
+                        .inner_margin(egui::Margin::symmetric(14, 10))
                         .show(ui, |ui| {
                             // Barre d'onglets
                             ui.horizontal(|ui| {
@@ -982,12 +986,15 @@ impl eframe::App for OverlayApp {
 
                             match self.active_tab {
                                 ActiveTab::Assistance => {
+                            let max_scroll_h = (response_h - 45.0).max(40.0);
                             egui::ScrollArea::vertical()
                                 .stick_to_bottom(true)
-                                .auto_shrink([false, false])
+                                .max_height(max_scroll_h)
+                                .auto_shrink([false, true])
                                 .show(ui, |ui| {
                                     let last_user_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::User);
                                     let last_agent_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::Agent);
+                                    let mut clicked_quick_suggestion: Option<String> = None;
 
                                     for (idx, entry) in self.chat_history.iter().enumerate() {
                                         let is_highlighted = Some(idx) == last_user_idx || Some(idx) == last_agent_idx;
@@ -1036,8 +1043,50 @@ impl eframe::App for OverlayApp {
                                                 rich = rich.strong();
                                             }
                                             ui.add(egui::Label::new(rich).wrap());
+
+                                            // Boutons-onglets pour les suggestions rapides
+                                            if !entry.quick_suggestions.is_empty() {
+                                                ui.add_space(4.0);
+                                                ui.horizontal_wrapped(|ui| {
+                                                    for sug in &entry.quick_suggestions {
+                                                        if let Some(clean_label) = sug.to_display_string() {
+                                                            let clean_label = clean_label.trim();
+                                                            if clean_label.is_empty() {
+                                                                continue;
+                                                            }
+                                                            let btn_text = egui::RichText::new(format!("💡 {clean_label}"))
+                                                                .size(11.0)
+                                                                .color(egui::Color32::from_rgb(130, 220, 255));
+
+                                                            let btn = egui::Button::new(btn_text)
+                                                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 95)))
+                                                                .corner_radius(egui::CornerRadius::same(10));
+
+                                                            if ui.add(btn).on_hover_text("Cliquer pour choisir cette suggestion").clicked() {
+                                                                clicked_quick_suggestion = Some(clean_label.to_string());
+                                                            }
+                                                        }
+                                                    }
+                                                });
+                                            }
                                         });
                                         ui.add_space(if is_highlighted { 8.0 } else { 5.0 });
+                                    }
+
+                                    if let Some(prompt) = clicked_quick_suggestion {
+                                        if self.is_recording {
+                                            self.stop_recording();
+                                        }
+                                        self.status = AgentStatus::Thinking;
+                                        self.continuous_mode = true;
+                                        self.live_transcript.clear();
+                                        self.chat_history.push(ChatEntry {
+                                            role: ChatRole::User,
+                                            text: prompt.clone(),
+                                            timestamp: current_time_str(),
+                                            quick_suggestions: Vec::new(),
+                                        });
+                                        let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
                                     }
                                 });
                                 }
@@ -1099,9 +1148,11 @@ impl eframe::App for OverlayApp {
                                         });
                                     }
                                     ui.separator();
+                                    let max_chat_scroll_h = (ui.available_height() - 4.0).max(40.0);
                                     egui::ScrollArea::vertical()
                                         .stick_to_bottom(true)
-                                        .auto_shrink([false, false])
+                                        .max_height(max_chat_scroll_h)
+                                        .auto_shrink([false, true])
                                         .show(ui, |ui| {
                                             if self.twitch_messages.is_empty() {
                                                 ui.label(
@@ -1140,12 +1191,12 @@ impl eframe::App for OverlayApp {
                 });
 
                 // 2. Zone inférieure (30 %) : contrôles, avatar et saisie
-                ui.allocate_ui_at_rect(control_rect, |ui| {
-                    egui::Frame::none()
+                ui.scope_builder(egui::UiBuilder::new().max_rect(control_rect), |ui| {
+                    egui::Frame::new()
                         .fill(egui::Color32::from_rgb(18, 20, 26))
                         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 75)))
-                        .rounding(14.0)
-                        .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+                        .corner_radius(egui::CornerRadius::same(14))
+                        .inner_margin(egui::Margin::symmetric(14, 10))
                         .show(ui, |ui| {
                             let inner_rect = ui.available_rect_before_wrap();
                             let avatar_pos = egui::pos2(inner_rect.max.x - 22.0, inner_rect.min.y + 24.0);
@@ -1156,7 +1207,7 @@ impl eframe::App for OverlayApp {
                                 egui::pos2(inner_rect.max.x - 48.0, inner_rect.max.y),
                             );
 
-                            ui.allocate_ui_at_rect(content_area, |ui| {
+                            ui.scope_builder(egui::UiBuilder::new().max_rect(content_area), |ui| {
                                 ui.vertical(|ui| {
                                     let status_badge = match self.status {
                                         AgentStatus::Idle => "DeepSeek · en veille",
@@ -1236,6 +1287,7 @@ impl eframe::App for OverlayApp {
                                                 role: ChatRole::User,
                                                 text: prompt.clone(),
                                                 timestamp: current_time_str(),
+                                                quick_suggestions: Vec::new(),
                                             });
                                             if is_hide_command(&prompt) {
                                                 self.is_hidden = true;
@@ -1245,6 +1297,7 @@ impl eframe::App for OverlayApp {
                                                     role: ChatRole::Agent,
                                                     text: reply.clone(),
                                                     timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
                                                 });
                                                 let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                                             } else {
@@ -1262,6 +1315,7 @@ impl eframe::App for OverlayApp {
                                                 role: ChatRole::Agent,
                                                 text: "Mémoire contextuelle réinitialisée.".to_string(),
                                                 timestamp: current_time_str(),
+                                                quick_suggestions: Vec::new(),
                                             });
                                             self.live_transcript.clear();
                                             let _ = self.tts_sender.send(TtsCommand::Stop);
@@ -1301,7 +1355,7 @@ impl eframe::App for OverlayApp {
                         }
                     };
 
-                    let cursor_screen = get_screen_cursor_pos(ctx);
+                    let cursor_screen = get_screen_cursor_pos(&ctx);
                     if let Some(cursor) = cursor_screen {
                         if let Some(mon_size) = ctx.input(|i| i.viewport().monitor_size) {
                             let win_w = 560.0;
@@ -1358,6 +1412,7 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
         return AgentResponsePayload {
             narration: String::new(),
             actions: Vec::new(),
+            quick_suggestions: Vec::new(),
             invalid_request: true,
         };
     }
@@ -1384,14 +1439,58 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
         clean
     };
 
+    // 1. Désérialisation directe
     if let Ok(payload) = serde_json::from_str::<AgentResponsePayload>(unquoted) {
         return payload;
     }
 
+    // 2. Extraction du bloc JSON entre la première accolade '{' et la dernière '}'
     if let (Some(start), Some(end)) = (unquoted.find('{'), unquoted.rfind('}')) {
-        if start < end {
-            if let Ok(payload) = serde_json::from_str::<AgentResponsePayload>(&unquoted[start..=end]) {
+        if start <= end {
+            let json_candidate = &unquoted[start..=end];
+            if let Ok(payload) = serde_json::from_str::<AgentResponsePayload>(json_candidate) {
                 return payload;
+            }
+
+            // 3. Repli dynamique : extraction ciblée de la narration et des actions via serde_json::Value
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_candidate) {
+                let narration = val
+                    .get("narration")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let invalid_request = val
+                    .get("invalid_request")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                let mut actions = Vec::new();
+                if let Some(arr) = val.get("actions").and_then(|v| v.as_array()) {
+                    for item in arr {
+                        if let Ok(act) = serde_json::from_value::<AgentAction>(item.clone()) {
+                            actions.push(act);
+                        }
+                    }
+                }
+
+                let mut quick_suggestions = Vec::new();
+                if let Some(arr) = val.get("quick_suggestions").and_then(|v| v.as_array()) {
+                    for item in arr {
+                        if let Ok(sug) = serde_json::from_value::<QuickSuggestionItem>(item.clone()) {
+                            quick_suggestions.push(sug);
+                        }
+                    }
+                }
+
+                if !narration.is_empty() || !actions.is_empty() || invalid_request {
+                    return AgentResponsePayload {
+                        narration,
+                        actions,
+                        quick_suggestions,
+                        invalid_request,
+                    };
+                }
             }
         }
     }
@@ -1400,6 +1499,7 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
         return AgentResponsePayload {
             narration: String::new(),
             actions: Vec::new(),
+            quick_suggestions: Vec::new(),
             invalid_request: true,
         };
     }
@@ -1407,6 +1507,7 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
     AgentResponsePayload {
         narration: clean.to_string(),
         actions: Vec::new(),
+        quick_suggestions: Vec::new(),
         invalid_request: false,
     }
 }
@@ -1665,6 +1766,46 @@ fn get_desktop_work_area() -> RECT {
 }
 
 #[cfg(windows)]
+fn get_window_process_info(hwnd: HWND) -> (u32, String) {
+    extern "system" {
+        fn GetWindowThreadProcessId(hwnd: HWND, lpdwprocessid: *mut u32) -> u32;
+        fn OpenProcess(dwdesiredaccess: u32, binherithandle: i32, dwprocessid: u32) -> *mut std::ffi::c_void;
+        fn QueryFullProcessImageNameW(hprocess: *mut std::ffi::c_void, dwflags: u32, lpexename: *mut u16, lpsize: *mut u32) -> i32;
+        fn CloseHandle(hobject: *mut std::ffi::c_void) -> i32;
+    }
+    let mut pid: u32 = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, &mut pid);
+    }
+    if pid == 0 {
+        return (0, "inconnu".to_string());
+    }
+
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    let h_proc = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if h_proc.is_null() {
+        return (pid, "inconnu".to_string());
+    }
+
+    let mut path_buf = [0u16; 1024];
+    let mut size = path_buf.len() as u32;
+    let ok = unsafe { QueryFullProcessImageNameW(h_proc, 0, path_buf.as_mut_ptr(), &mut size) };
+    unsafe { CloseHandle(h_proc); }
+
+    if ok != 0 && size > 0 {
+        let full_path = String::from_utf16_lossy(&path_buf[..size as usize]);
+        let exe_name = std::path::Path::new(&full_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&full_path)
+            .to_string();
+        (pid, exe_name)
+    } else {
+        (pid, "inconnu".to_string())
+    }
+}
+
+#[cfg(windows)]
 fn find_largest_and_most_centered_window(user_windows: &[(HWND, String)]) -> Option<HWND> {
     if user_windows.is_empty() {
         return None;
@@ -1731,97 +1872,6 @@ fn get_active_or_best_window(user_windows: &[(HWND, String)]) -> Option<HWND> {
     } else {
         find_largest_and_most_centered_window(user_windows)
     }
-}
-
-fn split_propositions(input: &str) -> Vec<String> {
-    let mut results = Vec::new();
-    let mut current = String::new();
-    let chars: Vec<char> = input.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-    let mut in_bracket = false;
-
-    while i < len {
-        let c = chars[i];
-        if c == '\\' && i + 1 < len {
-            current.push(c);
-            current.push(chars[i + 1]);
-            i += 2;
-            continue;
-        }
-
-        if c == '[' {
-            in_bracket = true;
-            current.push(c);
-            i += 1;
-            continue;
-        } else if c == ']' {
-            in_bracket = false;
-            current.push(c);
-            i += 1;
-            continue;
-        }
-
-        if !in_bracket {
-            if c == ';' {
-                results.push(std::mem::take(&mut current));
-                i += 1;
-                continue;
-            } else if c == '|' {
-                if i + 1 < len && chars[i + 1] == '|' {
-                    i += 1;
-                }
-                results.push(std::mem::take(&mut current));
-                i += 1;
-                continue;
-            } else if (c == ' ' || c == '\t') && i + 3 < len {
-                let slice: String = chars[i..=(i + 3)].iter().collect::<String>().to_lowercase();
-                if slice == " ou " || slice == " or " {
-                    results.push(std::mem::take(&mut current));
-                    i += 4;
-                    continue;
-                }
-            }
-        }
-
-        current.push(c);
-        i += 1;
-    }
-
-    if !current.trim().is_empty() {
-        results.push(current);
-    }
-
-    results
-}
-
-fn extract_target_propositions(query: &str) -> Vec<String> {
-    let mut propositions = Vec::new();
-    for line in query.lines() {
-        let line_trimmed = line.trim();
-        if line_trimmed.is_empty() {
-            continue;
-        }
-
-        if line_trimmed.starts_with('/') && (line_trimmed.ends_with('/') || line_trimmed.ends_with("/i")) {
-            propositions.push(line_trimmed.to_string());
-            continue;
-        }
-
-        let parts = split_propositions(line_trimmed);
-        for part in parts {
-            let p = part.trim();
-            if !p.is_empty() {
-                propositions.push(p.to_string());
-            }
-        }
-    }
-
-    if propositions.is_empty() && !query.trim().is_empty() {
-        propositions.push(query.trim().to_string());
-    }
-
-    propositions
 }
 
 fn is_address_bar_target(target: &str) -> bool {
@@ -1897,351 +1947,6 @@ fn navigate_browser_address_bar(hwnd: HWND, url: &str) {
     std::thread::sleep(Duration::from_millis(40));
     send_hotkey(&[], VK_RETURN);
     println!("[Actions] Navigation vers {} effectuée avec succès via barre d'adresse", formatted_url);
-}
-
-#[derive(Clone, Debug)]
-enum CharClass {
-    Any,
-    Literal(char),
-    Digit,
-    NotDigit,
-    Word,
-    NotWord,
-    Whitespace,
-    NotWhitespace,
-    Custom {
-        chars: Vec<char>,
-        ranges: Vec<(char, char)>,
-        negated: bool,
-    },
-}
-
-impl CharClass {
-    fn matches(&self, c: char) -> bool {
-        let cl = c.to_ascii_lowercase();
-        match self {
-            CharClass::Any => c != '\n' && c != '\r',
-            CharClass::Literal(lit) => cl == *lit,
-            CharClass::Digit => c.is_ascii_digit(),
-            CharClass::NotDigit => !c.is_ascii_digit(),
-            CharClass::Word => c.is_alphanumeric() || c == '_',
-            CharClass::NotWord => !(c.is_alphanumeric() || c == '_'),
-            CharClass::Whitespace => c.is_whitespace(),
-            CharClass::NotWhitespace => !c.is_whitespace(),
-            CharClass::Custom { chars, ranges, negated } => {
-                let hit = chars.contains(&cl)
-                    || ranges.iter().any(|&(start, end)| cl >= start && cl <= end);
-                if *negated { !hit } else { hit }
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Quantifier {
-    Once,
-    ZeroOrMore,
-    OneOrMore,
-    ZeroOrOne,
-}
-
-#[derive(Clone, Debug)]
-enum AtomKind {
-    Char(CharClass),
-    AnchorStart,
-    AnchorEnd,
-}
-
-#[derive(Clone, Debug)]
-struct PatternAtom {
-    kind: AtomKind,
-    quant: Quantifier,
-}
-
-fn expand_grouped_alternations(pattern: &str) -> Vec<String> {
-    if let Some(open) = pattern.find('(') {
-        if let Some(close) = pattern[open..].find(')') {
-            let close = open + close;
-            let inside = &pattern[open + 1..close];
-            if inside.contains('|') {
-                let prefix = &pattern[..open];
-                let suffix = &pattern[close + 1..];
-                let mut res = Vec::new();
-                for opt in inside.split('|') {
-                    let sub = format!("{prefix}{opt}{suffix}");
-                    res.extend(expand_grouped_alternations(&sub));
-                }
-                return res;
-            }
-        }
-    }
-    vec![pattern.to_string()]
-}
-
-fn split_pattern_branches(pattern: &str) -> Vec<String> {
-    let mut branches = Vec::new();
-    let mut cur = String::new();
-    let mut in_bracket = false;
-    let chars: Vec<char> = pattern.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-
-    while i < len {
-        let c = chars[i];
-        if c == '\\' && i + 1 < len {
-            cur.push(c);
-            cur.push(chars[i + 1]);
-            i += 2;
-            continue;
-        }
-        if c == '[' {
-            in_bracket = true;
-            cur.push(c);
-        } else if c == ']' {
-            in_bracket = false;
-            cur.push(c);
-        } else if c == '|' && !in_bracket {
-            branches.push(std::mem::take(&mut cur));
-        } else if c != '(' && c != ')' {
-            cur.push(c);
-        }
-        i += 1;
-    }
-    if !cur.is_empty() {
-        branches.push(cur);
-    }
-    if branches.is_empty() {
-        branches.push(pattern.to_string());
-    }
-    branches
-}
-
-fn parse_pattern_branch(branch: &str) -> Vec<PatternAtom> {
-    let chars: Vec<char> = branch.chars().collect();
-    let len = chars.len();
-    let mut atoms = Vec::new();
-    let mut i = 0;
-
-    while i < len {
-        let c = chars[i];
-        if c == '^' && i == 0 {
-            atoms.push(PatternAtom { kind: AtomKind::AnchorStart, quant: Quantifier::Once });
-            i += 1;
-            continue;
-        }
-        if c == '$' && i == len - 1 {
-            atoms.push(PatternAtom { kind: AtomKind::AnchorEnd, quant: Quantifier::Once });
-            i += 1;
-            continue;
-        }
-
-        let kind = if c == '\\' && i + 1 < len {
-            i += 1;
-            match chars[i] {
-                'd' => AtomKind::Char(CharClass::Digit),
-                'D' => AtomKind::Char(CharClass::NotDigit),
-                'w' => AtomKind::Char(CharClass::Word),
-                'W' => AtomKind::Char(CharClass::NotWord),
-                's' => AtomKind::Char(CharClass::Whitespace),
-                'S' => AtomKind::Char(CharClass::NotWhitespace),
-                esc => AtomKind::Char(CharClass::Literal(esc.to_ascii_lowercase())),
-            }
-        } else if c == '.' {
-            AtomKind::Char(CharClass::Any)
-        } else if c == '[' {
-            i += 1;
-            let negated = if i < len && chars[i] == '^' {
-                i += 1;
-                true
-            } else {
-                false
-            };
-            let mut custom_chars = Vec::new();
-            let mut custom_ranges = Vec::new();
-
-            while i < len && chars[i] != ']' {
-                if chars[i] == '\\' && i + 1 < len {
-                    i += 1;
-                    match chars[i] {
-                        'd' => custom_ranges.push(('0', '9')),
-                        'w' => {
-                            custom_ranges.push(('a', 'z'));
-                            custom_ranges.push(('0', '9'));
-                            custom_chars.push('_');
-                        }
-                        's' => {
-                            custom_chars.push(' ');
-                            custom_chars.push('\t');
-                            custom_chars.push('\r');
-                            custom_chars.push('\n');
-                        }
-                        esc => custom_chars.push(esc.to_ascii_lowercase()),
-                    }
-                } else if i + 2 < len && chars[i + 1] == '-' && chars[i + 2] != ']' {
-                    let start = chars[i].to_ascii_lowercase();
-                    let end = chars[i + 2].to_ascii_lowercase();
-                    custom_ranges.push((start, end));
-                    i += 2;
-                } else {
-                    custom_chars.push(chars[i].to_ascii_lowercase());
-                }
-                i += 1;
-            }
-            if i < len && chars[i] == ']' {
-                i += 1;
-            }
-            AtomKind::Char(CharClass::Custom { chars: custom_chars, ranges: custom_ranges, negated })
-        } else if c == '(' || c == ')' {
-            i += 1;
-            continue;
-        } else {
-            AtomKind::Char(CharClass::Literal(c.to_ascii_lowercase()))
-        };
-
-        let quant = if i < len {
-            match chars[i] {
-                '*' => { i += 1; Quantifier::ZeroOrMore }
-                '+' => { i += 1; Quantifier::OneOrMore }
-                '?' => { i += 1; Quantifier::ZeroOrOne }
-                _ => Quantifier::Once,
-            }
-        } else {
-            Quantifier::Once
-        };
-
-        atoms.push(PatternAtom { kind, quant });
-    }
-
-    atoms
-}
-
-fn match_atoms(atoms: &[PatternAtom], atom_idx: usize, text: &[char], text_idx: usize) -> bool {
-    if atom_idx >= atoms.len() {
-        return true;
-    }
-
-    let atom = &atoms[atom_idx];
-    match &atom.kind {
-        AtomKind::AnchorStart => {
-            if text_idx == 0 {
-                match_atoms(atoms, atom_idx + 1, text, text_idx)
-            } else {
-                false
-            }
-        }
-        AtomKind::AnchorEnd => {
-            text_idx == text.len() && match_atoms(atoms, atom_idx + 1, text, text_idx)
-        }
-        AtomKind::Char(class) => match atom.quant {
-            Quantifier::Once => {
-                if text_idx < text.len() && class.matches(text[text_idx]) {
-                    match_atoms(atoms, atom_idx + 1, text, text_idx + 1)
-                } else {
-                    false
-                }
-            }
-            Quantifier::ZeroOrOne => {
-                if text_idx < text.len() && class.matches(text[text_idx]) {
-                    if match_atoms(atoms, atom_idx + 1, text, text_idx + 1) {
-                        return true;
-                    }
-                }
-                match_atoms(atoms, atom_idx + 1, text, text_idx)
-            }
-            Quantifier::ZeroOrMore => {
-                let mut count = 0;
-                while text_idx + count < text.len() && class.matches(text[text_idx + count]) {
-                    count += 1;
-                }
-                for k in (0..=count).rev() {
-                    if match_atoms(atoms, atom_idx + 1, text, text_idx + k) {
-                        return true;
-                    }
-                }
-                false
-            }
-            Quantifier::OneOrMore => {
-                if text_idx >= text.len() || !class.matches(text[text_idx]) {
-                    return false;
-                }
-                let mut count = 1;
-                while text_idx + count < text.len() && class.matches(text[text_idx + count]) {
-                    count += 1;
-                }
-                for k in (1..=count).rev() {
-                    if match_atoms(atoms, atom_idx + 1, text, text_idx + k) {
-                        return true;
-                    }
-                }
-                false
-            }
-        },
-    }
-}
-
-fn matches_single_regex(pattern: &str, text: &str) -> bool {
-    let clean_pat = if pattern.starts_with('/') {
-        let without_prefix = &pattern[1..];
-        if let Some(stripped) = without_prefix.strip_suffix("/i") {
-            stripped
-        } else if let Some(stripped) = without_prefix.strip_suffix('/') {
-            stripped
-        } else {
-            without_prefix
-        }
-    } else {
-        pattern
-    }.trim();
-
-    if clean_pat.is_empty() {
-        return false;
-    }
-
-    let expanded = expand_grouped_alternations(clean_pat);
-    let text_chars: Vec<char> = text.chars().collect();
-
-    for variant in expanded {
-        let branches = split_pattern_branches(&variant);
-        for branch in branches {
-            let b_trim = branch.trim();
-            if b_trim.is_empty() {
-                continue;
-            }
-            let atoms = parse_pattern_branch(b_trim);
-            if atoms.is_empty() {
-                continue;
-            }
-
-            let is_anchored_start = matches!(atoms.first(), Some(PatternAtom { kind: AtomKind::AnchorStart, .. }));
-
-            if is_anchored_start {
-                if match_atoms(&atoms, 0, &text_chars, 0) {
-                    return true;
-                }
-            } else {
-                for start_pos in 0..=text_chars.len() {
-                    if match_atoms(&atoms, 0, &text_chars, start_pos) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-
-    false
-}
-
-fn matches_pattern(pattern: &str, text: &str) -> bool {
-    let p_trim = pattern.trim();
-    if p_trim.is_empty() {
-        return false;
-    }
-
-    if !p_trim.starts_with('/') && !p_trim.contains(['*', '+', '?', '^', '$', '\\', '[', '(', '|']) {
-        return text.to_lowercase().contains(&p_trim.to_lowercase());
-    }
-
-    matches_single_regex(p_trim, text)
 }
 
 #[cfg(windows)]
@@ -2690,6 +2395,8 @@ fn run_system_command(command: &str) -> bool {
 #[cfg(windows)]
 static LAST_TXT_HWND: Mutex<Option<isize>> = Mutex::new(None);
 static LAST_SCREEN_SUMMARY: Mutex<Option<String>> = Mutex::new(None);
+static IS_IMMERSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+static IMMERSION_SCREEN_HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static AGENT_BUSY: AtomicBool = AtomicBool::new(false);
 static IS_EMERGENCY_STOPPED: AtomicBool = AtomicBool::new(false);
 
@@ -3360,6 +3067,76 @@ fn snap_window_native(hwnd: HWND, is_right: bool) {
     send_hotkey(&[], VK_ESCAPE);
 }
 
+#[cfg(windows)]
+fn classify_immersion_quadrants(hwnds: &[HWND], user_windows: &[(HWND, String)]) -> [Option<HWND>; 4] {
+    let mut slots: [Option<HWND>; 4] = [None; 4];
+    let mut unassigned: Vec<HWND> = Vec::new();
+
+    for &hwnd in hwnds {
+        let (_pid, exe_name) = get_window_process_info(hwnd);
+        let title = user_windows
+            .iter()
+            .find(|(h, _)| *h == hwnd)
+            .map(|(_, t)| t.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let exe_lower = exe_name.to_lowercase();
+
+        let is_terminal = exe_lower.contains("cmd")
+            || exe_lower.contains("powershell")
+            || exe_lower.contains("windowsterminal")
+            || exe_lower.contains("wt")
+            || exe_lower.contains("bash")
+            || exe_lower.contains("mintty")
+            || title.contains("terminal")
+            || title.contains("invite de commandes")
+            || title.contains("powershell");
+
+        let is_music = exe_lower.contains("spotify")
+            || exe_lower.contains("music")
+            || title.contains("spotify")
+            || title.contains("music")
+            || title.contains("lofi")
+            || title.contains("lo-fi")
+            || title.contains("ambient")
+            || title.contains("youtube")
+            || title.contains("soundcloud")
+            || title.contains("deezer");
+
+        let is_ide = !is_terminal
+            && (exe_lower.contains("code")
+                || exe_lower.contains("devenv")
+                || exe_lower.contains("idea")
+                || exe_lower.contains("clion")
+                || exe_lower.contains("pycharm")
+                || exe_lower.contains("rustrover")
+                || exe_lower.contains("sublime")
+                || exe_lower.contains("notepad")
+                || exe_lower.contains("zed"));
+
+        let is_browser = is_browser_hwnd(hwnd, &title);
+
+        if is_music && slots[3].is_none() {
+            slots[3] = Some(hwnd);
+        } else if is_ide && slots[0].is_none() {
+            slots[0] = Some(hwnd);
+        } else if is_terminal && slots[2].is_none() {
+            slots[2] = Some(hwnd);
+        } else if is_browser && slots[1].is_none() {
+            slots[1] = Some(hwnd);
+        } else {
+            unassigned.push(hwnd);
+        }
+    }
+
+    for slot_idx in [0, 1, 2, 3] {
+        if slots[slot_idx].is_none() && !unassigned.is_empty() {
+            slots[slot_idx] = Some(unassigned.remove(0));
+        }
+    }
+    slots
+}
+
 fn truncate_with_notice(text: &str, max_chars: usize) -> String {
     if text.chars().count() > max_chars {
         let truncated: String = text.chars().take(max_chars).collect();
@@ -3367,6 +3144,51 @@ fn truncate_with_notice(text: &str, max_chars: usize) -> String {
     } else {
         text.to_string()
     }
+}
+
+fn compute_screen_diff(old_summary: &str, new_summary: &str) -> String {
+    let old_lines: Vec<&str> = old_summary.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let new_lines: Vec<&str> = new_summary.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+
+    for &line in &new_lines {
+        if line.starts_with("===") || line.starts_with("Espace de travail") {
+            continue;
+        }
+        if !old_lines.contains(&line) {
+            added.push(line);
+        }
+    }
+
+    for &line in &old_lines {
+        if line.starts_with("===") || line.starts_with("Espace de travail") {
+            continue;
+        }
+        if !new_lines.contains(&line) {
+            removed.push(line);
+        }
+    }
+
+    if added.is_empty() && removed.is_empty() {
+        return String::new();
+    }
+
+    let mut diff = String::new();
+    if !removed.is_empty() {
+        diff.push_str("[Éléments disparus ou modifiés] :\n");
+        for r in removed {
+            diff.push_str(&format!("- {}\n", r));
+        }
+    }
+    if !added.is_empty() {
+        diff.push_str("[Nouveaux éléments ou nouveaux états] :\n");
+        for a in added {
+            diff.push_str(&format!("+ {}\n", a));
+        }
+    }
+    diff
 }
 
 #[cfg(windows)]
@@ -3391,7 +3213,7 @@ fn summarize_screen_state(target_window: Option<&str>) -> String {
         .unwrap_or("Inconnue ou overlay");
     out.push_str(&format!("Fenêtre au premier plan : \"{}\"\n\n", fg_title));
 
-    out.push_str("Fenêtres ouvertes visibles :\n");
+    out.push_str("Fenêtres et processus actifs :\n");
     let mut inspect_hwnds = Vec::new();
 
     if let Some(target) = target_window.filter(|t| !t.trim().is_empty()) {
@@ -3413,6 +3235,7 @@ fn summarize_screen_state(target_window: Option<&str>) -> String {
     }
 
     for (hwnd, title) in &user_windows {
+        let (pid, exe_name) = get_window_process_info(*hwnd);
         let mut r = RECT::default();
         let rect_str = if unsafe { GetWindowRect(*hwnd, &mut r).is_ok() } {
             let w = r.right - r.left;
@@ -3431,7 +3254,10 @@ fn summarize_screen_state(target_window: Option<&str>) -> String {
             "visible"
         };
 
-        out.push_str(&format!("- \"{}\" [{}] ({})\n", title, state, rect_str));
+        out.push_str(&format!(
+            "- \"{}\" [{}] ({}) | PID: {}, Exe: \"{}\" | Accéder: focus_window(title: \"{}\") | Tuer: kill_process(pid: {}, name: \"{}\")\n",
+            title, state, rect_str, pid, exe_name, title, pid, exe_name
+        ));
     }
 
     out.push_str("\n=== Contenu détaillé des fenêtres principales ===\n");
@@ -3463,19 +3289,90 @@ fn summarize_screen_state(target_window: Option<&str>) -> String {
             }
         }
 
+        let mut tabs: Vec<String> = elements
+            .iter()
+            .filter(|e| !e.name.is_empty() && (e.localized_type.contains("onglet") || e.localized_type.contains("tab")))
+            .map(|e| e.name.clone())
+            .collect();
+        tabs.dedup();
+        if !tabs.is_empty() {
+            let display_tabs: Vec<String> = tabs.into_iter().take(8).collect();
+            out.push_str(&format!("  [Onglets / pages ouvertes] : {}\n", display_tabs.join(" | ")));
+        }
+
+        let mut links: Vec<String> = elements
+            .iter()
+            .filter(|e| {
+                !e.is_edit_or_textarea
+                    && !e.name.is_empty()
+                    && (e.localized_type.contains("lien")
+                        || e.localized_type.contains("link")
+                        || e.localized_type.contains("hyperlink"))
+            })
+            .map(|e| e.name.clone())
+            .collect();
+        links.dedup();
+        if !links.is_empty() {
+            let display_links: Vec<String> = links.into_iter().take(25).collect();
+            out.push_str(&format!("  [Liens / résultats cliquables] : {}\n", display_links.join(" | ")));
+        }
+
+        let mut text_items: Vec<String> = elements
+            .iter()
+            .filter(|e| {
+                !e.is_edit_or_textarea
+                    && !e.name.is_empty()
+                    && e.name.len() >= 3
+                    && !e.localized_type.contains("lien")
+                    && !e.localized_type.contains("link")
+                    && (e.localized_type.contains("texte")
+                        || e.localized_type.contains("text")
+                        || e.localized_type.contains("en-tête")
+                        || e.localized_type.contains("heading")
+                        || e.name.contains('€')
+                        || e.name.contains('$')
+                        || e.name.to_lowercase().contains("eur"))
+            })
+            .map(|e| e.name.clone())
+            .collect();
+        text_items.dedup();
+        if !text_items.is_empty() {
+            let display_texts: Vec<String> = text_items.into_iter().take(10).collect();
+            out.push_str(&format!("  [Textes / prix observés] : {}\n", display_texts.join(" | ")));
+        }
+
         let mut buttons: Vec<String> = elements
             .iter()
-            .filter(|e| !e.is_edit_or_textarea && !e.name.is_empty() && (e.pattern.is_some() || e.localized_type.contains("bouton") || e.localized_type.contains("button")))
-            .map(|e| e.name.clone())
+            .filter(|e| {
+                !e.is_edit_or_textarea
+                    && (!e.name.is_empty() || !e.help_text.is_empty() || !e.automation_id.is_empty())
+                    && (e.pattern.is_some()
+                        || e.localized_type.contains("bouton")
+                        || e.localized_type.contains("button")
+                        || e.localized_type.contains("élément")
+                        || e.localized_type.contains("item")
+                        || e.automation_id.to_lowercase().contains("close")
+                        || e.name.to_lowercase().contains("fermer")
+                        || e.name.to_lowercase().contains("close"))
+            })
+            .map(|e| {
+                if !e.name.is_empty() {
+                    e.name.clone()
+                } else if !e.help_text.is_empty() {
+                    e.help_text.clone()
+                } else {
+                    e.automation_id.clone()
+                }
+            })
             .collect();
         buttons.dedup();
         if !buttons.is_empty() {
-            let display_btns: Vec<String> = buttons.into_iter().take(10).collect();
-            out.push_str(&format!("  [Boutons / actions] : {}\n", display_btns.join(", ")));
+            let display_btns: Vec<String> = buttons.into_iter().take(25).collect();
+            out.push_str(&format!("  [Boutons / contrôles cliquables] : {}\n", display_btns.join(", ")));
         }
     }
 
-    truncate_with_notice(&out, 2000)
+    truncate_with_notice(&out, 3500)
 }
 
 #[cfg(not(windows))]
@@ -3643,6 +3540,92 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                         println!("[Actions] Arrêt du processus {}", proc_name);
                         let _ = std::process::Command::new("taskkill")
                             .args(["/IM", &proc_name])
+                            .spawn();
+                    }
+                }
+            }
+            AgentAction::FocusWindow { title, pid } => {
+                let mut found_hwnd = None;
+                if let Some(target_pid) = pid {
+                    for &(h, _) in &user_windows {
+                        let (w_pid, _) = get_window_process_info(h);
+                        if w_pid == *target_pid {
+                            found_hwnd = Some(h);
+                            break;
+                        }
+                    }
+                }
+                if found_hwnd.is_none() {
+                    if let Some(t) = title.as_deref().filter(|s| !s.trim().is_empty()) {
+                        found_hwnd = find_windows_matching(t, &user_windows, active_user_hwnd).first().copied();
+                    }
+                }
+                if let Some(hwnd) = found_hwnd {
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                        let _ = SetForegroundWindow(hwnd);
+                    }
+                    feedback.push(format!("Fenêtre passée au premier plan [HWND {:?}].", hwnd.0));
+                } else {
+                    feedback.push("Fenêtre introuvable pour focus.".to_string());
+                }
+            }
+            AgentAction::ClickElement { window, target_name } => {
+                let target_hwnd = match window.as_deref() {
+                    Some(w) if !w.trim().is_empty() => {
+                        find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
+                    }
+                    _ => active_user_hwnd,
+                };
+
+                if let Some(hwnd) = target_hwnd {
+                    println!("[Actions] ClickElement sur [HWND {:?}] pour '{}'", hwnd.0, target_name);
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                        let _ = SetForegroundWindow(hwnd);
+                    }
+                    std::thread::sleep(Duration::from_millis(80));
+
+                    let mut elements = list_interactive_elements(hwnd);
+                    if elements.is_empty() {
+                        std::thread::sleep(Duration::from_millis(150));
+                        elements = list_interactive_elements(hwnd);
+                    }
+
+                    if let Some(elem) = find_best_element(&elements, target_name) {
+                        println!("[Actions] Élément/Lien trouvé : name='{}', id='{}', type='{}', clic en ({}, {})", elem.name, elem.automation_id, elem.localized_type, elem.click_x, elem.click_y);
+                        unsafe { let _ = elem.element.SetFocus(); }
+                        click_element(elem.click_x, elem.click_y, elem.pattern.as_ref());
+                        feedback.push(format!("Clic effectué sur l'élément '{}'.", target_name));
+                    } else {
+                        println!("[Actions] Aucun élément/lien correspondant trouvé pour '{}'", target_name);
+                        feedback.push(format!("Élément ou lien '{}' introuvable à l'écran.", target_name));
+                    }
+                }
+            }
+            AgentAction::KillProcess { pid, name } => {
+                if let Some(p) = pid {
+                    println!("[Actions] Terminaison du PID {}", p);
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/F", "/PID", &p.to_string()])
+                        .spawn();
+                    feedback.push(format!("Processus PID {} arrêté.", p));
+                } else if let Some(n) = name.as_deref().filter(|s| !s.trim().is_empty()) {
+                    let proc_name = if n.to_lowercase().ends_with(".exe") {
+                        n.to_string()
+                    } else {
+                        format!("{n}.exe")
+                    };
+                    println!("[Actions] Terminaison de {}", proc_name);
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/F", "/IM", &proc_name])
+                        .spawn();
+                    feedback.push(format!("Processus '{}' arrêté.", proc_name));
+                } else {
+                    if let Some(hwnd) = active_user_hwnd {
+                        let (target_pid, _) = get_window_process_info(hwnd);
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/F", "/PID", &target_pid.to_string()])
                             .spawn();
                     }
                 }
@@ -4164,13 +4147,14 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                     "grid" | "quad" | "grid_2x2" => {
                         let half_w = wa_w / 2;
                         let half_h = wa_h / 2;
+                        let ordered_quads = classify_immersion_quadrants(&target_hwnds, &user_windows);
                         let coords = [
                             (wa_x, wa_y),
                             (wa_x + half_w, wa_y),
                             (wa_x, wa_y + half_h),
                             (wa_x + half_w, wa_y + half_h),
                         ];
-                        for (idx, &hwnd) in target_hwnds.iter().take(4).enumerate() {
+                        for (idx, &hwnd) in ordered_quads.iter().flatten().take(4).enumerate() {
                             let (x, y) = coords[idx];
                             apply_window_rect(hwnd, x, y, half_w, half_h);
                         }
@@ -4317,8 +4301,12 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                     feedback.push(current_summary);
                 }
             }
-            AgentAction::ActivateImmersion { apps, layout } => {
-                println!("[Actions] Activation du mode immersion (apps: {:?}, layout: {:?})", apps, layout);
+            AgentAction::ActivateImmersion { apps, urls, layout } => {
+                IS_IMMERSION_ACTIVE.store(true, Ordering::SeqCst);
+                if let Ok(mut hist) = IMMERSION_SCREEN_HISTORY.lock() {
+                    hist.clear();
+                }
+                println!("[Actions] Activation du mode immersion (apps: {:?}, urls: {:?}, layout: {:?})", apps, urls, layout);
 
                 // 1. Analyse préalable de l'état de l'écran
                 let initial_summary = summarize_screen_state(None);
@@ -4329,7 +4317,7 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                 const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
                 const VK_D: VIRTUAL_KEY = VIRTUAL_KEY(0x44);
                 send_hotkey(&[VK_LWIN, VK_CONTROL], VK_D);
-                std::thread::sleep(Duration::from_millis(400));
+                std::thread::sleep(Duration::from_millis(500));
 
                 // 3. Lancement des applications spécifiées pour l'immersion
                 let mut spawned_windows = Vec::new();
@@ -4341,15 +4329,48 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                     let before_windows = list_user_windows();
                     let before_hwnds: std::collections::HashSet<isize> = before_windows.iter().map(|(h, _)| h.0 as isize).collect();
 
-                    if let Some(exe_path) = find_executable_in_path(app_trimmed) {
+                    let launched = if let Some(exe_path) = find_executable_in_path(app_trimmed) {
+                        let stem = exe_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("")
+                            .to_lowercase();
+                        let is_console = stem == "cmd" || stem == "powershell" || stem == "pwsh";
                         let mut cmd = std::process::Command::new(exe_path);
-                        let _ = cmd.spawn();
+                        if is_console {
+                            cmd.creation_flags(CREATE_NEW_CONSOLE);
+                        }
+                        cmd.spawn().is_ok()
                     } else {
                         let mut cmd = std::process::Command::new(app_trimmed);
-                        let _ = cmd.spawn();
-                    }
+                        cmd.creation_flags(CREATE_NEW_CONSOLE);
+                        cmd.spawn().is_ok()
+                    };
 
-                    for _ in 0..15 {
+                    if launched {
+                        for _ in 0..20 {
+                            std::thread::sleep(Duration::from_millis(100));
+                            let after_windows = list_user_windows();
+                            if let Some((h, _)) = after_windows.iter().find(|(h, _)| !before_hwnds.contains(&(h.0 as isize))) {
+                                spawned_windows.push(*h);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // 4. Lancement des liens documentaires et musicaux
+                for url in urls {
+                    let url_trimmed = url.trim();
+                    if url_trimmed.is_empty() {
+                        continue;
+                    }
+                    let before_windows = list_user_windows();
+                    let before_hwnds: std::collections::HashSet<isize> = before_windows.iter().map(|(h, _)| h.0 as isize).collect();
+
+                    launch_browser_new_window(url_trimmed);
+
+                    for _ in 0..20 {
                         std::thread::sleep(Duration::from_millis(100));
                         let after_windows = list_user_windows();
                         if let Some((h, _)) = after_windows.iter().find(|(h, _)| !before_hwnds.contains(&(h.0 as isize))) {
@@ -4359,14 +4380,18 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                     }
                 }
 
-                // 4. Disposition et tuilage automatique des fenêtres
+                // 5. Disposition et tuilage automatique aux 4 coins (grid_2x2 par défaut)
                 let layout_mode = layout.as_deref().unwrap_or("split_horizontal");
                 let current_windows = list_user_windows();
-                let target_hwnds: Vec<HWND> = if !spawned_windows.is_empty() {
-                    spawned_windows
-                } else {
-                    current_windows.iter().take(2).map(|(h, _)| *h).collect()
-                };
+                let mut target_hwnds: Vec<HWND> = spawned_windows;
+                for (h, _) in &current_windows {
+                    if !target_hwnds.contains(h) {
+                        target_hwnds.push(*h);
+                    }
+                    if target_hwnds.len() >= 4 {
+                        break;
+                    }
+                }
 
                 let count = target_hwnds.len().max(1) as i32;
                 if count >= 2 {
@@ -4374,15 +4399,18 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                         "grid" | "quad" | "grid_2x2" => {
                             let half_w = wa_w / 2;
                             let half_h = wa_h / 2;
+                            let ordered_quads = classify_immersion_quadrants(&target_hwnds, &current_windows);
                             let coords = [
                                 (wa_x, wa_y),
                                 (wa_x + half_w, wa_y),
                                 (wa_x, wa_y + half_h),
                                 (wa_x + half_w, wa_y + half_h),
                             ];
-                            for (idx, &h) in target_hwnds.iter().take(4).enumerate() {
-                                let (x, y) = coords[idx];
-                                apply_window_rect(h, x, y, half_w, half_h);
+                            for (idx, opt_h) in ordered_quads.iter().enumerate() {
+                                if let Some(h) = opt_h {
+                                    let (x, y) = coords[idx];
+                                    apply_window_rect(*h, x, y, half_w, half_h);
+                                }
                             }
                         }
                         "master_stack" | "focus_side" => {
@@ -4417,12 +4445,19 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                     }
                 }
 
-                // 5. Analyse post-installation du nouvel espace immersif
+                // 6. Analyse post-installation du nouvel espace immersif
                 std::thread::sleep(Duration::from_millis(200));
                 let post_summary = summarize_screen_state(None);
+                if let Ok(mut hist) = IMMERSION_SCREEN_HISTORY.lock() {
+                    hist.push(post_summary.clone());
+                }
                 feedback.push(format!("Mode immersion actif (bureau virtuel créé, disposition : {}). Nouvel état d'écran :\n{}", layout_mode, truncate_with_notice(&post_summary, 800)));
             }
             AgentAction::DeactivateImmersion => {
+                IS_IMMERSION_ACTIVE.store(false, Ordering::SeqCst);
+                if let Ok(mut hist) = IMMERSION_SCREEN_HISTORY.lock() {
+                    hist.clear();
+                }
                 println!("[Actions] Désactivation du mode immersion");
                 const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
                 const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
@@ -4528,7 +4563,7 @@ async fn compact_history_if_needed(
                         let mut new_history = Vec::with_capacity(recent.len() + 2);
                         new_history.push(ChatMessage {
                             role: "user".to_string(),
-                            content: format!("[Note contextuelle - Résumé des échanges antérieurs] :\n{}", summary),
+                            content: format!("[Note contextuelle - résumé des échanges antérieurs] :\n{}", summary),
                         });
                         new_history.push(ChatMessage {
                             role: "assistant".to_string(),
@@ -4548,85 +4583,78 @@ async fn compact_history_if_needed(
     *history = recent;
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PromptTrigger {
+    User,
+    Surveillance,
+    Immersion { screen_changed: bool },
+}
+
 async fn call_deepseek_prompt(
     api_key: String,
     user_prompt: String,
     history: &mut Vec<ChatMessage>,
     event_tx: Sender<AgentEvent>,
     last_call_time: &mut Option<Instant>,
-    is_periodic: bool,
+    trigger: PromptTrigger,
 ) {
     AGENT_BUSY.store(true, Ordering::SeqCst);
     let _busy_guard = BusyGuard;
     let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
 
     if api_key.is_empty() {
-        let _ = event_tx.send(AgentEvent::ReplaceNarration(
-            "Veuillez renseigner DEEPSEEK_API_KEY dans le fichier .env.".into(),
-        ));
+        let _ = event_tx.send(AgentEvent::ReplaceNarration {
+            text: "Veuillez renseigner DEEPSEEK_API_KEY dans le fichier .env.".into(),
+            quick_suggestions: Vec::new(),
+        });
         let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
         return;
     }
 
     let client = reqwest::Client::new();
     let system_instructions = r#"Tu es l'agent d'exploration Libertide pour Windows.
-Tu dois IMPÉRATIVEMENT répondre uniquement avec un JSON strict sans texte autour.
-Exprime-toi exclusivement en français dans la narration.
-Prends en compte l'historique des échanges pour assurer la continuité de la conversation et adapter tes actions.
+Réponds STRICTEMENT en JSON sans texte autour. Narration concise en français (max 2 phrases).
 
-Règle de filtrage strict et silence ("invalid_request") :
-- Tu dois être STRICT et NON PERMISSIF : n'exécute aucune action et ne brode rien si la commande est incomplète, inintelligible, tronquée, s'il s'agit d'un bruit parasite ou si l'intention n'est pas claire et explicite.
-- Si tu ne comprends pas exactement la demande, si elle est incomplète ou sans action intelligible, retourne IMMÉDIATEMENT ce JSON exact en mode silencieux :
-  {"invalid_request": true, "narration": "", "actions": []}
-- Ne tente JAMAIS de deviner des paramètres manquants ni d'inventer une réponse d'assistance polie si la demande n'a pas de sens.
-
-Règles d'autonomie et de ciblage :
-- Navigation web directe : Si l'utilisateur demande d'aller sur un site, d'accéder à un domaine, d'effectuer une recherche ou d'ouvrir une page web (ex: "aller sur google.fr", "navigue vers github.com", "cherche la météo", "ouvre le navigateur") : utilise TOUJOURS directement l'action "navigate_to_url" avec l'adresse complète dans "url". Ne passe JAMAIS par une saisie manuelle dans la barre d'adresse ni par des raccourcis Ctrl+L, le système traite nativement "navigate_to_url".
-- Saisie et zone de texte : Pour toute commande demandant d'écrire ou remplacer du texte sans cible spécifique ou visant une « zone de texte », un champ ou le document en cours, renseigne TOUJOURS "target": null dans "write_text" ou "replace_field_text". Cela déclenchera immédiatement la sélection automatique de la plus vaste zone de saisie à l'écran.
-- Résumé et analyse différentielle de l'écran : Si l'utilisateur demande de résumer, d'observer ou de vérifier l'écran ou ce qui a changé (ex: "résume ce qu'il y a à l'écran", "qu'est-ce qui a changé ?", "vérifie si l'action a fonctionné") : utilise TOUJOURS l'action "summarize_screen" (avec "window": null ou le titre ciblé). Le système t'enverra à la fois l'état d'écran précédent et l'état actuel dès qu'un état antérieur est disponible. Exploite ces deux sources pour identifier les changements réels (apparition d'une fenêtre, modification d'un champ texte, nouveau focus) et décider de la meilleure proposition.
-- Extraction stricte du texte : Sépare TOUJOURS le texte à écrire de sa cible d'UI ou de sa destination. Par exemple, si la consigne est "écris bonjour dans la zone de texte", le texte à saisir est STRICTEMENT "bonjour" ("text": "bonjour") et la cible est "target": null. Ne recopie JAMAIS les compléments de lieu ou d'interface ("dans la zone de texte", "dans le champ...") à l'intérieur du champ "text".
-- Si l'utilisateur demande d'ouvrir une application, un outil ou un logiciel (ex: invite de commande, terminal, bloc-notes, messagerie, calculatrice, etc.), détermine TOI-MÊME le nom exact de son exécutable Windows binaire (ex: "cmd", "wt", "notepad", "calc", "thunderbird", "explorer", "code", "mspaint", etc.) et utilise l'action "open_app" avec ce nom direct d'exécutable dans "name".
-- Si l'utilisateur demande de fermer une application ou une fenêtre, utilise l'action "close_app" avec le nom de l'exécutable ou un mot-clé du titre dans "name".
-- Si l'utilisateur demande de lancer une commande directe ou un script shell/cmd (ex: "ipconfig", "ping", "git status", etc.), utilise l'action "run_command" avec la commande complète dans "command".
-- La reconnaissance vocale est assurée localement par Whisper. Réserve tes réponses à l'analyse et à la planification des actions.
-- Pour effacer ou réinitialiser le texte du champ ou document actif, utilise l'action "clear_text" avec optionnellement "window".
-- Si l'utilisateur demande de cliquer sur un bouton ou un lien, utilise l'action "click_button" avec les mots-clés dans "button_name".
-- Pour cibler ou pointer un élément précis sans cliquer, utilise l'action "focus_element" avec "target_name".
-- Pour la disposition et l'agencement des fenêtres :
-  * Si l'utilisateur nomme une application ou une fenêtre précise, utilise TOUJOURS "arrange_window" avec "title" correspondant à ce nom et "position" ("right" pour la droite, "left" pour la gauche).
-  * Si l'utilisateur demande de mettre côte à côte deux fenêtres, de scinder l'écran ou de fusionner avec le slider, utilise "tile_windows" avec "layout": "split_horizontal" et "windows": ["fenetre_gauche", "fenetre_droite"].
-- Mode immersion et espace de travail dédié :
-  * Pour activer le mode immersion (ex: "active l'immersion", "lance le mode immersion", "crée un espace immersif", "espace de concentration") : utilise TOUJOURS "activate_immersion" avec optionnellement "apps": ["app1", "app2"] et "layout": "split_horizontal" | "master_stack" | "grid_2x2". Le système analyse l'écran, crée un bureau virtuel dédié (Win+Ctrl+D) et dispose les fenêtres.
-  * Pour désactiver l'immersion (ex: "quitte l'immersion", "désactive le mode immersion", "reviens au bureau normal") : utilise l'action "deactivate_immersion" qui fermera le bureau virtuel (Win+Ctrl+F4) et te fournira l'état récapitulatif.
-
-Boucle récursive d'exécution multi-étapes (3 passes max) :
-Tu opères dans un cycle récursif. Dès que tu renvoies des actions, le système les exécute immédiatement et te fournit un rapport d'exécution sous la forme `[Retour d'exécution étape X]`.
-- Analyse attentivement ce retour d'exécution.
-- Si la demande initiale est entièrement complétée ou qu'aucune action subséquente n'est nécessaire : renvoie OBLIGATOIREMENT "actions": [] avec ta narration de confirmation finale.
-- Si une étape suivante est requise pour mener à terme l'instruction : renvoie l'action suivante dans "actions".
+Règles d'action et d'arbitrage :
+- Silence ("invalid_request": true) : réservé aux bruits de micro et phrases inintelligibles.
+- Salutations et discussion : valide ("invalid_request": false), réponds courtoisement dans "narration" avec "actions": [].
+- Interface : consulte toujours "[État actuel de l'écran]" (fenêtres, onglets, boutons, liens).
+- Fermeture d'onglets ou sous-pages (ex: "ferme Google") : JAMAIS "close_app" ! Enchaîne "focus_window" puis "accessibility_shortcut": "close_tab" ou clique la croix ("click_button" / "click_element"). Réserve "close_app" à la fermeture d'une application entière.
+- Obstacles et bannières (cookies, rgpd, popups de démarrage) : Analyse systématiquement l'écran pour détecter si la navigation est entravée par un dialogue de consentement ou une modale. Si c'est le cas, clique immédiatement et en toute autonomie sur l'action de validation ou de fermeture adéquate ("click_button" ou "click_element") avant de poursuivre l'objectif utilisateur. Ne demande jamais de confirmation pour lever ces blocages.
+- Éléments cliquables et saisie : utilise "click_element" pour les liens et onglets, "click_button" pour les boutons. Pour saisir sans cible précise, mets "target": null dans "write_text" ou "replace_field_text".
+- Navigation et shopping autonome : génère l'URL pertinente (ex: "https://www.google.com/search?tbm=shop&q=..." pour shopping) avec "navigate_to_url".
+  * Achat multi-étapes : 1. Ajoute au panier ("click_element" ou "click_button") -> 2. Ouvre le panier / commande ("click_element") -> 3. Devant le paiement, stoppe toute action et demande confirmation orale dans "narration" avec "actions": [].
+  * Recherche exploratoire : dès l'affichage des résultats, résume 2-3 options observées et pose une question de cadrage (budget, dimensions) dans "narration" avec "actions": [].
+- Suggestions rapides ("quick_suggestions") : quand tu poses une question ou suggères des options, propose 2 à 4 choix brefs sous forme de tableau de chaînes textuelles dans "quick_suggestions" (ex: ["Tennis de course, 80-120€", "Modèle lifestyle"]). Ces options seront affichées sous forme de boutons-onglets directement cliquables par l'utilisateur.
+- Immersion : "activate_immersion" pour créer le bureau virtuel (Win+Ctrl+D). Silence absolu lors du suivi périodique si l'activité est normale. "deactivate_immersion" pour le fermer.
+- Cycle d'exécution (3 passes max) : analyse le retour d'étape et l'état d'écran. Dès que la tâche est finie ou nécessite une précision de l'utilisateur, renvoie "actions": [].
 
 Format json obligatoire :
 {
-  "narration": "Explication vocale en français (2 phrases max, concis, naturel).",
+  "narration": "Explication vocale en français (2 phrases max ou vide pour silence).",
   "actions": [
     {"action": "open_app", "name": "nom_executable"},
+    {"action": "close_app", "name": "nom_ou_titre"},
+    {"action": "click_element", "window": "titre_optionnel", "target_name": "nom_du_lien_ou_element"},
     {"action": "click_button", "window": "titre_optionnel", "button_name": "nom_du_bouton"},
     {"action": "focus_element", "window": "titre_optionnel", "target_name": "nom_ou_id_element"},
+    {"action": "focus_window", "title": "titre_optionnel", "pid": 1234},
     {"action": "clear_text", "window": "titre_optionnel"},
-    {"action": "run_command", "command": "commande_ou_outil"},
     {"action": "write_text", "text": "texte à écrire", "target": null},
     {"action": "replace_field_text", "text": "texte complet modifié", "target": null},
-    {"action": "close_app", "name": "nom_ou_titre"},
+    {"action": "run_command", "command": "commande_ou_outil"},
+    {"action": "kill_process", "pid": 1234, "name": "app.exe"},
     {"action": "open_browser", "url": "https://..."},
     {"action": "navigate_to_url", "url": "https://..."},
     {"action": "tile_windows", "layout": "split_horizontal" | "split_vertical" | "grid_2x2" | "master_stack", "windows": ["titre_fenetre_1", "titre_fenetre_2"]},
-    {"action": "arrange_window", "title": "mot_cle_ou_active", "position": "left" | "right" | "top" | "bottom" | "top_left" | "top_right" | "bottom_left" | "bottom_right" | "left_two_thirds" | "right_one_third" | "left_one_third" | "right_two_thirds" | "center" | "maximize" | "minimize"},
+    {"action": "arrange_window", "title": "mot_cle", "position": "left" | "right" | "top" | "bottom" | "center" | "maximize" | "minimize"},
     {"action": "move_window", "title": "mot_cle", "x": 0, "y": 0, "width": 960, "height": 1040},
-    {"action": "accessibility_shortcut", "shortcut": "snap_left" | "snap_right" | "snap_up" | "snap_down" | "snap_top_half" | "snap_bottom_half" | "minimize_others" | "restore_window" | "magnifier_zoom_in" | "magnifier_zoom_out" | "magnifier_close" | "narrator_toggle" | "color_filter_toggle" | "accessibility_settings" | "clipboard_history" | "mute_mic" | "toggle_desktop" | "snap_layouts" | "task_manager" | "snip_screenshot" | "action_center" | "notification_center" | "task_view" | "open_search" | "open_run" | "open_settings" | "lock_screen" | "emoji_panel" | "minimize_all" | "restore_minimized" | "new_desktop" | "next_desktop" | "prev_desktop" | "close_desktop" | "move_window_monitor_left" | "move_window_monitor_right" | "file_explorer" | "quick_link_menu" | "project_display" | "cast_display" | "screen_recording" | "select_all" | "copy" | "undo" | "redo" | "find_in_page" | "close_tab" | "reopen_tab" | "refresh_page" | "next_field" | "previous_field"},
+    {"action": "accessibility_shortcut", "shortcut": "close_tab" | "snap_left" | "snap_right" | "snap_up" | "snap_down" | "task_manager" | "undo" | "copy" | "refresh_page"},
     {"action": "summarize_screen", "window": "titre_optionnel"},
-    {"action": "activate_immersion", "apps": ["code", "chrome"], "layout": "split_horizontal"},
+    {"action": "activate_immersion", "apps": ["code"], "urls": ["https://..."], "layout": "grid_2x2"},
     {"action": "deactivate_immersion"}
-  ]
+  ],
+  "quick_suggestions": ["Suggestion 1", "Suggestion 2"]
 }"#;
 
     let safe_user_prompt = truncate_with_notice(&user_prompt, 4000);
@@ -4644,7 +4672,7 @@ Format json obligatoire :
         compact_history_if_needed(&api_key, history, &client, last_call_time).await;
 
         // Debounce : pause minimale entre deux requêtes API
-        let min_debounce = Duration::from_millis(8000);
+        let min_debounce = if pass == 1 { Duration::from_millis(3000) } else { Duration::from_millis(2000) };
         if let Some(prev) = *last_call_time {
             let elapsed = prev.elapsed();
             if elapsed < min_debounce {
@@ -4689,7 +4717,7 @@ Format json obligatoire :
                     if let Ok(body) = res.json::<DeepSeekChatResponse>().await {
                         if let Some(choice) = body.choices.first() {
                             let raw_content = &choice.message.content;
-                            println!("\n=================== [RÉPONSE DEEPSEEK BRUTE (PASSE {}/{})] ===================", pass, MAX_AGENT_PASSES);
+                            println!("\n=================== [Réponse deepseek brute (passe {}/{})] ===================", pass, MAX_AGENT_PASSES);
                             println!("{}", raw_content.trim());
                             println!("============================================================");
 
@@ -4704,7 +4732,10 @@ Format json obligatoire :
                         }
                     }
                     history.pop();
-                    let _ = event_tx.send(AgentEvent::ReplaceNarration("Format de réponse inattendu.".into()));
+                    let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                        text: "Format de réponse inattendu.".into(),
+                        quick_suggestions: Vec::new(),
+                    });
                     break;
                 }
                 Ok(res) if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempts <= MAX_RETRIES => {
@@ -4722,9 +4753,10 @@ Format json obligatoire :
                         println!("[DeepSeek 429] Détails renvoyés par l'API : {}", err_body);
                         history.pop();
                         let mins = (wait_secs + 59) / 60;
-                        let _ = event_tx.send(AgentEvent::ReplaceNarration(format!(
-                            "Plafond instantané DeepSeek atteint (pause requise par l'API : {mins} min). Historique réinitialisé."
-                        )));
+                        let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                            text: format!("Plafond instantané DeepSeek atteint (pause requise par l'API : {mins} min). Historique réinitialisé."),
+                            quick_suggestions: Vec::new(),
+                        });
                         history.clear();
                         break;
                     }
@@ -4740,7 +4772,10 @@ Format json obligatoire :
                     *last_call_time = Some(Instant::now());
                     history.pop();
                     let status = res.status();
-                    let _ = event_tx.send(AgentEvent::ReplaceNarration(format!("Erreur api deepseek : {status}")));
+                    let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                        text: format!("Erreur api deepseek : {status}"),
+                        quick_suggestions: Vec::new(),
+                    });
                     break;
                 }
                 Err(err) if attempts <= MAX_RETRIES => {
@@ -4754,7 +4789,10 @@ Format json obligatoire :
                 Err(err) => {
                     *last_call_time = Some(Instant::now());
                     history.pop();
-                    let _ = event_tx.send(AgentEvent::ReplaceNarration(format!("Erreur réseau : {err}")));
+                    let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                        text: format!("Erreur réseau : {err}"),
+                        quick_suggestions: Vec::new(),
+                    });
                     break;
                 }
             }
@@ -4772,7 +4810,21 @@ Format json obligatoire :
             return;
         }
 
-        if is_periodic && payload.actions.is_empty() && payload.narration.trim().is_empty() {
+        // En mode immersion, si l'écran n'a pas bougé et qu'aucune action ni suggestion rapide n'est formulée, préserver le silence
+        if let PromptTrigger::Immersion { screen_changed } = trigger {
+            let no_actions_or_suggestions = payload.actions.is_empty() && payload.quick_suggestions.is_empty();
+            if (!screen_changed && no_actions_or_suggestions) || (payload.narration.trim().is_empty() && no_actions_or_suggestions) {
+                println!("[Immersion] Écran inchangé ou silence demandé sans action/suggestion : préservation du silence.");
+                history.pop();
+                history.pop();
+                let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                return;
+            }
+        }
+
+        if trigger == PromptTrigger::Surveillance
+            && payload.actions.is_empty() && payload.quick_suggestions.is_empty() && payload.narration.trim().is_empty()
+        {
             println!("[Surveillance] L'IA a analysé l'écran : aucune action nécessaire.");
             history.pop();
             history.pop();
@@ -4786,8 +4838,11 @@ Format json obligatoire :
             println!("  [{}] {:?}", i + 1, act);
         }
 
-        if !payload.narration.trim().is_empty() {
-            let _ = event_tx.send(AgentEvent::ReplaceNarration(payload.narration.clone()));
+        if !payload.narration.trim().is_empty() || !payload.quick_suggestions.is_empty() {
+            let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                text: payload.narration.clone(),
+                quick_suggestions: payload.quick_suggestions.clone(),
+            });
         }
 
         if payload.actions.is_empty() {
@@ -4796,17 +4851,35 @@ Format json obligatoire :
         }
 
         let actions_to_run = payload.actions;
-        let report = tokio::task::spawn_blocking(move || {
-            execute_system_actions(&actions_to_run)
-        }).await.unwrap_or_else(|_| "Erreur d'exécution.".to_string());
+        let (report, screen_after) = tokio::task::spawn_blocking(move || {
+            let rep = execute_system_actions(&actions_to_run);
+            std::thread::sleep(Duration::from_millis(1200));
+            #[cfg(windows)]
+            let sc = summarize_screen_state(None);
+            #[cfg(not(windows))]
+            let sc = String::new();
+            (rep, sc)
+        }).await.unwrap_or_else(|_| ("Erreur d'exécution.".to_string(), String::new()));
 
         if pass < MAX_AGENT_PASSES {
-            let compact_report = truncate_with_notice(&report, 2000);
+            let compact_report = truncate_with_notice(&report, 1200);
+            let mut step_feedback = format!("[Retour d'exécution étape {pass}] :\n{compact_report}");
+            if !screen_after.trim().is_empty() {
+                let safe_screen = truncate_with_notice(screen_after.trim(), 2400);
+                step_feedback.push_str(&format!("\n\n[État de l'écran suite aux actions] :\n{safe_screen}"));
+            }
+            step_feedback.push_str(
+                "\n\nConsignes pour cette nouvelle étape :\n\
+                - Analyse les résultats et éléments visibles dans [État de l'écran suite aux actions].\n\
+                - Si l'affichage montre que la page est recouverte par une modale, une bannière de cookies ou un écran de démarrage, résous ce blocage en priorité en cliquant sur le contrôle approprié.\n\
+                - Pour une recherche ou un achat web : relève les modèles, catégories ou prix repérés à l'écran, formule 2 ou 3 suggestions concrètes et pose une question de précision à l'utilisateur (budget, marque, dimensions, préférences) dans \"narration\" avec \"actions\": [].\n\
+                - Si l'utilisateur a déjà précisé son choix ou qu'un lien évident s'impose, utilise l'action générique \"click_element\" dans \"actions\".\n\
+                - Si la tâche est terminée, confirme-le dans \"narration\" avec \"actions\": []."
+            );
+
             history.push(ChatMessage {
                 role: "user".to_string(),
-                content: format!(
-                    "[Retour d'exécution étape {pass}] :\n{compact_report}\n\nSi la tâche demandée est achevée, réponds avec \"actions\": [] et la narration finale. Sinon, transmets les actions nécessaires suivantes."
-                ),
+                content: step_feedback,
             });
             // Marquer la fin de l'exécution pour que le debounce de la passe suivante s'applique bien
             *last_call_time = Some(Instant::now());
@@ -4852,41 +4925,56 @@ fn main() -> eframe::Result<()> {
                     AgentCommand::Prompt(prompt) => {
                         IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
                         if let Some(cli_feedback) = try_execute_direct_cli(&prompt) {
-                            let _ = event_tx.send(AgentEvent::ReplaceNarration(cli_feedback.clone()));
+                            let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                                text: cli_feedback.clone(),
+                                quick_suggestions: Vec::new(),
+                            });
                         } else if let Some(text_to_write) = parse_write_command(&prompt) {
                             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
                             let narration = tokio::task::spawn_blocking(move || {
                                 write_to_browser_or_txt(&text_to_write)
                             }).await.unwrap_or_else(|_| "Erreur lors de l'écriture.".to_string());
-                            let _ = event_tx.send(AgentEvent::ReplaceNarration(narration));
+                            let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                                text: narration,
+                                quick_suggestions: Vec::new(),
+                            });
                         } else {
-                            let field_content = tokio::task::spawn_blocking(|| {
+                            let (field_content, screen_state) = tokio::task::spawn_blocking(|| {
                                 #[cfg(windows)]
                                 {
-                                    get_active_field_content()
+                                    (get_active_field_content(), summarize_screen_state(None))
                                 }
                                 #[cfg(not(windows))]
                                 {
-                                    None
+                                    (None, String::new())
                                 }
-                            }).await.unwrap_or(None);
+                            }).await.unwrap_or((None, String::new()));
 
-                            let final_prompt = if let Some(content) = field_content {
+                            let mut prompt_sections = Vec::new();
+
+                            if !screen_state.trim().is_empty() {
+                                let safe_screen = truncate_with_notice(screen_state.trim(), 2800);
+                                prompt_sections.push(format!("[État actuel de l'écran]\n{safe_screen}"));
+                            }
+
+                            if let Some(content) = field_content {
                                 if !content.trim().is_empty() {
-                                    let safe_content = truncate_with_notice(content.trim(), 2000);
-                                    format!("Contenu actuel du champ de saisie :\n\"\"\"\n{}\n\"\"\"\n\nCommande : {}", safe_content, prompt)
-                                } else {
-                                    prompt
+                                    let safe_content = truncate_with_notice(content.trim(), 1200);
+                                    prompt_sections.push(format!("[Contenu actuel du champ de saisie]\n\"\"\"\n{safe_content}\n\"\"\""));
                                 }
-                            } else {
-                                prompt
-                            };
+                            }
 
-                            call_deepseek_prompt(deepseek_chat_key.clone(), final_prompt, &mut history, event_tx.clone(), &mut last_call_time, false).await;
+                            prompt_sections.push(format!("[Demande utilisateur]\n{prompt}"));
+                            let final_prompt = prompt_sections.join("\n\n");
+
+                            call_deepseek_prompt(deepseek_chat_key.clone(), final_prompt, &mut history, event_tx.clone(), &mut last_call_time, PromptTrigger::User).await;
                         }
                     }
                     AgentCommand::ClearHistory => {
                         IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
+                        if let Ok(mut hist) = IMMERSION_SCREEN_HISTORY.lock() {
+                            hist.clear();
+                        }
                         history.clear();
                         if let Ok(mut lock) = LAST_SCREEN_SUMMARY.lock() {
                             *lock = None;
@@ -4910,6 +4998,53 @@ fn main() -> eframe::Result<()> {
                             let current_summary = tokio::task::spawn_blocking(|| {
                                 summarize_screen_state(None)
                             }).await.unwrap_or_default();
+
+                            let is_immersion = IS_IMMERSION_ACTIVE.load(Ordering::SeqCst);
+                            if is_immersion {
+                                let (screen_diff, screen_changed) = {
+                                    let mut hist = IMMERSION_SCREEN_HISTORY.lock().unwrap_or_else(|e| e.into_inner());
+                                    let last_summary = hist.last().cloned();
+                                    hist.push(current_summary.clone());
+                                    if hist.len() > 6 {
+                                        hist.remove(0);
+                                    }
+                                    if let Some(prev) = last_summary {
+                                        let diff = compute_screen_diff(&prev, &current_summary);
+                                        let changed = !diff.trim().is_empty();
+                                        (diff, changed)
+                                    } else {
+                                        (String::new(), true)
+                                    }
+                                };
+
+                                if !screen_changed {
+                                    println!("[Immersion] Aucun changement à l'écran, silence préservé.");
+                                    continue;
+                                }
+
+                                let immersion_prompt = if screen_diff.is_empty() {
+                                    format!(
+                                        "[Suivi du mode immersion - état initial]\n\n\
+                                        [État d'écran actuel] :\n{}\n\n\
+                                        Instruction : Session d'immersion active. Consigne de silence absolu : réponds STRICTEMENT avec \"narration\": \"\", \"actions\": [], \"quick_suggestions\": [].",
+                                        truncate_with_notice(&current_summary, 1500)
+                                    )
+                                } else {
+                                    format!(
+                                        "[Suivi du mode immersion - différentiel des changements]\n\n\
+                                        {}\n\n\
+                                        Instruction impérative : Analyse UNIQUEMENT et STRICTEMENT les lignes de changement ci-dessus (+ et -). \
+                                        Ne commente absolument rien de ce qui est fixe ou inchangé. \
+                                        Consigne de silence absolu : si ces changements font partie du travail normal de l'utilisateur, réponds STRICTEMENT avec \"narration\": \"\", \"actions\": [], \"quick_suggestions\": []. \
+                                        Ne commente que les éléments modifiés si une intervention ou suggestion est réellement utile.",
+                                        truncate_with_notice(&screen_diff, 1800)
+                                    )
+                                };
+
+                                println!("[Immersion] Changement détecté (diff: {} octets), transmission du diff au LLM...", screen_diff.len());
+                                call_deepseek_prompt(deepseek_chat_key.clone(), immersion_prompt, &mut history, event_tx.clone(), &mut last_call_time, PromptTrigger::Immersion { screen_changed: true }).await;
+                                continue;
+                            }
 
                             let prev_summary = {
                                 let mut lock = LAST_SCREEN_SUMMARY.lock().unwrap_or_else(|e| e.into_inner());
@@ -4937,7 +5072,7 @@ fn main() -> eframe::Result<()> {
                                     truncate_with_notice(&current_summary, 1500)
                                 );
 
-                                call_deepseek_prompt(deepseek_chat_key.clone(), diff_prompt, &mut history, event_tx.clone(), &mut last_call_time, true).await;
+                                call_deepseek_prompt(deepseek_chat_key.clone(), diff_prompt, &mut history, event_tx.clone(), &mut last_call_time, PromptTrigger::Surveillance).await;
                             } else {
                                 println!("[Surveillance] Premier instantané d'écran enregistré.");
                             }
