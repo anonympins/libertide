@@ -25,16 +25,16 @@ use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, 
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
-    IUIAutomationTextPattern, IUIAutomationValuePattern, TreeScope_Descendants,
-    UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_InvokePatternId,
-    UIA_TextPatternId, UIA_ValuePatternId,
+    IUIAutomationScrollItemPattern, IUIAutomationTextPattern, IUIAutomationValuePattern,
+    TreeScope_Descendants, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+    UIA_InvokePatternId, UIA_ScrollItemPatternId, UIA_TextPatternId, UIA_ValuePatternId,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     mouse_event, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_WHEEL,
     MOUSEEVENTF_LEFTUP, VIRTUAL_KEY,
 };
 #[cfg(windows)]
@@ -567,6 +567,7 @@ impl OverlayApp {
                 text: initial_subtitle,
                 timestamp: current_time_str(),
                 quick_suggestions: Vec::new(),
+                screen_size_kb: None,
             }],
             active_tab: ActiveTab::Assistance,
             twitch_messages: Vec::new(),
@@ -646,6 +647,7 @@ impl OverlayApp {
             text: stop_msg.clone(),
             timestamp: current_time_str(),
             quick_suggestions: Vec::new(),
+            screen_size_kb: None,
         });
         let _ = self.tts_sender.send(TtsCommand::Stop);
         let _ = self.tts_sender.send(TtsCommand::Speak(stop_msg));
@@ -766,6 +768,11 @@ impl eframe::App for OverlayApp {
                         }
                     }
                 }
+                AgentEvent::ScreenPayloadSize(kb) => {
+                    if let Some(entry) = self.chat_history.iter_mut().rev().find(|e| e.role == ChatRole::User) {
+                        entry.screen_size_kb = Some(kb);
+                    }
+                }
                 AgentEvent::NarrationChunk(chunk) => {
                     if let Some(last) = self.chat_history.last_mut() {
                         if matches!(last.role, ChatRole::Agent) {
@@ -776,6 +783,7 @@ impl eframe::App for OverlayApp {
                                 text: chunk,
                                 timestamp: current_time_str(),
                                 quick_suggestions: Vec::new(),
+                                screen_size_kb: None,
                             });
                         }
                     } else {
@@ -784,6 +792,7 @@ impl eframe::App for OverlayApp {
                             text: chunk,
                             timestamp: current_time_str(),
                             quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
                         });
                     }
                 }
@@ -793,6 +802,7 @@ impl eframe::App for OverlayApp {
                         text: text.clone(),
                         timestamp: current_time_str(),
                         quick_suggestions,
+                        screen_size_kb: None,
                     });
                     let _ = self.tts_sender.send(TtsCommand::Speak(text));
                 }
@@ -802,6 +812,7 @@ impl eframe::App for OverlayApp {
                         text: full_text,
                         timestamp: current_time_str(),
                         quick_suggestions: Vec::new(),
+                        screen_size_kb: None,
                     });
                 }
                 AgentEvent::TranscriptionPartial(text) => {
@@ -822,6 +833,7 @@ impl eframe::App for OverlayApp {
                                 text: prompt,
                                 timestamp: current_time_str(),
                                 quick_suggestions: Vec::new(),
+                                screen_size_kb: None,
                             });
                             let reply = "Me revoilà, overlay réaffiché.".to_string();
                             self.chat_history.push(ChatEntry {
@@ -829,6 +841,7 @@ impl eframe::App for OverlayApp {
                                 text: reply.clone(),
                                 timestamp: current_time_str(),
                                 quick_suggestions: Vec::new(),
+                                screen_size_kb: None,
                             });
                             let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                             self.continuous_mode = true;
@@ -845,6 +858,7 @@ impl eframe::App for OverlayApp {
                                 text: prompt,
                                 timestamp: current_time_str(),
                                 quick_suggestions: Vec::new(),
+                                screen_size_kb: None,
                             });
                             let reply = "Overlay masqué. Je reste à l'écoute pour « deepseek ouvre toi ».".to_string();
                             self.chat_history.push(ChatEntry {
@@ -852,6 +866,7 @@ impl eframe::App for OverlayApp {
                                 text: reply.clone(),
                                 timestamp: current_time_str(),
                                 quick_suggestions: Vec::new(),
+                                screen_size_kb: None,
                             });
                             let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                             self.continuous_mode = true;
@@ -862,6 +877,7 @@ impl eframe::App for OverlayApp {
                                 text: reply.clone(),
                                 timestamp: current_time_str(),
                                 quick_suggestions: Vec::new(),
+                                screen_size_kb: None,
                             });
                             let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                             self.continuous_mode = true;
@@ -874,6 +890,7 @@ impl eframe::App for OverlayApp {
                                 text: prompt.clone(),
                                 timestamp: current_time_str(),
                                 quick_suggestions: Vec::new(),
+                                screen_size_kb: None,
                             });
                             let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
                         } else if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
@@ -1002,11 +1019,18 @@ impl eframe::App for OverlayApp {
                                         ui.vertical(|ui| {
                                             ui.horizontal(|ui| {
                                                 let (label_name, label_color) = match entry.role {
-                                                    ChatRole::User => ("🗣 Vous", egui::Color32::from_rgb(255, 215, 120)),
-                                                    ChatRole::Agent => ("DeepSeek", egui::Color32::from_rgb(0, 195, 255)),
+                                                    ChatRole::User => {
+                                                        let name = if let Some(kb) = entry.screen_size_kb {
+                                                            format!("🗣 Vous - {:.1} ko", kb)
+                                                        } else {
+                                                            "🗣 Vous".to_string()
+                                                        };
+                                                        (name, egui::Color32::from_rgb(255, 215, 120))
+                                                    }
+                                                    ChatRole::Agent => ("DeepSeek".to_string(), egui::Color32::from_rgb(0, 195, 255)),
                                                 };
                                                 ui.label(
-                                                    egui::RichText::new(label_name)
+                                                    egui::RichText::new(&label_name)
                                                         .size(if is_highlighted { 11.5 } else { 10.0 })
                                                         .color(label_color)
                                                         .strong(),
@@ -1085,6 +1109,7 @@ impl eframe::App for OverlayApp {
                                             text: prompt.clone(),
                                             timestamp: current_time_str(),
                                             quick_suggestions: Vec::new(),
+                                            screen_size_kb: None,
                                         });
                                         let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
                                     }
@@ -1288,6 +1313,7 @@ impl eframe::App for OverlayApp {
                                                 text: prompt.clone(),
                                                 timestamp: current_time_str(),
                                                 quick_suggestions: Vec::new(),
+                                                screen_size_kb: None,
                                             });
                                             if is_hide_command(&prompt) {
                                                 self.is_hidden = true;
@@ -1298,6 +1324,7 @@ impl eframe::App for OverlayApp {
                                                     text: reply.clone(),
                                                     timestamp: current_time_str(),
                                                     quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
                                                 });
                                                 let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                                             } else {
@@ -1316,6 +1343,7 @@ impl eframe::App for OverlayApp {
                                                 text: "Mémoire contextuelle réinitialisée.".to_string(),
                                                 timestamp: current_time_str(),
                                                 quick_suggestions: Vec::new(),
+                                                screen_size_kb: None,
                                             });
                                             self.live_transcript.clear();
                                             let _ = self.tts_sender.send(TtsCommand::Stop);
@@ -1665,7 +1693,12 @@ fn find_executable_in_path(name: &str) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(windows)]
-fn launch_browser_new_window(url: &str) {
+fn launch_browser_new_window(url: &str) -> Option<HWND> {
+    let initial_hwnds: std::collections::HashSet<isize> = list_user_windows()
+        .into_iter()
+        .map(|(h, _)| h.0 as isize)
+        .collect();
+
     let chrome_paths = [
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -1676,38 +1709,67 @@ fn launch_browser_new_window(url: &str) {
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
     ];
 
-    // Recherche prioritaire de Chrome, puis Edge sur les chemins standards
+    let mut spawned = false;
     for path in chrome_paths.iter().chain(edge_paths.iter()) {
         if std::path::Path::new(path).exists() {
             if std::process::Command::new(path)
-                .args(["--force-renderer-accessibility", "--new-window", url])
+                .args(["--force-renderer-accessibility", "--start-maximized", "--new-window", url])
                 .spawn()
                 .is_ok()
             {
-                return;
+                spawned = true;
+                break;
             }
         }
     }
 
-    if std::process::Command::new("chrome")
-        .args(["--force-renderer-accessibility", "--new-window", url])
+    if !spawned && std::process::Command::new("chrome")
+        .args(["--force-renderer-accessibility", "--start-maximized", "--new-window", url])
         .spawn()
         .is_ok()
     {
-        return;
+        spawned = true;
     }
 
-    if std::process::Command::new("msedge")
-        .args(["--force-renderer-accessibility", "--new-window", url])
+    if !spawned && std::process::Command::new("msedge")
+        .args(["--force-renderer-accessibility", "--start-maximized", "--new-window", url])
         .spawn()
         .is_ok()
     {
-        return;
+        spawned = true;
     }
 
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", "chrome", "--new-window", url])
-        .spawn();
+    if !spawned {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", "/MAX", "chrome", "--start-maximized", "--new-window", url])
+            .spawn();
+        spawned = true;
+    }
+
+    if spawned {
+        for _ in 0..25 {
+            std::thread::sleep(Duration::from_millis(100));
+            let current_windows = list_user_windows();
+            for (hwnd, title) in &current_windows {
+                if !initial_hwnds.contains(&(hwnd.0 as isize)) {
+                    let t = title.to_lowercase();
+                    if is_browser_hwnd(*hwnd, title)
+                        || t.contains("chrome")
+                        || t.contains("edge")
+                        || t.contains("brave")
+                        || !t.is_empty()
+                    {
+                        unsafe {
+                            let _ = ShowWindow(*hwnd, SW_MAXIMIZE);
+                            let _ = SetForegroundWindow(*hwnd);
+                        }
+                        return Some(*hwnd);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(windows)]
@@ -1929,7 +1991,7 @@ fn format_url_for_navigation(raw_url: &str) -> String {
 fn navigate_browser_address_bar(hwnd: HWND, url: &str) {
     let formatted_url = format_url_for_navigation(url);
     unsafe {
-        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = ShowWindow(hwnd, SW_MAXIMIZE);
         let _ = SetForegroundWindow(hwnd);
     }
     std::thread::sleep(Duration::from_millis(80));
@@ -2106,7 +2168,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
             return results;
         };
 
-        let count = elements.Length().unwrap_or(0);
+        let count = elements.Length().unwrap_or(0).clamp(0, 300);
         for i in 0..count {
             if let Ok(item) = elements.GetElement(i) {
                 let is_offscreen = item.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false);
@@ -2252,7 +2314,7 @@ fn refocus_largest_textarea_or_fallback(hwnd: HWND) -> bool {
 
     if let Some(target) = textareas.first() {
         unsafe { let _ = target.element.SetFocus(); }
-        click_element(target.click_x, target.click_y, target.pattern.as_ref());
+        click_element(target.click_x, target.click_y, Some(&target.element), target.pattern.as_ref());
         return true;
     }
 
@@ -2265,7 +2327,7 @@ fn refocus_largest_textarea_or_fallback(hwnd: HWND) -> bool {
 
     if let Some(target) = inputs.first() {
         unsafe { let _ = target.element.SetFocus(); }
-        click_element(target.click_x, target.click_y, target.pattern.as_ref());
+        click_element(target.click_x, target.click_y, Some(&target.element), target.pattern.as_ref());
         return true;
     }
 
@@ -2278,7 +2340,7 @@ fn refocus_largest_textarea_or_fallback(hwnd: HWND) -> bool {
 
     if let Some(target) = focusables.first() {
         unsafe { let _ = target.element.SetFocus(); }
-        click_element(target.click_x, target.click_y, target.pattern.as_ref());
+        click_element(target.click_x, target.click_y, Some(&target.element), target.pattern.as_ref());
         return true;
     }
 
@@ -2329,7 +2391,7 @@ fn find_largest_textarea_on_screen(
         }
     }
 
-    for hwnd in ordered {
+    for hwnd in ordered.into_iter().take(4) {
         let elements = list_interactive_elements(hwnd);
         for elem in elements {
             if elem.is_explicit_textarea {
@@ -2598,7 +2660,7 @@ fn write_to_browser_or_txt(text: &str) -> String {
 
         if let Some(elem) = find_largest_textarea(target_hwnd) {
             unsafe { let _ = elem.element.SetFocus(); }
-            click_element(elem.click_x, elem.click_y, elem.pattern.as_ref());
+            click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
             std::thread::sleep(Duration::from_millis(50));
         } else {
             ensure_window_textarea_focus(target_hwnd);
@@ -2825,7 +2887,24 @@ fn try_execute_direct_cli(prompt: &str) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn click_element(x: i32, y: i32, invoke_pattern: Option<&IUIAutomationInvokePattern>) {
+fn click_element(
+    x: i32,
+    y: i32,
+    element: Option<&IUIAutomationElement>,
+    invoke_pattern: Option<&IUIAutomationInvokePattern>,
+) {
+    // 1. Rendre l'élément visible dans le viewport s'il est hors écran
+    if let Some(elem) = element {
+        unsafe {
+            if let Ok(pattern_unk) = elem.GetCurrentPattern(UIA_ScrollItemPatternId) {
+                if let Ok(scroll_pattern) = pattern_unk.cast::<IUIAutomationScrollItemPattern>() {
+                    let _ = scroll_pattern.ScrollIntoView();
+                    std::thread::sleep(Duration::from_millis(80));
+                }
+            }
+        }
+    }
+
     if let Some(pattern) = invoke_pattern {
         unsafe {
             if pattern.Invoke().is_ok() {
@@ -2834,9 +2913,25 @@ fn click_element(x: i32, y: i32, invoke_pattern: Option<&IUIAutomationInvokePatt
         }
     }
 
-    // Simulation curseur et clic matériel si l'invocation UIA n'est pas supportée
+    // 2. Recalculer les coordonnées réelles après défilement
+    let mut click_x = x;
+    let mut click_y = y;
+    if let Some(elem) = element {
+        unsafe {
+            if let Ok(rect) = elem.CurrentBoundingRectangle() {
+                let width = rect.right - rect.left;
+                let height = rect.bottom - rect.top;
+                if width > 4 && height > 4 {
+                    click_x = rect.left + ((width / 2).min(80)).max(5);
+                    click_y = rect.top + ((height / 2).min(30)).max(5);
+                }
+            }
+        }
+    }
+
+    // 3. Simulation curseur et clic matériel si l'invocation UIA directe n'est pas supportée
     unsafe {
-        let _ = SetCursorPos(x, y);
+        let _ = SetCursorPos(click_x, click_y);
         std::thread::sleep(Duration::from_millis(30));
         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
         std::thread::sleep(Duration::from_millis(40));
@@ -3191,9 +3286,118 @@ fn compute_screen_diff(old_summary: &str, new_summary: &str) -> String {
     diff
 }
 
+fn generate_fallback_suggestions_from_screen(screen_summary: &str) -> Vec<QuickSuggestionItem> {
+    let mut suggestions = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // 1. Détection de défilement ou scrollbar disponible
+    if screen_summary.contains("[Défilement possible]") || screen_summary.to_lowercase().contains("défilement") {
+        suggestions.push(QuickSuggestionItem::Text("Faire défiler vers le bas".to_string()));
+        seen.insert("faire défiler vers le bas".to_string());
+    }
+
+    // 2. Extraction d'éléments pertinents observés à l'écran
+    for line in screen_summary.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("[Liens / résultats cliquables] :")
+            || trimmed.starts_with("[Boutons / contrôles cliquables] :")
+            || trimmed.starts_with("[Onglets / pages ouvertes] :")
+        {
+            if let Some((_, items_part)) = trimmed.split_once(':') {
+                for item in items_part.split('|').chain(items_part.split(',')) {
+                    let clean = item.trim().trim_matches('"').trim();
+                    let lower = clean.to_lowercase();
+                    if clean.len() >= 3
+                        && clean.len() <= 40
+                        && !seen.contains(&lower)
+                        && !lower.contains("fermer")
+                        && !lower.contains("close")
+                        && !lower.contains("annuler")
+                        && !lower.contains("inconnue")
+                    {
+                        seen.insert(lower);
+                        suggestions.push(QuickSuggestionItem::Text(clean.to_string()));
+                        if suggestions.len() >= 4 {
+                            return suggestions;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if suggestions.is_empty() {
+        suggestions.push(QuickSuggestionItem::Text("Faire défiler vers le bas".to_string()));
+        suggestions.push(QuickSuggestionItem::Text("Actualiser la page".to_string()));
+    }
+
+    suggestions
+}
+
 #[cfg(windows)]
-fn summarize_screen_state(target_window: Option<&str>) -> String {
+fn is_poor_or_redundant_link(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    if lower.len() < 2 {
+        return true;
+    }
+    const BLACKLIST: &[&str] = &[
+        "précédent", "suivant", "next", "previous", "en savoir plus", "lire la suite",
+        "plus", "voir plus", "connexion", "se connecter", "s'inscrire", "sign in",
+        "login", "accueil", "home", "menu", "conditions d'utilisation", "confidentialité",
+        "cookies", "aide", "help", "contact", "retour", "partager", "haut de page", "top",
+        "fermer", "close", "annuler", "cancel", "ok", "oui", "non",
+    ];
+    BLACKLIST.iter().any(|&b| lower == b)
+}
+
+#[cfg(windows)]
+fn score_enriched_link(text: &str) -> f32 {
+    let clean = text.trim();
+    let char_count = clean.chars().count();
+    let lower = clean.to_lowercase();
+
+    let mut score = 10.0f32;
+
+    // Longueur idéale pour un produit ou titre d'article (18 à 95 caractères)
+    if (18..=95).contains(&char_count) {
+        score += 15.0;
+    } else if char_count < 10 {
+        score -= 8.0;
+    } else if char_count > 120 {
+        score -= 5.0;
+    }
+
+    // Indices techniques, modèles ou composants
+    const TECH_KEYWORDS: &[&str] = &[
+        "go", "gb", "to", "tb", "ram", "pro", "max", "ultra", "plus", "lite",
+        "mini", "ghz", "core", "ssd", "oled", "led", "4k", "5g", "wifi",
+        "intel", "amd", "ryzen", "rtx", "gtx", "apple", "samsung", "asus",
+        "sony", "dell", "hp", "lenovo",
+    ];
+    for &kw in TECH_KEYWORDS {
+        if lower.split(|c: char| !c.is_alphanumeric()).any(|w| w == kw) {
+            score += 8.0;
+        }
+    }
+
+    // Présence de prix (€, $, eur, usd)
+    if clean.contains('€') || clean.contains('$') || lower.contains("eur") || lower.contains("usd") {
+        score += 20.0;
+    }
+
+    // Présence d'évaluations ou avis (★, avis, étoiles, ratings)
+    if clean.contains('★') || clean.contains('☆') || lower.contains("avis") || lower.contains("étoile") || lower.contains("etoile") {
+        score += 15.0;
+    }
+
+    score
+}
+
+#[cfg(windows)]
+fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> String {
     let work_area = get_desktop_work_area();
+    let wa_x = work_area.left;
+    let wa_y = work_area.top;
     let wa_w = work_area.right - work_area.left;
     let wa_h = work_area.bottom - work_area.top;
 
@@ -3261,15 +3465,82 @@ fn summarize_screen_state(target_window: Option<&str>) -> String {
     }
 
     out.push_str("\n=== Contenu détaillé des fenêtres principales ===\n");
-    for hwnd in inspect_hwnds {
+    for (win_idx, hwnd) in inspect_hwnds.iter().enumerate() {
         let win_title = user_windows
             .iter()
-            .find(|(h, _)| *h == hwnd)
+            .find(|(h, _)| *h == *hwnd)
             .map(|(_, t)| t.as_str())
             .unwrap_or("Fenêtre");
 
         out.push_str(&format!("\n--- Fenêtre : \"{}\" ---\n", win_title));
-        let elements = list_interactive_elements(hwnd);
+        let initial_elements = list_interactive_elements(*hwnd);
+        let is_browser = is_browser_hwnd(*hwnd, win_title);
+        let has_scrollbar = initial_elements.iter().any(|e| {
+            e.class_name.contains("scrollbar")
+                || e.localized_type.contains("scrollbar")
+                || e.localized_type.contains("défilement")
+        });
+
+        let is_primary = win_idx == 0;
+        let mut elements = initial_elements;
+        let mut chunks_count = 1usize;
+
+        // Autoscroll par tranches de viewport (limité à 10 chunks) sur la fenêtre principale
+        if is_primary && autoscroll && (has_scrollbar || is_browser) {
+            unsafe {
+                let show_mode = if is_browser { SW_MAXIMIZE } else { SW_RESTORE };
+                let _ = ShowWindow(*hwnd, show_mode);
+                let _ = SetForegroundWindow(*hwnd);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+
+            let mut r = RECT::default();
+            let (cx, cy) = if unsafe { GetWindowRect(*hwnd, &mut r).is_ok() } {
+                let w = (r.right - r.left).max(10);
+                let h = (r.bottom - r.top).max(10);
+                (r.left + w / 2, r.top + h / 2)
+            } else {
+                (wa_x + wa_w / 2, wa_y + wa_h / 2)
+            };
+            unsafe { let _ = SetCursorPos(cx, cy); }
+            std::thread::sleep(Duration::from_millis(30));
+
+            let mut prev_sig: Vec<String> = elements.iter().map(|e| format!("{}:{}:{}", e.name, e.localized_type, e.automation_id)).collect();
+            const VK_NEXT: VIRTUAL_KEY = VIRTUAL_KEY(0x22);
+            const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+            const VK_HOME: VIRTUAL_KEY = VIRTUAL_KEY(0x24);
+
+            for _chunk in 2..=10 {
+                unsafe { mouse_event(MOUSEEVENTF_WHEEL, 0, 0, -480, 0); }
+                std::thread::sleep(Duration::from_millis(30));
+                send_hotkey(&[], VK_NEXT);
+                std::thread::sleep(Duration::from_millis(90));
+
+                let next_chunk = list_interactive_elements(*hwnd);
+                if next_chunk.is_empty() {
+                    break;
+                }
+                let next_sig: Vec<String> = next_chunk.iter().map(|e| format!("{}:{}:{}", e.name, e.localized_type, e.automation_id)).collect();
+                if next_sig == prev_sig {
+                    break;
+                }
+                chunks_count += 1;
+                prev_sig = next_sig;
+
+                for item in next_chunk {
+                    let exists = elements.iter().any(|e| {
+                        (!e.name.is_empty() && e.name == item.name && e.localized_type == item.localized_type)
+                            || (!e.automation_id.is_empty() && e.automation_id == item.automation_id)
+                    });
+                    if !exists {
+                        elements.push(item);
+                    }
+                }
+            }
+            send_hotkey(&[VK_CONTROL], VK_HOME);
+            std::thread::sleep(Duration::from_millis(60));
+        }
+
         if elements.is_empty() {
             out.push_str("  (Aucun élément UI interactif accessible)\n");
             continue;
@@ -3300,7 +3571,7 @@ fn summarize_screen_state(target_window: Option<&str>) -> String {
             out.push_str(&format!("  [Onglets / pages ouvertes] : {}\n", display_tabs.join(" | ")));
         }
 
-        let mut links: Vec<String> = elements
+        let raw_links: Vec<String> = elements
             .iter()
             .filter(|e| {
                 !e.is_edit_or_textarea
@@ -3311,9 +3582,27 @@ fn summarize_screen_state(target_window: Option<&str>) -> String {
             })
             .map(|e| e.name.clone())
             .collect();
-        links.dedup();
-        if !links.is_empty() {
-            let display_links: Vec<String> = links.into_iter().take(25).collect();
+
+        let mut seen_links = std::collections::HashSet::new();
+        let mut scored_links: Vec<(f32, String)> = raw_links
+            .into_iter()
+            .filter(|l| !is_poor_or_redundant_link(l))
+            .filter(|l| {
+                let lower = l.trim().to_lowercase();
+                if seen_links.contains(&lower) {
+                    false
+                } else {
+                    seen_links.insert(lower);
+                    true
+                }
+            })
+            .map(|l| (score_enriched_link(&l), l))
+            .collect();
+
+        scored_links.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let display_links: Vec<String> = scored_links.into_iter().take(25).map(|(_, l)| l).collect();
+
+        if !display_links.is_empty() {
             out.push_str(&format!("  [Liens / résultats cliquables] : {}\n", display_links.join(" | ")));
         }
 
@@ -3370,13 +3659,19 @@ fn summarize_screen_state(target_window: Option<&str>) -> String {
             let display_btns: Vec<String> = buttons.into_iter().take(25).collect();
             out.push_str(&format!("  [Boutons / contrôles cliquables] : {}\n", display_btns.join(", ")));
         }
+
+        if chunks_count > 1 {
+            out.push_str(&format!("  [Autoscroll et chunks de viewport] : {} viewports explorés (limite max 10), contenu agrégé.\n", chunks_count));
+        } else if has_scrollbar {
+            out.push_str("  [Défilement possible] : Une barre de défilement est présente. Utilise l'action 'scroll' ('down'/'up') pour révéler la suite de la page.\n");
+        }
     }
 
-    truncate_with_notice(&out, 3500)
+    truncate_with_notice(&out, 4500)
 }
 
 #[cfg(not(windows))]
-fn summarize_screen_state(_target_window: Option<&str>) -> String {
+fn summarize_screen_state(_target_window: Option<&str>, _autoscroll: bool) -> String {
     "[Analyse de l'écran] Environnement non-Windows (simulation).".to_string()
 }
 
@@ -3434,7 +3729,8 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
             if !launched {
                 let search_url = format!("https://www.google.com/search?q={}", urlencoding_simple(name));
                 println!("[Actions] Exécutable introuvable, ouverture de la recherche : {}", search_url);
-                launch_browser_new_window(&search_url);
+                let browser_hwnd = launch_browser_new_window(&search_url);
+                newly_spawned_hwnd = browser_hwnd;
                 feedback.push(format!("Application non trouvée localement ; recherche web lancée pour '{}'.", name));
             } else {
                 feedback.push(format!("Application '{}' lancée.", name));
@@ -3445,6 +3741,10 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                 let current_windows = list_user_windows();
                 for (hwnd, _title) in &current_windows {
                     if !initial_hwnds.contains(&(hwnd.0 as isize)) {
+                        unsafe {
+                            let _ = ShowWindow(*hwnd, SW_MAXIMIZE);
+                            let _ = SetForegroundWindow(*hwnd);
+                        }
                         newly_spawned_hwnd = Some(*hwnd);
                         break;
                     }
@@ -3458,11 +3758,6 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
 
     for action in actions {
         if let AgentAction::OpenBrowser { url } = action {
-            let initial_hwnds: std::collections::HashSet<isize> = list_user_windows()
-                .into_iter()
-                .map(|(h, _)| h.0 as isize)
-                .collect();
-
             let raw_url = url.as_deref().unwrap_or("").trim();
             let target = if raw_url.is_empty() || raw_url.starts_with("about:") {
                 "https://www.google.com".to_string()
@@ -3476,29 +3771,9 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                 raw_url.to_string()
             };
 
-            launch_browser_new_window(&target);
-
-            // Scrutation active pendant l'initialisation de la nouvelle fenêtre
-            for _ in 0..25 {
-                std::thread::sleep(Duration::from_millis(100));
-                let current_windows = list_user_windows();
-                for (hwnd, title) in &current_windows {
-                    if !initial_hwnds.contains(&(hwnd.0 as isize)) {
-                        let t = title.to_lowercase();
-                        if t.contains("chrome")
-                            || t.contains("edge")
-                            || t.contains("brave")
-                            || t.contains("google")
-                            || !t.is_empty()
-                        {
-                            newly_spawned_hwnd = Some(*hwnd);
-                            break;
-                        }
-                    }
-                }
-                if newly_spawned_hwnd.is_some() {
-                    break;
-                }
+            let spawned = launch_browser_new_window(&target);
+            if spawned.is_some() {
+                newly_spawned_hwnd = spawned;
             }
         }
     }
@@ -3580,8 +3855,10 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
 
                 if let Some(hwnd) = target_hwnd {
                     println!("[Actions] ClickElement sur [HWND {:?}] pour '{}'", hwnd.0, target_name);
+                    let is_browser = user_windows.iter().find(|(h, t)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
+                    let show_mode = if is_browser { SW_MAXIMIZE } else { SW_RESTORE };
                     unsafe {
-                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                        let _ = ShowWindow(hwnd, show_mode);
                         let _ = SetForegroundWindow(hwnd);
                     }
                     std::thread::sleep(Duration::from_millis(80));
@@ -3595,11 +3872,94 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                     if let Some(elem) = find_best_element(&elements, target_name) {
                         println!("[Actions] Élément/Lien trouvé : name='{}', id='{}', type='{}', clic en ({}, {})", elem.name, elem.automation_id, elem.localized_type, elem.click_x, elem.click_y);
                         unsafe { let _ = elem.element.SetFocus(); }
-                        click_element(elem.click_x, elem.click_y, elem.pattern.as_ref());
+                        click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                         feedback.push(format!("Clic effectué sur l'élément '{}'.", target_name));
                     } else {
                         println!("[Actions] Aucun élément/lien correspondant trouvé pour '{}'", target_name);
                         feedback.push(format!("Élément ou lien '{}' introuvable à l'écran.", target_name));
+                    }
+                }
+            }
+            AgentAction::Scroll { direction, window, amount } => {
+                let target_hwnd = match window.as_deref() {
+                    Some(w) if !w.trim().is_empty() => {
+                        find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
+                    }
+                    _ => preferred_target_hwnd.or(active_user_hwnd),
+                };
+
+                let dir_clean = direction.trim().to_lowercase();
+                let steps = amount.unwrap_or(1).clamp(1, 10);
+
+                if let Some(hwnd) = target_hwnd {
+                    let win_title = user_windows
+                        .iter()
+                        .find(|(h, _)| *h == hwnd)
+                        .map(|(_, t)| t.as_str())
+                        .unwrap_or("");
+                    let is_browser = user_windows.iter().find(|(h, t)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
+                    let show_mode = if is_browser { SW_MAXIMIZE } else { SW_RESTORE };
+                    unsafe {
+                        let _ = ShowWindow(hwnd, show_mode);
+                        let _ = SetForegroundWindow(hwnd);
+                    }
+                    std::thread::sleep(Duration::from_millis(60));
+
+                    let mut r = RECT::default();
+                    let (cx, cy) = if unsafe { GetWindowRect(hwnd, &mut r).is_ok() } {
+                        let w = (r.right - r.left).max(10);
+                        let h = (r.bottom - r.top).max(10);
+                        (r.left + w / 2, r.top + h / 2)
+                    } else {
+                        (wa_x + wa_w / 2, wa_y + wa_h / 2)
+                    };
+
+                    unsafe {
+                        let _ = SetCursorPos(cx, cy);
+                    }
+                    std::thread::sleep(Duration::from_millis(40));
+
+                    const VK_NEXT: VIRTUAL_KEY = VIRTUAL_KEY(0x22);  // Page Down
+                    const VK_PRIOR: VIRTUAL_KEY = VIRTUAL_KEY(0x21); // Page Up
+                    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+                    const VK_HOME: VIRTUAL_KEY = VIRTUAL_KEY(0x24);
+                    const VK_END: VIRTUAL_KEY = VIRTUAL_KEY(0x23);
+
+                    if dir_clean == "up" || dir_clean == "haut" {
+                        for _ in 0..steps {
+                            unsafe { mouse_event(MOUSEEVENTF_WHEEL, 0, 0, 360, 0); }
+                            std::thread::sleep(Duration::from_millis(30));
+                            send_hotkey(&[], VK_PRIOR);
+                            std::thread::sleep(Duration::from_millis(40));
+                        }
+                        feedback.push(format!("Défilement vers le haut ({steps} pas) effectué."));
+                    } else if dir_clean == "top" || dir_clean == "debut" || dir_clean == "début" {
+                        send_hotkey(&[VK_CONTROL], VK_HOME);
+                        feedback.push("Défilement vers le début de page effectué.".to_string());
+                    } else if dir_clean == "bottom" || dir_clean == "fin" {
+                        send_hotkey(&[VK_CONTROL], VK_END);
+                        feedback.push("Défilement vers la fin de page effectué.".to_string());
+                    } else {
+                        for _ in 0..steps {
+                            unsafe { mouse_event(MOUSEEVENTF_WHEEL, 0, 0, -360, 0); }
+                            std::thread::sleep(Duration::from_millis(30));
+                            send_hotkey(&[], VK_NEXT);
+                            std::thread::sleep(Duration::from_millis(40));
+                        }
+                        feedback.push(format!("Défilement vers le bas ({steps} pas) effectué."));
+                    }
+
+                    // Stabilisation du rendu et extraction des éléments révélés dans le tampon d'analyse
+                    std::thread::sleep(Duration::from_millis(150));
+                    let scrolled_summary = summarize_screen_state(if win_title.is_empty() { None } else { Some(win_title) }, false);
+                    if !scrolled_summary.trim().is_empty() {
+                        if let Ok(mut lock) = LAST_SCREEN_SUMMARY.lock() {
+                            *lock = Some(scrolled_summary.clone());
+                        }
+                        feedback.push(format!(
+                            "[Contenu et éléments révélés après défilement] :\n{}",
+                            truncate_with_notice(&scrolled_summary, 2500)
+                        ));
                     }
                 }
             }
@@ -3640,8 +4000,10 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
 
                 if let Some(hwnd) = target_hwnd {
                     println!("[Actions] ClickButton sur [HWND {:?}] pour '{}'", hwnd.0, button_name);
+                    let is_browser = user_windows.iter().find(|(h, t)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
+                    let show_mode = if is_browser { SW_MAXIMIZE } else { SW_RESTORE };
                     unsafe {
-                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                        let _ = ShowWindow(hwnd, show_mode);
                         let _ = SetForegroundWindow(hwnd);
                     }
                     std::thread::sleep(Duration::from_millis(80));
@@ -3655,7 +4017,7 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                     if let Some(elem) = find_best_element(&elements, button_name) {
                         println!("[Actions] Bouton trouvé : name='{}', id='{}', clic en ({}, {})", elem.name, elem.automation_id, elem.click_x, elem.click_y);
                         unsafe { let _ = elem.element.SetFocus(); }
-                        click_element(elem.click_x, elem.click_y, elem.pattern.as_ref());
+                        click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                         feedback.push(format!("Clic effectué sur '{}'.", button_name));
                     } else {
                         println!("[Actions] Aucun bouton correspondant trouvé pour '{}'", button_name);
@@ -3673,8 +4035,10 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
 
                 if let Some(hwnd) = target_hwnd {
                     println!("[Actions] FocusElement sur [HWND {:?}] pour '{}'", hwnd.0, target_name);
+                    let is_browser = user_windows.iter().find(|(h, t)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
+                    let show_mode = if is_browser { SW_MAXIMIZE } else { SW_RESTORE };
                     unsafe {
-                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                        let _ = ShowWindow(hwnd, show_mode);
                         let _ = SetForegroundWindow(hwnd);
                     }
                     std::thread::sleep(Duration::from_millis(60));
@@ -3698,7 +4062,7 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                         if let Some(elem) = find_best_element(&elements, target_name) {
                             println!("[Actions] Élément focusable trouvé : name='{}', id='{}'", elem.name, elem.automation_id);
                             unsafe { let _ = elem.element.SetFocus(); }
-                            click_element(elem.click_x, elem.click_y, elem.pattern.as_ref());
+                            click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                         } else {
                             println!("[Actions] Repli focus textarea/champ principal");
                             refocus_largest_textarea_or_fallback(hwnd);
@@ -3726,7 +4090,7 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                         let elements = list_interactive_elements(hwnd);
                         if let Some(elem) = find_best_input_element(&elements, t) {
                             unsafe { let _ = elem.element.SetFocus(); }
-                            click_element(elem.click_x, elem.click_y, elem.pattern.as_ref());
+                            click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                             std::thread::sleep(Duration::from_millis(40));
                             const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
                             const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
@@ -3771,9 +4135,10 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                 if is_address_bar {
                     if let Some(hwnd) = target_hwnd {
                         let win_title = user_windows.iter().find(|(h, _)| *h == hwnd).map(|(_, t)| t.as_str()).unwrap_or("Navigateur");
+                        let is_browser = is_browser_hwnd(hwnd, win_title);
                         println!("[Actions] Ciblage barre d'adresse sur [HWND {:?}] '{}'", hwnd.0, win_title);
                         unsafe {
-                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                            let _ = ShowWindow(hwnd, if is_browser { SW_MAXIMIZE } else { SW_RESTORE });
                             let _ = SetForegroundWindow(hwnd);
                         }
                         std::thread::sleep(Duration::from_millis(80));
@@ -3824,7 +4189,7 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                         }
                         std::thread::sleep(Duration::from_millis(80));
                         unsafe { let _ = elem.element.SetFocus(); }
-                        click_element(elem.click_x, elem.click_y, elem.pattern.as_ref());
+                        click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                         std::thread::sleep(Duration::from_millis(50));
                         clipboard::set_text(text);
                         std::thread::sleep(Duration::from_millis(30));
@@ -3843,7 +4208,7 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                     if let Some(elem) = find_best_input_element(&elements, target_desc) {
                         println!("[Actions] Saisie dans l'élément : name='{}', id='{}'", elem.name, elem.automation_id);
                         unsafe { let _ = elem.element.SetFocus(); }
-                        click_element(elem.click_x, elem.click_y, elem.pattern.as_ref());
+                        click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                         std::thread::sleep(Duration::from_millis(50));
 
                         clipboard::set_text(text);
@@ -3862,7 +4227,7 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                             }
                             std::thread::sleep(Duration::from_millis(80));
                             unsafe { let _ = elem.element.SetFocus(); }
-                            click_element(elem.click_x, elem.click_y, elem.pattern.as_ref());
+                            click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                             std::thread::sleep(Duration::from_millis(50));
                             clipboard::set_text(text);
                             std::thread::sleep(Duration::from_millis(30));
@@ -3901,9 +4266,10 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                 if is_address_bar {
                     if let Some(hwnd) = target_hwnd {
                         let win_title = user_windows.iter().find(|(h, _)| *h == hwnd).map(|(_, t)| t.as_str()).unwrap_or("Navigateur");
+                        let is_browser = is_browser_hwnd(hwnd, win_title);
                         println!("[Actions] Remplacement d'URL barre d'adresse sur [HWND {:?}] '{}'", hwnd.0, win_title);
                         unsafe {
-                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                            let _ = ShowWindow(hwnd, if is_browser { SW_MAXIMIZE } else { SW_RESTORE });
                             let _ = SetForegroundWindow(hwnd);
                         }
                         std::thread::sleep(Duration::from_millis(80));
@@ -3954,7 +4320,7 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                         }
                         std::thread::sleep(Duration::from_millis(80));
                         unsafe { let _ = elem.element.SetFocus(); }
-                        click_element(elem.click_x, elem.click_y, elem.pattern.as_ref());
+                        click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                         std::thread::sleep(Duration::from_millis(50));
                         const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
                         const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
@@ -3977,7 +4343,7 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                     if let Some(elem) = find_best_input_element(&elements, target_desc) {
                         println!("[Actions] Remplacement du champ : name='{}', id='{}'", elem.name, elem.automation_id);
                         unsafe { let _ = elem.element.SetFocus(); }
-                        click_element(elem.click_x, elem.click_y, elem.pattern.as_ref());
+                        click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                         std::thread::sleep(Duration::from_millis(50));
 
                         const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
@@ -4018,6 +4384,10 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
 
                 if let Some(hwnd) = existing_browser {
                     println!("[Actions] Navigateur ouvert trouvé [HWND {:?}], navigation via barre d'adresse vers : {}", hwnd.0, target);
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+                        let _ = SetForegroundWindow(hwnd);
+                    }
                     navigate_browser_address_bar(hwnd, &target);
                 } else {
                     println!("[Actions] Aucun navigateur ouvert trouvé, ouverture d'une nouvelle fenêtre vers : {}", target);
@@ -4276,13 +4646,14 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                     "refresh_page" => send_hotkey(&[], VK_F5),
                     "next_field" => send_hotkey(&[], VK_TAB),
                     "previous_field" => send_hotkey(&[VK_SHIFT], VK_TAB),
+                    "escape" => send_hotkey(&[], VK_ESCAPE),
                     _ => {}
                 }
                 feedback.push(format!("Raccourci système '{}' envoyé.", shortcut));
             }
             AgentAction::SummarizeScreen { window } => {
                 println!("[Actions] Analyse de l'écran en cours (fenêtre : {:?})", window);
-                let current_summary = summarize_screen_state(window.as_deref());
+                let current_summary = summarize_screen_state(window.as_deref(), true);
                 let prev_summary = {
                     let mut lock = LAST_SCREEN_SUMMARY.lock().unwrap_or_else(|e| e.into_inner());
                     let prev = lock.clone();
@@ -4309,7 +4680,7 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                 println!("[Actions] Activation du mode immersion (apps: {:?}, urls: {:?}, layout: {:?})", apps, urls, layout);
 
                 // 1. Analyse préalable de l'état de l'écran
-                let initial_summary = summarize_screen_state(None);
+                let initial_summary = summarize_screen_state(None, false);
                 feedback.push(format!("Analyse pré-immersion :\n{}", truncate_with_notice(&initial_summary, 600)));
 
                 // 2. Création et bascule vers un nouveau bureau virtuel (Win + Ctrl + D)
@@ -4447,7 +4818,7 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
 
                 // 6. Analyse post-installation du nouvel espace immersif
                 std::thread::sleep(Duration::from_millis(200));
-                let post_summary = summarize_screen_state(None);
+                let post_summary = summarize_screen_state(None, false);
                 if let Ok(mut hist) = IMMERSION_SCREEN_HISTORY.lock() {
                     hist.push(post_summary.clone());
                 }
@@ -4464,7 +4835,7 @@ fn execute_system_actions(actions: &[AgentAction]) -> String {
                 const VK_F4: VIRTUAL_KEY = VIRTUAL_KEY(0x73);
                 send_hotkey(&[VK_LWIN, VK_CONTROL], VK_F4);
                 std::thread::sleep(Duration::from_millis(300));
-                let current_summary = summarize_screen_state(None);
+                let current_summary = summarize_screen_state(None, false);
                 feedback.push(format!("Mode immersion désactivé : bureau virtuel fermé. Retour à l'espace initial :\n{}", truncate_with_notice(&current_summary, 600)));
             }
         }
@@ -4620,14 +4991,22 @@ Règles d'action et d'arbitrage :
 - Salutations et discussion : valide ("invalid_request": false), réponds courtoisement dans "narration" avec "actions": [].
 - Interface : consulte toujours "[État actuel de l'écran]" (fenêtres, onglets, boutons, liens).
 - Fermeture d'onglets ou sous-pages (ex: "ferme Google") : JAMAIS "close_app" ! Enchaîne "focus_window" puis "accessibility_shortcut": "close_tab" ou clique la croix ("click_button" / "click_element"). Réserve "close_app" à la fermeture d'une application entière.
-- Obstacles et bannières (cookies, rgpd, popups de démarrage) : Analyse systématiquement l'écran pour détecter si la navigation est entravée par un dialogue de consentement ou une modale. Si c'est le cas, clique immédiatement et en toute autonomie sur l'action de validation ou de fermeture adéquate ("click_button" ou "click_element") avant de poursuivre l'objectif utilisateur. Ne demande jamais de confirmation pour lever ces blocages.
+- Détection d'obstruction et éléments surgissants (bannières RGPD/cookies, modales, dialogues, popups bloquants) :
+  * Analyse systématiquement [État actuel de l'écran] pour détecter si un dialogue inattendu, une bannière de consentement ou un élément soudain masque la cible ou obstrue la vue.
+  * Si une obstruction est visible : entre immédiatement en récursion en émettant EN PRIORITÉ l'action de déblocage ("click_button", "click_element" ou "accessibility_shortcut": "escape").
+  * Dès que l'obstacle n'apparaît plus à l'écran, reprends immédiatement le cours de la consigne initiale là où elle s'était arrêtée.
 - Éléments cliquables et saisie : utilise "click_element" pour les liens et onglets, "click_button" pour les boutons. Pour saisir sans cible précise, mets "target": null dans "write_text" ou "replace_field_text".
+- Défilement de page et scrollbar ("scroll") :
+  * L'analyse d'écran intègre automatiquement un autoscroll par tranches de viewport (jusqu'à 10 chunks) pour agréger l'ensemble des éléments de la page.
+  * Si une barre de défilement est signalée ou si tu as besoin de positionner la vue sur un conteneur précis, utilise "scroll" ("direction": "down" | "up" | "bottom" | "top", "amount": 1 ou 2).
+  * Tu réévalueras le nouvel état de l'écran à l'étape suivante pour cliquer ou interagir avec les éléments révélés.
 - Navigation et shopping autonome : génère l'URL pertinente (ex: "https://www.google.com/search?tbm=shop&q=..." pour shopping) avec "navigate_to_url".
   * Achat multi-étapes : 1. Ajoute au panier ("click_element" ou "click_button") -> 2. Ouvre le panier / commande ("click_element") -> 3. Devant le paiement, stoppe toute action et demande confirmation orale dans "narration" avec "actions": [].
   * Recherche exploratoire : dès l'affichage des résultats, résume 2-3 options observées et pose une question de cadrage (budget, dimensions) dans "narration" avec "actions": [].
 - Suggestions rapides ("quick_suggestions") : quand tu poses une question ou suggères des options, propose 2 à 4 choix brefs sous forme de tableau de chaînes textuelles dans "quick_suggestions" (ex: ["Tennis de course, 80-120€", "Modèle lifestyle"]). Ces options seront affichées sous forme de boutons-onglets directement cliquables par l'utilisateur.
 - Immersion : "activate_immersion" pour créer le bureau virtuel (Win+Ctrl+D). Silence absolu lors du suivi périodique si l'activité est normale. "deactivate_immersion" pour le fermer.
-- Cycle d'exécution (3 passes max) : analyse le retour d'étape et l'état d'écran. Dès que la tâche est finie ou nécessite une précision de l'utilisateur, renvoie "actions": [].
+- Cycle d'exécution et fin de mission : analyse le retour d'étape et l'état d'écran. Dès que la tâche est finie ou nécessite une précision de l'utilisateur, renvoie "actions": [].
+  * OBLIGATION DE FIN DE PASSES : Dès que "actions" est vide (tâche terminée ou attente), fournis TOUJOURS dans "quick_suggestions" 2 à 4 suggestions contextuelles concrètes basées sur ton analyse de l'écran et des éléments observés (ex: produits aperçus, avis, défilement, choix suivants).
 
 Format json obligatoire :
 {
@@ -4638,6 +5017,7 @@ Format json obligatoire :
     {"action": "click_element", "window": "titre_optionnel", "target_name": "nom_du_lien_ou_element"},
     {"action": "click_button", "window": "titre_optionnel", "button_name": "nom_du_bouton"},
     {"action": "focus_element", "window": "titre_optionnel", "target_name": "nom_ou_id_element"},
+    {"action": "scroll", "direction": "down" | "up" | "bottom" | "top", "amount": 1, "window": "titre_optionnel"},
     {"action": "focus_window", "title": "titre_optionnel", "pid": 1234},
     {"action": "clear_text", "window": "titre_optionnel"},
     {"action": "write_text", "text": "texte à écrire", "target": null},
@@ -4660,10 +5040,10 @@ Format json obligatoire :
     let safe_user_prompt = truncate_with_notice(&user_prompt, 4000);
     history.push(ChatMessage {
         role: "user".to_string(),
-        content: safe_user_prompt,
+        content: safe_user_prompt.clone(),
     });
 
-    const MAX_AGENT_PASSES: usize = 3;
+    const MAX_AGENT_PASSES: usize = 5;
 
     for pass in 1..=MAX_AGENT_PASSES {
         let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
@@ -4798,7 +5178,7 @@ Format json obligatoire :
             }
         }
 
-        let Some(payload) = success_payload else {
+        let Some(mut payload) = success_payload else {
             break;
         };
 
@@ -4838,6 +5218,28 @@ Format json obligatoire :
             println!("  [{}] {:?}", i + 1, act);
         }
 
+        if payload.actions.is_empty() {
+            println!("[Agent] Tâche accomplie : aucune action supplémentaire. Fin de la séquence après {} passe(s).", pass);
+            if payload.quick_suggestions.is_empty() {
+                let screen = {
+                    LAST_SCREEN_SUMMARY.lock().ok().and_then(|s| s.clone()).unwrap_or_else(|| {
+                        #[cfg(windows)]
+                        { summarize_screen_state(None, false) }
+                        #[cfg(not(windows))]
+                        { String::new() }
+                    })
+                };
+                payload.quick_suggestions = generate_fallback_suggestions_from_screen(&screen);
+            }
+            if !payload.narration.trim().is_empty() || !payload.quick_suggestions.is_empty() {
+                let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                    text: payload.narration.clone(),
+                    quick_suggestions: payload.quick_suggestions.clone(),
+                });
+            }
+            break;
+        }
+
         if !payload.narration.trim().is_empty() || !payload.quick_suggestions.is_empty() {
             let _ = event_tx.send(AgentEvent::ReplaceNarration {
                 text: payload.narration.clone(),
@@ -4845,37 +5247,50 @@ Format json obligatoire :
             });
         }
 
-        if payload.actions.is_empty() {
-            println!("[Agent] Tâche accomplie : aucune action supplémentaire. Fin de la séquence après {} passe(s).", pass);
-            break;
-        }
-
         let actions_to_run = payload.actions;
         let (report, screen_after) = tokio::task::spawn_blocking(move || {
-            let rep = execute_system_actions(&actions_to_run);
-            std::thread::sleep(Duration::from_millis(1200));
-            #[cfg(windows)]
-            let sc = summarize_screen_state(None);
-            #[cfg(not(windows))]
-            let sc = String::new();
-            (rep, sc)
-        }).await.unwrap_or_else(|_| ("Erreur d'exécution.".to_string(), String::new()));
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let rep = execute_system_actions(&actions_to_run);
+                std::thread::sleep(Duration::from_millis(1200));
+                #[cfg(windows)]
+                let sc = summarize_screen_state(None, false);
+                #[cfg(not(windows))]
+                let sc = String::new();
+                (rep, sc)
+            }));
+            match outcome {
+                Ok(res) => res,
+                Err(err) => {
+                    eprintln!("[Résilience] Panique interceptée lors de l'exécution des actions : {:?}", err);
+                    ("Une action système a rencontré une erreur non critique et a été interrompue en toute sécurité.".to_string(), String::new())
+                }
+            }
+        }).await.unwrap_or_else(|_| ("Erreur d'exécution du worker.".to_string(), String::new()));
+
+        if !screen_after.trim().is_empty() {
+            if let Ok(mut lock) = LAST_SCREEN_SUMMARY.lock() {
+                *lock = Some(screen_after.clone());
+            }
+        }
 
         if pass < MAX_AGENT_PASSES {
             let compact_report = truncate_with_notice(&report, 1200);
             let mut step_feedback = format!("[Retour d'exécution étape {pass}] :\n{compact_report}");
             if !screen_after.trim().is_empty() {
-                let safe_screen = truncate_with_notice(screen_after.trim(), 2400);
+                let safe_screen = truncate_with_notice(screen_after.trim(), 3500);
                 step_feedback.push_str(&format!("\n\n[État de l'écran suite aux actions] :\n{safe_screen}"));
             }
-            step_feedback.push_str(
+
+            step_feedback.push_str(&format!(
                 "\n\nConsignes pour cette nouvelle étape :\n\
-                - Analyse les résultats et éléments visibles dans [État de l'écran suite aux actions].\n\
-                - Si l'affichage montre que la page est recouverte par une modale, une bannière de cookies ou un écran de démarrage, résous ce blocage en priorité en cliquant sur le contrôle approprié.\n\
-                - Pour une recherche ou un achat web : relève les modèles, catégories ou prix repérés à l'écran, formule 2 ou 3 suggestions concrètes et pose une question de précision à l'utilisateur (budget, marque, dimensions, préférences) dans \"narration\" avec \"actions\": [].\n\
-                - Si l'utilisateur a déjà précisé son choix ou qu'un lien évident s'impose, utilise l'action générique \"click_element\" dans \"actions\".\n\
-                - Si la tâche est terminée, confirme-le dans \"narration\" avec \"actions\": []."
-            );
+                - Analyse attentivement [État de l'écran suite aux actions].\n\
+                - Détection d'obstacle : si une modale, dialogue, alerte ou bannière de consentement bloque l'accès ou la visibilité, émets en priorité l'action nécessaire pour la fermer ou l'accepter ('click_button', 'click_element' ou 'accessibility_shortcut': 'escape').\n\
+                - Si l'élément cible n'est pas encore visible sur la page, émets un défilement ('scroll' direction: 'down') pour explorer le reste de la page.\n\
+                - Si l'écran est dégagé, poursuis immédiatement l'exécution de la consigne initiale : \"{}\".\n\
+                - Pour une recherche ou un achat web : relève les modèles ou prix observés et formule 2 ou 3 suggestions concrètes dans \"narration\" si un choix utilisateur est nécessaire.\n\
+                - Si la tâche est terminée ou attend un choix, confirme-le dans \"narration\" avec \"actions\": [] et fournis impérativement 2 à 4 suggestions contextuelles dans \"quick_suggestions\" basées sur ton analyse des éléments à l'écran.",
+                safe_user_prompt
+            ));
 
             history.push(ChatMessage {
                 role: "user".to_string(),
@@ -4885,6 +5300,16 @@ Format json obligatoire :
             *last_call_time = Some(Instant::now());
         } else {
             println!("[Agent] Nombre maximal de passes ({MAX_AGENT_PASSES}) atteint.");
+            let screen_for_sug = if !screen_after.trim().is_empty() {
+                screen_after.clone()
+            } else {
+                LAST_SCREEN_SUMMARY.lock().ok().and_then(|s| s.clone()).unwrap_or_default()
+            };
+            let auto_suggestions = generate_fallback_suggestions_from_screen(&screen_for_sug);
+            let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                text: "Actions terminées. Voici les suites possibles identifiées à l'écran :".to_string(),
+                quick_suggestions: auto_suggestions,
+            });
         }
     }
 
@@ -4925,11 +5350,13 @@ fn main() -> eframe::Result<()> {
                     AgentCommand::Prompt(prompt) => {
                         IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
                         if let Some(cli_feedback) = try_execute_direct_cli(&prompt) {
+                            let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
                             let _ = event_tx.send(AgentEvent::ReplaceNarration {
                                 text: cli_feedback.clone(),
                                 quick_suggestions: Vec::new(),
                             });
                         } else if let Some(text_to_write) = parse_write_command(&prompt) {
+                            let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
                             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
                             let narration = tokio::task::spawn_blocking(move || {
                                 write_to_browser_or_txt(&text_to_write)
@@ -4942,7 +5369,7 @@ fn main() -> eframe::Result<()> {
                             let (field_content, screen_state) = tokio::task::spawn_blocking(|| {
                                 #[cfg(windows)]
                                 {
-                                    (get_active_field_content(), summarize_screen_state(None))
+                                    (get_active_field_content(), summarize_screen_state(None, false))
                                 }
                                 #[cfg(not(windows))]
                                 {
@@ -4953,8 +5380,15 @@ fn main() -> eframe::Result<()> {
                             let mut prompt_sections = Vec::new();
 
                             if !screen_state.trim().is_empty() {
-                                let safe_screen = truncate_with_notice(screen_state.trim(), 2800);
+                                if let Ok(mut lock) = LAST_SCREEN_SUMMARY.lock() {
+                                    *lock = Some(screen_state.clone());
+                                }
+                                let safe_screen = truncate_with_notice(screen_state.trim(), 3800);
+                                let kb = safe_screen.len() as f32 / 1024.0;
+                                let _ = event_tx.send(AgentEvent::ScreenPayloadSize(kb));
                                 prompt_sections.push(format!("[État actuel de l'écran]\n{safe_screen}"));
+                            } else {
+                                let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
                             }
 
                             if let Some(content) = field_content {
@@ -4996,7 +5430,7 @@ fn main() -> eframe::Result<()> {
                         #[cfg(windows)]
                         {
                             let current_summary = tokio::task::spawn_blocking(|| {
-                                summarize_screen_state(None)
+                                summarize_screen_state(None, false)
                             }).await.unwrap_or_default();
 
                             let is_immersion = IS_IMMERSION_ACTIVE.load(Ordering::SeqCst);

@@ -237,8 +237,8 @@ fn parse_pattern_branch(branch: &str) -> Vec<PatternAtom> {
         }
 
         let kind = if c == '\\' && i + 1 < len {
-            i += 1;
-            match chars[i] {
+            i += 2;
+            match chars[i - 1] {
                 'd' => AtomKind::Char(CharClass::Digit),
                 'D' => AtomKind::Char(CharClass::NotDigit),
                 'w' => AtomKind::Char(CharClass::Word),
@@ -248,6 +248,7 @@ fn parse_pattern_branch(branch: &str) -> Vec<PatternAtom> {
                 esc => AtomKind::Char(CharClass::Literal(esc.to_ascii_lowercase())),
             }
         } else if c == '.' {
+            i += 1;
             AtomKind::Char(CharClass::Any)
         } else if c == '[' {
             i += 1;
@@ -296,6 +297,7 @@ fn parse_pattern_branch(branch: &str) -> Vec<PatternAtom> {
             i += 1;
             continue;
         } else {
+            i += 1;
             AtomKind::Char(CharClass::Literal(c.to_ascii_lowercase()))
         };
 
@@ -317,6 +319,13 @@ fn parse_pattern_branch(branch: &str) -> Vec<PatternAtom> {
 }
 
 fn match_atoms(atoms: &[PatternAtom], atom_idx: usize, text: &[char], text_idx: usize) -> bool {
+    match_atoms_bounded(atoms, atom_idx, text, text_idx, 0)
+}
+
+fn match_atoms_bounded(atoms: &[PatternAtom], atom_idx: usize, text: &[char], text_idx: usize, depth: usize) -> bool {
+    if depth > 200 {
+        return false;
+    }
     if atom_idx >= atoms.len() {
         return true;
     }
@@ -325,29 +334,29 @@ fn match_atoms(atoms: &[PatternAtom], atom_idx: usize, text: &[char], text_idx: 
     match &atom.kind {
         AtomKind::AnchorStart => {
             if text_idx == 0 {
-                match_atoms(atoms, atom_idx + 1, text, text_idx)
+                match_atoms_bounded(atoms, atom_idx + 1, text, text_idx, depth + 1)
             } else {
                 false
             }
         }
         AtomKind::AnchorEnd => {
-            text_idx == text.len() && match_atoms(atoms, atom_idx + 1, text, text_idx)
+            text_idx == text.len() && match_atoms_bounded(atoms, atom_idx + 1, text, text_idx, depth + 1)
         }
         AtomKind::Char(class) => match atom.quant {
             Quantifier::Once => {
                 if text_idx < text.len() && class.matches(text[text_idx]) {
-                    match_atoms(atoms, atom_idx + 1, text, text_idx + 1)
+                    match_atoms_bounded(atoms, atom_idx + 1, text, text_idx + 1, depth + 1)
                 } else {
                     false
                 }
             }
             Quantifier::ZeroOrOne => {
                 if text_idx < text.len() && class.matches(text[text_idx]) {
-                    if match_atoms(atoms, atom_idx + 1, text, text_idx + 1) {
+                    if match_atoms_bounded(atoms, atom_idx + 1, text, text_idx + 1, depth + 1) {
                         return true;
                     }
                 }
-                match_atoms(atoms, atom_idx + 1, text, text_idx)
+                match_atoms_bounded(atoms, atom_idx + 1, text, text_idx, depth + 1)
             }
             Quantifier::ZeroOrMore => {
                 let mut count = 0;
@@ -355,7 +364,7 @@ fn match_atoms(atoms: &[PatternAtom], atom_idx: usize, text: &[char], text_idx: 
                     count += 1;
                 }
                 for k in (0..=count).rev() {
-                    if match_atoms(atoms, atom_idx + 1, text, text_idx + k) {
+                    if match_atoms_bounded(atoms, atom_idx + 1, text, text_idx + k, depth + 1) {
                         return true;
                     }
                 }
@@ -370,7 +379,7 @@ fn match_atoms(atoms: &[PatternAtom], atom_idx: usize, text: &[char], text_idx: 
                     count += 1;
                 }
                 for k in (1..=count).rev() {
-                    if match_atoms(atoms, atom_idx + 1, text, text_idx + k) {
+                    if match_atoms_bounded(atoms, atom_idx + 1, text, text_idx + k, depth + 1) {
                         return true;
                     }
                 }

@@ -41,6 +41,7 @@ pub struct ChatEntry {
     pub text: String,
     pub timestamp: String,
     pub quick_suggestions: Vec<QuickSuggestionItem>,
+    pub screen_size_kb: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +56,7 @@ pub enum AgentEvent {
     TranscriptionPartial(String),
     VoicePromptReady(String),
     TtsFinished,
+    ScreenPayloadSize(f32),
     TwitchChatReceived(TwitchMessage),
     TwitchSearchResults(Vec<TwitchChannelItem>),
     RequestIgnored,
@@ -98,6 +100,14 @@ pub enum AgentAction {
     ClickButton {
         window: Option<String>,
         button_name: String,
+    },
+    Scroll {
+        #[serde(default)]
+        direction: String,
+        #[serde(default)]
+        amount: Option<i32>,
+        #[serde(default)]
+        window: Option<String>,
     },
     OpenBrowser {
         url: Option<String>,
@@ -210,6 +220,7 @@ impl QuickSuggestionItem {
                 AgentAction::ClickElement { target_name, .. } => Some(format!("Cliquer {target_name}")),
                 AgentAction::ClickButton { button_name, .. } => Some(format!("Cliquer {button_name}")),
                 AgentAction::CloseApp { name } => Some(format!("Fermer {name}")),
+                AgentAction::Scroll { direction, .. } => Some(format!("Faire défiler ({direction})")),
                 _ => None,
             },
         }
