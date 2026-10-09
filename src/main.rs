@@ -327,7 +327,7 @@ impl OverlayApp {
         painter.circle_filled(center, base_radius * 0.2, egui::Color32::WHITE);
     }
 
-    fn trigger_emergency_stop(&mut self, ctx: &egui::Context) {
+    fn trigger_emergency_stop(&mut self, _ctx: &egui::Context) {
         self.continuous_mode = false;
         IS_EMERGENCY_STOPPED.store(true, Ordering::SeqCst);
         if self.is_recording {
@@ -1324,7 +1324,7 @@ async fn compact_history_if_needed(
     }
 
     // Repli de sécurité en cas d'erreur de condensation
-    println!("[Mémoire] Repli : éviction FIFO sans résumé.");
+    println!("[Mémoire] Repli : éviction fifo sans résumé.");
     *history = recent;
 }
 
@@ -1367,7 +1367,8 @@ Règles d'action et d'arbitrage :
 - Fermeture d'onglets ou sous-pages (ex: "ferme Google") : JAMAIS "close_app" ! Enchaîne "focus_window" puis "accessibility_shortcut": "close_tab" ou clique la croix ("click_button" / "click_element"). Réserve "close_app" à la fermeture d'une application entière.
 - Détection d'obstruction et éléments surgissants (bannières RGPD/cookies, modales, dialogues, popups bloquants) :
   * Analyse systématiquement [État actuel de l'écran] pour détecter si un dialogue inattendu, une bannière de consentement ou un élément soudain masque la cible ou obstrue la vue.
-  * Si une obstruction est visible : entre immédiatement en récursion en émettant EN PRIORITÉ l'action de déblocage ("click_button", "click_element" ou "accessibility_shortcut": "escape").
+  * Bannières de cookies / consentement RGPD : repère le bouton dans [Boutons / contrôles cliquables] ou [Liens / résultats cliquables] (ex: "Tout accepter", "Accepter", "J'accepte", "Autoriser", "Continuer sans accepter") et clique-le EN PRIORITÉ via "click_button" ou "click_element".
+  * INTERDICTION D'ESCAPE SUR LE WEB : Ne JAMAIS utiliser "accessibility_shortcut": "escape" pour une bannière de cookies car la touche Échap ne la ferme pas. Réserve "escape" exclusivement aux fenêtres modales ou dialogues système natifs dépourvus de bouton.
   * Dès que l'obstacle n'apparaît plus à l'écran, reprends immédiatement le cours de la consigne initiale là où elle s'était arrêtée.
 - Éléments cliquables et saisie : utilise "click_element" pour les liens et onglets, "click_button" pour les boutons. Pour saisir sans cible précise, mets "target": null dans "write_text" ou "replace_field_text".
 - Défilement de page et scrollbar ("scroll") :
@@ -1532,7 +1533,7 @@ Format json obligatoire :
                     });
                     break;
                 }
-                Err(err) if attempts <= MAX_RETRIES => {
+                Err(_err) if attempts <= MAX_RETRIES => {
                     let _ = event_tx.send(AgentEvent::SilentNarration(
                         "Connexion interrompue, nouvelle tentative dans 3 secondes...".into(),
                     ));
@@ -1586,7 +1587,7 @@ Format json obligatoire :
             return;
         }
 
-        println!("[Agent] Narration (Passe {}) : \"{}\"", pass, payload.narration);
+        println!("[Agent] Narration (passe {}) : \"{}\"", pass, payload.narration);
         println!("[Agent] {} action(s) planifiée(s) :", payload.actions.len());
         for (i, act) in payload.actions.iter().enumerate() {
             println!("  [{}] {:?}", i + 1, act);
@@ -1658,7 +1659,7 @@ Format json obligatoire :
             step_feedback.push_str(&format!(
                 "\n\nConsignes pour cette nouvelle étape :\n\
                 - Analyse attentivement [État de l'écran suite aux actions].\n\
-                - Détection d'obstacle : si une modale, dialogue, alerte ou bannière de consentement bloque l'accès ou la visibilité, émets en priorité l'action nécessaire pour la fermer ou l'accepter ('click_button', 'click_element' ou 'accessibility_shortcut': 'escape').\n\
+                - Détection d'obstacle : si une bannière de consentement ou de cookies obstrue la vue, analyse attentivement les boutons visibles et clique immédiatement sur le bouton d'acceptation ou de fermeture ('click_button' ou 'click_element' ciblant 'Tout accepter', 'Accepter', etc.). Ne jamais envoyer 'escape' pour une bannière web.\n\
                 - Si l'élément cible n'est pas encore visible sur la page, émets un défilement ('scroll' direction: 'down') pour explorer le reste de la page.\n\
                 - Si l'écran est dégagé, poursuis immédiatement l'exécution de la consigne initiale : \"{}\".\n\
                 - Pour une recherche ou un achat web : relève les modèles ou prix observés et formule 2 ou 3 suggestions concrètes dans \"narration\" si un choix utilisateur est nécessaire.\n\
@@ -1712,7 +1713,6 @@ fn main() -> eframe::Result<()> {
 
     // Runtime Tokio en arrière-plan pour requêter DeepSeek
     let deepseek_chat_key = deepseek_key.clone();
-    let tts_worker_tx = tts_tx.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("Échec d'initialisation du runtime Tokio");
         rt.block_on(async move {
