@@ -1365,10 +1365,12 @@ Règles d'action et d'arbitrage :
 - Salutations et discussion : valide ("invalid_request": false), réponds courtoisement dans "narration" avec "actions": [].
 - Interface : consulte toujours "[État actuel de l'écran]" (fenêtres, onglets, boutons, liens).
 - Fermeture d'onglets ou sous-pages (ex: "ferme Google") : JAMAIS "close_app" ! Enchaîne "focus_window" puis "accessibility_shortcut": "close_tab" ou clique la croix ("click_button" / "click_element"). Réserve "close_app" à la fermeture d'une application entière.
-- Détection d'obstruction et éléments surgissants (bannières RGPD/cookies, modales, dialogues, popups bloquants) :
-  * Analyse systématiquement [État actuel de l'écran] pour détecter si un dialogue inattendu, une bannière de consentement ou un élément soudain masque la cible ou obstrue la vue.
-  * Bannières de cookies / consentement RGPD : repère le bouton dans [Boutons / contrôles cliquables] ou [Liens / résultats cliquables] (ex: "Tout accepter", "Accepter", "J'accepte", "Autoriser", "Continuer sans accepter") et clique-le EN PRIORITÉ via "click_button" ou "click_element".
-  * INTERDICTION D'ESCAPE SUR LE WEB : Ne JAMAIS utiliser "accessibility_shortcut": "escape" pour une bannière de cookies car la touche Échap ne la ferme pas. Réserve "escape" exclusivement aux fenêtres modales ou dialogues système natifs dépourvus de bouton.
+- Détection d'obstruction et éléments surgissants (bannières cookies, popups, notifications Windows) :
+  * Analyse systématiquement [État actuel de l'écran] pour repérer toute notification Windows, toast, modale ou bannière de consentement qui masque l'écran ou demande validation.
+  * Sélection impérative du sous-bouton d'action ou de fermeture : n'envoie JAMAIS "escape" ! Identifie et clique directement sur le sous-bouton approprié présent dans [Boutons / contrôles cliquables] ou [Liens / résultats cliquables] :
+    - Bannières de cookies / RGPD : sous-bouton "Tout accepter", "Accepter", "J'accepte", "Autoriser", "Continuer sans accepter" ou croix de fermeture.
+    - Notifications Windows et toasts système : sous-bouton "Fermer", "Ignorer", "Supprimer", "Dismiss" ou le bouton d'action contextuel de la notification.
+    - Popups, modales et dialogues d'application : sous-bouton "Fermer", "Annuler", "Plus tard", "Non merci" ou bouton de rejet.
   * Dès que l'obstacle n'apparaît plus à l'écran, reprends immédiatement le cours de la consigne initiale là où elle s'était arrêtée.
 - Éléments cliquables et saisie : utilise "click_element" pour les liens et onglets, "click_button" pour les boutons. Pour saisir sans cible précise, mets "target": null dans "write_text" ou "replace_field_text".
 - Défilement de page et scrollbar ("scroll") :
@@ -1659,7 +1661,7 @@ Format json obligatoire :
             step_feedback.push_str(&format!(
                 "\n\nConsignes pour cette nouvelle étape :\n\
                 - Analyse attentivement [État de l'écran suite aux actions].\n\
-                - Détection d'obstacle : si une bannière de consentement ou de cookies obstrue la vue, analyse attentivement les boutons visibles et clique immédiatement sur le bouton d'acceptation ou de fermeture ('click_button' ou 'click_element' ciblant 'Tout accepter', 'Accepter', etc.). Ne jamais envoyer 'escape' pour une bannière web.\n\
+                - Détection d'obstacle : si une notification Windows, un popup ou une bannière de consentement obstrue la vue, sélectionne et clique immédiatement sur le sous-bouton approprié de la notification ('click_button' ou 'click_element' vers 'Tout accepter', 'Accepter', 'Fermer', 'Ignorer', etc.). Ne jamais envoyer 'escape'.\n\
                 - Si l'élément cible n'est pas encore visible sur la page, émets un défilement ('scroll' direction: 'down') pour explorer le reste de la page.\n\
                 - Si l'écran est dégagé, poursuis immédiatement l'exécution de la consigne initiale : \"{}\".\n\
                 - Pour une recherche ou un achat web : relève les modèles ou prix observés et formule 2 ou 3 suggestions concrètes dans \"narration\" si un choix utilisateur est nécessaire.\n\

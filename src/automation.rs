@@ -1243,12 +1243,6 @@ fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option
 
 #[cfg(windows)]
 fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option<&'a UiaElementInfo> {
-    let target_lower = target.to_lowercase();
-    let is_cookie_query = target_lower.contains("cookie")
-        || target_lower.contains("consent")
-        || target_lower.contains("accepter")
-        || target_lower.contains("accept")
-        || target_lower.contains("autoriser");
     let mut scored: Vec<(f32, &'a UiaElementInfo)> = elements
         .iter()
         .filter_map(|elem| {
@@ -1266,12 +1260,6 @@ fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) ->
                     final_score += 40.0;
                 } else {
                     final_score -= 60.0;
-                }
-                if is_cookie_query {
-                    let n = elem.name.to_lowercase();
-                    if n.contains("tout accepter") || n.contains("accepter tout") || n == "accepter" || n.contains("j'accepte") || n.contains("autoriser") {
-                        final_score += 160.0;
-                    }
                 }
                 if elem.area > 150_000 {
                     final_score -= 100.0;
