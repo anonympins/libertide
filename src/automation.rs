@@ -115,6 +115,11 @@ pub fn force_foreground_window(hwnd: HWND) {
             0
         };
 
+        // Déblocage de la restriction de premier plan Windows
+        const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
+        send_key_event(VK_MENU, KEYBD_EVENT_FLAGS(0));
+        send_key_event(VK_MENU, KEYEVENTF_KEYUP);
+
         if current_thread_id != target_thread_id && target_thread_id != 0 {
             let _ = AttachThreadInput(current_thread_id, target_thread_id, 1);
             if fg_thread_id != 0 && fg_thread_id != target_thread_id {
@@ -134,94 +139,55 @@ pub fn force_foreground_window(hwnd: HWND) {
 }
 
 #[cfg(windows)]
-fn send_paste() {
-    let keys = [
-        (VIRTUAL_KEY(0x11), KEYBD_EVENT_FLAGS(0)), // Ctrl enfoncé
-        (VIRTUAL_KEY(0x56), KEYBD_EVENT_FLAGS(0)), // V enfoncé
-        (VIRTUAL_KEY(0x56), KEYEVENTF_KEYUP),      // V relâché
-        (VIRTUAL_KEY(0x11), KEYEVENTF_KEYUP),      // Ctrl relâché
-    ];
-    let mut inputs = Vec::new();
-    for (vk, flags) in keys {
-        inputs.push(INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: vk,
-                    wScan: 0,
-                    dwFlags: flags,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
+fn send_key_event(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) {
+    let input = [INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
             },
-        });
-    }
+        },
+    }];
     unsafe {
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        SendInput(&input, std::mem::size_of::<INPUT>() as i32);
     }
 }
 
 #[cfg(windows)]
-pub fn send_hotkey(modifiers: &[VIRTUAL_KEY], key: VIRTUAL_KEY) {
-    let mut inputs = Vec::new();
+fn send_paste() {
+    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+    const VK_V: VIRTUAL_KEY = VIRTUAL_KEY(0x56);
 
+    send_key_event(VK_CONTROL, KEYBD_EVENT_FLAGS(0));
+    std::thread::sleep(Duration::from_millis(20));
+    send_key_event(VK_V, KEYBD_EVENT_FLAGS(0));
+    std::thread::sleep(Duration::from_millis(35));
+    send_key_event(VK_V, KEYEVENTF_KEYUP);
+    std::thread::sleep(Duration::from_millis(20));
+    send_key_event(VK_CONTROL, KEYEVENTF_KEYUP);
+}
+
+#[cfg(windows)]
+pub fn send_hotkey(modifiers: &[VIRTUAL_KEY], key: VIRTUAL_KEY) {
     for &m in modifiers {
-        inputs.push(INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: m,
-                    wScan: 0,
-                    dwFlags: KEYBD_EVENT_FLAGS(0),
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        });
+        send_key_event(m, KEYBD_EVENT_FLAGS(0));
+        std::thread::sleep(Duration::from_millis(15));
     }
 
-    inputs.push(INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: key,
-                wScan: 0,
-                dwFlags: KEYBD_EVENT_FLAGS(0),
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    });
-    inputs.push(INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: key,
-                wScan: 0,
-                dwFlags: KEYEVENTF_KEYUP,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    });
+    if key.0 != 0 {
+        send_key_event(key, KEYBD_EVENT_FLAGS(0));
+        std::thread::sleep(Duration::from_millis(35));
+        send_key_event(key, KEYEVENTF_KEYUP);
+        std::thread::sleep(Duration::from_millis(15));
+    }
 
     for &m in modifiers.iter().rev() {
-        inputs.push(INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: m,
-                    wScan: 0,
-                    dwFlags: KEYEVENTF_KEYUP,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        });
-    }
-
-    unsafe {
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        send_key_event(m, KEYEVENTF_KEYUP);
+        std::thread::sleep(Duration::from_millis(15));
     }
 }
 
@@ -258,6 +224,14 @@ pub fn is_address_bar_target(target: &str) -> bool {
         || t.contains("barre d'adresse")
         || t.contains("barre d adresse")
         || t.contains("adresse web")
+}
+
+pub fn is_browser_chrome_target(target: &str) -> bool {
+    let t = target.trim().to_lowercase();
+    t.starts_with("[navigateur]")
+        || t.starts_with("navigateur:")
+        || t.starts_with("[browser]")
+        || t.starts_with("browser:")
 }
 
 pub fn is_generic_textarea_target(target: &str) -> bool {
@@ -299,20 +273,46 @@ fn navigate_browser_address_bar(hwnd: HWND, url: &str) {
     unsafe {
         let _ = ShowWindow(hwnd, SW_MAXIMIZE);
     }
-    std::thread::sleep(Duration::from_millis(80));
+    std::thread::sleep(Duration::from_millis(150));
 
     const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
     const VK_L: VIRTUAL_KEY = VIRTUAL_KEY(0x4C);
+    const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
+    const VK_D: VIRTUAL_KEY = VIRTUAL_KEY(0x44);
     const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
 
-    send_hotkey(&[VK_CONTROL], VK_L);
-    std::thread::sleep(Duration::from_millis(60));
+    // 1. Clic direct sur la barre d'adresse si elle est repérée dans l'arbre UIA
+    let elements = list_interactive_elements(hwnd);
+    let address_elem = elements.iter().find(|e| {
+        e.is_browser_chrome
+            && (e.class_name.contains("omnibox")
+                || e.automation_id.to_lowercase().contains("omnibox")
+                || e.localized_type.contains("omnibox")
+                || e.name.to_lowercase().contains("adresse")
+                || e.name.to_lowercase().contains("address"))
+    });
 
+    if let Some(elem) = address_elem {
+        unsafe { let _ = elem.element.SetFocus(); }
+        click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
+        std::thread::sleep(Duration::from_millis(80));
+    }
+
+    // 2. Raccourcis universels de sélection de la barre d'adresse (Alt+D puis Ctrl+L)
+    send_hotkey(&[VK_MENU], VK_D);
+    std::thread::sleep(Duration::from_millis(80));
+    send_hotkey(&[VK_CONTROL], VK_L);
+    std::thread::sleep(Duration::from_millis(100));
+
+    // 3. Écriture de l'URL via le presse-papiers
     clipboard::set_text(&formatted_url);
-    std::thread::sleep(Duration::from_millis(40));
+    std::thread::sleep(Duration::from_millis(60));
     send_paste();
-    std::thread::sleep(Duration::from_millis(40));
+    std::thread::sleep(Duration::from_millis(180));
+
+    // 4. Validation par la touche Entrée avec un délai de maintien suffisant
     send_hotkey(&[], VK_RETURN);
+    std::thread::sleep(Duration::from_millis(100));
     println!("[Actions] Navigation vers {} effectuée avec succès via barre d'adresse", formatted_url);
 }
 
@@ -333,6 +333,8 @@ struct UiaElementInfo {
     is_button: bool,
     is_link: bool,
     is_focusable: bool,
+    is_web_content: bool,
+    is_browser_chrome: bool,
     click_x: i32,
     click_y: i32,
     rect: RECT,
@@ -363,6 +365,34 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
         };
 
         let count = elements.Length().unwrap_or(0).clamp(0, 1200);
+
+        // Délimitation géométrique du document web par rapport à la fenêtre
+        let mut doc_rect: Option<RECT> = None;
+        for i in 0..count {
+            if let Ok(item) = elements.GetElement(i) {
+                let ctype = item.CurrentControlType().unwrap_or_default();
+                let class_name = item.CurrentClassName().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+                let is_doc = ctype == UIA_DocumentControlTypeId
+                    || class_name.contains("renderwidget")
+                    || class_name.contains("rootwebarea");
+                if is_doc {
+                    if let Ok(r) = item.CurrentBoundingRectangle() {
+                        let w = r.right - r.left;
+                        let h = r.bottom - r.top;
+                        if w > 200 && h > 150 {
+                            let replace = match doc_rect {
+                                Some(cur) => (w as i64 * h as i64) > ((cur.right - cur.left) as i64 * (cur.bottom - cur.top) as i64),
+                                None => true,
+                            };
+                            if replace {
+                                doc_rect = Some(r);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         for i in 0..count {
             if let Ok(item) = elements.GetElement(i) {
                 let is_offscreen = item.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false);
@@ -465,6 +495,21 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || loc_type.contains("hyperlink")
                         || is_role_link;
 
+                    let (is_web_content, is_browser_chrome) = match doc_rect {
+                        Some(dr) => {
+                            if rect.bottom <= (dr.top + 5) {
+                                (false, true)
+                            } else {
+                                (true, false)
+                            }
+                        }
+                        None => (false, false),
+                    };
+
+                    if is_browser_chrome && !name.is_empty() && !name.starts_with("[Navigateur]") {
+                        name = format!("[Navigateur] {name}");
+                    }
+
                     if name.is_empty() && (is_link || is_button) {
                         if let Some(txt) = extract_element_text(&item) {
                             name = txt.trim().to_string();
@@ -496,6 +541,8 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         is_button,
                         is_link,
                         is_focusable,
+                        is_web_content,
+                        is_browser_chrome,
                         click_x,
                         click_y,
                         rect,
@@ -560,9 +607,10 @@ fn refocus_largest_textarea_or_fallback(hwnd: HWND) -> bool {
         return false;
     }
 
+    let has_web = elements.iter().any(|e| e.is_web_content);
     let mut textareas: Vec<&UiaElementInfo> = elements
         .iter()
-        .filter(|e| e.is_explicit_textarea)
+        .filter(|e| (!has_web || !e.is_browser_chrome) && e.is_explicit_textarea)
         .collect();
     textareas.sort_by(|a, b| b.area.cmp(&a.area));
 
@@ -574,7 +622,7 @@ fn refocus_largest_textarea_or_fallback(hwnd: HWND) -> bool {
 
     let mut inputs: Vec<&UiaElementInfo> = elements
         .iter()
-        .filter(|e| e.is_input || e.is_edit_or_textarea)
+        .filter(|e| (!has_web || !e.is_browser_chrome) && (e.is_input || e.is_edit_or_textarea))
         .collect();
     inputs.sort_by(|a, b| b.area.cmp(&a.area));
 
@@ -610,12 +658,21 @@ fn find_largest_textarea(hwnd: HWND) -> Option<UiaElementInfo> {
         return None;
     }
 
+    let has_web = elements.iter().any(|e| e.is_web_content && (e.is_explicit_textarea || e.is_edit_or_textarea || e.is_input));
     let mut textareas: Vec<UiaElementInfo> = elements
         .into_iter()
-        .filter(|e| e.is_explicit_textarea || e.is_edit_or_textarea || e.is_input)
+        .filter(|e| {
+            if has_web && e.is_browser_chrome {
+                return false;
+            }
+            e.is_explicit_textarea || e.is_edit_or_textarea || e.is_input
+        })
         .collect();
 
     textareas.sort_by(|a, b| {
+        if a.is_web_content != b.is_web_content {
+            return b.is_web_content.cmp(&a.is_web_content);
+        }
         if a.is_explicit_textarea != b.is_explicit_textarea {
             return b.is_explicit_textarea.cmp(&a.is_explicit_textarea);
         }
@@ -645,7 +702,11 @@ fn find_largest_textarea_on_screen(
 
     for hwnd in ordered.into_iter().take(4) {
         let elements = list_interactive_elements(hwnd);
+        let has_web = elements.iter().any(|e| e.is_web_content);
         for elem in elements {
+            if has_web && elem.is_browser_chrome {
+                continue;
+            }
             if elem.is_explicit_textarea {
                 let replace = match &best_explicit {
                     Some((_, cur)) => elem.area > cur.area,
@@ -1209,10 +1270,21 @@ fn score_element(elem: &UiaElementInfo, query: &str) -> Option<f32> {
 fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option<&'a UiaElementInfo> {
     let target_words = clean_words(target);
     let is_target_short = target_words.len() <= 5 && target.len() <= 40;
+    let is_chrome_target = is_browser_chrome_target(target);
+    let has_web_content = elements.iter().any(|e| e.is_web_content);
 
     let mut scored: Vec<(f32, &'a UiaElementInfo)> = elements
         .iter()
         .filter_map(|elem| {
+            if has_web_content {
+                if is_chrome_target && !elem.is_browser_chrome {
+                    return None;
+                }
+                if !is_chrome_target && elem.is_browser_chrome {
+                    return None;
+                }
+            }
+
             let word_count = elem.name.split_whitespace().count();
             if is_target_short && (word_count > 12 || elem.name.len() > 90) {
                 return None;
@@ -1224,6 +1296,9 @@ fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option
                     final_score += 40.0;
                 } else if elem.pattern.is_some() {
                     final_score += 20.0;
+                }
+                if elem.is_web_content {
+                    final_score += 35.0;
                 }
                 (final_score, elem)
             })
@@ -1243,6 +1318,8 @@ fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option
 
 #[cfg(windows)]
 fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option<&'a UiaElementInfo> {
+    let is_chrome_target = is_browser_chrome_target(target);
+    let has_web_content = elements.iter().any(|e| e.is_web_content);
     let mut scored: Vec<(f32, &'a UiaElementInfo)> = elements
         .iter()
         .filter_map(|elem| {
@@ -1250,6 +1327,14 @@ fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) ->
             let word_count = elem.name.split_whitespace().count();
             if word_count > 10 || elem.name.len() > 80 {
                 return None;
+            }
+            if has_web_content {
+                if is_chrome_target && !elem.is_browser_chrome {
+                    return None;
+                }
+                if !is_chrome_target && elem.is_browser_chrome {
+                    return None;
+                }
             }
 
             score_element(elem, target).map(|score| {
@@ -1260,6 +1345,9 @@ fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) ->
                     final_score += 40.0;
                 } else {
                     final_score -= 60.0;
+                }
+                if elem.is_web_content {
+                    final_score += 40.0;
                 }
                 if elem.area > 150_000 {
                     final_score -= 100.0;
@@ -1282,15 +1370,29 @@ fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) ->
 
 #[cfg(windows)]
 fn find_best_input_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option<&'a UiaElementInfo> {
+    let is_chrome_target = is_browser_chrome_target(target);
+    let has_web_content = elements.iter().any(|e| e.is_web_content);
     let mut scored: Vec<(f32, &'a UiaElementInfo)> = elements
         .iter()
         .filter_map(|elem| {
+            if has_web_content {
+                if is_chrome_target && !elem.is_browser_chrome {
+                    return None;
+                }
+                if !is_chrome_target && elem.is_browser_chrome {
+                    return None;
+                }
+            }
+
             score_element(elem, target).map(|score| {
                 let mut final_score = score;
                 if elem.is_edit_or_textarea || elem.is_input {
                     final_score += 40.0;
                 } else if elem.is_focusable {
                     final_score += 15.0;
+                }
+                if elem.is_web_content {
+                    final_score += 50.0;
                 }
                 (final_score, elem)
             })
@@ -1606,9 +1708,32 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
             continue;
         }
 
-        let edits: Vec<&UiaElementInfo> = elements.iter().filter(|e| e.is_edit_or_textarea || e.is_input).collect();
+        let has_web_doc = elements.iter().any(|e| e.is_web_content);
+
+        if has_web_doc {
+            let chrome_controls: Vec<String> = elements
+                .iter()
+                .filter(|e| e.is_browser_chrome && (!e.name.is_empty() || !e.value_text.is_empty()))
+                .map(|e| {
+                    if !e.value_text.is_empty() {
+                        format!("{}: \"{}\"", e.name, e.value_text.chars().take(70).collect::<String>())
+                    } else {
+                        e.name.clone()
+                    }
+                })
+                .take(5)
+                .collect();
+            if !chrome_controls.is_empty() {
+                out.push_str(&format!("  [Interface navigateur] : {}\n", chrome_controls.join(" | ")));
+            }
+        }
+
+        let edits: Vec<&UiaElementInfo> = elements.iter()
+            .filter(|e| (!has_web_doc || e.is_web_content) && (e.is_edit_or_textarea || e.is_input))
+            .collect();
         if !edits.is_empty() {
-            out.push_str("  [Champs de texte / saisie] :\n");
+            let prefix = if has_web_doc { "  [Page web - champs de saisie] :\n" } else { "  [Champs de texte / saisie] :\n" };
+            out.push_str(prefix);
             for edit in edits.iter().take(5) {
                 let label = if !edit.name.is_empty() { &edit.name } else { "Champ" };
                 let val = if !edit.value_text.is_empty() {
@@ -1666,7 +1791,8 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
         let display_links: Vec<String> = scored_links.into_iter().take(25).map(|(_, l)| l).collect();
 
         if !display_links.is_empty() {
-            out.push_str(&format!("  [Liens / résultats cliquables] : {}\n", display_links.join(" | ")));
+            let prefix = if has_web_doc { "  [Page web - liens cliquables] : " } else { "  [Liens / résultats cliquables] : " };
+            out.push_str(&format!("{}{}\n", prefix, display_links.join(" | ")));
         }
 
         let mut text_items: Vec<String> = elements
@@ -1698,7 +1824,8 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
         let mut buttons: Vec<String> = elements
             .iter()
             .filter(|e| {
-                !e.is_edit_or_textarea
+                (!has_web_doc || e.is_web_content)
+                    && !e.is_edit_or_textarea
                     && (!e.name.is_empty() || !e.help_text.is_empty() || !e.automation_id.is_empty())
                     && (e.is_button
                         || e.pattern.is_some()
@@ -1723,7 +1850,8 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
         buttons.dedup();
         if !buttons.is_empty() {
             let display_btns: Vec<String> = buttons.into_iter().take(25).collect();
-            out.push_str(&format!("  [Boutons / contrôles cliquables] : {}\n", display_btns.join(", ")));
+            let prefix = if has_web_doc { "  [Page web - boutons cliquables] : " } else { "  [Boutons / contrôles cliquables] : " };
+            out.push_str(&format!("{}{}\n", prefix, display_btns.join(", ")));
         }
 
         if chunks_count > 1 {
@@ -2205,27 +2333,8 @@ pub fn execute_system_actions(actions: &[AgentAction]) -> String {
                         unsafe {
                             let _ = ShowWindow(hwnd, if is_browser { SW_MAXIMIZE } else { SW_RESTORE });
                         }
-                        std::thread::sleep(Duration::from_millis(80));
-
-                        const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
-                        const VK_L: VIRTUAL_KEY = VIRTUAL_KEY(0x4C);
-                        const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
-
-                        send_hotkey(&[VK_CONTROL], VK_L);
                         std::thread::sleep(Duration::from_millis(50));
-
-                        let formatted_url = if !text.starts_with("http://") && !text.starts_with("https://") && text.contains('.') {
-                            format!("https://{text}")
-                        } else {
-                            text.to_string()
-                        };
-
-                        clipboard::set_text(&formatted_url);
-                        std::thread::sleep(Duration::from_millis(40));
-                        send_paste();
-                        std::thread::sleep(Duration::from_millis(40));
-                        send_hotkey(&[], VK_RETURN);
-                        println!("[Actions] Url collée et validée par entrée : {}", formatted_url);
+                        navigate_browser_address_bar(hwnd, text);
                         handled = true;
                     } else {
                         println!("[Actions] Aucun navigateur ouvert trouvé, ouverture d'une nouvelle fenêtre pour : {}", text);
@@ -2336,27 +2445,8 @@ pub fn execute_system_actions(actions: &[AgentAction]) -> String {
                         unsafe {
                             let _ = ShowWindow(hwnd, if is_browser { SW_MAXIMIZE } else { SW_RESTORE });
                         }
-                        std::thread::sleep(Duration::from_millis(80));
-
-                        const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
-                        const VK_L: VIRTUAL_KEY = VIRTUAL_KEY(0x4C);
-                        const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
-
-                        send_hotkey(&[VK_CONTROL], VK_L);
                         std::thread::sleep(Duration::from_millis(50));
-
-                        let formatted_url = if !text.starts_with("http://") && !text.starts_with("https://") && text.contains('.') {
-                            format!("https://{text}")
-                        } else {
-                            text.to_string()
-                        };
-
-                        clipboard::set_text(&formatted_url);
-                        std::thread::sleep(Duration::from_millis(40));
-                        send_paste();
-                        std::thread::sleep(Duration::from_millis(40));
-                        send_hotkey(&[], VK_RETURN);
-                        println!("[Actions] Url mise à jour et validée (entrée) : {}", formatted_url);
+                        navigate_browser_address_bar(hwnd, text);
                         handled = true;
                     } else {
                         println!("[Actions] Aucun navigateur ouvert trouvé, ouverture avec : {}", text);

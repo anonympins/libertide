@@ -1364,6 +1364,8 @@ Règles d'action et d'arbitrage :
 - Silence ("invalid_request": true) : réservé aux bruits de micro et phrases inintelligibles.
 - Salutations et discussion : valide ("invalid_request": false), réponds courtoisement dans "narration" avec "actions": [].
 - Interface : consulte toujours "[État actuel de l'écran]" (fenêtres, onglets, boutons, liens).
+  * Les contrôles de l'interface du navigateur portent le préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse", "[Navigateur] Actualiser"). Pour interagir avec le navigateur hôte, inclus explicitement ce préfixe dans la cible.
+  * Les éléments internes au site web (champs de formulaire, boutons d'action, liens) figurent dans "[Page web - ...]" sans préfixe. Cible-les par leur libellé direct (ex: "Destination", "Rechercher", "Tout accepter").
 - Fermeture d'onglets ou sous-pages (ex: "ferme Google") : JAMAIS "close_app" ! Enchaîne "focus_window" puis "accessibility_shortcut": "close_tab" ou clique la croix ("click_button" / "click_element"). Réserve "close_app" à la fermeture d'une application entière.
 - Détection d'obstruction et éléments surgissants (bannières cookies, popups, notifications Windows) :
   * Analyse systématiquement [État actuel de l'écran] pour repérer toute notification Windows, toast, modale ou bannière de consentement qui masque l'écran ou demande validation.
@@ -1661,6 +1663,7 @@ Format json obligatoire :
             step_feedback.push_str(&format!(
                 "\n\nConsignes pour cette nouvelle étape :\n\
                 - Analyse attentivement [État de l'écran suite aux actions].\n\
+                - Pour cibler un contrôle de l'application hôte (navigateur), utilise le libellé commençant par '[Navigateur]'. Pour la page web, utilise le nom direct affiché dans les sections '[Page web - ...]'.\n\
                 - Détection d'obstacle : si une notification Windows, un popup ou une bannière de consentement obstrue la vue, sélectionne et clique immédiatement sur le sous-bouton approprié de la notification ('click_button' ou 'click_element' vers 'Tout accepter', 'Accepter', 'Fermer', 'Ignorer', etc.). Ne jamais envoyer 'escape'.\n\
                 - Si l'élément cible n'est pas encore visible sur la page, émets un défilement ('scroll' direction: 'down') pour explorer le reste de la page.\n\
                 - Si l'écran est dégagé, poursuis immédiatement l'exécution de la consigne initiale : \"{}\".\n\
