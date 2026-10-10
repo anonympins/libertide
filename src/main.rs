@@ -595,8 +595,21 @@ impl eframe::App for OverlayApp {
         visuals.extreme_bg_color = egui::Color32::from_rgb(18, 20, 26);
         ctx.set_visuals(visuals);
 
-        let mon_size = ctx.input(|i| i.viewport().monitor_size);
-        let screen_h = mon_size.map_or(1080.0, |m| m.y);
+        let ppp = ctx.pixels_per_point().max(0.5);
+        #[cfg(windows)]
+        let (work_x, work_y, work_w, work_h, taskbar_top) = {
+            let wa = get_desktop_work_area();
+            let left = wa.left as f32 / ppp;
+            let top = wa.top as f32 / ppp;
+            let right = wa.right as f32 / ppp;
+            let bottom = wa.bottom as f32 / ppp;
+            (left, top, (right - left).max(380.0), (bottom - top).max(200.0), bottom)
+        };
+        #[cfg(not(windows))]
+        let (work_x, work_y, work_w, work_h, taskbar_top) = {
+            let mon = ctx.input(|i| i.viewport().monitor_size).unwrap_or(egui::vec2(1920.0, 1080.0));
+            (0.0, 0.0, mon.x, mon.y, mon.y)
+        };
 
         let min_win_w: f32 = 380.0;
         let min_win_h: f32 = 134.0;
@@ -609,53 +622,40 @@ impl eframe::App for OverlayApp {
         let padding: f32 = 2.0;
         let control_h: f32 = 78.0;
 
-        let max_chat_h = (screen_h - control_h - 120.0).clamp(180.0, 520.0);
+        let max_chat_h = (work_h - control_h - 60.0).clamp(180.0, 560.0);
         let min_chat_h: f32 = 50.0;
         let current_chat_h = self.chat_height.clamp(min_chat_h, max_chat_h);
 
         let target_win_h = (padding + current_chat_h + padding + control_h + padding).max(min_win_h);
         let active_win_h = inner_rect_opt.map_or(self.current_win_h, |r| r.height().max(min_win_h));
 
-        // Ancrage automatique de la fenêtre en bas à droite
+        // Ancrage automatique de la fenêtre ferrée à la barre des tâches en bas à droite
         if !self.position_initialized {
-            if let Some(m_size) = mon_size {
-                if m_size.x > 100.0 && m_size.y > 100.0 {
-                    let margin_x = 24.0;
-                    let margin_y = 36.0;
-                    let init_h = target_win_h;
-                    let bot_y = m_size.y - margin_y;
-                    let target_pos = egui::pos2(
-                        m_size.x - win_w - margin_x,
-                        bot_y - init_h,
-                    );
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, init_h)));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(target_pos));
-                    self.window_pos = Some(target_pos);
-                    self.window_bottom_y = Some(bot_y);
-                    self.current_win_h = init_h;
-                    self.position_initialized = true;
-                }
-            }
+            let margin_x = 16.0;
+            let init_h = target_win_h;
+            let bot_y = taskbar_top; // Ferrée directement au sommet de la barre des tâches
+            let target_pos = egui::pos2(
+                (work_x + work_w - win_w - margin_x).max(work_x),
+                (bot_y - init_h).max(work_y),
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, init_h)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(target_pos));
+            self.window_pos = Some(target_pos);
+            self.window_bottom_y = Some(bot_y);
+            self.current_win_h = init_h;
+            self.position_initialized = true;
         }
 
-        // Redimensionnement dynamique de la fenêtre vers le haut
-        if self.position_initialized && (target_win_h - self.current_win_h).abs() > 1.0 {
+        // Redimensionnement dynamique de la fenêtre vers le haut en conservant l'ancrage au bas
+        if self.position_initialized && (target_win_h - self.current_win_h).abs() > 0.5 {
             self.current_win_h = target_win_h;
-            if let Some(bot_y) = self.window_bottom_y {
-                let cur_x = self.window_pos.map_or(100.0, |p| p.x);
-                let new_y = (bot_y - target_win_h).max(0.0);
-                let new_pos = egui::pos2(cur_x, new_y);
-                self.window_pos = Some(new_pos);
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, target_win_h)));
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(new_pos));
-            }
-        }
-
-        if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
-            if self.drag_offset.is_none() && (target_win_h - self.current_win_h).abs() <= 1.0 {
-                self.window_pos = Some(outer.min);
-                self.window_bottom_y = Some(outer.min.y + self.current_win_h);
-            }
+            let bot_y = self.window_bottom_y.unwrap_or(taskbar_top);
+            let cur_x = self.window_pos.map_or(work_x + work_w - win_w - 16.0, |p| p.x);
+            let new_y = (bot_y - target_win_h).clamp(work_y, taskbar_top - min_win_h);
+            let new_pos = egui::pos2(cur_x, new_y);
+            self.window_pos = Some(new_pos);
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, target_win_h)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(new_pos));
         }
 
         // Alignement strict : panneau de commandes calé en bas, boîte de discussion au-dessus
@@ -1287,44 +1287,61 @@ impl eframe::App for OverlayApp {
                         });
                 });
 
-                // Zone de déplacement restreinte à l'en-tête supérieur de la boîte active
-                let drag_rect = egui::Rect::from_min_max(
-                    egui::pos2(tab_bar_max_x + 8.0, response_rect.min.y),
-                    egui::pos2(win_w - padding, response_rect.min.y + 32.0),
+                // Zones de déplacement : en-tête supérieur et bandeau de la capsule inférieure
+                let drag_rect_top = egui::Rect::from_min_max(
+                    egui::pos2(tab_bar_max_x + 6.0, response_rect.min.y),
+                    egui::pos2(win_w - padding - 4.0, response_rect.min.y + 30.0),
                 );
-                let drag_response = ui.interact(drag_rect, ui.id().with("capsule_drag"), egui::Sense::drag());
-                if drag_response.hovered() {
+                let drag_rect_bot = egui::Rect::from_min_max(
+                    egui::pos2(control_rect.min.x + 8.0, control_rect.min.y + 4.0),
+                    egui::pos2(control_rect.max.x - 48.0, control_rect.min.y + 24.0),
+                );
+                let resp_top = ui.interact(drag_rect_top, ui.id().with("capsule_drag_top"), egui::Sense::drag());
+                let resp_bot = ui.interact(drag_rect_bot, ui.id().with("capsule_drag_bot"), egui::Sense::drag());
+
+                let is_hovered = resp_top.hovered() || resp_bot.hovered();
+                let is_dragged = resp_top.dragged() || resp_bot.dragged();
+                let drag_started = resp_top.drag_started() || resp_bot.drag_started();
+                let drag_stopped = resp_top.drag_stopped() || resp_bot.drag_stopped();
+
+                if is_hovered {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                 }
 
-                if drag_response.drag_started() {
+                if drag_started {
                     if let Some(cursor) = get_screen_cursor_pos(&ctx) {
                         let win_p = self.window_pos.unwrap_or_default();
                         self.drag_offset = Some(egui::vec2(cursor.x - win_p.x, cursor.y - win_p.y));
                     }
                 }
 
-                if drag_response.dragged() {
+                if is_dragged {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                    let offset = self.drag_offset.unwrap_or(egui::vec2(280.0, 16.0));
+                    let offset = self.drag_offset.unwrap_or(egui::vec2(win_w / 2.0, 16.0));
 
                     let cursor_screen = get_screen_cursor_pos(&ctx);
                     if let Some(cursor) = cursor_screen {
-                        if let Some(m_size) = mon_size {
-                            let max_x = (m_size.x - win_w).max(0.0);
-                            let max_y = (m_size.y - self.current_win_h).max(0.0);
+                        let max_x = (work_x + work_w - win_w).max(work_x);
+                        let max_y = (taskbar_top - active_win_h).max(work_y);
 
-                            let target_x = (cursor.x - offset.x).clamp(0.0, max_x);
-                            let target_y = (cursor.y - offset.y).clamp(0.0, max_y);
-                            let new_pos = egui::pos2(target_x, target_y);
+                        let raw_x = cursor.x - offset.x;
+                        let raw_y = cursor.y - offset.y;
 
-                            self.window_pos = Some(new_pos);
-                            self.window_bottom_y = Some(new_pos.y + self.current_win_h);
-                            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(new_pos));
-                        }
+                        // Magnétisme à la barre des tâches : si le bas de l'overlay s'en approche à moins de 24 px
+                        let target_y = if (raw_y - max_y).abs() < 24.0 || raw_y >= max_y {
+                            max_y
+                        } else {
+                            raw_y.clamp(work_y, max_y)
+                        };
+                        let target_x = raw_x.clamp(work_x, max_x);
+
+                        let new_pos = egui::pos2(target_x, target_y);
+                        self.window_pos = Some(new_pos);
+                        self.window_bottom_y = Some(new_pos.y + active_win_h);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(new_pos));
                     }
                 }
-                if drag_response.drag_stopped() {
+                if drag_stopped {
                     self.drag_offset = None;
                 }
 
