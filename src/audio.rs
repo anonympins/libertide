@@ -293,6 +293,7 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
             while is_listening {
                 if let Ok(AudioCommand::Stop) = cmd_rx.try_recv() {
                     let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                    crate::set_mic_audio_level(0.0);
                     break;
                 }
 
@@ -306,6 +307,13 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                 if !new_16k.is_empty() {
                     let sum_sq: f32 = new_16k.iter().map(|&s| s * s).sum();
                     let rms = (sum_sq / new_16k.len() as f32).sqrt();
+
+                    let mic_level = if rms > 0.003 {
+                        ((rms - 0.003) * 15.0).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    crate::set_mic_audio_level(mic_level);
 
                     if rms > SPEECH_ENERGY_THRESHOLD {
                         if !speech_detected {
@@ -337,6 +345,7 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                     if (silence_elapsed >= SILENCE_TIMEOUT && audio_16k_buffer.len() >= 8000)
                         || total_elapsed >= MAX_RECORDING_DURATION
                     {
+                        crate::set_mic_audio_level(0.0);
                         let _ = event_tx.send(AgentEvent::TranscriptionPartial(
                             "Transcription locale en cours...".into(),
                         ));
@@ -365,6 +374,7 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
 
                 std::thread::sleep(Duration::from_millis(20));
             }
+            crate::set_mic_audio_level(0.0);
         }
     });
     cmd_tx

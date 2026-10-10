@@ -33,6 +33,7 @@ use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, 
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 static TTS_AUDIO_LEVEL: AtomicU32 = AtomicU32::new(0);
+static MIC_AUDIO_LEVEL: AtomicU32 = AtomicU32::new(0);
 
 pub fn set_tts_audio_level(level: f32) {
     TTS_AUDIO_LEVEL.store(level.to_bits(), Ordering::Relaxed);
@@ -40,6 +41,14 @@ pub fn set_tts_audio_level(level: f32) {
 
 pub fn get_tts_audio_level() -> f32 {
     f32::from_bits(TTS_AUDIO_LEVEL.load(Ordering::Relaxed))
+}
+
+pub fn set_mic_audio_level(level: f32) {
+    MIC_AUDIO_LEVEL.store(level.to_bits(), Ordering::Relaxed);
+}
+
+pub fn get_mic_audio_level() -> f32 {
+    f32::from_bits(MIC_AUDIO_LEVEL.load(Ordering::Relaxed))
 }
 
 pub struct OverlayApp {
@@ -394,12 +403,11 @@ impl OverlayApp {
         let pulse_speed = match self.status {
             AgentStatus::Idle => 1.6,
             AgentStatus::Thinking => 4.2,
-            AgentStatus::Speaking => 2.0 + 4.5 * (self.smoothed_audio_level as f64),
-            AgentStatus::Listening => 5.5,
+            AgentStatus::Speaking | AgentStatus::Listening => 2.0 + 4.5 * (self.smoothed_audio_level as f64),
             AgentStatus::EmergencyStopped => 0.0,
         };
 
-        let wave = if self.status == AgentStatus::Speaking {
+        let wave = if self.status == AgentStatus::Speaking || self.status == AgentStatus::Listening {
             self.smoothed_audio_level
         } else {
             ((time * pulse_speed).sin() as f32).max(0.0)
@@ -415,8 +423,7 @@ impl OverlayApp {
         // Empreinte sonore radiale (audio voiceprint spectrum)
         let num_bars = 16;
         let activity_level = match self.status {
-            AgentStatus::Speaking => self.smoothed_audio_level,
-            AgentStatus::Listening => 0.85f32,
+            AgentStatus::Speaking | AgentStatus::Listening => self.smoothed_audio_level,
             AgentStatus::Thinking => 0.5f32,
             AgentStatus::Idle => 0.18f32,
             AgentStatus::EmergencyStopped => 0.0f32,
@@ -435,7 +442,7 @@ impl OverlayApp {
             painter.line_segment([start, end], egui::Stroke::new(1.3, bar_color));
         }
 
-        let ring_alpha_mult = if self.status == AgentStatus::Speaking {
+        let ring_alpha_mult = if self.status == AgentStatus::Speaking || self.status == AgentStatus::Listening {
             0.2 + 0.8 * self.smoothed_audio_level
         } else {
             1.0
@@ -472,7 +479,7 @@ impl OverlayApp {
 
         let (base_color, activity_mult) = match self.status {
             AgentStatus::Speaking => (egui::Color32::from_rgb(0, 215, 255), self.smoothed_audio_level),
-            AgentStatus::Listening => (egui::Color32::from_rgb(255, 75, 90), 0.9f32),
+            AgentStatus::Listening => (egui::Color32::from_rgb(255, 75, 90), self.smoothed_audio_level),
             AgentStatus::Thinking => (egui::Color32::from_rgb(180, 120, 255), 0.55f32),
             AgentStatus::Idle => (egui::Color32::from_rgba_unmultiplied(0, 180, 255, 120), 0.15f32),
             AgentStatus::EmergencyStopped => (egui::Color32::from_rgb(220, 50, 50), 0.0f32),
@@ -482,7 +489,7 @@ impl OverlayApp {
             let x = rect.min.x + (i as f32) * (bar_width + spacing);
             let h = if self.status == AgentStatus::EmergencyStopped {
                 2.0
-            } else if self.status == AgentStatus::Speaking {
+            } else if self.status == AgentStatus::Speaking || self.status == AgentStatus::Listening {
                 let freq_mod = ((time * (9.0 + (i as f64) * 3.2) + (i as f64 * 1.5)).sin() as f32).abs();
                 let bar_scale = 0.35 + 0.65 * freq_mod;
                 (2.5 + bar_scale * activity_mult * (rect.height() - 2.5)).clamp(2.5, rect.height())
@@ -542,6 +549,7 @@ impl OverlayApp {
         self.is_recording = false;
         self.continuous_mode = false;
         let _ = self.audio_sender.send(AudioCommand::Stop);
+        set_mic_audio_level(0.0);
         self.input_text.clear();
         self.live_transcript.clear();
         self.status = AgentStatus::Idle;
@@ -565,12 +573,17 @@ impl eframe::App for OverlayApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        let raw_tts_level = get_tts_audio_level();
-        if self.status == AgentStatus::Speaking {
-            if raw_tts_level > self.smoothed_audio_level {
-                self.smoothed_audio_level += (raw_tts_level - self.smoothed_audio_level) * 0.6;
+        let target_level = match self.status {
+            AgentStatus::Speaking => get_tts_audio_level(),
+            AgentStatus::Listening => get_mic_audio_level(),
+            _ => 0.0,
+        };
+
+        if self.status == AgentStatus::Speaking || self.status == AgentStatus::Listening {
+            if target_level > self.smoothed_audio_level {
+                self.smoothed_audio_level += (target_level - self.smoothed_audio_level) * 0.65;
             } else {
-                self.smoothed_audio_level += (raw_tts_level - self.smoothed_audio_level) * 0.2;
+                self.smoothed_audio_level += (target_level - self.smoothed_audio_level) * 0.22;
             }
         } else {
             self.smoothed_audio_level += (0.0 - self.smoothed_audio_level) * 0.25;
