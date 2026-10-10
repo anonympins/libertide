@@ -16,7 +16,7 @@ use eframe::egui;
 use serde::Deserialize;
 use types::*;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender as StdSender};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use std::time::{Duration, Instant};
@@ -32,6 +32,16 @@ use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, 
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
+static TTS_AUDIO_LEVEL: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_tts_audio_level(level: f32) {
+    TTS_AUDIO_LEVEL.store(level.to_bits(), Ordering::Relaxed);
+}
+
+pub fn get_tts_audio_level() -> f32 {
+    f32::from_bits(TTS_AUDIO_LEVEL.load(Ordering::Relaxed))
+}
+
 pub struct OverlayApp {
     status: AgentStatus,
     chat_history: Vec<ChatEntry>,
@@ -40,6 +50,7 @@ pub struct OverlayApp {
     live_transcript: String,
     input_text: String,
     is_recording: bool,
+    smoothed_audio_level: f32,
     continuous_mode: bool,
 
     // Canaux de communication asynchrones
@@ -221,6 +232,7 @@ fn spawn_tts_worker(event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
                             base_flags,
                             None,
                         );
+                        set_tts_audio_level(0.0);
                     }
                     TtsCommand::Speak(raw_text) => {
                         let clean_text = sanitize_for_tts(&raw_text);
@@ -238,10 +250,11 @@ fn spawn_tts_worker(event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
                             .is_ok()
                         {
                             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Speaking));
-                            std::thread::sleep(Duration::from_millis(80));
+                            let start_wait = Instant::now();
+                            let mut has_started = false;
 
                             loop {
-                                std::thread::sleep(Duration::from_millis(50));
+                                std::thread::sleep(Duration::from_millis(20));
 
                                 if let Ok(next_cmd) = rx.try_recv() {
                                     match next_cmd {
@@ -251,6 +264,7 @@ fn spawn_tts_worker(event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
                                                 base_flags,
                                                 None,
                                             );
+                                            set_tts_audio_level(0.0);
                                             break;
                                         }
                                         TtsCommand::Speak(next_text) => {
@@ -263,6 +277,8 @@ fn spawn_tts_worker(event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
                                                     base_flags,
                                                     None,
                                                 );
+                                                has_started = false;
+                                                set_tts_audio_level(0.0);
                                                 std::thread::sleep(Duration::from_millis(80));
                                             }
                                         }
@@ -271,18 +287,33 @@ fn spawn_tts_worker(event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
 
                                 let mut status = SPVOICESTATUS::default();
                                 if voice.GetStatus(&mut status, std::ptr::null_mut()).is_ok() {
-                                    if status.dwRunningState != 2 {
+                                    if status.dwRunningState == 2 {
+                                        has_started = true;
+                                        let level = if status.PhonemeId > 0 {
+                                            let p = status.PhonemeId as f32;
+                                            let t = start_wait.elapsed().as_millis() as f32 * 0.025;
+                                            (0.40 + 0.35 * (p * 0.17 + t).sin().abs() + 0.25 * (t * 1.6).cos().abs()).clamp(0.2, 1.0)
+                                        } else {
+                                            0.05
+                                        };
+                                        set_tts_audio_level(level);
+                                    } else if has_started || start_wait.elapsed() > Duration::from_millis(350) {
+                                        set_tts_audio_level(0.0);
                                         let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                                         let _ = event_tx.send(AgentEvent::TtsFinished);
                                         break;
+                                    } else {
+                                        set_tts_audio_level(0.0);
                                     }
                                 } else {
+                                    set_tts_audio_level(0.0);
                                     let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                                     let _ = event_tx.send(AgentEvent::TtsFinished);
                                     break;
                                 }
                             }
                         } else {
+                            set_tts_audio_level(0.0);
                             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                             let _ = event_tx.send(AgentEvent::TtsFinished);
                         }
@@ -334,6 +365,7 @@ impl OverlayApp {
             twitch_messages: Vec::new(),
             live_transcript: String::new(),
             input_text: String::new(),
+            smoothed_audio_level: 0.0,
             is_recording: false,
             continuous_mode: true,
             event_receiver,
@@ -362,12 +394,16 @@ impl OverlayApp {
         let pulse_speed = match self.status {
             AgentStatus::Idle => 1.6,
             AgentStatus::Thinking => 4.2,
-            AgentStatus::Speaking => 2.8,
+            AgentStatus::Speaking => 2.0 + 4.5 * (self.smoothed_audio_level as f64),
             AgentStatus::Listening => 5.5,
             AgentStatus::EmergencyStopped => 0.0,
         };
 
-        let wave = ((time * pulse_speed).sin() as f32).max(0.0);
+        let wave = if self.status == AgentStatus::Speaking {
+            self.smoothed_audio_level
+        } else {
+            ((time * pulse_speed).sin() as f32).max(0.0)
+        };
 
         // Teinte rouge/corail en écoute micro, bleu cyan le reste du temps
         let (ring_base_color, core_color) = if self.status == AgentStatus::Listening {
@@ -379,7 +415,7 @@ impl OverlayApp {
         // Empreinte sonore radiale (audio voiceprint spectrum)
         let num_bars = 16;
         let activity_level = match self.status {
-            AgentStatus::Speaking => 1.0f32,
+            AgentStatus::Speaking => self.smoothed_audio_level,
             AgentStatus::Listening => 0.85f32,
             AgentStatus::Thinking => 0.5f32,
             AgentStatus::Idle => 0.18f32,
@@ -388,23 +424,29 @@ impl OverlayApp {
 
         for i in 0..num_bars {
             let angle = (i as f32 / num_bars as f32) * std::f32::consts::TAU + (time as f32 * 0.7);
-            let harmonic1 = ((time * 7.5 + (i as f64 * 1.4)).sin() as f32).abs();
+            let harmonic1 = ((time * (7.5 + (i % 4) as f64 * 2.0) + (i as f64 * 1.4)).sin() as f32).abs();
             let harmonic2 = ((time * 13.0 + (i as f64 * 2.2)).cos() as f32).abs();
-            let bar_len = (2.0 + (harmonic1 * 5.0 + harmonic2 * 3.5) * activity_level).clamp(1.5, 10.0);
+            let bar_len = (1.5 + (harmonic1 * 5.5 + harmonic2 * 4.0) * activity_level).clamp(1.5, 11.0);
             let dir = egui::vec2(angle.cos(), angle.sin());
             let start = center + dir * (base_radius + 3.0);
             let end = center + dir * (base_radius + 3.0 + bar_len);
-            let alpha = ((50.0 + 180.0 * activity_level * (harmonic1 * 0.6 + 0.4)) as u8).min(235);
+            let alpha = ((40.0 + 195.0 * activity_level * (harmonic1 * 0.6 + 0.4)) as u8).min(235);
             let bar_color = egui::Color32::from_rgba_unmultiplied(ring_base_color[0], ring_base_color[1], ring_base_color[2], alpha);
             painter.line_segment([start, end], egui::Stroke::new(1.3, bar_color));
         }
 
+        let ring_alpha_mult = if self.status == AgentStatus::Speaking {
+            0.2 + 0.8 * self.smoothed_audio_level
+        } else {
+            1.0
+        };
+
         // Cercles concentriques
         let rings = [
-            (base_radius + 26.0 + (wave * 6.0), egui::Color32::from_rgba_unmultiplied(ring_base_color[0], ring_base_color[1], ring_base_color[2], 35), 1.5),
-            (base_radius + 18.0 + (wave * 4.0), egui::Color32::from_rgba_unmultiplied(ring_base_color[0], ring_base_color[1], ring_base_color[2], 60), 1.8),
-            (base_radius + 10.0 + (wave * 2.5), egui::Color32::from_rgba_unmultiplied(ring_base_color[0], ring_base_color[1], ring_base_color[2], 110), 2.0),
-            (base_radius + 2.0, egui::Color32::from_rgba_unmultiplied(ring_base_color[0].saturating_add(30), ring_base_color[1].saturating_add(30), ring_base_color[2], 180), 2.2),
+            (base_radius + 26.0 + (wave * 6.0), egui::Color32::from_rgba_unmultiplied(ring_base_color[0], ring_base_color[1], ring_base_color[2], (35.0 * ring_alpha_mult) as u8), 1.5),
+            (base_radius + 18.0 + (wave * 4.0), egui::Color32::from_rgba_unmultiplied(ring_base_color[0], ring_base_color[1], ring_base_color[2], (60.0 * ring_alpha_mult) as u8), 1.8),
+            (base_radius + 10.0 + (wave * 2.5), egui::Color32::from_rgba_unmultiplied(ring_base_color[0], ring_base_color[1], ring_base_color[2], (110.0 * ring_alpha_mult) as u8), 2.0),
+            (base_radius + 2.0, egui::Color32::from_rgba_unmultiplied(ring_base_color[0].saturating_add(30), ring_base_color[1].saturating_add(30), ring_base_color[2], (180.0 * ring_alpha_mult) as u8), 2.2),
         ];
 
         for (radius, color, stroke_width) in rings {
@@ -414,10 +456,10 @@ impl OverlayApp {
         // Noyau central bleu
         painter.circle_filled(
             center,
-            base_radius * 0.45,
+            base_radius * (0.40 + 0.12 * activity_level),
             core_color,
         );
-        painter.circle_filled(center, base_radius * 0.2, egui::Color32::WHITE);
+        painter.circle_filled(center, base_radius * (0.18 + 0.06 * activity_level), egui::Color32::WHITE);
     }
 
     fn draw_mini_equalizer(&self, ui: &mut egui::Ui, time: f64) {
@@ -429,10 +471,10 @@ impl OverlayApp {
         let spacing = 2.5;
 
         let (base_color, activity_mult) = match self.status {
-            AgentStatus::Speaking => (egui::Color32::from_rgb(0, 215, 255), 1.0f32),
+            AgentStatus::Speaking => (egui::Color32::from_rgb(0, 215, 255), self.smoothed_audio_level),
             AgentStatus::Listening => (egui::Color32::from_rgb(255, 75, 90), 0.9f32),
             AgentStatus::Thinking => (egui::Color32::from_rgb(180, 120, 255), 0.55f32),
-            AgentStatus::Idle => (egui::Color32::from_rgba_unmultiplied(0, 180, 255, 120), 0.2f32),
+            AgentStatus::Idle => (egui::Color32::from_rgba_unmultiplied(0, 180, 255, 120), 0.15f32),
             AgentStatus::EmergencyStopped => (egui::Color32::from_rgb(220, 50, 50), 0.0f32),
         };
 
@@ -440,6 +482,10 @@ impl OverlayApp {
             let x = rect.min.x + (i as f32) * (bar_width + spacing);
             let h = if self.status == AgentStatus::EmergencyStopped {
                 2.0
+            } else if self.status == AgentStatus::Speaking {
+                let freq_mod = ((time * (9.0 + (i as f64) * 3.2) + (i as f64 * 1.5)).sin() as f32).abs();
+                let bar_scale = 0.35 + 0.65 * freq_mod;
+                (2.5 + bar_scale * activity_mult * (rect.height() - 2.5)).clamp(2.5, rect.height())
             } else {
                 let wave1 = ((time * 8.0 + (i as f64 * 1.6)).sin() as f32).abs();
                 let wave2 = ((time * 15.0 + (i as f64 * 2.7)).cos() as f32).abs();
@@ -518,6 +564,18 @@ impl eframe::App for OverlayApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        let raw_tts_level = get_tts_audio_level();
+        if self.status == AgentStatus::Speaking {
+            if raw_tts_level > self.smoothed_audio_level {
+                self.smoothed_audio_level += (raw_tts_level - self.smoothed_audio_level) * 0.6;
+            } else {
+                self.smoothed_audio_level += (raw_tts_level - self.smoothed_audio_level) * 0.2;
+            }
+        } else {
+            self.smoothed_audio_level += (0.0 - self.smoothed_audio_level) * 0.25;
+        }
+
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = egui::Color32::TRANSPARENT;
         visuals.window_fill = egui::Color32::TRANSPARENT;
@@ -653,6 +711,9 @@ impl eframe::App for OverlayApp {
                     }
                 }
                 AgentEvent::ReplaceNarration { text, quick_suggestions } => {
+                    if !sanitize_for_tts(&text).trim().is_empty() {
+                        self.status = AgentStatus::Speaking;
+                    }
                     self.chat_history.push(ChatEntry {
                         role: ChatRole::Agent,
                         text: text.clone(),
@@ -1638,6 +1699,7 @@ Format json obligatoire :
     }
 
     const MAX_AGENT_PASSES: usize = 5;
+    let mut has_spoken = false;
 
     for pass in 1..=MAX_AGENT_PASSES {
         if is_request_cancelled(request_id) {
@@ -1874,6 +1936,9 @@ Format json obligatoire :
                 payload.quick_suggestions = generate_fallback_suggestions_from_screen(&screen);
             }
             if !payload.narration.trim().is_empty() || !payload.quick_suggestions.is_empty() {
+                if !sanitize_for_tts(&payload.narration).trim().is_empty() {
+                    has_spoken = true;
+                }
                 let _ = event_tx.send(AgentEvent::ReplaceNarration {
                     text: payload.narration.clone(),
                     quick_suggestions: payload.quick_suggestions.clone(),
@@ -1887,6 +1952,9 @@ Format json obligatoire :
         }
 
         if !payload.narration.trim().is_empty() || !payload.quick_suggestions.is_empty() {
+            if !sanitize_for_tts(&payload.narration).trim().is_empty() {
+                has_spoken = true;
+            }
             let _ = event_tx.send(AgentEvent::ReplaceNarration {
                 text: payload.narration.clone(),
                 quick_suggestions: payload.quick_suggestions.clone(),
@@ -1969,6 +2037,7 @@ Format json obligatoire :
                 LAST_SCREEN_SUMMARY.lock().ok().and_then(|s| s.clone()).unwrap_or_default()
             };
             let auto_suggestions = generate_fallback_suggestions_from_screen(&screen_for_sug);
+            has_spoken = true;
             let _ = event_tx.send(AgentEvent::ReplaceNarration {
                 text: "Actions terminées. Voici les suites possibles identifiées à l'écran :".to_string(),
                 quick_suggestions: auto_suggestions,
@@ -1976,7 +2045,7 @@ Format json obligatoire :
         }
     }
 
-    if !is_request_cancelled(request_id) {
+    if !is_request_cancelled(request_id) && !has_spoken {
         let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
     }
 }
