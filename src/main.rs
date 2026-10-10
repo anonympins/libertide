@@ -17,7 +17,8 @@ use serde::Deserialize;
 use types::*;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender as StdSender};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
@@ -41,10 +42,10 @@ pub struct OverlayApp {
 
     // Canaux de communication asynchrones
     event_receiver: Receiver<AgentEvent>,
-    command_sender: Sender<AgentCommand>,
-    tts_sender: Sender<TtsCommand>,
-    audio_sender: Sender<AudioCommand>,
-    twitch_channel_sender: Sender<String>,
+    command_sender: UnboundedSender<AgentCommand>,
+    tts_sender: StdSender<TtsCommand>,
+    audio_sender: StdSender<AudioCommand>,
+    twitch_channel_sender: StdSender<String>,
     current_twitch_channel: String,
     twitch_search_query: String,
     twitch_search_results: Vec<TwitchChannelItem>,
@@ -134,7 +135,7 @@ pub(crate) fn current_time_str() -> String {
 }
 
 #[cfg(windows)]
-fn spawn_tts_worker(event_tx: Sender<AgentEvent>) -> Sender<TtsCommand> {
+fn spawn_tts_worker(event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
     let (tx, rx) = channel::<TtsCommand>();
 
     std::thread::spawn(move || {
@@ -230,7 +231,7 @@ fn spawn_tts_worker(event_tx: Sender<AgentEvent>) -> Sender<TtsCommand> {
 }
 
 #[cfg(not(windows))]
-fn spawn_tts_worker(_event_tx: Sender<AgentEvent>) -> Sender<TtsCommand> {
+fn spawn_tts_worker(_event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
     let (tx, rx) = channel::<TtsCommand>();
     std::thread::spawn(move || {
         while let Ok(cmd) = rx.recv() {
@@ -246,10 +247,10 @@ impl OverlayApp {
     pub fn new(
         _cc: &eframe::CreationContext<'_>,
         event_receiver: Receiver<AgentEvent>,
-        command_sender: Sender<AgentCommand>,
-        tts_sender: Sender<TtsCommand>,
-        audio_sender: Sender<AudioCommand>,
-        twitch_channel_sender: Sender<String>,
+        command_sender: UnboundedSender<AgentCommand>,
+        tts_sender: StdSender<TtsCommand>,
+        audio_sender: StdSender<AudioCommand>,
+        twitch_channel_sender: StdSender<String>,
         initial_twitch_channel: String,
     ) -> Self {
         let initial_subtitle = "En attente d'instructions d'exploration...".to_string();
@@ -330,6 +331,7 @@ impl OverlayApp {
     fn trigger_emergency_stop(&mut self, _ctx: &egui::Context) {
         self.continuous_mode = false;
         IS_EMERGENCY_STOPPED.store(true, Ordering::SeqCst);
+        let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
         if self.is_recording {
             self.stop_recording();
         }
@@ -519,6 +521,7 @@ impl eframe::App for OverlayApp {
                 AgentEvent::VoicePromptReady(prompt) => {
                     self.is_recording = false;
                     self.live_transcript.clear();
+                    let _ = self.tts_sender.send(TtsCommand::Stop);
                     if self.is_hidden {
                         if is_show_command(&prompt) {
                             self.is_hidden = false;
@@ -576,7 +579,7 @@ impl eframe::App for OverlayApp {
                             });
                             let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                             self.continuous_mode = true;
-                        } else if self.status != AgentStatus::Thinking && !prompt.trim().is_empty() {
+                        } else if !prompt.trim().is_empty() {
                             self.status = AgentStatus::Thinking;
                             self.continuous_mode = true;
                             self.input_text.clear();
@@ -796,6 +799,7 @@ impl eframe::App for OverlayApp {
                                         if self.is_recording {
                                             self.stop_recording();
                                         }
+                                        let _ = self.tts_sender.send(TtsCommand::Stop);
                                         self.status = AgentStatus::Thinking;
                                         self.continuous_mode = true;
                                         self.live_transcript.clear();
@@ -1000,6 +1004,7 @@ impl eframe::App for OverlayApp {
                                             if self.is_recording {
                                                 self.stop_recording();
                                             }
+                                            let _ = self.tts_sender.send(TtsCommand::Stop);
                                             self.continuous_mode = true;
                                             let prompt = std::mem::take(&mut self.input_text).trim().to_string();
                                             self.live_transcript.clear();
@@ -1023,6 +1028,7 @@ impl eframe::App for OverlayApp {
                                                 });
                                                 let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                                             } else {
+                                                self.status = AgentStatus::Thinking;
                                                 let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
                                             }
                                         }
@@ -1225,7 +1231,6 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
 }
 
 static AGENT_BUSY: AtomicBool = AtomicBool::new(false);
-static IS_EMERGENCY_STOPPED: AtomicBool = AtomicBool::new(false);
 
 struct BusyGuard;
 impl Drop for BusyGuard {
@@ -1338,11 +1343,16 @@ enum PromptTrigger {
 async fn call_deepseek_prompt(
     api_key: String,
     user_prompt: String,
-    history: &mut Vec<ChatMessage>,
-    event_tx: Sender<AgentEvent>,
-    last_call_time: &mut Option<Instant>,
+    history: Arc<tokio::sync::Mutex<Vec<ChatMessage>>>,
+    event_tx: StdSender<AgentEvent>,
+    last_call_time: Arc<tokio::sync::Mutex<Option<Instant>>>,
     trigger: PromptTrigger,
+    request_id: u64,
 ) {
+    if is_request_cancelled(request_id) {
+        return;
+    }
+
     AGENT_BUSY.store(true, Ordering::SeqCst);
     let _busy_guard = BusyGuard;
     let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
@@ -1417,34 +1427,53 @@ Format json obligatoire :
 }"#;
 
     let safe_user_prompt = truncate_with_notice(&user_prompt, 4000);
-    history.push(ChatMessage {
-        role: "user".to_string(),
-        content: safe_user_prompt.clone(),
-    });
+    {
+        let mut hist_guard = history.lock().await;
+        hist_guard.push(ChatMessage {
+            role: "user".to_string(),
+            content: safe_user_prompt.clone(),
+        });
+    }
 
     const MAX_AGENT_PASSES: usize = 5;
 
     for pass in 1..=MAX_AGENT_PASSES {
+        if is_request_cancelled(request_id) {
+            return;
+        }
         let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
 
         // Compaction progressive de la mémoire si l'historique dépasse le seuil
-        compact_history_if_needed(&api_key, history, &client, last_call_time).await;
+        {
+            let mut hist_guard = history.lock().await;
+            let mut time_guard = last_call_time.lock().await;
+            compact_history_if_needed(&api_key, &mut hist_guard, &client, &mut time_guard).await;
+        }
+
+        if is_request_cancelled(request_id) {
+            return;
+        }
 
         // Debounce : pause minimale entre deux requêtes API
         let min_debounce = if pass == 1 { Duration::from_millis(3000) } else { Duration::from_millis(2000) };
-        if let Some(prev) = *last_call_time {
+        let prev_call = { *last_call_time.lock().await };
+        if let Some(prev) = prev_call {
             let elapsed = prev.elapsed();
             if elapsed < min_debounce {
                 tokio::time::sleep(min_debounce - elapsed).await;
             }
         }
 
-        let mut messages = Vec::with_capacity(history.len() + 1);
+        if is_request_cancelled(request_id) {
+            return;
+        }
+
+        let mut messages = Vec::new();
         messages.push(ChatMessage {
             role: "system".to_string(),
             content: system_instructions.to_string(),
         });
-        messages.extend(history.iter().cloned());
+        messages.extend(history.lock().await.iter().cloned());
 
         let request = DeepSeekChatRequest {
             model: "deepseek-chat".to_string(),
@@ -1461,6 +1490,9 @@ Format json obligatoire :
         let mut success_payload: Option<AgentResponsePayload> = None;
 
         loop {
+            if is_request_cancelled(request_id) {
+                return;
+            }
             attempts += 1;
 
             let response = client
@@ -1472,7 +1504,10 @@ Format json obligatoire :
 
             match response {
                 Ok(res) if res.status().is_success() => {
-                    *last_call_time = Some(Instant::now());
+                    {
+                        let mut time_guard = last_call_time.lock().await;
+                        *time_guard = Some(Instant::now());
+                    }
                     if let Ok(body) = res.json::<DeepSeekChatResponse>().await {
                         if let Some(choice) = body.choices.first() {
                             let raw_content = &choice.message.content;
@@ -1480,7 +1515,7 @@ Format json obligatoire :
                             println!("{}", raw_content.trim());
                             println!("============================================================");
 
-                            history.push(ChatMessage {
+                            history.lock().await.push(ChatMessage {
                                 role: "assistant".to_string(),
                                 content: raw_content.clone(),
                             });
@@ -1490,11 +1525,13 @@ Format json obligatoire :
                             break;
                         }
                     }
-                    history.pop();
-                    let _ = event_tx.send(AgentEvent::ReplaceNarration {
-                        text: "Format de réponse inattendu.".into(),
-                        quick_suggestions: Vec::new(),
-                    });
+                    history.lock().await.pop();
+                    if !is_request_cancelled(request_id) {
+                        let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                            text: "Format de réponse inattendu.".into(),
+                            quick_suggestions: Vec::new(),
+                        });
+                    }
                     break;
                 }
                 Ok(res) if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempts <= MAX_RETRIES => {
@@ -1510,13 +1547,15 @@ Format json obligatoire :
                     if wait_secs > 12 {
                         let err_body = res.text().await.unwrap_or_default();
                         println!("[DeepSeek 429] Détails renvoyés par l'API : {}", err_body);
-                        history.pop();
+                        history.lock().await.pop();
                         let mins = (wait_secs + 59) / 60;
-                        let _ = event_tx.send(AgentEvent::ReplaceNarration {
-                            text: format!("Plafond instantané DeepSeek atteint (pause requise par l'API : {mins} min). Historique réinitialisé."),
-                            quick_suggestions: Vec::new(),
-                        });
-                        history.clear();
+                        if !is_request_cancelled(request_id) {
+                            let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                                text: format!("Plafond instantané DeepSeek atteint (pause requise par l'API : {mins} min). Historique réinitialisé."),
+                                quick_suggestions: Vec::new(),
+                            });
+                        }
+                        history.lock().await.clear();
                         break;
                     }
 
@@ -1524,17 +1563,25 @@ Format json obligatoire :
                         "Limite de requêtes atteinte. Pause de {safe_wait_secs} s avant réessai..."
                     )));
                     tokio::time::sleep(Duration::from_secs(safe_wait_secs)).await;
-                    *last_call_time = Some(Instant::now());
+                    {
+                        let mut time_guard = last_call_time.lock().await;
+                        *time_guard = Some(Instant::now());
+                    }
                     continue;
                 }
                 Ok(res) => {
-                    *last_call_time = Some(Instant::now());
-                    history.pop();
+                    {
+                        let mut time_guard = last_call_time.lock().await;
+                        *time_guard = Some(Instant::now());
+                    }
+                    history.lock().await.pop();
                     let status = res.status();
-                    let _ = event_tx.send(AgentEvent::ReplaceNarration {
-                        text: format!("Erreur api deepseek : {status}"),
-                        quick_suggestions: Vec::new(),
-                    });
+                    if !is_request_cancelled(request_id) {
+                        let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                            text: format!("Erreur api deepseek : {status}"),
+                            quick_suggestions: Vec::new(),
+                        });
+                    }
                     break;
                 }
                 Err(_err) if attempts <= MAX_RETRIES => {
@@ -1542,16 +1589,24 @@ Format json obligatoire :
                         "Connexion interrompue, nouvelle tentative dans 3 secondes...".into(),
                     ));
                     tokio::time::sleep(DEFAULT_RETRY_DELAY).await;
-                    *last_call_time = Some(Instant::now());
+                    {
+                        let mut time_guard = last_call_time.lock().await;
+                        *time_guard = Some(Instant::now());
+                    }
                     continue;
                 }
                 Err(err) => {
-                    *last_call_time = Some(Instant::now());
-                    history.pop();
-                    let _ = event_tx.send(AgentEvent::ReplaceNarration {
-                        text: format!("Erreur réseau : {err}"),
-                        quick_suggestions: Vec::new(),
-                    });
+                    {
+                        let mut time_guard = last_call_time.lock().await;
+                        *time_guard = Some(Instant::now());
+                    }
+                    history.lock().await.pop();
+                    if !is_request_cancelled(request_id) {
+                        let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                            text: format!("Erreur réseau : {err}"),
+                            quick_suggestions: Vec::new(),
+                        });
+                    }
                     break;
                 }
             }
@@ -1561,9 +1616,13 @@ Format json obligatoire :
             break;
         };
 
+        if is_request_cancelled(request_id) {
+            return;
+        }
+
         if payload.invalid_request || payload.narration.trim().eq_ignore_ascii_case("invalid_request") {
             println!("[Agent] Requête incomplète ou incomprise : mode silencieux activé (aucun affichage ni TTS).");
-            history.pop();
+            history.lock().await.pop();
             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
             let _ = event_tx.send(AgentEvent::RequestIgnored);
             return;
@@ -1574,8 +1633,9 @@ Format json obligatoire :
             let no_actions_or_suggestions = payload.actions.is_empty() && payload.quick_suggestions.is_empty();
             if (!screen_changed && no_actions_or_suggestions) || (payload.narration.trim().is_empty() && no_actions_or_suggestions) {
                 println!("[Immersion] Écran inchangé ou silence demandé sans action/suggestion : préservation du silence.");
-                history.pop();
-                history.pop();
+                let mut hist_guard = history.lock().await;
+                hist_guard.pop();
+                hist_guard.pop();
                 let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                 return;
             }
@@ -1585,8 +1645,9 @@ Format json obligatoire :
             && payload.actions.is_empty() && payload.quick_suggestions.is_empty() && payload.narration.trim().is_empty()
         {
             println!("[Surveillance] L'IA a analysé l'écran : aucune action nécessaire.");
-            history.pop();
-            history.pop();
+            let mut hist_guard = history.lock().await;
+            hist_guard.pop();
+            hist_guard.pop();
             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
             return;
         }
@@ -1619,6 +1680,10 @@ Format json obligatoire :
             break;
         }
 
+        if is_request_cancelled(request_id) {
+            return;
+        }
+
         if !payload.narration.trim().is_empty() || !payload.quick_suggestions.is_empty() {
             let _ = event_tx.send(AgentEvent::ReplaceNarration {
                 text: payload.narration.clone(),
@@ -1628,9 +1693,18 @@ Format json obligatoire :
 
         let actions_to_run = payload.actions;
         let (report, screen_after) = tokio::task::spawn_blocking(move || {
+            if is_request_cancelled(request_id) {
+                return ("Actions interrompues.".to_string(), String::new());
+            }
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let rep = execute_system_actions(&actions_to_run);
+                let rep = execute_system_actions(&actions_to_run, request_id);
+                if is_request_cancelled(request_id) {
+                    return (rep, String::new());
+                }
                 std::thread::sleep(Duration::from_millis(1200));
+                if is_request_cancelled(request_id) {
+                    return (rep, String::new());
+                }
                 #[cfg(windows)]
                 let sc = summarize_screen_state(None, false);
                 #[cfg(not(windows))]
@@ -1645,6 +1719,10 @@ Format json obligatoire :
                 }
             }
         }).await.unwrap_or_else(|_| ("Erreur d'exécution du worker.".to_string(), String::new()));
+
+        if is_request_cancelled(request_id) {
+            return;
+        }
 
         if !screen_after.trim().is_empty() {
             if let Ok(mut lock) = LAST_SCREEN_SUMMARY.lock() {
@@ -1672,12 +1750,15 @@ Format json obligatoire :
                 safe_user_prompt
             ));
 
-            history.push(ChatMessage {
+            history.lock().await.push(ChatMessage {
                 role: "user".to_string(),
                 content: step_feedback,
             });
             // Marquer la fin de l'exécution pour que le debounce de la passe suivante s'applique bien
-            *last_call_time = Some(Instant::now());
+            {
+                let mut time_guard = last_call_time.lock().await;
+                *time_guard = Some(Instant::now());
+            }
         } else {
             println!("[Agent] Nombre maximal de passes ({MAX_AGENT_PASSES}) atteint.");
             let screen_for_sug = if !screen_after.trim().is_empty() {
@@ -1693,12 +1774,14 @@ Format json obligatoire :
         }
     }
 
-    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+    if !is_request_cancelled(request_id) {
+        let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+    }
 }
 
 fn main() -> eframe::Result<()> {
     let (event_tx, event_rx) = channel::<AgentEvent>();
-    let (cmd_tx, cmd_rx) = channel::<AgentCommand>();
+    let (cmd_tx, mut cmd_rx) = unbounded_channel::<AgentCommand>();
     let tts_tx = spawn_tts_worker(event_tx.clone());
     let (twitch_ch_tx, twitch_ch_rx) = channel::<String>();
     spawn_twitch_worker(event_tx.clone(), twitch_ch_rx);
@@ -1718,99 +1801,152 @@ fn main() -> eframe::Result<()> {
 
     // Runtime Tokio en arrière-plan pour requêter DeepSeek
     let deepseek_chat_key = deepseek_key.clone();
+    let bg_tts_tx = tts_tx.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("Échec d'initialisation du runtime Tokio");
         rt.block_on(async move {
-            let mut history: Vec<ChatMessage> = Vec::new();
-            let mut last_call_time: Option<Instant> = None;
+            let history = Arc::new(tokio::sync::Mutex::new(Vec::<ChatMessage>::new()));
+            let last_call_time = Arc::new(tokio::sync::Mutex::new(None));
+            let mut current_task: Option<tokio::task::JoinHandle<()>> = None;
 
-            while let Ok(cmd) = cmd_rx.recv() {
+            while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     AgentCommand::Prompt(prompt) => {
-                        IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
-                        if let Some(cli_feedback) = try_execute_direct_cli(&prompt) {
-                            let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
-                            let _ = event_tx.send(AgentEvent::ReplaceNarration {
-                                text: cli_feedback.clone(),
-                                quick_suggestions: Vec::new(),
-                            });
-                        } else if let Some(text_to_write) = parse_write_command(&prompt) {
-                            let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
-                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
-                            let narration = tokio::task::spawn_blocking(move || {
-                                write_to_browser_or_txt(&text_to_write)
-                            }).await.unwrap_or_else(|_| "Erreur lors de l'écriture.".to_string());
-                            let _ = event_tx.send(AgentEvent::ReplaceNarration {
-                                text: narration,
-                                quick_suggestions: Vec::new(),
-                            });
-                        } else {
-                            let (field_content, screen_state) = tokio::task::spawn_blocking(|| {
-                                #[cfg(windows)]
-                                {
-                                    (get_active_field_content(), summarize_screen_state(None, false))
-                                }
-                                #[cfg(not(windows))]
-                                {
-                                    (None, String::new())
-                                }
-                            }).await.unwrap_or((None, String::new()));
-
-                            let mut prompt_sections = Vec::new();
-
-                            if !screen_state.trim().is_empty() {
-                                if let Ok(mut lock) = LAST_SCREEN_SUMMARY.lock() {
-                                    *lock = Some(screen_state.clone());
-                                }
-                                let safe_screen = truncate_with_notice(screen_state.trim(), 3800);
-                                let kb = safe_screen.len() as f32 / 1024.0;
-                                let _ = event_tx.send(AgentEvent::ScreenPayloadSize(kb));
-                                prompt_sections.push(format!("[État actuel de l'écran]\n{safe_screen}"));
-                            } else {
-                                let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
-                            }
-
-                            if let Some(content) = field_content {
-                                if !content.trim().is_empty() {
-                                    let safe_content = truncate_with_notice(content.trim(), 1200);
-                                    prompt_sections.push(format!("[Contenu actuel du champ de saisie]\n\"\"\"\n{safe_content}\n\"\"\""));
-                                }
-                            }
-
-                            prompt_sections.push(format!("[Demande utilisateur]\n{prompt}"));
-                            let final_prompt = prompt_sections.join("\n\n");
-
-                            call_deepseek_prompt(deepseek_chat_key.clone(), final_prompt, &mut history, event_tx.clone(), &mut last_call_time, PromptTrigger::User).await;
+                        let request_id = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst) + 1;
+                        if let Some(handle) = current_task.take() {
+                            handle.abort();
                         }
+                        let _ = bg_tts_tx.send(TtsCommand::Stop);
+                        IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
+
+                        let history = history.clone();
+                        let last_call_time = last_call_time.clone();
+                        let event_tx = event_tx.clone();
+                        let deepseek_chat_key = deepseek_chat_key.clone();
+
+                        current_task = Some(tokio::spawn(async move {
+                            if is_request_cancelled(request_id) {
+                                return;
+                            }
+                            if let Some(cli_feedback) = try_execute_direct_cli(&prompt) {
+                                if is_request_cancelled(request_id) { return; }
+                                let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
+                                let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                                    text: cli_feedback.clone(),
+                                    quick_suggestions: Vec::new(),
+                                });
+                                let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                            } else if let Some(text_to_write) = parse_write_command(&prompt) {
+                                if is_request_cancelled(request_id) { return; }
+                                let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
+                                let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
+                                let narration = tokio::task::spawn_blocking(move || {
+                                    write_to_browser_or_txt(&text_to_write)
+                                }).await.unwrap_or_else(|_| "Erreur lors de l'écriture.".to_string());
+                                if is_request_cancelled(request_id) { return; }
+                                let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                                    text: narration,
+                                    quick_suggestions: Vec::new(),
+                                });
+                                let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                            } else {
+                                let (field_content, screen_state) = tokio::task::spawn_blocking(|| {
+                                    #[cfg(windows)]
+                                    {
+                                        (get_active_field_content(), summarize_screen_state(None, false))
+                                    }
+                                    #[cfg(not(windows))]
+                                    {
+                                        (None, String::new())
+                                    }
+                                }).await.unwrap_or((None, String::new()));
+
+                                if is_request_cancelled(request_id) { return; }
+
+                                let mut prompt_sections = Vec::new();
+
+                                if !screen_state.trim().is_empty() {
+                                    if let Ok(mut lock) = LAST_SCREEN_SUMMARY.lock() {
+                                        *lock = Some(screen_state.clone());
+                                    }
+                                    let safe_screen = truncate_with_notice(screen_state.trim(), 3800);
+                                    let kb = safe_screen.len() as f32 / 1024.0;
+                                    let _ = event_tx.send(AgentEvent::ScreenPayloadSize(kb));
+                                    prompt_sections.push(format!("[État actuel de l'écran]\n{safe_screen}"));
+                                } else {
+                                    let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
+                                }
+
+                                if let Some(content) = field_content {
+                                    if !content.trim().is_empty() {
+                                        let safe_content = truncate_with_notice(content.trim(), 1200);
+                                        prompt_sections.push(format!("[Contenu actuel du champ de saisie]\n\"\"\"\n{safe_content}\n\"\"\""));
+                                    }
+                                }
+
+                                prompt_sections.push(format!("[Demande utilisateur]\n{prompt}"));
+                                let final_prompt = prompt_sections.join("\n\n");
+
+                                call_deepseek_prompt(
+                                    deepseek_chat_key,
+                                    final_prompt,
+                                    history,
+                                    event_tx,
+                                    last_call_time,
+                                    PromptTrigger::User,
+                                    request_id,
+                                ).await;
+                            }
+                        }));
                     }
                     AgentCommand::ClearHistory => {
+                        let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
+                        if let Some(handle) = current_task.take() {
+                            handle.abort();
+                        }
+                        let _ = bg_tts_tx.send(TtsCommand::Stop);
                         IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
                         if let Ok(mut hist) = IMMERSION_SCREEN_HISTORY.lock() {
                             hist.clear();
                         }
-                        history.clear();
+                        history.lock().await.clear();
                         if let Ok(mut lock) = LAST_SCREEN_SUMMARY.lock() {
                             *lock = None;
                         }
                     }
                     AgentCommand::SearchTwitch(query) => {
-                        let results = search_twitch_channels(&query).await;
-                        let _ = event_tx.send(AgentEvent::TwitchSearchResults(results));
+                        let event_tx = event_tx.clone();
+                        tokio::spawn(async move {
+                            let results = search_twitch_channels(&query).await;
+                            let _ = event_tx.send(AgentEvent::TwitchSearchResults(results));
+                        });
                     }
                     AgentCommand::PeriodicScreenCheck => {
                         if IS_EMERGENCY_STOPPED.load(Ordering::SeqCst) {
                             continue;
                         }
-                        if AGENT_BUSY.load(Ordering::SeqCst) {
+                        if AGENT_BUSY.load(Ordering::SeqCst)
+                            || current_task.as_ref().map_or(false, |h| !h.is_finished())
+                        {
                             println!("[Surveillance] Agent occupé, analyse d'écran différée.");
                             continue;
                         }
 
+                        let request_id = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst) + 1;
+                        let history = history.clone();
+                        let last_call_time = last_call_time.clone();
+                        let event_tx = event_tx.clone();
+                        let deepseek_chat_key = deepseek_chat_key.clone();
+
+                        current_task = Some(tokio::spawn(async move {
                         #[cfg(windows)]
                         {
+                            if is_request_cancelled(request_id) { return; }
                             let current_summary = tokio::task::spawn_blocking(|| {
                                 summarize_screen_state(None, false)
                             }).await.unwrap_or_default();
+
+                            if is_request_cancelled(request_id) { return; }
 
                             let is_immersion = IS_IMMERSION_ACTIVE.load(Ordering::SeqCst);
                             if is_immersion {
@@ -1832,7 +1968,7 @@ fn main() -> eframe::Result<()> {
 
                                 if !screen_changed {
                                     println!("[Immersion] Aucun changement à l'écran, silence préservé.");
-                                    continue;
+                                    return;
                                 }
 
                                 let immersion_prompt = if screen_diff.is_empty() {
@@ -1855,8 +1991,8 @@ fn main() -> eframe::Result<()> {
                                 };
 
                                 println!("[Immersion] Changement détecté (diff: {} octets), transmission du diff au LLM...", screen_diff.len());
-                                call_deepseek_prompt(deepseek_chat_key.clone(), immersion_prompt, &mut history, event_tx.clone(), &mut last_call_time, PromptTrigger::Immersion { screen_changed: true }).await;
-                                continue;
+                                call_deepseek_prompt(deepseek_chat_key, immersion_prompt, history, event_tx, last_call_time, PromptTrigger::Immersion { screen_changed: true }, request_id).await;
+                                return;
                             }
 
                             let prev_summary = {
@@ -1869,7 +2005,7 @@ fn main() -> eframe::Result<()> {
                             if let Some(prev) = prev_summary {
                                 if prev.trim() == current_summary.trim() {
                                     println!("[Surveillance] Aucun changement à l'écran.");
-                                    continue;
+                                    return;
                                 }
 
                                 println!("[Surveillance] Changement détecté, transmission du différentiel au LLM...");
@@ -1885,11 +2021,12 @@ fn main() -> eframe::Result<()> {
                                     truncate_with_notice(&current_summary, 1500)
                                 );
 
-                                call_deepseek_prompt(deepseek_chat_key.clone(), diff_prompt, &mut history, event_tx.clone(), &mut last_call_time, PromptTrigger::Surveillance).await;
+                                call_deepseek_prompt(deepseek_chat_key, diff_prompt, history, event_tx, last_call_time, PromptTrigger::Surveillance, request_id).await;
                             } else {
                                 println!("[Surveillance] Premier instantané d'écran enregistré.");
                             }
                         }
+                        }));
                     }
                 }
             }

@@ -2,3 +2,4 @@
 .env
 /.idea
 models/ggml-base.bin
+/.idea

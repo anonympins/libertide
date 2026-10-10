@@ -1,5 +1,5 @@
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::fs_util::{create_temp_note_file, find_executable_in_path};
@@ -40,6 +40,13 @@ const CREATE_NEW_CONSOLE: u32 = 0x00000010;
 
 #[cfg(windows)]
 static LAST_TXT_HWND: Mutex<Option<isize>> = Mutex::new(None);
+
+pub static CURRENT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
+pub static IS_EMERGENCY_STOPPED: AtomicBool = AtomicBool::new(false);
+
+pub fn is_request_cancelled(request_id: u64) -> bool {
+    CURRENT_REQUEST_ID.load(Ordering::SeqCst) != request_id || IS_EMERGENCY_STOPPED.load(Ordering::SeqCst)
+}
 
 pub static LAST_SCREEN_SUMMARY: Mutex<Option<String>> = Mutex::new(None);
 pub static IS_IMMERSION_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -333,6 +340,7 @@ struct UiaElementInfo {
     is_button: bool,
     is_link: bool,
     is_focusable: bool,
+    is_tabindex: bool,
     is_web_content: bool,
     is_browser_chrome: bool,
     click_x: i32,
@@ -340,6 +348,77 @@ struct UiaElementInfo {
     rect: RECT,
     pattern: Option<IUIAutomationInvokePattern>,
     area: i64,
+}
+
+#[cfg(windows)]
+fn extract_inner_text(uia: &IUIAutomation, element: &IUIAutomationElement, max_chars: usize) -> Option<String> {
+    unsafe {
+        // 1. TextPattern DocumentRange
+        if let Ok(pattern_unk) = element.GetCurrentPattern(UIA_TextPatternId) {
+            if let Ok(text_pattern) = pattern_unk.cast::<IUIAutomationTextPattern>() {
+                if let Ok(range) = text_pattern.DocumentRange() {
+                    if let Ok(bstr) = range.GetText(max_chars as i32) {
+                        let s = bstr.to_string();
+                        let trimmed = s.trim();
+                        if !trimmed.is_empty() {
+                            return Some(trimmed.chars().take(max_chars).collect());
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Direct Name
+        if let Ok(name_bstr) = element.CurrentName() {
+            let s = name_bstr.to_string();
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.chars().take(max_chars).collect());
+            }
+        }
+
+        // 3. ValuePattern
+        if let Ok(pattern_unk) = element.GetCurrentPattern(UIA_ValuePatternId) {
+            if let Ok(val_pattern) = pattern_unk.cast::<IUIAutomationValuePattern>() {
+                if let Ok(bstr) = val_pattern.CurrentValue() {
+                    let s = bstr.to_string();
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.chars().take(max_chars).collect());
+                    }
+                }
+            }
+        }
+
+        // 4. Parcourir les descendants pour extraire le texte innerText des sous-nœuds (spans, labels, etc.)
+        if let Ok(cond) = uia.CreateTrueCondition() {
+            if let Ok(children) = element.FindAll(TreeScope_Descendants, &cond) {
+                let child_count = children.Length().unwrap_or(0).min(8);
+                let mut collected = String::new();
+                for ci in 0..child_count {
+                    if let Ok(child) = children.GetElement(ci) {
+                        if let Ok(cname) = child.CurrentName() {
+                            let cstr = cname.to_string();
+                            let ctrim = cstr.trim();
+                            if !ctrim.is_empty() && !collected.contains(ctrim) {
+                                if !collected.is_empty() {
+                                    collected.push(' ');
+                                }
+                                collected.push_str(ctrim);
+                                if collected.chars().count() >= max_chars {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if !collected.is_empty() {
+                    return Some(collected.chars().take(max_chars).collect());
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(windows)]
@@ -506,17 +585,35 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         None => (false, false),
                     };
 
+                    let has_tabindex = (aria_properties.contains("tabindex")
+                        && !aria_properties.contains("tabindex=-1")
+                        && !aria_properties.contains("tabindex=\"-1\"")
+                        && !aria_properties.contains("tabindex='-1'"))
+                        || (is_web_content && is_focusable && !is_edit_or_textarea && !is_link && !is_button);
+                    let is_tabindex = has_tabindex;
+
                     if is_browser_chrome && !name.is_empty() && !name.starts_with("[Navigateur]") {
                         name = format!("[Navigateur] {name}");
                     }
 
-                    if name.is_empty() && (is_link || is_button) {
-                        if let Some(txt) = extract_element_text(&item) {
-                            name = txt.trim().to_string();
+                    const MAX_INTERACTIVE_TEXT_LEN: usize = 90;
+                    if (name.is_empty() || is_tabindex) && (is_link || is_button || is_tabindex || is_focusable) {
+                        if let Some(txt) = extract_inner_text(&uia, &item, MAX_INTERACTIVE_TEXT_LEN) {
+                            if name.is_empty() {
+                                name = txt;
+                            } else if is_tabindex && name != txt && !name.contains(&txt) {
+                                let combined = format!("{name} {txt}");
+                                name = combined.chars().take(MAX_INTERACTIVE_TEXT_LEN).collect();
+                            }
                         }
                     }
 
-                    if name.is_empty() && automation_id.is_empty() && help_text.is_empty() && value_text.is_empty() && !is_edit_or_textarea && !is_button && !is_link && !is_focusable {
+                    if name.chars().count() > MAX_INTERACTIVE_TEXT_LEN {
+                        name = name.chars().take(MAX_INTERACTIVE_TEXT_LEN).collect();
+                    }
+
+                    if name.is_empty() && automation_id.is_empty() && help_text.is_empty() && value_text.is_empty()
+                        && !is_edit_or_textarea && !is_button && !is_link && !is_focusable && !is_tabindex {
                         continue;
                     }
 
@@ -541,6 +638,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         is_button,
                         is_link,
                         is_focusable,
+                        is_tabindex,
                         is_web_content,
                         is_browser_chrome,
                         click_x,
@@ -1294,6 +1392,8 @@ fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option
                 let mut final_score = score;
                 if elem.is_link {
                     final_score += 40.0;
+                } else if elem.is_tabindex {
+                    final_score += 35.0;
                 } else if elem.pattern.is_some() {
                     final_score += 20.0;
                 }
@@ -1339,7 +1439,7 @@ fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) ->
 
             score_element(elem, target).map(|score| {
                 let mut final_score = score;
-                if elem.is_button {
+                if elem.is_button || elem.is_tabindex {
                     final_score += 100.0;
                 } else if elem.pattern.is_some() {
                     final_score += 40.0;
@@ -1647,6 +1747,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
         let is_primary = win_idx == 0;
         let mut elements = initial_elements;
         let mut chunks_count = 1usize;
+        let current_rid = CURRENT_REQUEST_ID.load(Ordering::SeqCst);
 
         if is_primary && autoscroll && (has_scrollbar || is_browser) {
             force_foreground_window(*hwnd);
@@ -1673,6 +1774,9 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
             const VK_HOME: VIRTUAL_KEY = VIRTUAL_KEY(0x24);
 
             for _chunk in 2..=10 {
+                if is_request_cancelled(current_rid) {
+                    break;
+                }
                 unsafe { mouse_event(MOUSEEVENTF_WHEEL, 0, 0, -480, 0); }
                 std::thread::sleep(Duration::from_millis(30));
                 send_hotkey(&[], VK_NEXT);
@@ -1828,6 +1932,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
                     && !e.is_edit_or_textarea
                     && (!e.name.is_empty() || !e.help_text.is_empty() || !e.automation_id.is_empty())
                     && (e.is_button
+                        || e.is_tabindex
                         || e.pattern.is_some()
                         || e.localized_type.contains("bouton")
                         || e.localized_type.contains("button")
@@ -1870,10 +1975,14 @@ pub fn summarize_screen_state(_target_window: Option<&str>, _autoscroll: bool) -
 }
 
 #[cfg(windows)]
-pub fn execute_system_actions(actions: &[AgentAction]) -> String {
+pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> String {
     if actions.is_empty() {
         println!("[Actions] Aucune action système à exécuter.");
         return "Aucune action système à exécuter.".to_string();
+    }
+    if is_request_cancelled(request_id) {
+        println!("[Actions] Exécution annulée avant le début des actions (nouvelle consigne reçue).");
+        return "Actions interrompues par une nouvelle consigne.".to_string();
     }
 
     let mut feedback = Vec::new();
@@ -1882,6 +1991,9 @@ pub fn execute_system_actions(actions: &[AgentAction]) -> String {
     let mut newly_spawned_hwnd: Option<HWND> = None;
 
     for action in actions {
+        if is_request_cancelled(request_id) {
+            return "Actions interrompues par une nouvelle consigne.".to_string();
+        }
         if let AgentAction::OpenApp { name } = action {
             let current_windows = list_user_windows();
             let matched_hwnds = find_windows_matching(name, &current_windows, None);
@@ -1930,6 +2042,9 @@ pub fn execute_system_actions(actions: &[AgentAction]) -> String {
             }
 
             for _ in 0..25 {
+                if is_request_cancelled(request_id) {
+                    return "Lancement d'application interrompu par une nouvelle consigne.".to_string();
+                }
                 std::thread::sleep(Duration::from_millis(100));
                 let current_windows = list_user_windows();
                 for (hwnd, _title) in &current_windows {
@@ -1950,6 +2065,9 @@ pub fn execute_system_actions(actions: &[AgentAction]) -> String {
     }
 
     for action in actions {
+        if is_request_cancelled(request_id) {
+            return "Actions interrompues par une nouvelle consigne.".to_string();
+        }
         if let AgentAction::OpenBrowser { url } = action {
             let raw_url = url.as_deref().unwrap_or("").trim();
             let target = if raw_url.is_empty() || raw_url.starts_with("about:") {
@@ -1982,6 +2100,11 @@ pub fn execute_system_actions(actions: &[AgentAction]) -> String {
     let preferred_target_hwnd = newly_spawned_hwnd.or(active_user_hwnd);
 
     for (idx, action) in actions.iter().enumerate() {
+        if is_request_cancelled(request_id) {
+            println!("[Actions] Interruption immédiate de la séquence d'actions (nouvelle consigne reçue).");
+            feedback.push("Séquence d'actions interrompue par une nouvelle consigne.".to_string());
+            break;
+        }
         println!("[Actions] [{}/{}] Action en cours : {:?}", idx + 1, actions.len(), action);
         match action {
             AgentAction::OpenApp { .. } => {}
@@ -2120,6 +2243,7 @@ pub fn execute_system_actions(actions: &[AgentAction]) -> String {
 
                     if dir_clean == "up" || dir_clean == "haut" {
                         for _ in 0..steps {
+                            if is_request_cancelled(request_id) { break; }
                             unsafe { mouse_event(MOUSEEVENTF_WHEEL, 0, 0, 360, 0); }
                             std::thread::sleep(Duration::from_millis(30));
                             send_hotkey(&[], VK_PRIOR);
@@ -2134,6 +2258,7 @@ pub fn execute_system_actions(actions: &[AgentAction]) -> String {
                         feedback.push("Défilement vers la fin de page effectué.".to_string());
                     } else {
                         for _ in 0..steps {
+                            if is_request_cancelled(request_id) { break; }
                             unsafe { mouse_event(MOUSEEVENTF_WHEEL, 0, 0, -360, 0); }
                             std::thread::sleep(Duration::from_millis(30));
                             send_hotkey(&[], VK_NEXT);
@@ -2869,6 +2994,7 @@ pub fn execute_system_actions(actions: &[AgentAction]) -> String {
 
                     if launched {
                         for _ in 0..20 {
+                            if is_request_cancelled(request_id) { break; }
                             std::thread::sleep(Duration::from_millis(100));
                             let after_windows = list_user_windows();
                             if let Some((h, _)) = after_windows.iter().find(|(h, _)| !before_hwnds.contains(&(h.0 as isize))) {
@@ -2890,6 +3016,7 @@ pub fn execute_system_actions(actions: &[AgentAction]) -> String {
                     launch_browser_new_window(url_trimmed);
 
                     for _ in 0..20 {
+                        if is_request_cancelled(request_id) { break; }
                         std::thread::sleep(Duration::from_millis(100));
                         let after_windows = list_user_windows();
                         if let Some((h, _)) = after_windows.iter().find(|(h, _)| !before_hwnds.contains(&(h.0 as isize))) {
@@ -2995,6 +3122,6 @@ pub fn execute_system_actions(actions: &[AgentAction]) -> String {
 }
 
 #[cfg(not(windows))]
-pub fn execute_system_actions(_actions: &[AgentAction]) -> String {
+pub fn execute_system_actions(_actions: &[AgentAction], _request_id: u64) -> String {
     "Actions simulées (environnement non-Windows).".to_string()
 }
