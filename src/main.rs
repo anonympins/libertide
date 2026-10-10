@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use windows::Win32::Foundation::POINT;
 #[cfg(windows)]
-use windows::Win32::Media::Speech::{ISpVoice, SpVoice, SPF_ASYNC, SPF_PURGEBEFORESPEAK, SPVOICESTATUS};
+use windows::Win32::Media::Speech::{
+    ISpVoice, SpVoice, SPF_ASYNC, SPF_IS_NOT_XML, SPF_PURGEBEFORESPEAK, SPVOICESTATUS,
+};
 #[cfg(windows)]
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
 #[cfg(windows)]
@@ -54,6 +56,7 @@ pub struct OverlayApp {
     window_bottom_y: Option<f32>,
     drag_offset: Option<egui::Vec2>,
     chat_height: f32,
+    current_win_w: f32,
     current_win_h: f32,
     is_hidden: bool,
     mouse_passthrough: bool,
@@ -79,9 +82,62 @@ fn get_screen_cursor_pos(ctx: &egui::Context) -> Option<egui::Pos2> {
 }
 
 fn sanitize_for_tts(text: &str) -> String {
-    text.chars()
-        .filter(|&c| c != '*' && c != '#' && c != '`' && c != '_' && c != '~')
-        .collect()
+    let mut cleaned = String::new();
+    let mut in_code_block = false;
+
+    // 1. Élimination complète des blocs de code markdown (```...```)
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+        if in_code_block {
+            continue;
+        }
+        cleaned.push_str(line);
+        cleaned.push(' ');
+    }
+
+    // 2. Nettoyage des balises XML/HTML, URLs et caractères de balisage
+    let chars: Vec<char> = cleaned.chars().collect();
+    let mut result = String::with_capacity(cleaned.len());
+    let mut i = 0;
+    let mut in_xml_tag = false;
+
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '<' {
+            in_xml_tag = true;
+            i += 1;
+            continue;
+        }
+        if in_xml_tag {
+            if c == '>' {
+                in_xml_tag = false;
+            }
+            i += 1;
+            continue;
+        }
+        if (c == 'h' || c == 'H') && i + 7 < chars.len() {
+            let slice: String = chars[i..i + 8.min(chars.len())].iter().collect();
+            if slice.eq_ignore_ascii_case("https://") || slice.starts_with("http://") {
+                while i < chars.len() && !chars[i].is_whitespace() && chars[i] != ')' && chars[i] != ']' {
+                    i += 1;
+                }
+                continue;
+            }
+        }
+        match c {
+            '*' | '#' | '`' | '_' | '~' | '{' | '}' | '[' | ']' | '|' | '\\' | '/' | '^' | '@' => result.push(' '),
+            '&' => result.push_str(" et "),
+            '>' | '<' => result.push(' '),
+            _ if !c.is_control() => result.push(c),
+            _ => {}
+        }
+        i += 1;
+    }
+    result.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
 fn is_hide_command(text: &str) -> bool {
@@ -151,12 +207,18 @@ fn spawn_tts_worker(event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
                 return;
             };
 
+            // Amélioration du timbre : Volume maximal et cadence légèrement dynamisée (+1)
+            let _ = voice.SetVolume(100);
+            let _ = voice.SetRate(1);
+
+            let base_flags = (SPF_ASYNC.0 | SPF_PURGEBEFORESPEAK.0 | SPF_IS_NOT_XML.0) as u32;
+
             while let Ok(cmd) = rx.recv() {
                 match cmd {
                     TtsCommand::Stop => {
                         let _ = voice.Speak(
                             windows::core::PCWSTR::null(),
-                            SPF_PURGEBEFORESPEAK.0 as u32,
+                            base_flags,
                             None,
                         );
                     }
@@ -168,11 +230,11 @@ fn spawn_tts_worker(event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
                             continue;
                         }
 
-                        let wide: Vec<u16> = clean_text.encode_utf16().chain(std::iter::once(0)).collect();
-                        let flags = (SPF_ASYNC.0 | SPF_PURGEBEFORESPEAK.0) as u32;
+                        // Conservation du buffer UTF-16 en mémoire vive pendant toute la lecture asynchrone
+                        let mut active_wide_buf: Vec<u16> = clean_text.encode_utf16().chain(std::iter::once(0)).collect();
 
                         if voice
-                            .Speak(windows::core::PCWSTR(wide.as_ptr()), flags, None)
+                            .Speak(windows::core::PCWSTR(active_wide_buf.as_ptr()), base_flags, None)
                             .is_ok()
                         {
                             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Speaking));
@@ -186,7 +248,7 @@ fn spawn_tts_worker(event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
                                         TtsCommand::Stop => {
                                             let _ = voice.Speak(
                                                 windows::core::PCWSTR::null(),
-                                                SPF_PURGEBEFORESPEAK.0 as u32,
+                                                base_flags,
                                                 None,
                                             );
                                             break;
@@ -194,11 +256,11 @@ fn spawn_tts_worker(event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
                                         TtsCommand::Speak(next_text) => {
                                             let clean_next = sanitize_for_tts(&next_text);
                                             if !clean_next.trim().is_empty() {
-                                                let wide_next: Vec<u16> =
+                                                active_wide_buf =
                                                     clean_next.encode_utf16().chain(std::iter::once(0)).collect();
                                                 let _ = voice.Speak(
-                                                    windows::core::PCWSTR(wide_next.as_ptr()),
-                                                    flags,
+                                                    windows::core::PCWSTR(active_wide_buf.as_ptr()),
+                                                    base_flags,
                                                     None,
                                                 );
                                                 std::thread::sleep(Duration::from_millis(80));
@@ -286,6 +348,7 @@ impl OverlayApp {
             window_pos: None,
             window_bottom_y: None,
             drag_offset: None,
+            current_win_w: 560.0,
             chat_height: 70.0,
             current_win_h: 154.0,
             is_hidden: false,
@@ -313,6 +376,29 @@ impl OverlayApp {
             ([0, 180, 255], egui::Color32::from_rgba_unmultiplied(0, 180, 255, 220))
         };
 
+        // Empreinte sonore radiale (audio voiceprint spectrum)
+        let num_bars = 16;
+        let activity_level = match self.status {
+            AgentStatus::Speaking => 1.0f32,
+            AgentStatus::Listening => 0.85f32,
+            AgentStatus::Thinking => 0.5f32,
+            AgentStatus::Idle => 0.18f32,
+            AgentStatus::EmergencyStopped => 0.0f32,
+        };
+
+        for i in 0..num_bars {
+            let angle = (i as f32 / num_bars as f32) * std::f32::consts::TAU + (time as f32 * 0.7);
+            let harmonic1 = ((time * 7.5 + (i as f64 * 1.4)).sin() as f32).abs();
+            let harmonic2 = ((time * 13.0 + (i as f64 * 2.2)).cos() as f32).abs();
+            let bar_len = (2.0 + (harmonic1 * 5.0 + harmonic2 * 3.5) * activity_level).clamp(1.5, 10.0);
+            let dir = egui::vec2(angle.cos(), angle.sin());
+            let start = center + dir * (base_radius + 3.0);
+            let end = center + dir * (base_radius + 3.0 + bar_len);
+            let alpha = ((50.0 + 180.0 * activity_level * (harmonic1 * 0.6 + 0.4)) as u8).min(235);
+            let bar_color = egui::Color32::from_rgba_unmultiplied(ring_base_color[0], ring_base_color[1], ring_base_color[2], alpha);
+            painter.line_segment([start, end], egui::Stroke::new(1.3, bar_color));
+        }
+
         // Cercles concentriques
         let rings = [
             (base_radius + 26.0 + (wave * 6.0), egui::Color32::from_rgba_unmultiplied(ring_base_color[0], ring_base_color[1], ring_base_color[2], 35), 1.5),
@@ -332,6 +418,37 @@ impl OverlayApp {
             core_color,
         );
         painter.circle_filled(center, base_radius * 0.2, egui::Color32::WHITE);
+    }
+
+    fn draw_mini_equalizer(&self, ui: &mut egui::Ui, time: f64) {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 12.0), egui::Sense::hover());
+        let painter = ui.painter();
+
+        let num_bars = 5;
+        let bar_width = 3.0;
+        let spacing = 2.5;
+
+        let (base_color, activity_mult) = match self.status {
+            AgentStatus::Speaking => (egui::Color32::from_rgb(0, 215, 255), 1.0f32),
+            AgentStatus::Listening => (egui::Color32::from_rgb(255, 75, 90), 0.9f32),
+            AgentStatus::Thinking => (egui::Color32::from_rgb(180, 120, 255), 0.55f32),
+            AgentStatus::Idle => (egui::Color32::from_rgba_unmultiplied(0, 180, 255, 120), 0.2f32),
+            AgentStatus::EmergencyStopped => (egui::Color32::from_rgb(220, 50, 50), 0.0f32),
+        };
+
+        for i in 0..num_bars {
+            let x = rect.min.x + (i as f32) * (bar_width + spacing);
+            let h = if self.status == AgentStatus::EmergencyStopped {
+                2.0
+            } else {
+                let wave1 = ((time * 8.0 + (i as f64 * 1.6)).sin() as f32).abs();
+                let wave2 = ((time * 15.0 + (i as f64 * 2.7)).cos() as f32).abs();
+                let combined = (wave1 * 0.6 + wave2 * 0.4) * activity_mult;
+                (3.0 + combined * (rect.height() - 3.0)).clamp(2.5, rect.height())
+            };
+            let bar_rect = egui::Rect::from_min_size(egui::pos2(x, rect.max.y - h), egui::vec2(bar_width, h));
+            painter.rect_filled(bar_rect, egui::CornerRadius::same(1), base_color);
+        }
     }
 
     fn trigger_emergency_stop(&mut self, _ctx: &egui::Context) {
@@ -410,7 +527,14 @@ impl eframe::App for OverlayApp {
         let mon_size = ctx.input(|i| i.viewport().monitor_size);
         let screen_h = mon_size.map_or(1080.0, |m| m.y);
 
-        let win_w: f32 = 560.0;
+        let min_win_w: f32 = 380.0;
+        let min_win_h: f32 = 134.0;
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(min_win_w, min_win_h)));
+
+        let inner_rect_opt = ctx.input(|i| i.viewport().inner_rect);
+        let win_w: f32 = inner_rect_opt.map_or(self.current_win_w, |r| r.width().max(min_win_w));
+        self.current_win_w = win_w;
+
         let padding: f32 = 2.0;
         let control_h: f32 = 78.0;
 
@@ -418,7 +542,8 @@ impl eframe::App for OverlayApp {
         let min_chat_h: f32 = 50.0;
         let current_chat_h = self.chat_height.clamp(min_chat_h, max_chat_h);
 
-        let target_win_h = padding + current_chat_h + padding + control_h + padding;
+        let target_win_h = (padding + current_chat_h + padding + control_h + padding).max(min_win_h);
+        let active_win_h = inner_rect_opt.map_or(self.current_win_h, |r| r.height().max(min_win_h));
 
         // Ancrage automatique de la fenêtre en bas à droite
         if !self.position_initialized {
@@ -462,13 +587,15 @@ impl eframe::App for OverlayApp {
             }
         }
 
-        let response_rect = egui::Rect::from_min_size(
-            egui::pos2(padding, padding),
-            egui::vec2(win_w - 2.0 * padding, current_chat_h),
-        );
+        // Alignement strict : panneau de commandes calé en bas, boîte de discussion au-dessus
+        let control_top = (active_win_h - padding - control_h).max(padding + min_chat_h);
         let control_rect = egui::Rect::from_min_size(
-            egui::pos2(padding, response_rect.max.y + padding),
+            egui::pos2(padding, control_top),
             egui::vec2(win_w - 2.0 * padding, control_h),
+        );
+        let response_rect = egui::Rect::from_min_max(
+            egui::pos2(padding, padding),
+            egui::pos2(win_w - padding, (control_rect.min.y - padding).max(padding + min_chat_h)),
         );
 
         let should_passthrough = self.is_hidden;
@@ -482,9 +609,18 @@ impl eframe::App for OverlayApp {
             match event {
                 AgentEvent::StatusChanged(new_status) => {
                     if self.status != AgentStatus::EmergencyStopped || new_status == AgentStatus::EmergencyStopped {
+                        let prev_status = self.status;
                         self.status = new_status;
-                        if new_status == AgentStatus::Idle && self.is_recording {
-                            self.is_recording = false;
+                        if new_status == AgentStatus::Idle {
+                            if self.is_recording {
+                                self.is_recording = false;
+                            } else if prev_status == AgentStatus::Thinking
+                                && self.continuous_mode
+                                && !self.is_hidden
+                                && !AGENT_BUSY.load(Ordering::SeqCst)
+                            {
+                                self.start_recording(&ctx);
+                            }
                         }
                     }
                 }
@@ -620,7 +756,10 @@ impl eframe::App for OverlayApp {
                     }
                 }
                 AgentEvent::TtsFinished => {
-                    if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                    if self.continuous_mode
+                        && self.status != AgentStatus::EmergencyStopped
+                        && !AGENT_BUSY.load(Ordering::SeqCst)
+                    {
                         self.start_recording(&ctx);
                     }
                 }
@@ -712,7 +851,7 @@ impl eframe::App for OverlayApp {
 
                             match self.active_tab {
                                 ActiveTab::Assistance => {
-                            let max_scroll_h = (current_chat_h - 40.0).max(20.0);
+                            let max_scroll_h = (response_rect.height() - 40.0).max(20.0);
                             let scroll_out = egui::ScrollArea::vertical()
                                 .stick_to_bottom(true)
                                 .max_height(max_scroll_h)
@@ -884,7 +1023,7 @@ impl eframe::App for OverlayApp {
                                         });
                                     }
                                     ui.separator();
-                                    let max_chat_scroll_h = (current_chat_h - 68.0).max(20.0);
+                                    let max_chat_scroll_h = (response_rect.height() - 68.0).max(20.0);
                                     let scroll_out = egui::ScrollArea::vertical()
                                         .stick_to_bottom(true)
                                         .max_height(max_chat_scroll_h)
@@ -962,11 +1101,15 @@ impl eframe::App for OverlayApp {
                                         egui::Color32::from_rgb(0, 200, 255)
                                     };
 
-                                    ui.label(
-                                        egui::RichText::new(status_badge)
-                                            .size(11.0)
-                                            .color(badge_color),
-                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(status_badge)
+                                                .size(11.0)
+                                                .color(badge_color),
+                                        );
+                                        ui.add_space(4.0);
+                                        self.draw_mini_equalizer(ui, time);
+                                    });
 
                                     if self.is_recording && !self.live_transcript.is_empty() {
                                         ui.add_space(2.0);
@@ -1110,6 +1253,59 @@ impl eframe::App for OverlayApp {
                 if drag_response.drag_stopped() {
                     self.drag_offset = None;
                 }
+
+                // Zones de redimensionnement interactif sur l'ensemble des bordures et coins (haut, côtés, bas)
+                let border_thickness = 6.0;
+                let total_w = win_w;
+                let total_h = active_win_h;
+
+                let resize_zones = [
+                    // Bord haut et coins hauts
+                    (egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(border_thickness, border_thickness)), egui::viewport::ResizeDirection::NorthWest, egui::CursorIcon::ResizeNorthWest),
+                    (egui::Rect::from_min_size(egui::pos2(total_w - border_thickness, 0.0), egui::vec2(border_thickness, border_thickness)), egui::viewport::ResizeDirection::NorthEast, egui::CursorIcon::ResizeNorthEast),
+                    (egui::Rect::from_min_size(egui::pos2(border_thickness, 0.0), egui::vec2((total_w - 2.0 * border_thickness).max(0.0), border_thickness)), egui::viewport::ResizeDirection::North, egui::CursorIcon::ResizeNorth),
+
+                    // Côtés gauche et droite
+                    (egui::Rect::from_min_size(egui::pos2(0.0, border_thickness), egui::vec2(border_thickness, (total_h - 2.0 * border_thickness).max(0.0))), egui::viewport::ResizeDirection::West, egui::CursorIcon::ResizeWest),
+                    (egui::Rect::from_min_size(egui::pos2(total_w - border_thickness, border_thickness), egui::vec2(border_thickness, (total_h - 2.0 * border_thickness).max(0.0))), egui::viewport::ResizeDirection::East, egui::CursorIcon::ResizeEast),
+
+                    // Bord bas et coins bas (South, SouthWest, SouthEast)
+                    (egui::Rect::from_min_size(egui::pos2(0.0, total_h - border_thickness), egui::vec2(border_thickness, border_thickness)), egui::viewport::ResizeDirection::SouthWest, egui::CursorIcon::ResizeSouthWest),
+                    (egui::Rect::from_min_size(egui::pos2(total_w - border_thickness, total_h - border_thickness), egui::vec2(border_thickness, border_thickness)), egui::viewport::ResizeDirection::SouthEast, egui::CursorIcon::ResizeSouthEast),
+                    (egui::Rect::from_min_size(egui::pos2(border_thickness, total_h - border_thickness), egui::vec2((total_w - 2.0 * border_thickness).max(0.0), border_thickness)), egui::viewport::ResizeDirection::South, egui::CursorIcon::ResizeSouth),
+                ];
+
+                for (rect, direction, cursor_icon) in resize_zones {
+                    let resp = ui.interact(rect, ui.id().with(format!("resize_{:?}", direction)), egui::Sense::drag());
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(cursor_icon);
+                    }
+                    if resp.drag_started() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+                    }
+                }
+
+                // Poignées visuelles de redimensionnement discrètes aux coins
+                let painter = ui.painter();
+                let grip_nw = egui::Rect::from_min_size(egui::pos2(padding + 2.0, padding + 2.0), egui::vec2(10.0, 10.0));
+                painter.line_segment(
+                    [egui::pos2(grip_nw.min.x, grip_nw.max.y), egui::pos2(grip_nw.max.x, grip_nw.min.y)],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 90)),
+                );
+                painter.line_segment(
+                    [egui::pos2(grip_nw.min.x + 3.0, grip_nw.max.y), egui::pos2(grip_nw.max.x, grip_nw.min.y + 3.0)],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 50)),
+                );
+
+                let grip_se = egui::Rect::from_min_size(egui::pos2(total_w - padding - 12.0, total_h - padding - 12.0), egui::vec2(10.0, 10.0));
+                painter.line_segment(
+                    [egui::pos2(grip_se.min.x, grip_se.max.y), egui::pos2(grip_se.max.x, grip_se.min.y)],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 90)),
+                );
+                painter.line_segment(
+                    [egui::pos2(grip_se.min.x + 3.0, grip_se.max.y), egui::pos2(grip_se.max.x, grip_se.min.y + 3.0)],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 50)),
+                );
             });
     }
 }
@@ -2046,7 +2242,8 @@ fn main() -> eframe::Result<()> {
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
-            .with_resizable(false)
+            .with_resizable(true)
+            .with_min_inner_size([380.0, 134.0])
             .with_inner_size([560.0, 154.0]),
         ..Default::default()
     };
