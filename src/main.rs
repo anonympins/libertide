@@ -51,7 +51,10 @@ pub struct OverlayApp {
     twitch_search_results: Vec<TwitchChannelItem>,
     position_initialized: bool,
     window_pos: Option<egui::Pos2>,
+    window_bottom_y: Option<f32>,
     drag_offset: Option<egui::Vec2>,
+    chat_height: f32,
+    current_win_h: f32,
     is_hidden: bool,
     mouse_passthrough: bool,
 }
@@ -281,7 +284,10 @@ impl OverlayApp {
             twitch_search_results: Vec::new(),
             position_initialized: false,
             window_pos: None,
+            window_bottom_y: None,
             drag_offset: None,
+            chat_height: 70.0,
+            current_win_h: 154.0,
             is_hidden: false,
             mouse_passthrough: false,
         }
@@ -401,54 +407,71 @@ impl eframe::App for OverlayApp {
         visuals.extreme_bg_color = egui::Color32::from_rgb(18, 20, 26);
         ctx.set_visuals(visuals);
 
+        let mon_size = ctx.input(|i| i.viewport().monitor_size);
+        let screen_h = mon_size.map_or(1080.0, |m| m.y);
+
+        let win_w: f32 = 560.0;
+        let padding: f32 = 2.0;
+        let control_h: f32 = 78.0;
+
+        let max_chat_h = (screen_h - control_h - 120.0).clamp(180.0, 520.0);
+        let min_chat_h: f32 = 50.0;
+        let current_chat_h = self.chat_height.clamp(min_chat_h, max_chat_h);
+
+        let target_win_h = padding + current_chat_h + padding + control_h + padding;
+
         // Ancrage automatique de la fenêtre en bas à droite
         if !self.position_initialized {
-            if let Some(mon_size) = ctx.input(|i| i.viewport().monitor_size) {
-                if mon_size.x > 100.0 && mon_size.y > 100.0 {
-                    let win_w = 560.0;
-                    let win_h = 380.0;
+            if let Some(m_size) = mon_size {
+                if m_size.x > 100.0 && m_size.y > 100.0 {
                     let margin_x = 24.0;
                     let margin_y = 36.0;
+                    let init_h = target_win_h;
+                    let bot_y = m_size.y - margin_y;
                     let target_pos = egui::pos2(
-                        mon_size.x - win_w - margin_x,
-                        mon_size.y - win_h - margin_y,
+                        m_size.x - win_w - margin_x,
+                        bot_y - init_h,
                     );
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, init_h)));
                     ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(target_pos));
                     self.window_pos = Some(target_pos);
+                    self.window_bottom_y = Some(bot_y);
+                    self.current_win_h = init_h;
                     self.position_initialized = true;
                 }
             }
         }
 
-        if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
-            self.window_pos = Some(outer.min);
+        // Redimensionnement dynamique de la fenêtre vers le haut
+        if self.position_initialized && (target_win_h - self.current_win_h).abs() > 1.0 {
+            self.current_win_h = target_win_h;
+            if let Some(bot_y) = self.window_bottom_y {
+                let cur_x = self.window_pos.map_or(100.0, |p| p.x);
+                let new_y = (bot_y - target_win_h).max(0.0);
+                let new_pos = egui::pos2(cur_x, new_y);
+                self.window_pos = Some(new_pos);
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(win_w, target_win_h)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(new_pos));
+            }
         }
 
-        let win_w: f32 = 560.0;
-        let win_h: f32 = 380.0;
-        let response_h = (win_h * 0.70 - 4.0).max(60.0);
+        if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
+            if self.drag_offset.is_none() && (target_win_h - self.current_win_h).abs() <= 1.0 {
+                self.window_pos = Some(outer.min);
+                self.window_bottom_y = Some(outer.min.y + self.current_win_h);
+            }
+        }
 
-        // Gestion dynamique du clic traversant : la zone transparente laisse passer les événements,
-        // seuls les contrôles inférieurs et l'en-tête de glissement capturent la souris.
-        let win_pos = self.window_pos.unwrap_or(egui::pos2(0.0, 0.0));
-        let cursor_screen = get_screen_cursor_pos(&ctx);
-        let wants_interaction = if self.is_hidden {
-            false
-        } else if self.drag_offset.is_some() {
-            true
-        } else if let Some(cursor) = cursor_screen {
-            let rel_x = cursor.x - win_pos.x;
-            let rel_y = cursor.y - win_pos.y;
-            let in_window_x = rel_x >= 0.0 && rel_x <= win_w;
-            let in_drag_header = in_window_x && rel_y >= 0.0 && rel_y <= 38.0;
-            let in_response_area = in_window_x && rel_y >= 0.0 && rel_y <= response_h;
-            let in_control_panel = in_window_x && rel_y >= (response_h + 4.0) && rel_y <= win_h;
-            in_drag_header || in_response_area || in_control_panel
-        } else {
-            false
-        };
+        let response_rect = egui::Rect::from_min_size(
+            egui::pos2(padding, padding),
+            egui::vec2(win_w - 2.0 * padding, current_chat_h),
+        );
+        let control_rect = egui::Rect::from_min_size(
+            egui::pos2(padding, response_rect.max.y + padding),
+            egui::vec2(win_w - 2.0 * padding, control_h),
+        );
 
-        let should_passthrough = !wants_interaction;
+        let should_passthrough = self.is_hidden;
         if should_passthrough != self.mouse_passthrough {
             self.mouse_passthrough = should_passthrough;
             ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(should_passthrough));
@@ -654,31 +677,19 @@ impl eframe::App for OverlayApp {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
+            .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT).inner_margin(egui::Margin::ZERO))
             .show(ui, |ui| {
-                let total_rect = ui.available_rect_before_wrap();
-                let total_h = total_rect.height();
+                let mut tab_bar_max_x = response_rect.min.x + 210.0;
 
-                // Répartition 70 % zone transparente (réponses de l'agent) et 30 % panneau de contrôle
-                let control_h = (total_h - response_h - 8.0).max(80.0);
+                // 1. Boîte de discussion adaptative (s'étend du bas vers le haut)
+                let mut computed_chat_h = current_chat_h;
 
-                let response_rect = egui::Rect::from_min_size(
-                    total_rect.min,
-                    egui::vec2(total_rect.width(), response_h),
-                );
-                let control_rect = egui::Rect::from_min_size(
-                    egui::pos2(total_rect.min.x, total_rect.min.y + response_h + 8.0),
-                    egui::vec2(total_rect.width(), control_h),
-                );
-
-                // 1. Zone supérieure transparente (70 %) pour l'historique du chat
-                let mut tab_bar_max_x = total_rect.min.x + 210.0;
                 ui.scope_builder(egui::UiBuilder::new().max_rect(response_rect), |ui| {
                     egui::Frame::new()
                         .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180))
                         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 55)))
-                        .corner_radius(egui::CornerRadius::same(14))
-                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .corner_radius(egui::CornerRadius::same(12))
+                        .inner_margin(egui::Margin::symmetric(10, 6))
                         .show(ui, |ui| {
                             // Barre d'onglets
                             ui.horizontal(|ui| {
@@ -701,8 +712,8 @@ impl eframe::App for OverlayApp {
 
                             match self.active_tab {
                                 ActiveTab::Assistance => {
-                            let max_scroll_h = (response_h - 45.0).max(40.0);
-                            egui::ScrollArea::vertical()
+                            let max_scroll_h = (current_chat_h - 40.0).max(20.0);
+                            let scroll_out = egui::ScrollArea::vertical()
                                 .stick_to_bottom(true)
                                 .max_height(max_scroll_h)
                                 .auto_shrink([false, true])
@@ -813,6 +824,7 @@ impl eframe::App for OverlayApp {
                                         let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
                                     }
                                 });
+                            computed_chat_h = (scroll_out.content_size.y + 44.0).clamp(min_chat_h, max_chat_h);
                                 }
                                 ActiveTab::Chat => {
                                     // Barre de recherche et salon actif
@@ -872,8 +884,8 @@ impl eframe::App for OverlayApp {
                                         });
                                     }
                                     ui.separator();
-                                    let max_chat_scroll_h = (ui.available_height() - 4.0).max(40.0);
-                                    egui::ScrollArea::vertical()
+                                    let max_chat_scroll_h = (current_chat_h - 68.0).max(20.0);
+                                    let scroll_out = egui::ScrollArea::vertical()
                                         .stick_to_bottom(true)
                                         .max_height(max_chat_scroll_h)
                                         .auto_shrink([false, true])
@@ -908,23 +920,26 @@ impl eframe::App for OverlayApp {
                                                     ui.add_space(3.0);
                                                 }
                                             }
-                                        });
+                                    });
+                                    computed_chat_h = (scroll_out.content_size.y + 72.0).clamp(min_chat_h, max_chat_h);
                                 }
                             }
                         });
                 });
+
+                self.chat_height = computed_chat_h;
 
                 // 2. Zone inférieure (30 %) : contrôles, avatar et saisie
                 ui.scope_builder(egui::UiBuilder::new().max_rect(control_rect), |ui| {
                     egui::Frame::new()
                         .fill(egui::Color32::from_rgb(18, 20, 26))
                         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 75)))
-                        .corner_radius(egui::CornerRadius::same(14))
-                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .corner_radius(egui::CornerRadius::same(12))
+                        .inner_margin(egui::Margin::symmetric(10, 8))
                         .show(ui, |ui| {
                             let inner_rect = ui.available_rect_before_wrap();
-                            let avatar_pos = egui::pos2(inner_rect.max.x - 22.0, inner_rect.min.y + 24.0);
-                            self.draw_avatar(ui, avatar_pos, 15.0, time);
+                            let avatar_pos = egui::pos2(inner_rect.max.x - 20.0, inner_rect.min.y + 22.0);
+                            self.draw_avatar(ui, avatar_pos, 14.0, time);
 
                             let content_area = egui::Rect::from_min_max(
                                 inner_rect.min,
@@ -1055,10 +1070,10 @@ impl eframe::App for OverlayApp {
                         });
                 });
 
-                // Zone de déplacement restreinte à l'en-tête supérieur en donnant priorité aux contrôles
+                // Zone de déplacement restreinte à l'en-tête supérieur de la boîte active
                 let drag_rect = egui::Rect::from_min_max(
-                    egui::pos2(tab_bar_max_x + 8.0, total_rect.min.y),
-                    egui::pos2(total_rect.max.x, total_rect.min.y + 36.0),
+                    egui::pos2(tab_bar_max_x + 8.0, response_rect.min.y),
+                    egui::pos2(win_w - padding, response_rect.min.y + 32.0),
                 );
                 let drag_response = ui.interact(drag_rect, ui.id().with("capsule_drag"), egui::Sense::drag());
                 if drag_response.hovered() {
@@ -1066,37 +1081,28 @@ impl eframe::App for OverlayApp {
                 }
 
                 if drag_response.drag_started() {
-                    if let Some(pointer_pos) = ctx.input(|i| i.pointer.latest_pos()) {
-                        self.drag_offset = Some(pointer_pos.to_vec2());
+                    if let Some(cursor) = get_screen_cursor_pos(&ctx) {
+                        let win_p = self.window_pos.unwrap_or_default();
+                        self.drag_offset = Some(egui::vec2(cursor.x - win_p.x, cursor.y - win_p.y));
                     }
                 }
 
                 if drag_response.dragged() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                    let offset = match self.drag_offset {
-                        Some(off) => off,
-                        None => {
-                            let off = ctx.input(|i| i.pointer.latest_pos())
-                                .map(|p| p.to_vec2())
-                                .unwrap_or(egui::vec2(280.0, 20.0));
-                            self.drag_offset = Some(off);
-                            off
-                        }
-                    };
+                    let offset = self.drag_offset.unwrap_or(egui::vec2(280.0, 16.0));
 
                     let cursor_screen = get_screen_cursor_pos(&ctx);
                     if let Some(cursor) = cursor_screen {
-                        if let Some(mon_size) = ctx.input(|i| i.viewport().monitor_size) {
-                            let win_w = 560.0;
-                            let win_h = 380.0;
-                            let max_x = (mon_size.x - win_w).max(0.0);
-                            let max_y = (mon_size.y - win_h).max(0.0);
+                        if let Some(m_size) = mon_size {
+                            let max_x = (m_size.x - win_w).max(0.0);
+                            let max_y = (m_size.y - self.current_win_h).max(0.0);
 
                             let target_x = (cursor.x - offset.x).clamp(0.0, max_x);
                             let target_y = (cursor.y - offset.y).clamp(0.0, max_y);
                             let new_pos = egui::pos2(target_x, target_y);
 
                             self.window_pos = Some(new_pos);
+                            self.window_bottom_y = Some(new_pos.y + self.current_win_h);
                             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(new_pos));
                         }
                     }
@@ -2041,7 +2047,7 @@ fn main() -> eframe::Result<()> {
             .with_transparent(true)
             .with_always_on_top()
             .with_resizable(false)
-            .with_inner_size([560.0, 380.0]),
+            .with_inner_size([560.0, 154.0]),
         ..Default::default()
     };
 
