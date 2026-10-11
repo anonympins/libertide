@@ -19,6 +19,22 @@ use crate::pattern::{extract_target_propositions, matches_pattern};
 use crate::send_hotkey;
 
 #[cfg(windows)]
+pub fn is_window_hung(hwnd: HWND) -> bool {
+    extern "system" {
+        fn IsHungAppWindow(hwnd: HWND) -> BOOL;
+    }
+    if hwnd.0.is_null() {
+        return false;
+    }
+    unsafe { IsHungAppWindow(hwnd).as_bool() }
+}
+
+#[cfg(not(windows))]
+pub fn is_window_hung(_hwnd: ()) -> bool {
+    false
+}
+
+#[cfg(windows)]
 unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let list = &mut *(lparam.0 as *mut Vec<(HWND, String)>);
     if IsWindowVisible(hwnd).as_bool() {
@@ -170,7 +186,7 @@ pub fn get_active_or_best_window(user_windows: &[(HWND, String)]) -> Option<HWND
         FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()))
     };
     let fg = unsafe { GetForegroundWindow() };
-    if !fg.0.is_null() && fg != overlay_hwnd && user_windows.iter().any(|(h, _)| *h == fg) {
+    if !fg.0.is_null() && fg != overlay_hwnd && !is_window_hung(fg) && user_windows.iter().any(|(h, _)| *h == fg) {
         Some(fg)
     } else {
         find_largest_and_most_centered_window(user_windows)

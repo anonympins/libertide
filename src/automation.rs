@@ -102,7 +102,11 @@ mod clipboard {
 }
 
 #[cfg(windows)]
-pub fn force_foreground_window(hwnd: HWND) {
+pub fn force_foreground_window(hwnd: HWND) -> bool {
+    if is_window_hung(hwnd) {
+        eprintln!("[Windows] Fenêtre {:?} figée / ne répond pas (sablier). Focus évité pour prévenir un gel.", hwnd.0);
+        return false;
+    }
     extern "system" {
         fn GetCurrentThreadId() -> u32;
         fn GetWindowThreadProcessId(hwnd: HWND, lpdwprocessid: *mut u32) -> u32;
@@ -143,6 +147,7 @@ pub fn force_foreground_window(hwnd: HWND) {
             let _ = SetForegroundWindow(hwnd);
         }
     }
+    true
 }
 
 #[cfg(windows)]
@@ -334,6 +339,9 @@ struct UiaElementInfo {
     class_name: String,
     localized_type: String,
     aria_role: String,
+    aria_label: String,
+    aria_description: String,
+    aria_indications: String,
     is_edit_or_textarea: bool,
     is_explicit_textarea: bool,
     is_input: bool,
@@ -348,6 +356,62 @@ struct UiaElementInfo {
     rect: RECT,
     pattern: Option<IUIAutomationInvokePattern>,
     area: i64,
+}
+
+#[cfg(windows)]
+fn parse_aria_property_value(aria_properties: &str, target_key: &str) -> Option<String> {
+    let target_clean = target_key.strip_prefix("aria-").unwrap_or(target_key).to_ascii_lowercase();
+    for part in aria_properties.split(';') {
+        let part = part.trim();
+        if let Some((key, val)) = part.split_once('=') {
+            let k = key.trim().to_ascii_lowercase();
+            let k_clean = k.strip_prefix("aria-").unwrap_or(&k);
+            if k_clean == target_clean {
+                let v = val.trim().trim_matches('\'').trim_matches('"').trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn extract_aria_details(aria_properties: &str) -> (Option<String>, Option<String>, Vec<String>) {
+    let label = parse_aria_property_value(aria_properties, "label");
+    let desc = parse_aria_property_value(aria_properties, "description")
+        .or_else(|| parse_aria_property_value(aria_properties, "describedby"));
+
+    let mut indications = Vec::new();
+    if let Some(roledesc) = parse_aria_property_value(aria_properties, "roledescription") {
+        indications.push(format!("rôle: {roledesc}"));
+    }
+    if let Some(ph) = parse_aria_property_value(aria_properties, "placeholder") {
+        indications.push(format!("placeholder: \"{ph}\""));
+    }
+    if let Some(exp) = parse_aria_property_value(aria_properties, "expanded") {
+        if exp == "true" { indications.push("déroulé".to_string()); }
+        else if exp == "false" { indications.push("replié".to_string()); }
+    }
+    if let Some(chk) = parse_aria_property_value(aria_properties, "checked") {
+        if chk == "true" { indications.push("coché".to_string()); }
+        else if chk == "false" { indications.push("décoché".to_string()); }
+    }
+    if let Some(sel) = parse_aria_property_value(aria_properties, "selected") {
+        if sel == "true" { indications.push("sélectionné".to_string()); }
+    }
+    if let Some(dis) = parse_aria_property_value(aria_properties, "disabled") {
+        if dis == "true" { indications.push("désactivé".to_string()); }
+    }
+    if let Some(req) = parse_aria_property_value(aria_properties, "required") {
+        if req == "true" { indications.push("requis".to_string()); }
+    }
+    if let Some(inv) = parse_aria_property_value(aria_properties, "invalid") {
+        if inv == "true" { indications.push("invalide".to_string()); }
+    }
+
+    (label, desc, indications)
 }
 
 #[cfg(windows)]
@@ -424,6 +488,10 @@ fn extract_inner_text(uia: &IUIAutomation, element: &IUIAutomationElement, max_c
 #[cfg(windows)]
 fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
     let mut results = Vec::new();
+    if is_window_hung(hwnd) {
+        eprintln!("[UIA] Fenêtre {:?} figée (sablier). Inspection UI ignorée.", hwnd.0);
+        return results;
+    }
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let uia: Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
@@ -496,16 +564,19 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let (aria_role, aria_properties) = if let Ok(e2) = item.cast::<IUIAutomationElement2>() {
                         let r = unsafe { e2.CurrentAriaRole().ok() }
                             .map(|b| b.to_string())
-                            .unwrap_or_default()
-                            .to_lowercase();
+                            .unwrap_or_default();
                         let p = unsafe { e2.CurrentAriaProperties().ok() }
                             .map(|b| b.to_string())
-                            .unwrap_or_default()
-                            .to_lowercase();
+                            .unwrap_or_default();
                         (r, p)
                     } else {
                         (String::new(), String::new())
                     };
+
+                    let (aria_label_opt, aria_desc_opt, indications_vec) = extract_aria_details(&aria_properties);
+                    let aria_label = aria_label_opt.unwrap_or_default();
+                    let aria_description = aria_desc_opt.unwrap_or_default();
+                    let aria_indications = indications_vec.join(", ");
 
                     let is_root_web_area = class_name.contains("rootwebarea")
                         || loc_type.contains("rootwebarea")
@@ -527,9 +598,17 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let is_explicit_textarea = class_name.contains("textarea")
                         || loc_type.contains("textarea")
                         || loc_type.contains("zone de texte")
+                        || aria_role.to_lowercase() == "textbox" && height >= 35
                         || (is_edit_type && height >= 35);
 
+                    let is_aria_input = aria_role.to_lowercase().contains("textbox")
+                        || aria_role.to_lowercase().contains("searchbox")
+                        || aria_role.to_lowercase().contains("combobox")
+                        || aria_properties.to_lowercase().contains("role=textbox")
+                        || aria_properties.to_lowercase().contains("role=searchbox");
+
                     let is_input = !is_explicit_textarea && (is_edit_type
+                        || is_aria_input
                         || class_name.contains("input")
                         || loc_type.contains("input")
                         || class_name.contains("edit")
@@ -585,6 +664,19 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         None => (false, false),
                     };
 
+                    // Prise en compte et intégration sémantique prioritaire de l'aria-label
+                    if !aria_label.is_empty() {
+                        if name.is_empty() || is_poor_or_redundant_link(&name) {
+                            name = aria_label.clone();
+                        } else if !name.to_lowercase().contains(&aria_label.to_lowercase()) {
+                            if aria_label.to_lowercase().contains(&name.to_lowercase()) {
+                                name = aria_label.clone();
+                            } else {
+                                name = format!("{name} [aria: {aria_label}]");
+                            }
+                        }
+                    }
+
                     let has_tabindex = (aria_properties.contains("tabindex")
                         && !aria_properties.contains("tabindex=-1")
                         && !aria_properties.contains("tabindex=\"-1\"")
@@ -596,7 +688,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         name = format!("[Navigateur] {name}");
                     }
 
-                    const MAX_INTERACTIVE_TEXT_LEN: usize = 90;
+                    const MAX_INTERACTIVE_TEXT_LEN: usize = 110;
                     if (name.is_empty() || is_tabindex) && (is_link || is_button || is_tabindex || is_focusable) {
                         if let Some(txt) = extract_inner_text(&uia, &item, MAX_INTERACTIVE_TEXT_LEN) {
                             if name.is_empty() {
@@ -612,7 +704,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         name = name.chars().take(MAX_INTERACTIVE_TEXT_LEN).collect();
                     }
 
-                    if name.is_empty() && automation_id.is_empty() && help_text.is_empty() && value_text.is_empty()
+                    if name.is_empty() && aria_label.is_empty() && automation_id.is_empty() && help_text.is_empty() && value_text.is_empty()
                         && !is_edit_or_textarea && !is_button && !is_link && !is_focusable && !is_tabindex {
                         continue;
                     }
@@ -632,6 +724,9 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         class_name,
                         localized_type: loc_type,
                         aria_role,
+                        aria_label,
+                        aria_description,
+                        aria_indications,
                         is_edit_or_textarea,
                         is_explicit_textarea,
                         is_input,
@@ -1228,21 +1323,75 @@ fn click_element(
 }
 
 #[cfg(windows)]
+fn is_ecommerce_action_term(term: &str) -> bool {
+    let t = term.to_lowercase();
+    t.contains("commande")
+        || t.contains("panier")
+        || t.contains("cart")
+        || t.contains("checkout")
+        || t.contains("valider")
+        || t.contains("payer")
+        || t.contains("commander")
+}
+
+#[cfg(windows)]
+fn ecommerce_match_bonus(prop: &str, target_text: &str) -> f32 {
+    let p = prop.to_lowercase();
+    let t = target_text.to_lowercase();
+
+    if is_ecommerce_action_term(&p) {
+        const CART_KEYWORDS: &[&str] = &[
+            "panier", "cart", "commander", "commande", "valider", "passer la commande",
+            "finaliser", "checkout", "payer", "achat", "payer maintenant", "voir le panier",
+        ];
+        let p_has = CART_KEYWORDS.iter().any(|k| p.contains(k));
+        let t_has = CART_KEYWORDS.iter().any(|k| t.contains(k));
+        if p_has && t_has {
+            // Bonus significatif pour relier "valide la commande" à "panier" / "commander"
+            let exact = if (p.contains("valide") || p.contains("commande"))
+                && (t.contains("panier") || t.contains("commander") || t.contains("checkout") || t.contains("valider"))
+            {
+                75.0
+            } else {
+                45.0
+            };
+            return exact;
+        }
+    }
+    0.0
+}
+
+#[cfg(windows)]
 fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
     let prop_clean = prop.trim();
     let prop_lower = prop_clean.to_lowercase();
     let name_trim = elem.name.trim();
     let name_lower = name_trim.to_lowercase();
+    let aria_label_trim = elem.aria_label.trim();
+    let aria_label_lower = aria_label_trim.to_lowercase();
 
-    if !name_lower.is_empty() && name_lower == prop_lower {
+    if (!name_lower.is_empty() && name_lower == prop_lower)
+        || (!aria_label_lower.is_empty() && aria_label_lower == prop_lower)
+    {
         return Some(350.0);
     }
 
+    let ecom_bonus = ecommerce_match_bonus(prop_clean, &elem.name)
+        .max(ecommerce_match_bonus(prop_clean, &elem.aria_label));
     let mut best_score: Option<f32> = None;
 
     let mut regex_score = 0.0f32;
     if matches_pattern(prop, &elem.name) {
         regex_score = regex_score.max(180.0);
+    }
+    if !elem.aria_label.is_empty() && matches_pattern(prop, &elem.aria_label) {
+        regex_score = regex_score.max(190.0);
+    }
+    if !elem.aria_description.is_empty() && matches_pattern(prop, &elem.aria_description) {
+        regex_score = regex_score.max(150.0);
+    }
+    if !elem.aria_indications.is_empty() && matches_pattern(prop, &elem.aria_indications) {
+        regex_score = regex_score.max(130.0);
     }
     if matches_pattern(prop, &elem.help_text) {
         regex_score = regex_score.max(160.0);
@@ -1262,6 +1411,8 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
     if matches_pattern(prop, &elem.class_name) {
         regex_score = regex_score.max(90.0);
     }
+
+    regex_score += ecom_bonus;
 
     if regex_score > 0.0 {
         if !elem.name.is_empty() && prop_clean.len() >= 3 {
@@ -1285,8 +1436,13 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
     let class_lower = elem.class_name.to_lowercase();
     let type_lower = elem.localized_type.to_lowercase();
     let aria_lower = elem.aria_role.to_lowercase();
+    let aria_desc_lower = elem.aria_description.to_lowercase();
+    let aria_ind_lower = elem.aria_indications.to_lowercase();
 
     let name_words = clean_words(&name_lower);
+    let aria_label_words = clean_words(&aria_label_lower);
+    let aria_desc_words = clean_words(&aria_desc_lower);
+    let aria_ind_words = clean_words(&aria_ind_lower);
     let id_words = clean_words(&id_lower);
     let help_words = clean_words(&help_lower);
     let val_words = clean_words(&val_lower);
@@ -1313,6 +1469,9 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
         };
 
         let s_name = check_attr(&name_lower, &name_words, 3.2);
+        let s_aria_label = check_attr(&aria_label_lower, &aria_label_words, 3.4);
+        let s_aria_desc = check_attr(&aria_desc_lower, &aria_desc_words, 2.8);
+        let s_aria_ind = check_attr(&aria_ind_lower, &aria_ind_words, 2.2);
         let s_help = check_attr(&help_lower, &help_words, 3.0);
         let s_id = check_attr(&id_lower, &id_words, 2.5);
         let s_val = check_attr(&val_lower, &val_words, 2.0);
@@ -1320,7 +1479,16 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
         let s_class = check_attr(&class_lower, &class_words, 1.2);
         let s_aria = check_attr(&aria_lower, &aria_words, 2.2);
 
-        let best_match = s_name.max(s_help).max(s_id).max(s_val).max(s_type).max(s_class).max(s_aria);
+        let best_match = s_name
+            .max(s_aria_label)
+            .max(s_aria_desc)
+            .max(s_aria_ind)
+            .max(s_help)
+            .max(s_id)
+            .max(s_val)
+            .max(s_type)
+            .max(s_class)
+            .max(s_aria);
         if best_match > 0.0 {
             matched_words_count += 1;
             total_score += best_match * weight;
@@ -1344,6 +1512,8 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
         let excess = (name_words.len() - q_words.len() * 4) as f32;
         total_score = (total_score - excess * 2.0).max(5.0);
     }
+
+    total_score += ecom_bonus;
 
     Some(best_score.map_or(total_score, |s| s.max(total_score)))
 }
@@ -1425,7 +1595,7 @@ fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) ->
         .filter_map(|elem| {
             // Un bouton ne peut pas être un paragraphe explicatif
             let word_count = elem.name.split_whitespace().count();
-            if word_count > 10 || elem.name.len() > 80 {
+            if word_count > 15 || elem.name.len() > 120 {
                 return None;
             }
             if has_web_content {
@@ -1633,6 +1803,10 @@ fn score_enriched_link(text: &str) -> f32 {
         score -= 5.0;
     }
 
+    if clean.contains("[aria:") {
+        score += 25.0;
+    }
+
     const TECH_KEYWORDS: &[&str] = &[
         "go", "gb", "to", "tb", "ram", "pro", "max", "ultra", "plus", "lite",
         "mini", "ghz", "core", "ssd", "oled", "led", "4k", "5g", "wifi",
@@ -1657,6 +1831,44 @@ fn score_enriched_link(text: &str) -> f32 {
 }
 
 #[cfg(windows)]
+fn score_enriched_button(text: &str) -> f32 {
+    let clean = text.trim();
+    let lower = clean.to_lowercase();
+    let mut score = 10.0f32;
+
+    // Boutons cruciaux de parcours utilisateur (panier, validation, checkout, soumission)
+    const HIGH_VALUE_BUTTONS: &[&str] = &[
+        "panier", "cart", "commander", "commande", "valider", "passer la commande",
+        "voir le panier", "payer", "checkout", "finaliser", "confirmer", "continuer",
+        "suivant", "ajouter", "soumettre", "submit", "acheter", "terminer", "accepter",
+    ];
+
+    for &kw in HIGH_VALUE_BUTTONS {
+        if lower.contains(kw) {
+            score += 60.0;
+            break;
+        }
+    }
+
+    if clean.contains('€') || clean.contains('$') || lower.contains("eur") || lower.contains("usd") {
+        score += 30.0;
+    }
+
+    if clean.contains("[aria:") {
+        score += 15.0;
+    }
+
+    let words = clean.split_whitespace().count();
+    if (1..=4).contains(&words) {
+        score += 10.0;
+    } else if words > 8 {
+        score -= 15.0;
+    }
+
+    score
+}
+
+#[cfg(windows)]
 pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> String {
     let work_area = get_desktop_work_area();
     let wa_x = work_area.left;
@@ -1669,7 +1881,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
 
     let mut out = String::new();
     out.push_str(&format!(
-        "=== Rapport d'analyse de l'écran ===\nEspace de travail : {}x{}\n",
+        "=== Rapport d'analyse de l'écran ===\nEspace de travail : {}x{}\n[Note d'intention contextuelle] : La fenêtre au premier plan est le contexte direct de l'utilisateur. Toute instruction relative à un achat, formulaire ou clic doit être résolue prioritairement dans cette fenêtre active.\n",
         wa_w, wa_h
     ));
 
@@ -1712,8 +1924,11 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
             "position inconnue".to_string()
         };
 
+        let is_hung = is_window_hung(*hwnd);
         let is_minimized = unsafe { IsIconic(*hwnd).as_bool() };
-        let state = if is_minimized {
+        let state = if is_hung {
+            "ne répond pas (gelée / sablier)"
+        } else if is_minimized {
             "réduite"
         } else if *hwnd == fg {
             "active/premier plan"
@@ -1735,7 +1950,17 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
             .map(|(_, t)| t.as_str())
             .unwrap_or("Fenêtre");
 
-        out.push_str(&format!("\n--- Fenêtre : \"{}\" ---\n", win_title));
+        let is_foreground = *hwnd == fg;
+        if is_foreground {
+            out.push_str(&format!("\n--- Fenêtre : \"{}\" [AU PREMIER PLAN - CONTEXTE ACTIF PRIORITAIRE] ---\n", win_title));
+        } else {
+            out.push_str(&format!("\n--- Fenêtre : \"{}\" ---\n", win_title));
+        }
+        if is_window_hung(*hwnd) {
+            out.push_str("  (Application figée / ne répond pas - UIA ignoré)\n");
+            continue;
+        }
+
         let initial_elements = list_interactive_elements(*hwnd);
         let is_browser = is_browser_hwnd(*hwnd, win_title);
         let has_scrollbar = initial_elements.iter().any(|e| {
@@ -1839,7 +2064,13 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
             let prefix = if has_web_doc { "  [Page web - champs de saisie] :\n" } else { "  [Champs de texte / saisie] :\n" };
             out.push_str(prefix);
             for edit in edits.iter().take(5) {
-                let label = if !edit.name.is_empty() { &edit.name } else { "Champ" };
+                let mut label = if !edit.name.is_empty() { edit.name.clone() } else { "Champ".to_string() };
+                if !edit.aria_indications.is_empty() {
+                    label.push_str(&format!(" ({})", edit.aria_indications));
+                }
+                if !edit.aria_description.is_empty() && edit.aria_description.len() <= 60 {
+                    label.push_str(&format!(" [info: {}]", edit.aria_description));
+                }
                 let val = if !edit.value_text.is_empty() {
                     format!(" = \"{}\"", edit.value_text.chars().take(100).collect::<String>())
                 } else {
@@ -1872,7 +2103,13 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
                         || e.aria_role.contains("link")
                         || e.aria_role.contains("lien"))
             })
-            .map(|e| e.name.clone())
+            .map(|e| {
+                if !e.aria_indications.is_empty() {
+                    format!("{} ({})", e.name, e.aria_indications)
+                } else {
+                    e.name.clone()
+                }
+            })
             .collect();
 
         let mut seen_links = std::collections::HashSet::new();
@@ -1939,22 +2176,31 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
                         || e.automation_id.to_lowercase().contains("close")
                         || e.name.to_lowercase().contains("fermer")
                         || e.name.to_lowercase().contains("close"))
-                    && e.name.len() <= 80
-                    && e.name.split_whitespace().count() <= 10
+                    && e.name.len() <= 120
+                    && e.name.split_whitespace().count() <= 15
             })
             .map(|e| {
-                if !e.name.is_empty() {
+                let base = if !e.name.is_empty() {
                     e.name.clone()
                 } else if !e.help_text.is_empty() {
                     e.help_text.clone()
                 } else {
                     e.automation_id.clone()
+                };
+                if !e.aria_indications.is_empty() {
+                    format!("{base} ({})", e.aria_indications)
+                } else {
+                    base
                 }
             })
-            .collect();
-        buttons.dedup();
-        if !buttons.is_empty() {
-            let display_btns: Vec<String> = buttons.into_iter().take(25).collect();
+            .collect::<Vec<String>>();
+
+        let mut scored_buttons: Vec<(f32, String)> = buttons.into_iter().map(|b| (score_enriched_button(&b), b)).collect();
+        scored_buttons.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut display_btns: Vec<String> = scored_buttons.into_iter().map(|(_, b)| b).collect();
+        display_btns.dedup();
+        if !display_btns.is_empty() {
+            display_btns.truncate(30);
             let prefix = if has_web_doc { "  [Page web - boutons cliquables] : " } else { "  [Boutons / contrôles cliquables] : " };
             out.push_str(&format!("{}{}\n", prefix, display_btns.join(", ")));
         }
@@ -2152,11 +2398,15 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     }
                 }
                 if let Some(hwnd) = found_hwnd {
-                    force_foreground_window(hwnd);
-                    unsafe {
-                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                    if is_window_hung(hwnd) {
+                        feedback.push(format!("La fenêtre [HWND {:?}] ne répond pas (sablier / bloquée). Focus annulé.", hwnd.0));
+                    } else {
+                        force_foreground_window(hwnd);
+                        unsafe {
+                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                        }
+                        feedback.push(format!("Fenêtre passée au premier plan [HWND {:?}].", hwnd.0));
                     }
-                    feedback.push(format!("Fenêtre passée au premier plan [HWND {:?}].", hwnd.0));
                 } else {
                     feedback.push("Fenêtre introuvable pour focus.".to_string());
                 }
@@ -2170,6 +2420,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 };
 
                 if let Some(hwnd) = target_hwnd {
+                    if is_window_hung(hwnd) {
+                        feedback.push(format!("Fenêtre cible [HWND {:?}] non réactive (sablier). Clic ignoré.", hwnd.0));
+                        continue;
+                    }
                     println!("[Actions] Clic sur l'élément [HWND {:?}] pour '{}'", hwnd.0, target_name);
                     let is_browser = user_windows.iter().find(|(h, t)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
                     let show_mode = if is_browser { SW_MAXIMIZE } else { SW_RESTORE };
@@ -2208,6 +2462,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 let steps = amount.unwrap_or(1).clamp(1, 10);
 
                 if let Some(hwnd) = target_hwnd {
+                    if is_window_hung(hwnd) {
+                        feedback.push(format!("Fenêtre cible [HWND {:?}] non réactive (sablier). Défilement ignoré.", hwnd.0));
+                        continue;
+                    }
                     let win_title = user_windows
                         .iter()
                         .find(|(h, _)| *h == hwnd)
@@ -2316,6 +2574,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 };
 
                 if let Some(hwnd) = target_hwnd {
+                    if is_window_hung(hwnd) {
+                        feedback.push(format!("Fenêtre cible [HWND {:?}] non réactive (sablier). Clic bouton ignoré.", hwnd.0));
+                        continue;
+                    }
                     println!("[Actions] Clic sur le bouton [HWND {:?}] pour '{}'", hwnd.0, button_name);
                     let is_browser = user_windows.iter().find(|(h, t)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
                     let show_mode = if is_browser { SW_MAXIMIZE } else { SW_RESTORE };
@@ -2351,6 +2613,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 };
 
                 if let Some(hwnd) = target_hwnd {
+                    if is_window_hung(hwnd) {
+                        feedback.push(format!("Fenêtre cible [HWND {:?}] non réactive (sablier). Focus ignoré.", hwnd.0));
+                        continue;
+                    }
                     println!("[Actions] Focus sur l'élément [HWND {:?}] pour '{}'", hwnd.0, target_name);
                     let is_browser = user_windows.iter().find(|(h, t)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
                     let show_mode = if is_browser { SW_MAXIMIZE } else { SW_RESTORE };
@@ -2398,6 +2664,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 };
 
                 if let Some(hwnd) = target_hwnd {
+                    if is_window_hung(hwnd) {
+                        feedback.push(format!("Fenêtre cible [HWND {:?}] non réactive (sablier). Effacement ignoré.", hwnd.0));
+                        continue;
+                    }
                     if let Some(t) = target.as_deref().filter(|s| !s.trim().is_empty()) {
                         force_foreground_window(hwnd);
                         unsafe {
@@ -2450,6 +2720,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 let mut handled = false;
 
                 if is_address_bar {
+                    if let Some(h) = target_hwnd.filter(|&h| is_window_hung(h)) {
+                        feedback.push(format!("Navigateur [HWND {:?}] non réactif (sablier). Écriture ignorée.", h.0));
+                        continue;
+                    }
                     if let Some(hwnd) = target_hwnd {
                         let win_title = user_windows.iter().find(|(h, _)| *h == hwnd).map(|(_, t)| t.as_str()).unwrap_or("Navigateur");
                         let is_browser = is_browser_hwnd(hwnd, win_title);
@@ -2480,6 +2754,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     };
 
                     if let Some((hwnd, elem)) = largest_target {
+                        if is_window_hung(hwnd) {
+                            feedback.push(format!("Fenêtre cible [HWND {:?}] non réactive. Écriture ignorée.", hwnd.0));
+                            continue;
+                        }
                         println!("[Actions] Sélection de la plus grande zone de texte à l'écran : [HWND {:?}] name='{}', id='{}', area={}, clic en ({}, {})", hwnd.0, elem.name, elem.automation_id, elem.area, elem.click_x, elem.click_y);
                         force_foreground_window(hwnd);
                         unsafe {
@@ -2496,6 +2774,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         handled = true;
                     }
                 } else if let (Some(hwnd), Some(target_desc)) = (target_hwnd, target_desc_opt) {
+                    if is_window_hung(hwnd) {
+                        feedback.push(format!("Fenêtre [HWND {:?}] non réactive. Écriture ignorée.", hwnd.0));
+                        continue;
+                    }
                     force_foreground_window(hwnd);
                     unsafe {
                         let _ = ShowWindow(hwnd, SW_RESTORE);
@@ -2563,6 +2845,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 let mut handled = false;
                 if is_address_bar {
                     if let Some(hwnd) = target_hwnd {
+                        if is_window_hung(hwnd) {
+                            feedback.push(format!("Navigateur [HWND {:?}] non réactif. Remplacement ignoré.", hwnd.0));
+                            continue;
+                        }
                         let win_title = user_windows.iter().find(|(h, _)| *h == hwnd).map(|(_, t)| t.as_str()).unwrap_or("Navigateur");
                         let is_browser = is_browser_hwnd(hwnd, win_title);
                         println!("[Actions] Remplacement d'url barre d'adresse sur [HWND {:?}] '{}'", hwnd.0, win_title);
@@ -2592,6 +2878,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     };
 
                     if let Some((hwnd, elem)) = largest_target {
+                        if is_window_hung(hwnd) {
+                            feedback.push(format!("Fenêtre [HWND {:?}] non réactive. Remplacement ignoré.", hwnd.0));
+                            continue;
+                        }
                         println!("[Actions] Remplacement dans la plus grande zone de texte : [HWND {:?}], area={}, clic en ({}, {})", hwnd.0, elem.area, elem.click_x, elem.click_y);
                         force_foreground_window(hwnd);
                         unsafe {
@@ -2612,6 +2902,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         handled = true;
                     }
                 } else if let (Some(hwnd), Some(target_desc)) = (target_hwnd, target_desc_opt) {
+                    if is_window_hung(hwnd) {
+                        feedback.push(format!("Fenêtre [HWND {:?}] non réactive. Remplacement ignoré.", hwnd.0));
+                        continue;
+                    }
                     force_foreground_window(hwnd);
                     unsafe {
                         let _ = ShowWindow(hwnd, SW_RESTORE);
@@ -2662,12 +2956,17 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     .or_else(|| user_windows.iter().find(|(h, t)| is_browser_hwnd(*h, t)).map(|(h, _)| *h));
 
                 if let Some(hwnd) = existing_browser {
+                    if is_window_hung(hwnd) {
+                        feedback.push(format!("Navigateur [HWND {:?}] ne répond pas. Ouverture d'une nouvelle instance.", hwnd.0));
+                        launch_browser_new_window(&target);
+                    } else {
                     println!("[Actions] Navigateur ouvert trouvé [HWND {:?}], navigation via barre d'adresse vers : {}", hwnd.0, target);
                     force_foreground_window(hwnd);
                     unsafe {
                         let _ = ShowWindow(hwnd, SW_MAXIMIZE);
                     }
                     navigate_browser_address_bar(hwnd, &target);
+                    }
                 } else {
                     println!("[Actions] Aucun navigateur ouvert trouvé, ouverture d'une nouvelle fenêtre vers : {}", target);
                     launch_browser_new_window(&target);
