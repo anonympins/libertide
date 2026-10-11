@@ -566,8 +566,12 @@ impl OverlayApp {
 
 impl eframe::App for OverlayApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        // Fond transparent pour laisser transparaître l'arrière-plan sur les 70 % supérieurs
-        [0.0, 0.0, 0.0, 0.0]
+        if self.is_hidden {
+            [0.0, 0.0, 0.0, 0.0]
+        } else {
+            // Fond noir à 75 % d'opacité
+            [0.0, 0.0, 0.0, 0.75]
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
