@@ -177,6 +177,12 @@ pub enum AgentAction {
         #[serde(default)]
         window: Option<String>,
     },
+    ReadEditorContent {
+        #[serde(default)]
+        window: Option<String>,
+        #[serde(default, alias = "target_name")]
+        target: Option<String>,
+    },
     ActivateImmersion {
         #[serde(default)]
         apps: Vec<String>,
@@ -221,6 +227,7 @@ impl QuickSuggestionItem {
                 AgentAction::ClickButton { button_name, .. } => Some(format!("Cliquer {button_name}")),
                 AgentAction::CloseApp { name } => Some(format!("Fermer {name}")),
                 AgentAction::Scroll { direction, .. } => Some(format!("Faire défiler ({direction})")),
+                AgentAction::ReadEditorContent { window, .. } => Some(format!("Lire le fichier ({})", window.as_deref().unwrap_or("éditeur"))),
                 _ => None,
             },
         }

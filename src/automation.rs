@@ -2,7 +2,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::fs_util::{create_temp_note_file, find_executable_in_path};
+use crate::fs_util::{create_temp_note_file, find_executable_in_path, find_file_in_workspace};
 use crate::pattern::{clean_words, extract_target_propositions, matches_pattern};
 use crate::types::{AgentAction, QuickSuggestionItem};
 use crate::window_util::*;
@@ -20,18 +20,19 @@ use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationElement2, IUIAutomationInvokePattern,
     IUIAutomationScrollItemPattern, IUIAutomationTextPattern, IUIAutomationValuePattern,
     TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+    UIA_TabControlTypeId, UIA_TabItemControlTypeId,
     UIA_HyperlinkControlTypeId, UIA_InvokePatternId, UIA_ScrollItemPatternId, UIA_TextPatternId, UIA_ValuePatternId,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     mouse_event, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_WHEEL,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_WHEEL,
     MOUSEEVENTF_LEFTUP, MOUSEINPUT, VIRTUAL_KEY,
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetForegroundWindow, GetWindowRect, IsIconic,
-    PostMessageW, SetCursorPos, SetForegroundWindow, ShowWindow,
+    PostMessageW, SendMessageW, SetCursorPos, SetForegroundWindow, ShowWindow,
     SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE,
 };
 
@@ -61,6 +62,8 @@ mod clipboard {
         fn CloseClipboard() -> i32;
         fn EmptyClipboard() -> i32;
         fn SetClipboardData(uformat: u32, hmem: *mut c_void) -> *mut c_void;
+        fn GetClipboardData(uformat: u32) -> *mut c_void;
+        fn IsClipboardFormatAvailable(uformat: u32) -> i32;
         fn GlobalAlloc(uflags: u32, dwbytes: usize) -> *mut c_void;
         fn GlobalLock(hmem: *mut c_void) -> *mut c_void;
         fn GlobalUnlock(hmem: *mut c_void) -> i32;
@@ -99,6 +102,157 @@ mod clipboard {
         }
         true
     }
+
+    pub fn get_text() -> Option<String> {
+        unsafe {
+            let mut opened = false;
+            for _ in 0..10 {
+                if OpenClipboard(std::ptr::null_mut()) != 0 {
+                    opened = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            if !opened {
+                return None;
+            }
+
+            if IsClipboardFormatAvailable(CF_UNICODETEXT) == 0 {
+                let _ = CloseClipboard();
+                return None;
+            }
+
+            let h_mem = GetClipboardData(CF_UNICODETEXT);
+            if h_mem.is_null() {
+                let _ = CloseClipboard();
+                return None;
+            }
+
+            let p_data = GlobalLock(h_mem) as *const u16;
+            if p_data.is_null() {
+                let _ = CloseClipboard();
+                return None;
+            }
+
+            let mut len = 0;
+            while *p_data.add(len) != 0 {
+                len += 1;
+            }
+            let slice = std::slice::from_raw_parts(p_data, len);
+            let s = String::from_utf16_lossy(slice);
+            let _ = GlobalUnlock(h_mem);
+            let _ = CloseClipboard();
+            Some(s)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn extract_terminal_uia_text(hwnd: HWND) -> Option<String> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let uia: Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
+        let Ok(uia) = uia else {
+            return None;
+        };
+        let Ok(window_element) = uia.ElementFromHandle(hwnd) else {
+            return None;
+        };
+
+        // 1. Tenter le TextPattern directement sur la fenêtre
+        if let Ok(pattern_unk) = window_element.GetCurrentPattern(UIA_TextPatternId) {
+            if let Ok(text_pattern) = pattern_unk.cast::<IUIAutomationTextPattern>() {
+                if let Ok(range) = text_pattern.DocumentRange() {
+                    if let Ok(bstr) = range.GetText(15000) {
+                        let s = bstr.to_string();
+                        let trimmed = s.trim();
+                        if !trimmed.is_empty() {
+                            return Some(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Parcourir les descendants pour trouver le composant console (ex: TermControl dans Windows Terminal)
+        let Ok(cond) = uia.CreateTrueCondition() else {
+            return None;
+        };
+        let Ok(elements) = window_element.FindAll(TreeScope_Descendants, &cond) else {
+            return None;
+        };
+
+        let count = elements.Length().unwrap_or(0).min(60);
+        for i in 0..count {
+            if let Ok(item) = elements.GetElement(i) {
+                let class_name = item.CurrentClassName().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+                let loc_type = item.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+                let is_term = class_name.contains("termcontrol")
+                    || class_name.contains("console")
+                    || loc_type.contains("terminal")
+                    || loc_type.contains("document")
+                    || loc_type.contains("edit");
+
+                if is_term {
+                    if let Ok(pattern_unk) = item.GetCurrentPattern(UIA_TextPatternId) {
+                        if let Ok(text_pattern) = pattern_unk.cast::<IUIAutomationTextPattern>() {
+                            if let Ok(range) = text_pattern.DocumentRange() {
+                                if let Ok(bstr) = range.GetText(15000) {
+                                    let s = bstr.to_string();
+                                    let trimmed = s.trim();
+                                    if !trimmed.is_empty() {
+                                        return Some(trimmed.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+pub fn read_terminal_window_content(hwnd: HWND, _win_title: &str) -> Option<String> {
+    if is_putty_window(hwnd) {
+        if let Some(text) = read_putty_terminal_content(hwnd) {
+            return Some(text);
+        }
+    }
+    extract_terminal_uia_text(hwnd)
+}
+
+#[cfg(not(windows))]
+pub fn read_terminal_window_content(_hwnd: (), _win_title: &str) -> Option<String> {
+    None
+}
+
+#[cfg(windows)]
+pub fn read_putty_terminal_content(hwnd: HWND) -> Option<String> {
+    const WM_SYSCOMMAND: u32 = 0x0112;
+    const IDM_COPYALL: usize = 0x0170;
+
+    let old_clip = clipboard::get_text();
+    unsafe {
+        SendMessageW(hwnd, WM_SYSCOMMAND, WPARAM(IDM_COPYALL), LPARAM(0));
+    }
+    std::thread::sleep(Duration::from_millis(60));
+
+    let new_clip = clipboard::get_text();
+    if let Some(text) = new_clip {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() && (old_clip.as_deref() != Some(&text) || !trimmed.is_empty()) {
+            return Some(text);
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+pub fn read_putty_terminal_content(_hwnd: ()) -> Option<String> {
+    None
 }
 
 #[cfg(windows)]
@@ -181,6 +335,87 @@ fn send_paste() {
     send_key_event(VK_V, KEYEVENTF_KEYUP);
     std::thread::sleep(Duration::from_millis(20));
     send_key_event(VK_CONTROL, KEYEVENTF_KEYUP);
+}
+
+#[cfg(windows)]
+fn send_char_unicode(c: char) {
+    let mut utf16_buf = [0u16; 2];
+    let encoded = c.encode_utf16(&mut utf16_buf);
+    for &mut u in encoded {
+        let down = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(0),
+                    wScan: u,
+                    dwFlags: KEYEVENTF_UNICODE,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        let up = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(0),
+                    wScan: u,
+                    dwFlags: KEYBD_EVENT_FLAGS(KEYEVENTF_UNICODE.0 | KEYEVENTF_KEYUP.0),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        unsafe {
+            SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn send_terminal_input(hwnd: HWND, text: &str, auto_enter: bool) {
+    const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
+    const VK_SHIFT: VIRTUAL_KEY = VIRTUAL_KEY(0x10);
+    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+    const VK_INSERT: VIRTUAL_KEY = VIRTUAL_KEY(0x2D);
+    const VK_V: VIRTUAL_KEY = VIRTUAL_KEY(0x56);
+
+    let trimmed = text.trim_end_matches(['\r', '\n']);
+    let has_trailing_newline = text.ends_with('\n') || text.ends_with('\r');
+    let should_press_enter = auto_enter || has_trailing_newline;
+
+    // 1. Saisie directe de caractères Unicode : infaillible sur tous les terminaux
+    // sans dépendre du presse-papiers ni des raccourcis clavier propres à une application.
+    if trimmed.chars().count() <= 1200 {
+        for c in trimmed.chars() {
+            if c == '\n' || c == '\r' {
+                send_hotkey(&[], VK_RETURN);
+                std::thread::sleep(Duration::from_millis(20));
+            } else {
+                send_char_unicode(c);
+                std::thread::sleep(Duration::from_millis(3));
+            }
+        }
+    } else {
+        // 2. Pour les très gros textes : collage adapté au type de terminal
+        clipboard::set_text(trimmed);
+        std::thread::sleep(Duration::from_millis(40));
+
+        if is_windows_terminal(hwnd) {
+            send_hotkey(&[VK_CONTROL, VK_SHIFT], VK_V);
+        } else if is_putty_window(hwnd) {
+            send_hotkey(&[VK_SHIFT], VK_INSERT);
+        } else {
+            // ConHost / CMD / PowerShell / MinTTY
+            send_hotkey(&[VK_SHIFT], VK_INSERT);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    if should_press_enter {
+        std::thread::sleep(Duration::from_millis(40));
+        send_hotkey(&[], VK_RETURN);
+    }
 }
 
 #[cfg(windows)]
@@ -347,6 +582,7 @@ struct UiaElementInfo {
     is_input: bool,
     is_button: bool,
     is_link: bool,
+    is_tab: bool,
     is_focusable: bool,
     is_tabindex: bool,
     is_web_content: bool,
@@ -511,7 +747,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
             return results;
         };
 
-        let count = elements.Length().unwrap_or(0).clamp(0, 1200);
+        let count = elements.Length().unwrap_or(0).clamp(0, 3000);
 
         // Délimitation géométrique du document web par rapport à la fenêtre
         let mut doc_rect: Option<RECT> = None;
@@ -542,21 +778,54 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
 
         for i in 0..count {
             if let Ok(item) = elements.GetElement(i) {
-                let is_offscreen = item.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false);
-                if is_offscreen {
-                    continue;
-                }
                 let rect = item.CurrentBoundingRectangle().unwrap_or_default();
                 let width = rect.right - rect.left;
                 let height = rect.bottom - rect.top;
                 if width > 4 && height > 4 {
                     let ctype = item.CurrentControlType().unwrap_or_default();
-                    let is_edit_type = ctype == UIA_EditControlTypeId || ctype == UIA_DocumentControlTypeId;
                     let class_name = item.CurrentClassName().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
                     let loc_type = item.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
                     let raw_name = item.CurrentName().map(|b| b.to_string()).unwrap_or_default();
                     let mut name = raw_name.trim().to_string();
                     let automation_id = item.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default();
+
+                    let is_swing_tab_class = class_name.contains("editortabs")
+                        || class_name.contains("jbtabs")
+                        || class_name.contains("tablabel")
+                        || class_name.contains("singlerowlayout");
+
+                    let has_source_ext = {
+                        let n = name.to_lowercase();
+                        n.ends_with(".rs")
+                            || n.ends_with(".toml")
+                            || n.ends_with(".json")
+                            || n.ends_with(".md")
+                            || n.ends_with(".txt")
+                            || n.ends_with(".js")
+                            || n.ends_with(".ts")
+                            || n.ends_with(".py")
+                            || n.ends_with(".java")
+                            || n.ends_with(".c")
+                            || n.ends_with(".cpp")
+                    };
+
+                    let is_top_editor_area = doc_rect.map_or(rect.top < 350, |dr| rect.top <= dr.top + 80);
+
+                    let is_tab_candidate = ctype == UIA_TabItemControlTypeId
+                        || ctype == UIA_TabControlTypeId
+                        || loc_type.contains("onglet")
+                        || loc_type.contains("tab")
+                        || class_name.contains("tab")
+                        || automation_id.to_lowercase().contains("tab")
+                        || is_swing_tab_class
+                        || (has_source_ext && is_top_editor_area && height < 50);
+
+                    let is_offscreen = item.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false);
+                    if is_offscreen && !is_tab_candidate {
+                        continue;
+                    }
+                    let ctype = item.CurrentControlType().unwrap_or_default();
+                    let is_edit_type = ctype == UIA_EditControlTypeId || ctype == UIA_DocumentControlTypeId;
                     let help_text = item.CurrentHelpText().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
                     let item_type = item.CurrentItemType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
                     let item_status = item.CurrentItemStatus().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
@@ -653,6 +922,8 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || loc_type.contains("hyperlink")
                         || is_role_link;
 
+                    let mut is_tab = is_tab_candidate;
+
                     let (is_web_content, is_browser_chrome) = match doc_rect {
                         Some(dr) => {
                             if rect.bottom <= (dr.top + 5) {
@@ -689,10 +960,25 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     }
 
                     const MAX_INTERACTIVE_TEXT_LEN: usize = 110;
-                    if (name.is_empty() || is_tabindex) && (is_link || is_button || is_tabindex || is_focusable) {
+                    if (name.is_empty() || is_tabindex) && (is_link || is_button || is_tab || is_tabindex || is_focusable) {
                         if let Some(txt) = extract_inner_text(&uia, &item, MAX_INTERACTIVE_TEXT_LEN) {
                             if name.is_empty() {
                                 name = txt;
+                                if !is_tab {
+                                    let n_low = name.to_lowercase();
+                                    let has_ext = n_low.ends_with(".rs")
+                                        || n_low.ends_with(".toml")
+                                        || n_low.ends_with(".json")
+                                        || n_low.ends_with(".md")
+                                        || n_low.ends_with(".txt")
+                                        || n_low.ends_with(".py")
+                                        || n_low.ends_with(".java")
+                                        || n_low.ends_with(".js")
+                                        || n_low.ends_with(".ts");
+                                    if has_ext && is_top_editor_area && height < 50 {
+                                        is_tab = true;
+                                    }
+                                }
                             } else if is_tabindex && name != txt && !name.contains(&txt) {
                                 let combined = format!("{name} {txt}");
                                 name = combined.chars().take(MAX_INTERACTIVE_TEXT_LEN).collect();
@@ -705,7 +991,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     }
 
                     if name.is_empty() && aria_label.is_empty() && automation_id.is_empty() && help_text.is_empty() && value_text.is_empty()
-                        && !is_edit_or_textarea && !is_button && !is_link && !is_focusable && !is_tabindex {
+                        && !is_edit_or_textarea && !is_button && !is_link && !is_tab && !is_focusable && !is_tabindex {
                         continue;
                     }
 
@@ -732,6 +1018,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         is_input,
                         is_button,
                         is_link,
+                        is_tab,
                         is_focusable,
                         is_tabindex,
                         is_web_content,
@@ -745,6 +1032,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                 }
             }
         }
+        results.sort_by_key(|e| !e.is_tab);
     }
     results
 }
@@ -953,11 +1241,45 @@ pub fn run_system_command(command: &str) -> bool {
     if trimmed.is_empty() {
         return false;
     }
-    std::process::Command::new("cmd")
-        .args(["/C", trimmed])
-        .creation_flags(CREATE_NEW_CONSOLE)
-        .spawn()
-        .is_ok()
+
+    let mut process = std::process::Command::new("cmd.exe");
+    process.creation_flags(CREATE_NEW_CONSOLE);
+
+    let mut cur = trimmed;
+
+    // 1. Déballage des préfixes "cmd.exe /c" ou "cmd /c" superflus
+    if cur.len() >= 11 && cur[..11].eq_ignore_ascii_case("cmd.exe /c ") {
+        cur = cur[11..].trim();
+    } else if cur.len() >= 7 && cur[..7].eq_ignore_ascii_case("cmd /c ") {
+        cur = cur[7..].trim();
+    }
+
+    // 2. Déballage d'un éventuel "start \"\" " ou "start "
+    if cur.len() >= 9 && cur[..9].eq_ignore_ascii_case("start \"\" ") {
+        cur = cur[9..].trim();
+    } else if cur.len() >= 6 && cur[..6].eq_ignore_ascii_case("start ") {
+        cur = cur[6..].trim();
+    }
+
+    // 3. Détection de /k (maintien de l'invite ouverte) ou /c (exécution puis fermeture)
+    if cur.len() >= 11 && cur[..11].eq_ignore_ascii_case("cmd.exe /k ") {
+        let rest = cur[11..].trim();
+        process.raw_arg(format!("/K {rest}"));
+    } else if cur.len() >= 7 && cur[..7].eq_ignore_ascii_case("cmd /k ") {
+        let rest = cur[7..].trim();
+        process.raw_arg(format!("/K {rest}"));
+    } else if cur.len() >= 11 && cur[..11].eq_ignore_ascii_case("cmd.exe /c ") {
+        let rest = cur[11..].trim();
+        process.raw_arg(format!("/C {rest}"));
+    } else if cur.len() >= 7 && cur[..7].eq_ignore_ascii_case("cmd /c ") {
+        let rest = cur[7..].trim();
+        process.raw_arg(format!("/C {rest}"));
+    } else {
+        // raw_arg préserve intacts les guillemets et les opérateurs shell (&&, |, etc.)
+        process.raw_arg(format!("/C {cur}"));
+    }
+
+    process.spawn().is_ok()
 }
 
 #[cfg(not(windows))]
@@ -1009,6 +1331,24 @@ pub fn write_to_browser_or_txt(text: &str) -> String {
     let active_hwnd = get_active_or_best_window(&user_windows);
 
     if let Some(target_hwnd) = active_hwnd {
+        let win_title = user_windows
+            .iter()
+            .find(|(h, _)| *h == target_hwnd)
+            .map(|(_, t)| t.as_str())
+            .unwrap_or("");
+        if is_terminal_window(target_hwnd, win_title) {
+            force_foreground_window(target_hwnd);
+            unsafe { let _ = ShowWindow(target_hwnd, SW_RESTORE); }
+            std::thread::sleep(Duration::from_millis(60));
+            let auto_enter = text.ends_with('\n') || text.ends_with('\r');
+            send_terminal_input(target_hwnd, text, auto_enter);
+            return if auto_enter {
+                "Commande envoyée et validée dans le terminal actif.".to_string()
+            } else {
+                "Texte inséré dans le terminal actif.".to_string()
+            };
+        }
+
         force_foreground_window(target_hwnd);
         unsafe {
             let _ = ShowWindow(target_hwnd, SW_RESTORE);
@@ -1560,7 +1900,9 @@ fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option
 
             score_element(elem, target).map(|score| {
                 let mut final_score = score;
-                if elem.is_link {
+                if elem.is_tab {
+                    final_score += 80.0;
+                } else if elem.is_link {
                     final_score += 40.0;
                 } else if elem.is_tabindex {
                     final_score += 35.0;
@@ -1963,6 +2305,17 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
 
         let initial_elements = list_interactive_elements(*hwnd);
         let is_browser = is_browser_hwnd(*hwnd, win_title);
+        let (_pid, exe_name) = get_window_process_info(*hwnd);
+        let is_editor = is_editor_window(*hwnd, win_title, &exe_name);
+        let detected_file = extract_filename_from_title(win_title);
+        let is_terminal = is_terminal_window(*hwnd, win_title);
+
+        if is_terminal {
+            if let Some(term_text) = read_terminal_window_content(*hwnd, win_title) {
+                let preview = truncate_with_notice(&term_text, 2200);
+                out.push_str(&format!("  [Terminal '{}' - Sortie console active] :\n```\n{}\n```\n", win_title, preview.trim()));
+            }
+        }
         let has_scrollbar = initial_elements.iter().any(|e| {
             e.class_name.contains("scrollbar")
                 || e.localized_type.contains("scrollbar")
@@ -2033,7 +2386,22 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
         }
 
         if elements.is_empty() {
+            if let Some(ref fname) = detected_file {
+                if let Some((fpath, fcontent)) = find_file_in_workspace(fname) {
+                    let lines_count = fcontent.lines().count();
+                    let chars_count = fcontent.chars().count();
+                    out.push_str(&format!("  [Fichier actif dans l'éditeur] : \"{}\" (chemin: {})\n", fname, fpath));
+                    out.push_str(&format!("  [Statistiques code] : {} lignes, {} caractères\n", lines_count, chars_count));
+                    let preview = truncate_with_notice(&fcontent, 2200);
+                    out.push_str(&format!("  [Aperçu du contenu du code] :\n```\n{}\n```\n", preview.trim()));
+                } else {
+                    out.push_str(&format!("  [Fichier actif détecté d'après le titre] : \"{}\"\n", fname));
+                }
+            } else if is_terminal {
+                // Déjà renseigné plus haut via read_terminal_window_content
+            } else {
             out.push_str("  (Aucun élément UI interactif accessible)\n");
+            }
             continue;
         }
 
@@ -2054,6 +2422,32 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
                 .collect();
             if !chrome_controls.is_empty() {
                 out.push_str(&format!("  [Interface navigateur] : {}\n", chrome_controls.join(" | ")));
+            }
+        }
+
+        let mut tabs: Vec<String> = elements
+            .iter()
+            .filter(|e| !e.name.is_empty() && (e.is_tab || e.localized_type.contains("onglet") || e.localized_type.contains("tab")))
+            .map(|e| e.name.clone())
+            .collect();
+        tabs.dedup();
+        if !tabs.is_empty() {
+            let display_tabs: Vec<String> = tabs.into_iter().take(20).collect();
+            out.push_str(&format!("  [Onglets / pages ouvertes] : {}\n", display_tabs.join(" | ")));
+        }
+
+        if is_editor || detected_file.is_some() {
+            if let Some(ref fname) = detected_file {
+                if let Some((fpath, fcontent)) = find_file_in_workspace(fname) {
+                    let lines_count = fcontent.lines().count();
+                    let chars_count = fcontent.chars().count();
+                    out.push_str(&format!("  [Fichier actif dans l'éditeur] : \"{}\" (chemin: {})\n", fname, fpath));
+                    out.push_str(&format!("  [Statistiques code] : {} lignes, {} caractères\n", lines_count, chars_count));
+                    let preview = truncate_with_notice(&fcontent, 2200);
+                    out.push_str(&format!("  [Aperçu du contenu du code] :\n```\n{}\n```\n", preview.trim()));
+                } else {
+                    out.push_str(&format!("  [Fichier actif détecté d'après le titre] : \"{}\"\n", fname));
+                }
             }
         }
 
@@ -2078,17 +2472,6 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
                 };
                 out.push_str(&format!("  • {}{}\n", label, val));
             }
-        }
-
-        let mut tabs: Vec<String> = elements
-            .iter()
-            .filter(|e| !e.name.is_empty() && (e.localized_type.contains("onglet") || e.localized_type.contains("tab")))
-            .map(|e| e.name.clone())
-            .collect();
-        tabs.dedup();
-        if !tabs.is_empty() {
-            let display_tabs: Vec<String> = tabs.into_iter().take(8).collect();
-            out.push_str(&format!("  [Onglets / pages ouvertes] : {}\n", display_tabs.join(" | ")));
         }
 
         let raw_links: Vec<String> = elements
@@ -2178,6 +2561,8 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
                         || e.name.to_lowercase().contains("close"))
                     && e.name.len() <= 120
                     && e.name.split_whitespace().count() <= 15
+                    && !e.name.eq_ignore_ascii_case("système")
+                    && !e.name.eq_ignore_ascii_case("system")
             })
             .map(|e| {
                 let base = if !e.name.is_empty() {
@@ -2212,7 +2597,11 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
         }
     }
 
-    truncate_with_notice(&out, 4500)
+    let summary = truncate_with_notice(&out, 4500);
+    println!("\n=================== [Analyse d'écran UIA] ===================");
+    println!("{}", summary.trim());
+    println!("============================================================\n");
+    summary
 }
 
 #[cfg(not(windows))]
@@ -2341,9 +2730,9 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
     let wa_w = (work_area.right - work_area.left).max(800);
     let wa_h = (work_area.bottom - work_area.top).max(600);
 
-    let user_windows = list_user_windows();
-    let active_user_hwnd = get_active_or_best_window(&user_windows);
-    let preferred_target_hwnd = newly_spawned_hwnd.or(active_user_hwnd);
+    let mut user_windows = list_user_windows();
+    let mut active_user_hwnd = get_active_or_best_window(&user_windows);
+    let mut preferred_target_hwnd = newly_spawned_hwnd.or(active_user_hwnd);
 
     for (idx, action) in actions.iter().enumerate() {
         if is_request_cancelled(request_id) {
@@ -2351,6 +2740,16 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
             feedback.push("Séquence d'actions interrompue par une nouvelle consigne.".to_string());
             break;
         }
+
+        // Réactualisation dynamique du premier plan réel entre chaque action
+        let fg = unsafe { GetForegroundWindow() };
+        let overlay_hwnd = unsafe {
+            FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()))
+        };
+        if !fg.0.is_null() && fg != overlay_hwnd && !is_window_hung(fg) {
+            active_user_hwnd = Some(fg);
+        }
+
         println!("[Actions] [{}/{}] Action en cours : {:?}", idx + 1, actions.len(), action);
         match action {
             AgentAction::OpenApp { .. } => {}
@@ -2405,6 +2804,8 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         unsafe {
                             let _ = ShowWindow(hwnd, SW_RESTORE);
                         }
+                        active_user_hwnd = Some(hwnd);
+                        preferred_target_hwnd = Some(hwnd);
                         feedback.push(format!("Fenêtre passée au premier plan [HWND {:?}].", hwnd.0));
                     }
                 } else {
@@ -2695,9 +3096,30 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 }
             }
             AgentAction::RunCommand { command } => {
+                let initial_hwnds: std::collections::HashSet<isize> = user_windows
+                    .iter()
+                    .map(|(h, _)| h.0 as isize)
+                    .collect();
+
                 let ok = run_system_command(command);
                 let status = if ok { "exécutée avec succès" } else { "échec d'exécution" };
                 feedback.push(format!("Commande système '{}' ({status}).", command));
+
+                if ok {
+                    for _ in 0..15 {
+                        if is_request_cancelled(request_id) { break; }
+                        std::thread::sleep(Duration::from_millis(80));
+                        let current_windows = list_user_windows();
+                        if let Some((new_hwnd, _)) = current_windows.iter().find(|(h, _)| !initial_hwnds.contains(&(h.0 as isize))) {
+                            force_foreground_window(*new_hwnd);
+                            unsafe { let _ = ShowWindow(*new_hwnd, SW_RESTORE); }
+                            active_user_hwnd = Some(*new_hwnd);
+                            preferred_target_hwnd = Some(*new_hwnd);
+                            user_windows = current_windows;
+                            break;
+                        }
+                    }
+                }
             }
             AgentAction::WriteText { text, target, window } => {
                 let target_desc_opt = target.as_deref().filter(|s| !s.trim().is_empty());
@@ -2719,27 +3141,55 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
 
                 let mut handled = false;
 
-                if is_address_bar {
-                    if let Some(h) = target_hwnd.filter(|&h| is_window_hung(h)) {
-                        feedback.push(format!("Navigateur [HWND {:?}] non réactif (sablier). Écriture ignorée.", h.0));
-                        continue;
-                    }
-                    if let Some(hwnd) = target_hwnd {
-                        let win_title = user_windows.iter().find(|(h, _)| *h == hwnd).map(|(_, t)| t.as_str()).unwrap_or("Navigateur");
-                        let is_browser = is_browser_hwnd(hwnd, win_title);
-                        println!("[Actions] Ciblage barre d'adresse sur [HWND {:?}] '{}'", hwnd.0, win_title);
-                        force_foreground_window(hwnd);
-                        unsafe {
-                            let _ = ShowWindow(hwnd, if is_browser { SW_MAXIMIZE } else { SW_RESTORE });
+                let candidate_hwnd = target_hwnd.or(active_user_hwnd).or(preferred_target_hwnd);
+                if let Some(hwnd) = candidate_hwnd {
+                    let win_title = user_windows
+                        .iter()
+                        .find(|(h, _)| *h == hwnd)
+                        .map(|(_, t)| t.as_str())
+                        .unwrap_or("");
+                    if is_terminal_window(hwnd, win_title) {
+                        if is_window_hung(hwnd) {
+                            feedback.push(format!("Terminal [HWND {:?}] non réactif. Écriture ignorée.", hwnd.0));
+                            continue;
                         }
-                        std::thread::sleep(Duration::from_millis(50));
-                        navigate_browser_address_bar(hwnd, text);
-                        handled = true;
-                    } else {
-                        println!("[Actions] Aucun navigateur ouvert trouvé, ouverture d'une nouvelle fenêtre pour : {}", text);
-                        launch_browser_new_window(text);
+                        force_foreground_window(hwnd);
+                        unsafe { let _ = ShowWindow(hwnd, SW_RESTORE); }
+                        std::thread::sleep(Duration::from_millis(60));
+                        let auto_enter = text.ends_with('\n') || text.ends_with('\r');
+                        send_terminal_input(hwnd, text, auto_enter);
+                        println!("[Actions] Texte inséré dans le terminal [HWND {:?}] '{}'", hwnd.0, win_title);
+                        if auto_enter {
+                            feedback.push(format!("Commande envoyée et validée dans le terminal '{}'.", win_title));
+                        } else {
+                            feedback.push(format!("Texte inséré dans le terminal '{}'.", win_title));
+                        }
                         handled = true;
                     }
+                }
+
+                if !handled {
+                    if is_address_bar {
+                        if let Some(h) = target_hwnd.filter(|&h| is_window_hung(h)) {
+                            feedback.push(format!("Navigateur [HWND {:?}] non réactif (sablier). Écriture ignorée.", h.0));
+                            continue;
+                        }
+                        if let Some(hwnd) = target_hwnd {
+                            let win_title = user_windows.iter().find(|(h, _)| *h == hwnd).map(|(_, t)| t.as_str()).unwrap_or("Navigateur");
+                            let is_browser = is_browser_hwnd(hwnd, win_title);
+                            println!("[Actions] Ciblage barre d'adresse sur [HWND {:?}] '{}'", hwnd.0, win_title);
+                            force_foreground_window(hwnd);
+                            unsafe {
+                                let _ = ShowWindow(hwnd, if is_browser { SW_MAXIMIZE } else { SW_RESTORE });
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
+                            navigate_browser_address_bar(hwnd, text);
+                            handled = true;
+                        } else {
+                            println!("[Actions] Aucun navigateur ouvert trouvé, ouverture d'une nouvelle fenêtre pour : {}", text);
+                            launch_browser_new_window(text);
+                            handled = true;
+                        }
                 } else if is_generic {
                     let largest_target = if let Some(hwnd) = window.as_deref().and_then(|w| {
                         if !w.trim().is_empty() {
@@ -2817,6 +3267,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         }
                     }
                 }
+                }
 
                 if !handled {
                     println!("[Actions] Repli d'écriture dans le document ou fenêtre de repli");
@@ -2843,27 +3294,56 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 };
 
                 let mut handled = false;
-                if is_address_bar {
-                    if let Some(hwnd) = target_hwnd {
+
+                let candidate_hwnd = target_hwnd.or(active_user_hwnd).or(preferred_target_hwnd);
+                if let Some(hwnd) = candidate_hwnd {
+                    let win_title = user_windows
+                        .iter()
+                        .find(|(h, _)| *h == hwnd)
+                        .map(|(_, t)| t.as_str())
+                        .unwrap_or("");
+                    if is_terminal_window(hwnd, win_title) {
                         if is_window_hung(hwnd) {
-                            feedback.push(format!("Navigateur [HWND {:?}] non réactif. Remplacement ignoré.", hwnd.0));
+                            feedback.push(format!("Terminal [HWND {:?}] non réactif. Remplacement ignoré.", hwnd.0));
                             continue;
                         }
-                        let win_title = user_windows.iter().find(|(h, _)| *h == hwnd).map(|(_, t)| t.as_str()).unwrap_or("Navigateur");
-                        let is_browser = is_browser_hwnd(hwnd, win_title);
-                        println!("[Actions] Remplacement d'url barre d'adresse sur [HWND {:?}] '{}'", hwnd.0, win_title);
                         force_foreground_window(hwnd);
-                        unsafe {
-                            let _ = ShowWindow(hwnd, if is_browser { SW_MAXIMIZE } else { SW_RESTORE });
-                        }
+                        unsafe { let _ = ShowWindow(hwnd, SW_RESTORE); }
                         std::thread::sleep(Duration::from_millis(50));
-                        navigate_browser_address_bar(hwnd, text);
-                        handled = true;
-                    } else {
-                        println!("[Actions] Aucun navigateur ouvert trouvé, ouverture avec : {}", text);
-                        launch_browser_new_window(text);
+                        // Annulation de la commande courante
+                        const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+                        const VK_C: VIRTUAL_KEY = VIRTUAL_KEY(0x43);
+                        send_hotkey(&[VK_CONTROL], VK_C);
+                        std::thread::sleep(Duration::from_millis(50));
+                        let auto_enter = text.ends_with('\n') || text.ends_with('\r');
+                        send_terminal_input(hwnd, text, auto_enter);
+                        feedback.push(format!("Ligne réinitialisée et texte inséré dans le terminal '{}'.", win_title));
                         handled = true;
                     }
+                }
+
+                if !handled {
+                    if is_address_bar {
+                        if let Some(hwnd) = target_hwnd {
+                            if is_window_hung(hwnd) {
+                                feedback.push(format!("Navigateur [HWND {:?}] non réactif. Remplacement ignoré.", hwnd.0));
+                                continue;
+                            }
+                            let win_title = user_windows.iter().find(|(h, _)| *h == hwnd).map(|(_, t)| t.as_str()).unwrap_or("Navigateur");
+                            let is_browser = is_browser_hwnd(hwnd, win_title);
+                            println!("[Actions] Remplacement d'url barre d'adresse sur [HWND {:?}] '{}'", hwnd.0, win_title);
+                            force_foreground_window(hwnd);
+                            unsafe {
+                                let _ = ShowWindow(hwnd, if is_browser { SW_MAXIMIZE } else { SW_RESTORE });
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
+                            navigate_browser_address_bar(hwnd, text);
+                            handled = true;
+                        } else {
+                            println!("[Actions] Aucun navigateur ouvert trouvé, ouverture avec : {}", text);
+                            launch_browser_new_window(text);
+                            handled = true;
+                        }
                 } else if is_generic {
                     let largest_target = if let Some(hwnd) = window.as_deref().and_then(|w| {
                         if !w.trim().is_empty() {
@@ -2930,6 +3410,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         handled = true;
                     }
                 }
+            }
                 if !handled {
                     println!("[Actions] Repli de remplacement sur le champ actif");
                     let _ = replace_active_field_text(text);
@@ -3248,6 +3729,205 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     feedback.push(current_summary);
                 }
             }
+            AgentAction::ReadEditorContent { window, target } => {
+                let target_hwnd = match window.as_deref() {
+                    Some(w) if !w.trim().is_empty() => {
+                        find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
+                    }
+                    _ => preferred_target_hwnd.or(active_user_hwnd),
+                };
+
+                if let Some(hwnd) = target_hwnd {
+                    if is_window_hung(hwnd) {
+                        feedback.push(format!("Fenêtre cible [HWND {:?}] non réactive (sablier). Lecture impossible.", hwnd.0));
+                        continue;
+                    }
+
+                    let win_title = user_windows
+                        .iter()
+                        .find(|(h, _)| *h == hwnd)
+                        .map(|(_, t)| t.as_str())
+                        .unwrap_or("Éditeur");
+
+                    if is_terminal_window(hwnd, win_title) {
+                        if let Some(content) = read_terminal_window_content(hwnd, win_title) {
+                            let trimmed = content.trim();
+                            let char_count = trimmed.chars().count();
+                            feedback.push(format!(
+                                "[Contenu extrait du terminal '{}' ({} caractères)] :\n```\n{}\n```",
+                                win_title,
+                                char_count,
+                                truncate_with_notice(trimmed, 10000)
+                            ));
+                            continue;
+                        } else {
+                            feedback.push(format!("'{}' est un terminal : lecture automatique impossible sans buffer accessible.", win_title));
+                            continue;
+                        }
+                    }
+
+                    let (_pid, exe_name) = get_window_process_info(hwnd);
+                    let exe_lower = exe_name.to_lowercase();
+                    let title_lower = win_title.to_lowercase();
+                    let is_jetbrains = exe_lower.contains("idea")
+                        || exe_lower.contains("rustrover")
+                        || exe_lower.contains("clion")
+                        || exe_lower.contains("pycharm")
+                        || exe_lower.contains("rider")
+                        || exe_lower.contains("webstorm")
+                        || exe_lower.contains("goland")
+                        || exe_lower.contains("phpstorm")
+                        || exe_lower.contains("rubymine")
+                        || title_lower.contains("intellij")
+                        || title_lower.contains("rustrover");
+                    let is_vscode_or_similar = exe_lower.contains("code")
+                        || exe_lower.contains("vscodium")
+                        || exe_lower.contains("cursor")
+                        || exe_lower.contains("sublime")
+                        || exe_lower.contains("zed");
+
+                    force_foreground_window(hwnd);
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                    }
+                    std::thread::sleep(Duration::from_millis(80));
+
+                    // Résolution de la cible de fichier : explicite ou déduite du titre de la fenêtre
+                    let effective_target = target.clone().or_else(|| extract_filename_from_title(win_title));
+
+                    // Si un onglet ou élément précis est ciblé (ex: "main.rs", "config.json")
+                    let mut tab_clicked = false;
+                    if let Some(ref target_name) = effective_target.as_deref().filter(|s| !s.trim().is_empty()) {
+                        let elements = list_interactive_elements(hwnd);
+                        // Chercher en priorité absolue un onglet d'éditeur (tab / onglet)
+                        let tab_elem = elements.iter().find(|e| {
+                            let is_tab_ctrl = e.is_tab
+                                || e.localized_type.contains("tab")
+                                || e.localized_type.contains("onglet")
+                                || e.class_name.contains("tab")
+                                || e.automation_id.to_lowercase().contains("tab");
+                            if is_tab_ctrl {
+                                let name_lower = e.name.to_lowercase();
+                                let target_lower = target_name.to_lowercase();
+                                name_lower.contains(&target_lower) || target_lower.contains(&name_lower)
+                            } else {
+                                false
+                            }
+                        });
+
+                        if let Some(elem) = tab_elem {
+                            println!("[Actions] Sélection de l'onglet éditeur '{}' [class={}] avant lecture", elem.name, elem.class_name);
+                            unsafe { let _ = elem.element.SetFocus(); }
+                            click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
+                            std::thread::sleep(Duration::from_millis(150));
+                            // Clic juste sous l'onglet pour focaliser le panneau d'édition de code associé
+                            let body_x = elem.click_x;
+                            let body_y = elem.rect.bottom + 40;
+                            unsafe {
+                                let _ = SetCursorPos(body_x, body_y);
+                            }
+                            click_element(body_x, body_y, None, None);
+                            tab_clicked = true;
+                        } else if is_jetbrains || is_vscode_or_similar {
+                            println!("[Actions] Onglet non trouvé via UIA dans {}, tentative via raccourci de recherche de fichier pour '{}'", win_title, target_name);
+                            const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+                            const VK_SHIFT: VIRTUAL_KEY = VIRTUAL_KEY(0x10);
+                            const VK_N: VIRTUAL_KEY = VIRTUAL_KEY(0x4E);
+                            const VK_P: VIRTUAL_KEY = VIRTUAL_KEY(0x50);
+                            const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
+
+                            if is_jetbrains {
+                                send_hotkey(&[VK_CONTROL, VK_SHIFT], VK_N);
+                            } else {
+                                send_hotkey(&[VK_CONTROL], VK_P);
+                            }
+                            std::thread::sleep(Duration::from_millis(250));
+                            clipboard::set_text(target_name);
+                            std::thread::sleep(Duration::from_millis(40));
+                            send_paste();
+                            std::thread::sleep(Duration::from_millis(300));
+                            send_hotkey(&[], VK_RETURN);
+                            std::thread::sleep(Duration::from_millis(350));
+                            tab_clicked = true;
+                        } else if let Some(elem) = find_best_element(&elements, target_name) {
+                            println!("[Actions] Sélection de l'élément de repli '{}' avant lecture", target_name);
+                            unsafe { let _ = elem.element.SetFocus(); }
+                            click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                    }
+
+                    // Focus sur la zone d'édition principale
+                    if !tab_clicked {
+                        if let Some(elem) = find_largest_textarea(hwnd) {
+                            unsafe { let _ = elem.element.SetFocus(); }
+                            click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
+                            std::thread::sleep(Duration::from_millis(60));
+                        } else {
+                            // Clic au centre de la fenêtre pour donner le focus au canevas Swing/IntelliJ
+                            let mut r = RECT::default();
+                            if unsafe { GetWindowRect(hwnd, &mut r).is_ok() } {
+                                let center_x = r.left + (r.right - r.left) / 2;
+                                let center_y = r.top + (r.bottom - r.top) / 2;
+                                unsafe { let _ = SetCursorPos(center_x, center_y); }
+                                click_element(center_x, center_y, None, None);
+                                std::thread::sleep(Duration::from_millis(100));
+                            }
+                        }
+                    } else if !has_focused_textarea(hwnd) {
+                        refocus_largest_textarea_or_fallback(hwnd);
+                        std::thread::sleep(Duration::from_millis(60));
+                    }
+
+                    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+                    const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
+                    const VK_C: VIRTUAL_KEY = VIRTUAL_KEY(0x43);
+                    const VK_LEFT: VIRTUAL_KEY = VIRTUAL_KEY(0x25);
+
+                    send_hotkey(&[VK_CONTROL], VK_A);
+                    std::thread::sleep(Duration::from_millis(70));
+                    send_hotkey(&[VK_CONTROL], VK_C);
+                    std::thread::sleep(Duration::from_millis(90));
+                    // Désélection douce pour laisser l'éditeur dans son état normal
+                    send_hotkey(&[], VK_LEFT);
+
+                    // Repli fichier disque si target correspond à un fichier local existant
+                    let local_file_content = effective_target.as_deref().and_then(find_file_in_workspace);
+
+                    let mut content_captured = false;
+                    if let Some(content) = clipboard::get_text() {
+                        let trimmed = content.trim();
+                        if !trimmed.is_empty() {
+                            let char_count = content.chars().count();
+                            println!("[Actions] Contenu lu depuis '{}' ({} caractères)", win_title, char_count);
+                            feedback.push(format!(
+                                "[Contenu extrait du fichier/éditeur '{}' ({} caractères)] :\n```\n{}\n```",
+                                win_title,
+                                char_count,
+                                truncate_with_notice(&content, 10000)
+                            ));
+                            content_captured = true;
+                        }
+                    }
+
+                    if !content_captured {
+                        if let Some((path_str, content)) = local_file_content {
+                            let char_count = content.chars().count();
+                            println!("[Actions] Repli lecture directe depuis le fichier disque '{}' ({} caractères)", path_str, char_count);
+                            feedback.push(format!(
+                                "[Contenu extrait du fichier disque '{}' ({} caractères)] :\n```\n{}\n```",
+                                path_str,
+                                char_count,
+                                truncate_with_notice(&content, 10000)
+                            ));
+                        } else {
+                            feedback.push(format!("Le document ou champ dans '{}' est vide.", win_title));
+                        }
+                    }
+                } else {
+                    feedback.push("Aucune fenêtre d'éditeur trouvée pour lire le fichier.".to_string());
+                }
+            }
             AgentAction::ActivateImmersion { apps, urls, layout } => {
                 IS_IMMERSION_ACTIVE.store(true, Ordering::SeqCst);
                 if let Ok(mut hist) = IMMERSION_SCREEN_HISTORY.lock() {
@@ -3416,7 +4096,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
     if feedback.is_empty() {
         "Actions système exécutées avec succès.".to_string()
     } else {
-        truncate_with_notice(&feedback.join("\n"), 2500)
+        truncate_with_notice(&feedback.join("\n"), 12000)
     }
 }
 

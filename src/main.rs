@@ -534,7 +534,6 @@ impl OverlayApp {
         self.continuous_mode = true;
         self.is_recording = true;
         self.status = AgentStatus::Listening;
-        self.input_text.clear();
         let _ = self.tts_sender.send(TtsCommand::Stop);
         if !self.is_hidden {
             self.live_transcript = "Écoute Whisper active... parlez à votre micro.".to_string();
@@ -550,7 +549,6 @@ impl OverlayApp {
         self.continuous_mode = false;
         let _ = self.audio_sender.send(AudioCommand::Stop);
         set_mic_audio_level(0.0);
-        self.input_text.clear();
         self.live_transcript.clear();
         self.status = AgentStatus::Idle;
     }
@@ -751,13 +749,23 @@ impl eframe::App for OverlayApp {
                 }
                 AgentEvent::TranscriptionPartial(text) => {
                     if self.is_recording && !self.is_hidden {
-                        self.input_text = text.clone();
+                        let is_user_typing = ctx.memory(|m| m.has_focus(egui::Id::new("prompt_input_text")))
+                            && !self.input_text.is_empty();
+                        if !is_user_typing {
+                            self.input_text = text.clone();
+                        }
                         self.live_transcript = text;
                     }
                 }
                 AgentEvent::VoicePromptReady(prompt) => {
                     self.is_recording = false;
                     self.live_transcript.clear();
+                    let is_user_typing = ctx.memory(|m| m.has_focus(egui::Id::new("prompt_input_text")))
+                        && !self.input_text.trim().is_empty();
+                    if is_user_typing {
+                        // L'utilisateur est activement en train de taper au clavier : on préserve son texte
+                        return;
+                    }
                     let _ = self.tts_sender.send(TtsCommand::Stop);
                     if self.is_hidden {
                         if is_show_command(&prompt) {
@@ -869,8 +877,8 @@ impl eframe::App for OverlayApp {
             self.trigger_emergency_stop(&ctx);
         }
 
-        // Raccourci clavier 'R' pour basculer le micro (autorisé pour couper le micro même avec focus)
-        let is_typing = ctx.memory(|m| m.focused().is_some()) && !self.is_recording;
+        // Raccourci clavier 'R' pour basculer le micro (désactivé si l'utilisateur est en train de taper du texte)
+        let is_typing = ctx.memory(|m| m.focused().is_some());
         if !self.is_hidden && !is_typing && ctx.input(|i| i.key_pressed(egui::Key::R)) {
             self.toggle_recording(&ctx);
         }
@@ -1673,6 +1681,9 @@ Règles d'action et d'arbitrage :
 - Interface : consulte toujours "[État actuel de l'écran]" (fenêtres, onglets, boutons, liens).
   * Les contrôles de l'interface du navigateur portent le préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse", "[Navigateur] Actualiser"). Pour interagir avec le navigateur hôte, inclus explicitement ce préfixe dans la cible.
   * Les éléments internes au site web (champs de formulaire, boutons d'action, liens) figurent dans "[Page web - ...]" sans préfixe. Cible-les par leur libellé direct (ex: "Destination", "Rechercher", "Tout accepter").
+- Lecture de fichier ou code dans un éditeur ("read_editor_content") :
+  * Lorsque l'utilisateur demande de lire, consulter, analyser, vérifier ou résumer un fichier ouvert ou le code dans un éditeur (VS Code, Notepad, IDE, etc.), utilise impérativement "read_editor_content" (avec "window": "titre_optionnel", "target": "onglet_ou_fichier_optionnel").
+  * Le moteur placera la fenêtre au premier plan, sélectionnera le champ d'édition/l'onglet approprié, copiera le contenu (Ctrl+A, Ctrl+C) et te réinjectera l'intégralité du texte extrait dans le retour de l'étape suivante pour que tu puisses l'analyser.
 - Fermeture d'onglets ou sous-pages (ex: "ferme Google") : JAMAIS "close_app" ! Enchaîne "focus_window" puis "accessibility_shortcut": "close_tab" ou clique la croix ("click_button" / "click_element"). Réserve "close_app" à la fermeture d'une application entière.
 - Détection d'obstruction et éléments surgissants (bannières cookies, popups, notifications Windows) :
   * Analyse systématiquement [État actuel de l'écran] pour repérer toute notification Windows, toast, modale ou bannière de consentement qui masque l'écran ou demande validation.
@@ -1705,6 +1716,7 @@ Format json obligatoire :
     {"action": "focus_element", "window": "titre_optionnel", "target_name": "nom_ou_id_element"},
     {"action": "scroll", "direction": "down" | "up" | "bottom" | "top", "amount": 1, "window": "titre_optionnel"},
     {"action": "focus_window", "title": "titre_optionnel", "pid": 1234},
+    {"action": "read_editor_content", "window": "titre_optionnel", "target": "nom_onglet_ou_element_optionnel"},
     {"action": "clear_text", "window": "titre_optionnel"},
     {"action": "write_text", "text": "texte à écrire", "target": null},
     {"action": "replace_field_text", "text": "texte complet modifié", "target": null},
@@ -2035,7 +2047,7 @@ Format json obligatoire :
         }
 
         if pass < MAX_AGENT_PASSES {
-            let compact_report = truncate_with_notice(&report, 1200);
+            let compact_report = truncate_with_notice(&report, 10000);
             let mut step_feedback = format!("[Retour d'exécution étape {pass}] :\n{compact_report}");
             if !screen_after.trim().is_empty() {
                 let safe_screen = truncate_with_notice(screen_after.trim(), 3500);
@@ -2045,6 +2057,7 @@ Format json obligatoire :
             step_feedback.push_str(&format!(
                 "\n\nConsignes pour cette nouvelle étape :\n\
                 - Analyse attentivement [État de l'écran suite aux actions].\n\
+                - Si un contenu de fichier ou de code a été extrait via 'read_editor_content', analyse-le en profondeur et réponds directement à la question de l'utilisateur dans 'narration' avec 'actions': [].\n\
                 - Pour cibler un contrôle de l'application hôte (navigateur), utilise le libellé commençant par '[Navigateur]'. Pour la page web, utilise le nom direct affiché dans les sections '[Page web - ...]'.\n\
                 - Détection d'obstacle : si une notification Windows, un popup ou une bannière de consentement obstrue la vue, sélectionne et clique immédiatement sur le sous-bouton approprié de la notification ('click_button' ou 'click_element' vers 'Tout accepter', 'Accepter', 'Fermer', 'Ignorer', etc.). Ne jamais envoyer 'escape'.\n\
                 - Si l'élément cible n'est pas encore visible sur la page, émets un défilement ('scroll' direction: 'down') pour explorer le reste de la page.\n\
