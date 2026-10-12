@@ -207,17 +207,81 @@ pub fn is_window_hung(_hwnd: ()) -> bool {
 }
 
 #[cfg(windows)]
+pub fn is_toast_notification_window(hwnd: HWND, class_name: &str, title: &str) -> bool {
+    let c_lower = class_name.to_lowercase();
+    let t_lower = title.to_lowercase();
+
+    if t_lower.contains("notification") || t_lower.contains("toast") {
+        return true;
+    }
+
+    if c_lower.contains("toast") {
+        return true;
+    }
+
+    if c_lower == "windows.ui.core.corewindow"
+        || c_lower.contains("xamlexplorerhostislandwindow")
+        || c_lower.contains("toplevelwindowforoverflowxamlisland")
+    {
+        let (_pid, exe) = get_window_process_info(hwnd);
+        let exe_lower = exe.to_lowercase();
+        if exe_lower.contains("shellexperiencehost") || exe_lower.contains("explorer") {
+            let mut r = RECT::default();
+            if unsafe { GetWindowRect(hwnd, &mut r).is_ok() } {
+                let w = r.right - r.left;
+                let h = r.bottom - r.top;
+                let wa = get_desktop_work_area();
+                // Toasts situés dans le coin inférieur droit de l'écran
+                if w >= 150 && w <= 700 && h >= 40 && h <= 600 {
+                    if r.right >= wa.right - 100 && r.bottom >= wa.bottom - 650 && r.left >= wa.left + (wa.right - wa.left) / 3 {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+#[cfg(not(windows))]
+pub fn is_toast_notification_window(_hwnd: (), _class_name: &str, _title: &str) -> bool {
+    false
+}
+
+#[cfg(windows)]
 unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let list = &mut *(lparam.0 as *mut Vec<(HWND, String)>);
     if IsWindowVisible(hwnd).as_bool() {
         let length = GetWindowTextLengthW(hwnd);
-        if length > 0 {
+        let title = if length > 0 {
             let mut buf = vec![0u16; (length + 1) as usize];
             let copied = GetWindowTextW(hwnd, &mut buf);
             if copied > 0 {
-                let title = String::from_utf16_lossy(&buf[..copied as usize]);
-                list.push((hwnd, title));
+                String::from_utf16_lossy(&buf[..copied as usize])
+            } else {
+                String::new()
             }
+        } else {
+            String::new()
+        };
+
+        let mut class_buf = [0u16; 256];
+        let class_len = GetClassNameW(hwnd, &mut class_buf);
+        let class_name = if class_len > 0 {
+            String::from_utf16_lossy(&class_buf[..class_len as usize])
+        } else {
+            String::new()
+        };
+
+        if is_toast_notification_window(hwnd, &class_name, &title) {
+            let display_title = if title.trim().is_empty() {
+                "Notification Windows".to_string()
+            } else {
+                title
+            };
+            list.push((hwnd, display_title));
+        } else if !title.trim().is_empty() {
+            list.push((hwnd, title));
         }
     }
     BOOL(1)

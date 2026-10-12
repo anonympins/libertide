@@ -33,7 +33,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow,
-    FindWindowW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+    FindWindowW, GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic,
     GetGUIThreadInfo, GUITHREADINFO,
     PostMessageW, SendMessageW, SetCursorPos, SetForegroundWindow, ShowWindow,
     SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE,
@@ -898,6 +898,15 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
             return results;
         };
 
+        let mut class_win_buf = [0u16; 256];
+        let cw_len = GetClassNameW(hwnd, &mut class_win_buf);
+        let is_toast_window = if cw_len > 0 {
+            let cname = String::from_utf16_lossy(&class_win_buf[..cw_len as usize]);
+            is_toast_notification_window(hwnd, &cname, "")
+        } else {
+            false
+        };
+
         let count = elements.Length().unwrap_or(0).clamp(0, 3000);
 
         // Délimitation géométrique du document web par rapport à la fenêtre
@@ -972,7 +981,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || (has_source_ext && is_top_editor_area && height < 50);
 
                     let is_offscreen = item.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false);
-                    if is_offscreen && !is_tab_candidate {
+                    if is_offscreen && !is_tab_candidate && !is_toast_window {
                         continue;
                     }
                     let ctype = item.CurrentControlType().unwrap_or_default();
@@ -2406,6 +2415,15 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
         }
     }
 
+    // Inclusion systématique des notifications Windows détectées pour inspection UIA
+    for (h, title) in &user_windows {
+        if title.to_lowercase().contains("notification") || title.to_lowercase().contains("toast") {
+            if !inspect_hwnds.contains(h) {
+                inspect_hwnds.push(*h);
+            }
+        }
+    }
+
     for (hwnd, title) in &user_windows {
         let (pid, exe_name) = get_window_process_info(*hwnd);
         let mut r = RECT::default();
@@ -2997,8 +3015,26 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                         feedback.push(format!("Clic effectué sur l'élément '{}'.", target_name));
                     } else {
+                        // Repli : vérifier si l'élément se trouve dans une notification active
+                        let mut found_toast = None;
+                        for (w_h, w_t) in &user_windows {
+                            if *w_h != hwnd && (w_t.to_lowercase().contains("notification") || w_t.to_lowercase().contains("toast")) {
+                                let toast_elems = list_interactive_elements(*w_h);
+                                if let Some(elem) = find_best_element(&toast_elems, target_name) {
+                                    found_toast = Some((*w_h, elem.clone()));
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some((toast_hwnd, elem)) = found_toast {
+                            force_foreground_window(toast_hwnd);
+                            unsafe { let _ = elem.element.SetFocus(); }
+                            click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
+                            feedback.push(format!("Clic effectué sur l'élément '{}' (Notification).", target_name));
+                        } else {
                         println!("[Actions] Aucun élément/lien correspondant trouvé pour '{}'", target_name);
                         feedback.push(format!("Élément ou lien '{}' introuvable à l'écran.", target_name));
+                        }
                     }
                 }
             }
@@ -3151,8 +3187,26 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                         feedback.push(format!("Clic effectué sur '{}'.", button_name));
                     } else {
+                        // Repli : vérifier si le bouton se trouve dans une notification active
+                        let mut found_toast = None;
+                        for (w_h, w_t) in &user_windows {
+                            if *w_h != hwnd && (w_t.to_lowercase().contains("notification") || w_t.to_lowercase().contains("toast")) {
+                                let toast_elems = list_interactive_elements(*w_h);
+                                if let Some(elem) = find_best_button_element(&toast_elems, button_name) {
+                                    found_toast = Some((*w_h, elem.clone()));
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some((toast_hwnd, elem)) = found_toast {
+                            force_foreground_window(toast_hwnd);
+                            unsafe { let _ = elem.element.SetFocus(); }
+                            click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
+                            feedback.push(format!("Clic effectué sur le bouton '{}' de la notification.", button_name));
+                        } else {
                         println!("[Actions] Aucun bouton correspondant trouvé pour '{}'", button_name);
                         feedback.push(format!("Bouton '{}' introuvable à l'écran.", button_name));
+                        }
                     }
                 }
             }
