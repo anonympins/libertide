@@ -88,7 +88,8 @@ impl WhisperEngine {
         params.set_language(Some("fr"));
         params.set_translate(false);
         params.set_no_context(true);
-        params.set_single_segment(false);
+        params.set_single_segment(true);
+        params.set_no_timestamps(true);
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
@@ -164,6 +165,13 @@ fn ensure_model_downloaded(event_tx: &Sender<AgentEvent>) -> Result<PathBuf, Str
     Ok(model_path)
 }
 
+fn handle_cpal_stream_err(err: impl std::fmt::Display) {
+    let msg = err.to_string().to_lowercase();
+    if !msg.contains("overrun") && !msg.contains("underrun") {
+        eprintln!("Erreur de capture audio cpal : {err}");
+    }
+}
+
 pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sender<AudioCommand> {
     let (cmd_tx, cmd_rx) = channel::<AudioCommand>();
 
@@ -229,7 +237,6 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
             let sample_format = config.sample_format();
             let stream_config: cpal::StreamConfig = config.into();
             let (audio_tx, audio_rx) = channel::<Vec<f32>>();
-            let err_fn = |err| eprintln!("Erreur de capture audio cpal : {err}");
 
             let stream = match sample_format {
                 cpal::SampleFormat::F32 => device.build_input_stream(
@@ -237,7 +244,7 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                     move |data: &[f32], _| {
                         let _ = audio_tx.send(data.to_vec());
                     },
-                    err_fn,
+                    |err| handle_cpal_stream_err(err),
                     None,
                 ).ok(),
                 cpal::SampleFormat::I16 => device.build_input_stream(
@@ -247,7 +254,7 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                             data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
                         let _ = audio_tx.send(converted);
                     },
-                    err_fn,
+                    |err| handle_cpal_stream_err(err),
                     None,
                 ).ok(),
                 cpal::SampleFormat::U16 => device.build_input_stream(
@@ -257,7 +264,7 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                             data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect();
                         let _ = audio_tx.send(converted);
                     },
-                    err_fn,
+                    |err| handle_cpal_stream_err(err),
                     None,
                 ).ok(),
                 _ => None,
@@ -353,7 +360,6 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                         match whisper.transcribe(&audio_16k_buffer) {
                             Ok(text) if !text.trim().is_empty() => {
                                 let _ = event_tx.send(AgentEvent::VoicePromptReady(text));
-                                is_listening = false;
                                 break;
                             }
                             Ok(_) => {

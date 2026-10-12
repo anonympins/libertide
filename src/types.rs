@@ -191,7 +191,40 @@ pub enum AgentAction {
         #[serde(default)]
         layout: Option<String>,
     },
+    Dictate {
+        text: String,
+        #[serde(default)]
+        window: Option<String>,
+        #[serde(default, alias = "target_name")]
+        target: Option<String>,
+        #[serde(default)]
+        press_enter: Option<bool>,
+    },
+    ActivateDictation {
+        #[serde(default)]
+        window: Option<String>,
+        #[serde(default, alias = "target_name")]
+        target: Option<String>,
+    },
+    ToggleDictation {
+        #[serde(default)]
+        window: Option<String>,
+    },
+    #[serde(alias = "move_cursor", alias = "cursor_action")]
+    CursorMove {
+        #[serde(alias = "direction", alias = "type", alias = "movement")]
+        command: String,
+    },
     DeactivateImmersion,
+    DeactivateDictation,
+    SelectTextBetween {
+        from: String,
+        to: String,
+        #[serde(default)]
+        window: Option<String>,
+        #[serde(default, alias = "target_name")]
+        target: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -228,6 +261,19 @@ impl QuickSuggestionItem {
                 AgentAction::CloseApp { name } => Some(format!("Fermer {name}")),
                 AgentAction::Scroll { direction, .. } => Some(format!("Faire défiler ({direction})")),
                 AgentAction::ReadEditorContent { window, .. } => Some(format!("Lire le fichier ({})", window.as_deref().unwrap_or("éditeur"))),
+                AgentAction::Dictate { text, .. } => {
+                    let preview: String = text.chars().take(22).collect();
+                    Some(format!("Dicter : \"{preview}\""))
+                }
+                AgentAction::CursorMove { command } => {
+                    Some(format!("Curseur : {command}"))
+                }
+                AgentAction::ActivateDictation { .. } => Some("Activer le mode dictée".to_string()),
+                AgentAction::DeactivateDictation => Some("Arrêter la dictée".to_string()),
+                AgentAction::ToggleDictation { .. } => Some("Basculer la dictée".to_string()),
+                AgentAction::SelectTextBetween { from, to, .. } => {
+                    Some(format!("Sélectionner de \"{from}\" à \"{to}\""))
+                }
                 _ => None,
             },
         }

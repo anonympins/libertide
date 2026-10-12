@@ -32,7 +32,7 @@ pub fn spawn_twitch_worker(event_tx: Sender<AgentEvent>, channel_rx: Receiver<St
                 }
             }
 
-            if let Ok(mut stream) = TcpStream::connect("irc.chat.twitch.tv:6667") {
+            if let Ok(stream) = TcpStream::connect("irc.chat.twitch.tv:6667") {
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
                 let mut writer = match stream.try_clone() {
                     Ok(w) => w,

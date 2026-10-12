@@ -26,12 +26,15 @@ use windows::Win32::UI::Accessibility::{
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     mouse_event, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+    SetFocus,
     KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_WHEEL,
     MOUSEEVENTF_LEFTUP, MOUSEINPUT, VIRTUAL_KEY,
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetForegroundWindow, GetWindowRect, IsIconic,
+    AllowSetForegroundWindow,
+    FindWindowW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+    GetGUIThreadInfo, GUITHREADINFO,
     PostMessageW, SendMessageW, SetCursorPos, SetForegroundWindow, ShowWindow,
     SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE,
 };
@@ -41,6 +44,15 @@ const CREATE_NEW_CONSOLE: u32 = 0x00000010;
 
 #[cfg(windows)]
 static LAST_TXT_HWND: Mutex<Option<isize>> = Mutex::new(None);
+pub static LAST_EXTERNAL_HWND: Mutex<Option<isize>> = Mutex::new(None);
+pub static LAST_FOCUSED_CHILD_HWND: Mutex<Option<isize>> = Mutex::new(None);
+
+#[derive(Clone)]
+pub struct SendableUiaElement(pub IUIAutomationElement);
+unsafe impl Send for SendableUiaElement {}
+unsafe impl Sync for SendableUiaElement {}
+pub static LAST_FOCUSED_UIA_ELEMENT: Mutex<Option<SendableUiaElement>> = Mutex::new(None);
+pub static LAST_FOCUSED_RECT: Mutex<Option<[i32; 4]>> = Mutex::new(None);
 
 pub static CURRENT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 pub static IS_EMERGENCY_STOPPED: AtomicBool = AtomicBool::new(false);
@@ -51,7 +63,138 @@ pub fn is_request_cancelled(request_id: u64) -> bool {
 
 pub static LAST_SCREEN_SUMMARY: Mutex<Option<String>> = Mutex::new(None);
 pub static IS_IMMERSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static IS_DICTATION_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static IMMERSION_SCREEN_HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[cfg(windows)]
+pub fn update_last_external_focus() {
+    // En mode dictée actif, on verrouille la cible capturée avant le clic sur Dictée
+    if IS_DICTATION_ACTIVE.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.0.is_null() || is_window_hung(fg) {
+        return;
+    }
+    let current_pid = std::process::id();
+    let mut fg_pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+    }
+    if fg_pid != current_pid {
+        if let Ok(mut lock) = LAST_EXTERNAL_HWND.lock() {
+            *lock = Some(fg.0 as isize);
+        }
+        let fg_thread_id = unsafe { GetWindowThreadProcessId(fg, None) };
+        let mut gti = GUITHREADINFO::default();
+        gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+        if unsafe { GetGUIThreadInfo(fg_thread_id, &mut gti).is_ok() } && !gti.hwndFocus.0.is_null() {
+            if let Ok(mut clock) = LAST_FOCUSED_CHILD_HWND.lock() {
+                *clock = Some(gti.hwndFocus.0 as isize);
+            }
+            let mut r = RECT::default();
+            if unsafe { GetWindowRect(gti.hwndFocus, &mut r).is_ok() } && (r.right - r.left) > 10 && (r.bottom - r.top) > 10 {
+                if let Ok(mut rlock) = LAST_FOCUSED_RECT.lock() {
+                    *rlock = Some([r.left, r.top, r.right, r.bottom]);
+                }
+            }
+        }
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            if let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+                if let Ok(elem) = uia.GetFocusedElement() {
+                    // Ne capturer l'élément UIA que s'il s'agit d'une vraie zone d'édition textuelle
+                    let ctype = elem.CurrentControlType().unwrap_or_default();
+                    let is_edit = ctype == UIA_EditControlTypeId || ctype == UIA_DocumentControlTypeId;
+                    let has_text_pat = elem.GetCurrentPattern(UIA_TextPatternId).is_ok();
+                    let has_val_pat = elem.GetCurrentPattern(UIA_ValuePatternId).is_ok();
+
+                    if is_edit || has_text_pat || has_val_pat {
+                        if let Ok(rect) = elem.CurrentBoundingRectangle() {
+                            let w = rect.right - rect.left;
+                            let h = rect.bottom - rect.top;
+                            let mut win_r = RECT::default();
+                            let is_whole_window = GetWindowRect(fg, &mut win_r).is_ok()
+                                && (rect.left - win_r.left).abs() < 12
+                                && (rect.top - win_r.top).abs() < 12
+                                && (rect.right - win_r.right).abs() < 12
+                                && (rect.bottom - win_r.bottom).abs() < 12;
+
+                            if w > 8 && h > 8 && !is_whole_window && (w < 2500 || h < 1800) {
+                                if let Ok(mut rlock) = LAST_FOCUSED_RECT.lock() {
+                                    *rlock = Some([rect.left, rect.top, rect.right, rect.bottom]);
+                                }
+                                if let Ok(mut elock) = LAST_FOCUSED_UIA_ELEMENT.lock() {
+                                    *elock = Some(SendableUiaElement(elem));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn update_last_external_focus() {}
+
+#[cfg(windows)]
+pub fn restore_external_focus() -> bool {
+    extern "system" {
+        fn GetCurrentThreadId() -> u32;
+        fn AttachThreadInput(idattach: u32, idattachto: u32, fattach: i32) -> i32;
+    }
+
+    let target = LAST_EXTERNAL_HWND.lock().ok().and_then(|g| *g);
+    if let Some(raw_hwnd) = target {
+        let hwnd = HWND(raw_hwnd as _);
+        if !hwnd.0.is_null() && !is_window_hung(hwnd) {
+            force_foreground_window(hwnd);
+            std::thread::sleep(Duration::from_millis(40));
+
+            // 1. Repositionner le focus si un vrai champ de texte UIA a été validé
+            let uia_elem_opt = LAST_FOCUSED_UIA_ELEMENT.lock().ok().and_then(|g| g.clone());
+            if let Some(sendable) = uia_elem_opt {
+                unsafe {
+                    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+                    let _ = sendable.0.SetFocus();
+                }
+            }
+
+            // 2. Si c'est un contrôle Win32 enfant (ex: canevas Java Swing IntelliJ, Notepad, champs de dialogue)
+            if let Ok(clock) = LAST_FOCUSED_CHILD_HWND.lock() {
+                if let Some(child_raw) = *clock {
+                    let child_hwnd = HWND(child_raw as _);
+                    if !child_hwnd.0.is_null() {
+                        let current_tid = unsafe { GetCurrentThreadId() };
+                        let mut target_pid = 0u32;
+                        let target_tid = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut target_pid)) };
+                        if current_tid != target_tid && target_tid != 0 {
+                            unsafe {
+                                let _ = AttachThreadInput(current_tid, target_tid, 1);
+                                let _ = SetFocus(child_hwnd);
+                                let _ = AttachThreadInput(current_tid, target_tid, 0);
+                            }
+                        } else {
+                            unsafe { let _ = SetFocus(child_hwnd); }
+                        }
+                    }
+                }
+            }
+            // Note : aucun clic de souris (click_element) n'est simulé ici afin de préserver
+            // intégralement la sélection de texte et le curseur actif dans l'éditeur.
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(not(windows))]
+pub fn restore_external_focus() -> bool {
+    false
+}
 
 #[cfg(windows)]
 mod clipboard {
@@ -263,7 +406,6 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
     }
     extern "system" {
         fn GetCurrentThreadId() -> u32;
-        fn GetWindowThreadProcessId(hwnd: HWND, lpdwprocessid: *mut u32) -> u32;
         fn AttachThreadInput(idattach: u32, idattachto: u32, fattach: i32) -> i32;
         fn BringWindowToTop(hwnd: HWND) -> i32;
     }
@@ -272,18 +414,20 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
         let fg_hwnd = GetForegroundWindow();
+        if fg_hwnd == hwnd {
+            return true;
+        }
         let current_thread_id = GetCurrentThreadId();
-        let target_thread_id = GetWindowThreadProcessId(hwnd, std::ptr::null_mut());
+        let mut target_pid = 0u32;
+        let target_thread_id = GetWindowThreadProcessId(hwnd, Some(&mut target_pid));
         let fg_thread_id = if !fg_hwnd.0.is_null() {
-            GetWindowThreadProcessId(fg_hwnd, std::ptr::null_mut())
+            GetWindowThreadProcessId(fg_hwnd, None)
         } else {
             0
         };
 
-        // Déblocage de la restriction de premier plan Windows
-        const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
-        send_key_event(VK_MENU, KEYBD_EVENT_FLAGS(0));
-        send_key_event(VK_MENU, KEYEVENTF_KEYUP);
+        const ASFW_ANY: u32 = 0xFFFFFFFF;
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
 
         if current_thread_id != target_thread_id && target_thread_id != 0 {
             let _ = AttachThreadInput(current_thread_id, target_thread_id, 1);
@@ -292,6 +436,13 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
             }
             let _ = BringWindowToTop(hwnd);
             let _ = SetForegroundWindow(hwnd);
+
+            let mut gti = GUITHREADINFO::default();
+            gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+            if GetGUIThreadInfo(target_thread_id, &mut gti).is_ok() && !gti.hwndFocus.0.is_null() {
+                let _ = SetFocus(gti.hwndFocus);
+            }
+
             if fg_thread_id != 0 && fg_thread_id != target_thread_id {
                 let _ = AttachThreadInput(fg_thread_id, target_thread_id, 0);
             }
@@ -831,10 +982,10 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let item_status = item.CurrentItemStatus().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
 
                     let (aria_role, aria_properties) = if let Ok(e2) = item.cast::<IUIAutomationElement2>() {
-                        let r = unsafe { e2.CurrentAriaRole().ok() }
+                        let r = e2.CurrentAriaRole().ok()
                             .map(|b| b.to_string())
                             .unwrap_or_default();
-                        let p = unsafe { e2.CurrentAriaProperties().ok() }
+                        let p = e2.CurrentAriaProperties().ok()
                             .map(|b| b.to_string())
                             .unwrap_or_default();
                         (r, p)
@@ -858,7 +1009,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         .GetCurrentPattern(UIA_ValuePatternId)
                         .ok()
                         .and_then(|p| p.cast::<IUIAutomationValuePattern>().ok())
-                        .and_then(|vp| unsafe { vp.CurrentValue().ok() })
+                        .and_then(|vp| vp.CurrentValue().ok())
                         .map(|b| b.to_string())
                         .unwrap_or_default()
                         .trim().to_string();
@@ -1038,7 +1189,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
 }
 
 #[cfg(windows)]
-fn has_focused_textarea(hwnd: HWND) -> bool {
+fn has_focused_textarea(_hwnd: HWND) -> bool {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let Ok(uia): Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else {
@@ -1478,7 +1629,7 @@ pub fn get_active_field_content() -> Option<String> {
 fn replace_active_field_text(new_text: &str) -> String {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let uia: Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
+        let _uia: Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
         let user_windows = list_user_windows();
         let target_hwnd = get_active_or_best_window(&user_windows);
 
@@ -2545,7 +2696,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, autoscroll: bool) -> 
             out.push_str(&format!("  [Textes / prix observés] : {}\n", display_texts.join(" | ")));
         }
 
-        let mut buttons: Vec<String> = elements
+        let buttons: Vec<String> = elements
             .iter()
             .filter(|e| {
                 (!has_web_doc || e.is_web_content)
@@ -2826,7 +2977,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         continue;
                     }
                     println!("[Actions] Clic sur l'élément [HWND {:?}] pour '{}'", hwnd.0, target_name);
-                    let is_browser = user_windows.iter().find(|(h, t)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
+                    let is_browser = user_windows.iter().find(|(h, _)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
                     let show_mode = if is_browser { SW_MAXIMIZE } else { SW_RESTORE };
                     force_foreground_window(hwnd);
                     unsafe {
@@ -2872,7 +3023,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         .find(|(h, _)| *h == hwnd)
                         .map(|(_, t)| t.as_str())
                         .unwrap_or("");
-                    let is_browser = user_windows.iter().find(|(h, t)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
+                    let is_browser = user_windows.iter().find(|(h, _)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
                     let show_mode = if is_browser { SW_MAXIMIZE } else { SW_RESTORE };
                     force_foreground_window(hwnd);
                     unsafe {
@@ -2980,7 +3131,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         continue;
                     }
                     println!("[Actions] Clic sur le bouton [HWND {:?}] pour '{}'", hwnd.0, button_name);
-                    let is_browser = user_windows.iter().find(|(h, t)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
+                    let is_browser = user_windows.iter().find(|(h, _)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
                     let show_mode = if is_browser { SW_MAXIMIZE } else { SW_RESTORE };
                     force_foreground_window(hwnd);
                     unsafe {
@@ -3019,7 +3170,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         continue;
                     }
                     println!("[Actions] Focus sur l'élément [HWND {:?}] pour '{}'", hwnd.0, target_name);
-                    let is_browser = user_windows.iter().find(|(h, t)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
+                    let is_browser = user_windows.iter().find(|(h, _)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
                     let show_mode = if is_browser { SW_MAXIMIZE } else { SW_RESTORE };
                     force_foreground_window(hwnd);
                     unsafe {
@@ -4089,6 +4240,289 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 std::thread::sleep(Duration::from_millis(300));
                 let current_summary = summarize_screen_state(None, false);
                 feedback.push(format!("Mode immersion désactivé : bureau virtuel fermé. Retour à l'espace initial :\n{}", truncate_with_notice(&current_summary, 600)));
+            }
+            AgentAction::Dictate { text, window, target, press_enter } => {
+                let target_desc_opt = target.as_deref().filter(|s| !s.trim().is_empty());
+                let target_hwnd = match window.as_deref() {
+                    Some(w) if !w.trim().is_empty() => {
+                        find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
+                    }
+                    _ => {
+                        let ext_h = LAST_EXTERNAL_HWND.lock().ok().and_then(|g| *g).map(|raw| HWND(raw as _));
+                        ext_h.filter(|h| !h.0.is_null() && !is_window_hung(*h))
+                            .or(active_user_hwnd)
+                            .or(preferred_target_hwnd)
+                    }
+                };
+
+                let should_enter = press_enter.unwrap_or(false);
+
+                if let Some(hwnd) = target_hwnd {
+                    if is_window_hung(hwnd) {
+                        feedback.push(format!("Fenêtre [HWND {:?}] non réactive. Dictée ignorée.", hwnd.0));
+                        continue;
+                    }
+                    let win_title = user_windows
+                        .iter()
+                        .find(|(h, _)| *h == hwnd)
+                        .map(|(_, t)| t.as_str())
+                        .unwrap_or("");
+
+                    restore_external_focus();
+                    std::thread::sleep(Duration::from_millis(60));
+
+                    if is_terminal_window(hwnd, win_title) {
+                        send_terminal_input(hwnd, text, should_enter);
+                        feedback.push(format!("Texte dicté inséré dans le terminal '{}'.", win_title));
+                    } else if target_desc_opt.is_none() && window.is_none() {
+                        let text_to_insert = if !text.ends_with(' ') && !text.ends_with('\n') {
+                            format!("{text} ")
+                        } else {
+                            text.to_string()
+                        };
+
+                        clipboard::set_text(&text_to_insert);
+                        std::thread::sleep(Duration::from_millis(30));
+                        send_paste();
+
+                        if should_enter {
+                            std::thread::sleep(Duration::from_millis(30));
+                            send_hotkey(&[], VIRTUAL_KEY(0x0D));
+                        }
+                        feedback.push(format!("Texte dicté inséré à la position du curseur ({} caractères).", text.len()));
+                    } else {
+                        if let Some(target_desc) = target_desc_opt {
+                            let elements = list_interactive_elements(hwnd);
+                            if let Some(elem) = find_best_input_element(&elements, target_desc) {
+                                unsafe { let _ = elem.element.SetFocus(); }
+                                click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
+                                std::thread::sleep(Duration::from_millis(50));
+                            }
+                        } else {
+                            if !has_focused_textarea(hwnd) {
+                                refocus_largest_textarea_or_fallback(hwnd);
+                                std::thread::sleep(Duration::from_millis(40));
+                            }
+                        }
+
+                        for c in text.chars() {
+                            if c == '\n' || c == '\r' {
+                                send_hotkey(&[], VIRTUAL_KEY(0x0D));
+                                std::thread::sleep(Duration::from_millis(15));
+                            } else {
+                                send_char_unicode(c);
+                                std::thread::sleep(Duration::from_millis(2));
+                            }
+                        }
+                        if should_enter {
+                            std::thread::sleep(Duration::from_millis(30));
+                            send_hotkey(&[], VIRTUAL_KEY(0x0D));
+                        }
+                        feedback.push(format!("Texte dicté inséré avec succès ({} caractères).", text.len()));
+                    }
+                } else {
+                    let _ = write_to_browser_or_txt(text);
+                    feedback.push(format!("Texte dicté via repli système ({} caractères).", text.len()));
+                }
+            }
+            AgentAction::CursorMove { command } => {
+                let cmd_lower = command.to_lowercase();
+                const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
+                const VK_LEFT: VIRTUAL_KEY = VIRTUAL_KEY(0x25);
+                const VK_UP: VIRTUAL_KEY = VIRTUAL_KEY(0x26);
+                const VK_RIGHT: VIRTUAL_KEY = VIRTUAL_KEY(0x27);
+                const VK_DOWN: VIRTUAL_KEY = VIRTUAL_KEY(0x28);
+                const VK_HOME: VIRTUAL_KEY = VIRTUAL_KEY(0x24);
+                const VK_END: VIRTUAL_KEY = VIRTUAL_KEY(0x23);
+                const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+                const VK_SHIFT: VIRTUAL_KEY = VIRTUAL_KEY(0x10);
+                const VK_BACK: VIRTUAL_KEY = VIRTUAL_KEY(0x08);
+                const VK_SPACE: VIRTUAL_KEY = VIRTUAL_KEY(0x20);
+                const VK_TAB: VIRTUAL_KEY = VIRTUAL_KEY(0x09);
+                const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
+
+                match cmd_lower.as_str() {
+                    "newline" | "a_la_ligne" | "ligne_suivante" | "enter" => {
+                        send_hotkey(&[], VK_RETURN);
+                        feedback.push("Curseur : à la ligne.".to_string());
+                    }
+                    "new_paragraph" | "nouveau_paragraphe" => {
+                        send_hotkey(&[], VK_RETURN);
+                        std::thread::sleep(Duration::from_millis(25));
+                        send_hotkey(&[], VK_RETURN);
+                        feedback.push("Curseur : nouveau paragraphe.".to_string());
+                    }
+                    "left" | "gauche" => {
+                        send_hotkey(&[], VK_LEFT);
+                        feedback.push("Curseur : vers la gauche.".to_string());
+                    }
+                    "right" | "droite" => {
+                        send_hotkey(&[], VK_RIGHT);
+                        feedback.push("Curseur : vers la droite.".to_string());
+                    }
+                    "up" | "haut" => {
+                        send_hotkey(&[], VK_UP);
+                        feedback.push("Curseur : vers le haut.".to_string());
+                    }
+                    "down" | "bas" => {
+                        send_hotkey(&[], VK_DOWN);
+                        feedback.push("Curseur : vers le bas.".to_string());
+                    }
+                    "line_start" | "debut_ligne" => {
+                        send_hotkey(&[], VK_HOME);
+                        feedback.push("Curseur : début de ligne.".to_string());
+                    }
+                    "line_end" | "fin_ligne" => {
+                        send_hotkey(&[], VK_END);
+                        feedback.push("Curseur : fin de ligne.".to_string());
+                    }
+                    "doc_start" | "debut_doc" => {
+                        send_hotkey(&[VK_CONTROL], VK_HOME);
+                        feedback.push("Curseur : début du document.".to_string());
+                    }
+                    "doc_end" | "fin_doc" => {
+                        send_hotkey(&[VK_CONTROL], VK_END);
+                        feedback.push("Curseur : fin du document.".to_string());
+                    }
+                    "backspace" | "efface" | "supprime" => {
+                        send_hotkey(&[], VK_BACK);
+                        feedback.push("Effacement caractère précédent.".to_string());
+                    }
+                    "delete_word" | "efface_mot" => {
+                        send_hotkey(&[VK_CONTROL], VK_BACK);
+                        feedback.push("Effacement du mot précédent.".to_string());
+                    }
+                    "delete_line" | "efface_ligne" => {
+                        send_hotkey(&[VK_SHIFT], VK_HOME);
+                        std::thread::sleep(Duration::from_millis(20));
+                        send_hotkey(&[], VK_BACK);
+                        feedback.push("Effacement de la ligne.".to_string());
+                    }
+                    "select_all" | "tout_selectionner" => {
+                        send_hotkey(&[VK_CONTROL], VK_A);
+                        feedback.push("Tout sélectionner.".to_string());
+                    }
+                    "space" | "espace" => {
+                        send_hotkey(&[], VK_SPACE);
+                        feedback.push("Espace inséré.".to_string());
+                    }
+                    "tab" | "tabulation" => {
+                        send_hotkey(&[], VK_TAB);
+                        feedback.push("Tabulation.".to_string());
+                    }
+                    _ => {
+                        feedback.push(format!("Commande curseur '{command}' inconnue."));
+                    }
+                }
+            }
+            AgentAction::ActivateDictation { window, target: _ } => {
+                IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
+                if let Some(w) = window {
+                    let targets = find_windows_matching(w, &user_windows, active_user_hwnd);
+                    if let Some(&h) = targets.first() {
+                        force_foreground_window(h);
+                        unsafe { let _ = ShowWindow(h, SW_RESTORE); }
+                    }
+                }
+                feedback.push("Mode dictée vocale activé.".to_string());
+            }
+            AgentAction::DeactivateDictation => {
+                IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
+                feedback.push("Mode dictée désactivé.".to_string());
+            }
+            AgentAction::ToggleDictation { window } => {
+                let new_state = !IS_DICTATION_ACTIVE.load(Ordering::SeqCst);
+                IS_DICTATION_ACTIVE.store(new_state, Ordering::SeqCst);
+                if new_state {
+                    if let Some(w) = window {
+                        let targets = find_windows_matching(w, &user_windows, active_user_hwnd);
+                        if let Some(&h) = targets.first() {
+                            force_foreground_window(h);
+                            unsafe { let _ = ShowWindow(h, SW_RESTORE); }
+                        }
+                    }
+                    feedback.push("Mode dictée vocale activé.".to_string());
+                } else {
+                    feedback.push("Mode dictée vocale désactivé.".to_string());
+                }
+            }
+            AgentAction::SelectTextBetween { from, to, window, target } => {
+                let target_hwnd = match window.as_deref() {
+                    Some(w) if !w.trim().is_empty() => {
+                        find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
+                    }
+                    _ => active_user_hwnd.or(preferred_target_hwnd),
+                };
+
+                if let Some(hwnd) = target_hwnd {
+                    if is_window_hung(hwnd) {
+                        feedback.push(format!("Fenêtre [HWND {:?}] non réactive. Sélection ignorée.", hwnd.0));
+                        continue;
+                    }
+                    force_foreground_window(hwnd);
+                    unsafe { let _ = ShowWindow(hwnd, SW_RESTORE); }
+                    std::thread::sleep(Duration::from_millis(60));
+
+                    if let Some(t_desc) = target.as_deref().filter(|s| !s.trim().is_empty()) {
+                        let elements = list_interactive_elements(hwnd);
+                        if let Some(elem) = find_best_input_element(&elements, t_desc) {
+                            unsafe { let _ = elem.element.SetFocus(); }
+                            click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
+                            std::thread::sleep(Duration::from_millis(40));
+                        }
+                    } else if !has_focused_textarea(hwnd) {
+                        refocus_largest_textarea_or_fallback(hwnd);
+                        std::thread::sleep(Duration::from_millis(40));
+                    }
+
+                    // 1. Tenter la sélection via UIA TextPattern si supporté
+                    let mut selected_via_uia = false;
+                    unsafe {
+                        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+                        if let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+                            if let Ok(focused) = uia.GetFocusedElement() {
+                                if let Ok(p_unk) = focused.GetCurrentPattern(UIA_TextPatternId) {
+                                    if let Ok(text_pattern) = p_unk.cast::<IUIAutomationTextPattern>() {
+                                        if let Ok(doc_range) = text_pattern.DocumentRange() {
+                                            let from_bstr = windows::core::BSTR::from(from.as_str());
+                                            let to_bstr = windows::core::BSTR::from(to.as_str());
+                                            if let Ok(from_range) = doc_range.FindText(&from_bstr, false, false) {
+                                                if let Ok(to_range) = doc_range.FindText(&to_bstr, false, false) {
+                                                    from_range.MoveEndpointByRange(
+                                                        windows::Win32::UI::Accessibility::TextPatternRangeEndpoint_End,
+                                                        &to_range,
+                                                        windows::Win32::UI::Accessibility::TextPatternRangeEndpoint_End,
+                                                    ).ok();
+                                                    if from_range.Select().is_ok() {
+                                                        selected_via_uia = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. Repli clavier universel avec recherche (Ctrl+F)
+                    if !selected_via_uia {
+                        const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+                        const VK_F: VIRTUAL_KEY = VIRTUAL_KEY(0x46);
+                        const VK_ESCAPE: VIRTUAL_KEY = VIRTUAL_KEY(0x1B);
+                        const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
+
+                        send_hotkey(&[VK_CONTROL], VK_F);
+                        std::thread::sleep(Duration::from_millis(150));
+                        clipboard::set_text(from);
+                        send_paste();
+                        std::thread::sleep(Duration::from_millis(80));
+                        send_hotkey(&[], VK_RETURN);
+                        std::thread::sleep(Duration::from_millis(50));
+                        send_hotkey(&[], VK_ESCAPE);
+                    }
+                    feedback.push(format!("Plage de texte entre \"{from}\" et \"{to}\" ciblée avec succès."));
+                }
             }
         }
     }
