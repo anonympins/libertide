@@ -161,6 +161,9 @@ pub fn extract_filename_from_title(title: &str) -> Option<String> {
 
 #[cfg(windows)]
 pub fn is_editor_window(_hwnd: HWND, title: &str, exe_name: &str) -> bool {
+    if is_browser_hwnd(_hwnd, title) {
+        return false;
+    }
     let exe_lower = exe_name.to_lowercase();
     let title_lower = title.to_lowercase();
 

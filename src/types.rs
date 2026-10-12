@@ -115,7 +115,11 @@ pub enum AgentAction {
     NavigateToUrl {
         url: String,
         #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
         window: Option<String>,
+        #[serde(default)]
+        new_window: Option<bool>,
     },
     WriteText {
         text: String,
@@ -123,6 +127,8 @@ pub enum AgentAction {
         target: Option<String>,
         #[serde(default)]
         window: Option<String>,
+        #[serde(default)]
+        press_enter: Option<bool>,
     },
     ReplaceFieldText {
         text: String,
@@ -256,6 +262,7 @@ impl QuickSuggestionItem {
             }
             QuickSuggestionItem::Action(act) => match act {
                 AgentAction::OpenApp { name } => Some(format!("Ouvrir {name}")),
+                AgentAction::NavigateToUrl { url, .. } => Some(format!("Naviguer vers {url}")),
                 AgentAction::ClickElement { target_name, .. } => Some(format!("Cliquer {target_name}")),
                 AgentAction::ClickButton { button_name, .. } => Some(format!("Cliquer {button_name}")),
                 AgentAction::CloseApp { name } => Some(format!("Fermer {name}")),

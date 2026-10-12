@@ -1760,6 +1760,7 @@ Règles d'action et d'arbitrage :
     - Notifications Windows et toasts système : sous-bouton "Fermer", "Ignorer", "Supprimer", "Dismiss" ou le bouton d'action contextuel de la notification.
     - Popups, modales et dialogues d'application : sous-bouton "Fermer", "Annuler", "Plus tard", "Non merci" ou bouton de rejet.
   * Dès que l'obstacle n'apparaît plus à l'écran, reprends immédiatement le cours de la consigne initiale là où elle s'était arrêtée.
+- Validation et saisie : pour valider un champ ou une recherche par la touche Entrée, passe "press_enter": true dans "write_text" ou utilise "accessibility_shortcut": "enter". N'utilise JAMAIS "run_command" pour simuler une touche !
 - Éléments cliquables et saisie : utilise "click_element" pour les liens et onglets, "click_button" pour les boutons. Pour saisir sans cible précise, mets "target": null dans "write_text" ou "replace_field_text".
 - Mode dictée ("dictate", "activate_dictation", "deactivate_dictation") :
   * Tu contrôles le flag de dictée via les actions "activate_dictation", "deactivate_dictation" ou "toggle_dictation".
@@ -1770,7 +1771,7 @@ Règles d'action et d'arbitrage :
   * L'analyse d'écran intègre automatiquement un autoscroll par tranches de viewport (jusqu'à 10 chunks) pour agréger l'ensemble des éléments de la page.
   * Si une barre de défilement est signalée ou si tu as besoin de positionner la vue sur un conteneur précis, utilise "scroll" ("direction": "down" | "up" | "bottom" | "top", "amount": 1 ou 2).
   * Tu réévalueras le nouvel état de l'écran à l'étape suivante pour cliquer ou interagir avec les éléments révélés.
-- Navigation et shopping autonome : génère l'URL pertinente (ex: "https://www.google.com/search?tbm=shop&q=..." pour shopping) avec "navigate_to_url".
+- Navigation web et shopping : génère l'URL pertinente avec "navigate_to_url". Par défaut, elle s'ouvre TOUJOURS dans un NOUVEL ONGLET ("target": "new_tab"). Ne remplace JAMAIS l'onglet/page en cours sauf demande expresse ("target": "current_tab"). Tu peux également spécifier "target": "new_window" pour une nouvelle fenêtre ou cibler un navigateur via "target": "titre_fenetre".
   * Achat multi-étapes : 1. Ajoute au panier ("click_element" ou "click_button") -> 2. Ouvre le panier / commande ("click_element") -> 3. Devant le paiement, stoppe toute action et demande confirmation orale dans "narration" avec "actions": [].
   * Recherche exploratoire : dès l'affichage des résultats, résume 2-3 options observées et pose une question de cadrage (budget, dimensions) dans "narration" avec "actions": [].
 - Suggestions rapides ("quick_suggestions") : quand tu poses une question ou suggères des options, propose 2 à 4 choix brefs sous forme de tableau de chaînes textuelles dans "quick_suggestions" (ex: ["Tennis de course, 80-120€", "Modèle lifestyle"]). Ces options seront affichées sous forme de boutons-onglets directement cliquables par l'utilisateur.
@@ -1791,7 +1792,7 @@ Format json obligatoire :
     {"action": "focus_window", "title": "titre_optionnel", "pid": 1234},
     {"action": "read_editor_content", "window": "titre_optionnel", "target": "nom_onglet_ou_element_optionnel"},
     {"action": "clear_text", "window": "titre_optionnel"},
-    {"action": "write_text", "text": "texte à écrire", "target": null},
+    {"action": "write_text", "text": "texte à écrire", "target": null, "press_enter": false},
     {"action": "dictate", "text": "texte dicté et ponctué", "window": null, "target": null, "press_enter": false},
     {"action": "activate_dictation", "window": null, "target": null},
     {"action": "deactivate_dictation"},
@@ -1801,11 +1802,11 @@ Format json obligatoire :
     {"action": "run_command", "command": "commande_ou_outil"},
     {"action": "kill_process", "pid": 1234, "name": "app.exe"},
     {"action": "open_browser", "url": "https://..."},
-    {"action": "navigate_to_url", "url": "https://..."},
+    {"action": "navigate_to_url", "url": "https://...", "target": "new_tab" | "current_tab" | "new_window" | "titre_fenetre_optionnel"},
     {"action": "tile_windows", "layout": "split_horizontal" | "split_vertical" | "grid_2x2" | "master_stack", "windows": ["titre_fenetre_1", "titre_fenetre_2"]},
     {"action": "arrange_window", "title": "mot_cle", "position": "left" | "right" | "top" | "bottom" | "center" | "maximize" | "minimize"},
     {"action": "move_window", "title": "mot_cle", "x": 0, "y": 0, "width": 960, "height": 1040},
-    {"action": "accessibility_shortcut", "shortcut": "close_tab" | "snap_left" | "snap_right" | "snap_up" | "snap_down" | "task_manager" | "undo" | "copy" | "refresh_page"},
+    {"action": "accessibility_shortcut", "shortcut": "enter" | "close_tab" | "snap_left" | "snap_right" | "snap_up" | "snap_down" | "task_manager" | "undo" | "copy" | "refresh_page"},
     {"action": "summarize_screen", "window": "titre_optionnel"},
     {"action": "activate_immersion", "apps": ["code"], "urls": ["https://..."], "layout": "grid_2x2"},
     {"action": "deactivate_immersion"}

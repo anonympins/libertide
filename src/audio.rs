@@ -296,7 +296,7 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
             const SILENCE_TIMEOUT: Duration = Duration::from_millis(900);
             const MAX_RECORDING_DURATION: Duration = Duration::from_secs(12);
 
-            let mut is_listening = true;
+            let is_listening = true;
             while is_listening {
                 if let Ok(AudioCommand::Stop) = cmd_rx.try_recv() {
                     let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
