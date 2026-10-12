@@ -2546,35 +2546,6 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
 
         let has_web_doc = elements.iter().any(|e| e.is_web_content);
 
-        if has_web_doc {
-            let chrome_controls: Vec<String> = elements
-                .iter()
-                .filter(|e| e.is_browser_chrome && (!e.name.is_empty() || !e.value_text.is_empty()))
-                .map(|e| {
-                    if !e.value_text.is_empty() {
-                        format!("{}: \"{}\"", e.name, e.value_text.chars().take(70).collect::<String>())
-                    } else {
-                        e.name.clone()
-                    }
-                })
-                .take(5)
-                .collect();
-            if !chrome_controls.is_empty() {
-                out.push_str(&format!("  [Interface navigateur] : {}\n", chrome_controls.join(" | ")));
-            }
-        }
-
-        let mut tabs: Vec<String> = elements
-            .iter()
-            .filter(|e| !e.name.is_empty() && (e.is_tab || e.localized_type.contains("onglet") || e.localized_type.contains("tab")))
-            .map(|e| e.name.clone())
-            .collect();
-        tabs.dedup();
-        if !tabs.is_empty() {
-            let display_tabs: Vec<String> = tabs.into_iter().take(20).collect();
-            out.push_str(&format!("  [Onglets / pages ouvertes] : {}\n", display_tabs.join(" | ")));
-        }
-
         if !is_browser && (is_editor || detected_file.is_some()) {
             if let Some(ref fname) = detected_file {
                 if let Some((fpath, _)) = find_file_in_workspace(fname) {
@@ -2585,6 +2556,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             }
         }
 
+        // 1. PRIMAUTÉ DU CONTENU HTML / WEB : Champs de formulaire
         let edits: Vec<&UiaElementInfo> = elements.iter()
             .filter(|e| (!has_web_doc || e.is_web_content) && (e.is_edit_or_textarea || e.is_input))
             .collect();
@@ -2608,78 +2580,8 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             }
         }
 
-        let raw_links: Vec<String> = elements
-            .iter()
-            .filter(|e| {
-                !e.is_edit_or_textarea
-                    && !e.name.is_empty()
-                    && (e.is_link
-                        || e.localized_type.contains("lien")
-                        || e.localized_type.contains("link")
-                        || e.localized_type.contains("hyperlink")
-                        || e.aria_role.contains("link")
-                        || e.aria_role.contains("lien"))
-            })
-            .map(|e| {
-                if !e.aria_indications.is_empty() {
-                    format!("{} ({})", e.name, e.aria_indications)
-                } else {
-                    e.name.clone()
-                }
-            })
-            .collect();
-
-        let mut seen_links = std::collections::HashSet::new();
-        let mut scored_links: Vec<(f32, String)> = raw_links
-            .into_iter()
-            .filter(|l| !is_poor_or_redundant_link(l))
-            .filter(|l| {
-                let lower = l.trim().to_lowercase();
-                if seen_links.contains(&lower) {
-                    false
-                } else {
-                    seen_links.insert(lower);
-                    true
-                }
-            })
-            .map(|l| (score_enriched_link(&l), l))
-            .collect();
-
-        scored_links.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let display_links: Vec<String> = scored_links.into_iter().take(25).map(|(_, l)| l).collect();
-
-        if !display_links.is_empty() {
-            let prefix = if has_web_doc { "  [Page web - liens cliquables] : " } else { "  [Liens / résultats cliquables] : " };
-            out.push_str(&format!("{}{}\n", prefix, display_links.join(" | ")));
-        }
-
-        let mut text_items: Vec<String> = elements
-            .iter()
-            .filter(|e| {
-                !e.is_edit_or_textarea
-                    && !e.name.is_empty()
-                    && e.name.len() >= 3
-                    && !e.is_link
-                    && !e.aria_role.contains("link")
-                    && !e.localized_type.contains("lien")
-                    && !e.localized_type.contains("link")
-                    && (e.localized_type.contains("texte")
-                        || e.localized_type.contains("text")
-                        || e.localized_type.contains("en-tête")
-                        || e.localized_type.contains("heading")
-                        || e.name.contains('€')
-                        || e.name.contains('$')
-                        || e.name.to_lowercase().contains("eur"))
-            })
-            .map(|e| e.name.clone())
-            .collect();
-        text_items.dedup();
-        if !text_items.is_empty() {
-            let display_texts: Vec<String> = text_items.into_iter().take(10).collect();
-            out.push_str(&format!("  [Textes / prix observés] : {}\n", display_texts.join(" | ")));
-        }
-
-        let buttons: Vec<String> = elements
+        // 2. PRIMAUTÉ DU CONTENU HTML / WEB : Boutons cliquables d'action
+        let buttons: Vec<(bool, String)> = elements
             .iter()
             .filter(|e| {
                 (!has_web_doc || e.is_web_content)
@@ -2706,15 +2608,20 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                 } else {
                     e.automation_id.clone()
                 };
-                if !e.aria_indications.is_empty() {
+                let full_label = if !e.aria_indications.is_empty() {
                     format!("{base} ({})", e.aria_indications)
                 } else {
                     base
-                }
+                };
+                (e.is_offscreen, full_label)
             })
-            .collect::<Vec<String>>();
+            .collect();
 
-        let mut scored_buttons: Vec<(f32, String)> = buttons.into_iter().map(|b| (score_enriched_button(&b), b)).collect();
+        let mut scored_buttons: Vec<(f32, String)> = buttons.into_iter().map(|(is_off, b)| {
+            let base_score = score_enriched_button(&b);
+            let score = if is_off { base_score - 10.0 } else { base_score + 15.0 };
+            (score, b)
+        }).collect();
         scored_buttons.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         let mut display_btns: Vec<String> = scored_buttons.into_iter().map(|(_, b)| b).collect();
         display_btns.dedup();
@@ -2722,6 +2629,117 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             display_btns.truncate(30);
             let prefix = if has_web_doc { "  [Page web - boutons cliquables] : " } else { "  [Boutons / contrôles cliquables] : " };
             out.push_str(&format!("{}{}\n", prefix, display_btns.join(", ")));
+        }
+
+        // 3. PRIMAUTÉ DU CONTENU HTML / WEB : Liens et résultats
+        let raw_links: Vec<(bool, String)> = elements
+            .iter()
+            .filter(|e| {
+                (!has_web_doc || e.is_web_content)
+                    && !e.is_edit_or_textarea
+                    && !e.name.is_empty()
+                    && (e.is_link
+                        || e.localized_type.contains("lien")
+                        || e.localized_type.contains("link")
+                        || e.localized_type.contains("hyperlink")
+                        || e.aria_role.contains("link")
+                        || e.aria_role.contains("lien"))
+            })
+            .map(|e| {
+                let label = if !e.aria_indications.is_empty() {
+                    format!("{} ({})", e.name, e.aria_indications)
+                } else {
+                    e.name.clone()
+                };
+                (e.is_offscreen, label)
+            })
+            .collect();
+
+        let mut seen_links = std::collections::HashSet::new();
+        let mut scored_links: Vec<(f32, String)> = raw_links
+            .into_iter()
+            .filter(|(_, l)| !is_poor_or_redundant_link(l))
+            .filter(|(_, l)| {
+                let lower = l.trim().to_lowercase();
+                if seen_links.contains(&lower) {
+                    false
+                } else {
+                    seen_links.insert(lower);
+                    true
+                }
+            })
+            .map(|(is_off, l)| {
+                let base_score = score_enriched_link(&l);
+                let score = if is_off { base_score - 10.0 } else { base_score + 15.0 };
+                (score, l)
+            })
+            .collect();
+
+        scored_links.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let display_links: Vec<String> = scored_links.into_iter().take(25).map(|(_, l)| l).collect();
+
+        if !display_links.is_empty() {
+            let prefix = if has_web_doc { "  [Page web - liens cliquables] : " } else { "  [Liens / résultats cliquables] : " };
+            out.push_str(&format!("{}{}\n", prefix, display_links.join(" | ")));
+        }
+
+        // 4. PRIMAUTÉ DU CONTENU HTML / WEB : Textes informatifs et prix
+        let mut text_items: Vec<String> = elements
+            .iter()
+            .filter(|e| {
+                (!has_web_doc || e.is_web_content)
+                    && !e.is_edit_or_textarea
+                    && !e.name.is_empty()
+                    && e.name.len() >= 3
+                    && !e.is_link
+                    && !e.aria_role.contains("link")
+                    && !e.localized_type.contains("lien")
+                    && !e.localized_type.contains("link")
+                    && (e.localized_type.contains("texte")
+                        || e.localized_type.contains("text")
+                        || e.localized_type.contains("en-tête")
+                        || e.localized_type.contains("heading")
+                        || e.name.contains('€')
+                        || e.name.contains('$')
+                        || e.name.to_lowercase().contains("eur"))
+            })
+            .map(|e| e.name.clone())
+            .collect();
+        text_items.dedup();
+        if !text_items.is_empty() {
+            let display_texts: Vec<String> = text_items.into_iter().take(10).collect();
+            let prefix = if has_web_doc { "  [Page web - textes / prix observés] : " } else { "  [Textes / prix observés] : " };
+            out.push_str(&format!("{}{}\n", prefix, display_texts.join(" | ")));
+        }
+
+        // 5. Informations secondaires de la fenêtre hôte (Onglets et contrôles navigateur)
+        let mut tabs: Vec<String> = elements
+            .iter()
+            .filter(|e| !e.name.is_empty() && (e.is_tab || e.localized_type.contains("onglet") || e.localized_type.contains("tab")))
+            .map(|e| e.name.clone())
+            .collect();
+        tabs.dedup();
+        if !tabs.is_empty() {
+            let display_tabs: Vec<String> = tabs.into_iter().take(10).collect();
+            out.push_str(&format!("  [Onglets / pages ouvertes] : {}\n", display_tabs.join(" | ")));
+        }
+
+        if has_web_doc {
+            let chrome_controls: Vec<String> = elements
+                .iter()
+                .filter(|e| e.is_browser_chrome && (!e.name.is_empty() || !e.value_text.is_empty()))
+                .map(|e| {
+                    if !e.value_text.is_empty() {
+                        format!("{}: \"{}\"", e.name, e.value_text.chars().take(70).collect::<String>())
+                    } else {
+                        e.name.clone()
+                    }
+                })
+                .take(4)
+                .collect();
+            if !chrome_controls.is_empty() {
+                out.push_str(&format!("  [Interface navigateur] : {}\n", chrome_controls.join(" | ")));
+            }
         }
 
         if has_scrollbar {
