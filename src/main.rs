@@ -1,6 +1,7 @@
 mod audio;
 mod automation;
 mod fs_util;
+mod html_util;
 mod pattern;
 mod twitch;
 mod types;
@@ -13,9 +14,8 @@ use window_util::*;
 use audio::spawn_audio_worker;
 use twitch::{search_twitch_channels, spawn_twitch_worker};
 use eframe::egui;
-use serde::Deserialize;
 use types::*;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender as StdSender};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
@@ -29,6 +29,8 @@ use windows::Win32::Media::Speech::{
 };
 #[cfg(windows)]
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
+#[cfg(windows)]
+use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
@@ -61,6 +63,7 @@ pub struct OverlayApp {
     is_recording: bool,
     smoothed_audio_level: f32,
     continuous_mode: bool,
+    dictation_mode: bool,
 
     // Canaux de communication asynchrones
     event_receiver: Receiver<AgentEvent>,
@@ -377,6 +380,7 @@ impl OverlayApp {
             smoothed_audio_level: 0.0,
             is_recording: false,
             continuous_mode: true,
+            dictation_mode: false,
             event_receiver,
             command_sender,
             tts_sender,
@@ -506,6 +510,8 @@ impl OverlayApp {
 
     fn trigger_emergency_stop(&mut self, _ctx: &egui::Context) {
         self.continuous_mode = false;
+        self.dictation_mode = false;
+        IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
         IS_EMERGENCY_STOPPED.store(true, Ordering::SeqCst);
         let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
         if self.is_recording {
@@ -526,6 +532,28 @@ impl OverlayApp {
         let _ = self.tts_sender.send(TtsCommand::Speak(stop_msg));
     }
 
+    fn exit_dictation_mode(&mut self) {
+        self.dictation_mode = false;
+        self.continuous_mode = false;
+        IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
+        let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
+        if self.is_recording {
+            self.stop_recording();
+        }
+        self.live_transcript.clear();
+        self.status = AgentStatus::Idle;
+        let _ = self.tts_sender.send(TtsCommand::Stop);
+        let msg = "Mode dictée désactivé.".to_string();
+        self.chat_history.push(ChatEntry {
+            role: ChatRole::Agent,
+            text: msg.clone(),
+            timestamp: current_time_str(),
+            quick_suggestions: Vec::new(),
+            screen_size_kb: None,
+        });
+        let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+    }
+
     fn start_recording(&mut self, ctx: &egui::Context) {
         if self.status == AgentStatus::EmergencyStopped {
             return;
@@ -534,14 +562,15 @@ impl OverlayApp {
         self.continuous_mode = true;
         self.is_recording = true;
         self.status = AgentStatus::Listening;
-        self.input_text.clear();
         let _ = self.tts_sender.send(TtsCommand::Stop);
         if !self.is_hidden {
             self.live_transcript = "Écoute Whisper active... parlez à votre micro.".to_string();
         } else {
             self.live_transcript.clear();
         }
-        ctx.memory_mut(|m| m.request_focus(egui::Id::new("prompt_input_text")));
+        if self.dictation_mode {
+            restore_external_focus();
+        }
         let _ = self.audio_sender.send(AudioCommand::Start);
     }
 
@@ -550,7 +579,6 @@ impl OverlayApp {
         self.continuous_mode = false;
         let _ = self.audio_sender.send(AudioCommand::Stop);
         set_mic_audio_level(0.0);
-        self.input_text.clear();
         self.live_transcript.clear();
         self.status = AgentStatus::Idle;
     }
@@ -566,12 +594,20 @@ impl OverlayApp {
 
 impl eframe::App for OverlayApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        // Fond transparent pour laisser transparaître l'arrière-plan sur les 70 % supérieurs
-        [0.0, 0.0, 0.0, 0.0]
+        if self.is_hidden {
+            [0.0, 0.0, 0.0, 0.0]
+        } else {
+            // Fond noir à 75 % d'opacité
+            [0.0, 0.0, 0.0, 0.75]
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        update_last_external_focus();
+
+        self.dictation_mode = IS_DICTATION_ACTIVE.load(Ordering::SeqCst);
 
         let target_level = match self.status {
             AgentStatus::Speaking => get_tts_audio_level(),
@@ -626,7 +662,8 @@ impl eframe::App for OverlayApp {
         let min_chat_h: f32 = 50.0;
         let current_chat_h = self.chat_height.clamp(min_chat_h, max_chat_h);
 
-        let target_win_h = (padding + current_chat_h + padding + control_h + padding).max(min_win_h);
+        // Arrondi pour éviter les oscillations de conversion DPI sub-pixel
+        let target_win_h = (padding + current_chat_h + padding + control_h + padding).max(min_win_h).round();
         let active_win_h = inner_rect_opt.map_or(self.current_win_h, |r| r.height().max(min_win_h));
 
         // Ancrage automatique de la fenêtre ferrée à la barre des tâches en bas à droite
@@ -646,8 +683,8 @@ impl eframe::App for OverlayApp {
             self.position_initialized = true;
         }
 
-        // Redimensionnement dynamique de la fenêtre vers le haut en conservant l'ancrage au bas
-        if self.position_initialized && (target_win_h - self.current_win_h).abs() > 0.5 {
+        // Redimensionnement dynamique avec hystérésis (seuil >= 3.0 px)
+        if self.position_initialized && (target_win_h - self.current_win_h).abs() >= 3.0 {
             self.current_win_h = target_win_h;
             let bot_y = self.window_bottom_y.unwrap_or(taskbar_top);
             let cur_x = self.window_pos.map_or(work_x + work_w - win_w - 16.0, |p| p.x);
@@ -683,10 +720,10 @@ impl eframe::App for OverlayApp {
                         let prev_status = self.status;
                         self.status = new_status;
                         if new_status == AgentStatus::Idle {
-                            if self.is_recording {
-                                self.is_recording = false;
-                            } else if prev_status == AgentStatus::Thinking
-                                && self.continuous_mode
+                            self.is_recording = false;
+                            if (self.dictation_mode
+                                || (prev_status == AgentStatus::Thinking && self.continuous_mode))
+                                && self.status != AgentStatus::EmergencyStopped
                                 && !self.is_hidden
                                 && !AGENT_BUSY.load(Ordering::SeqCst)
                             {
@@ -747,13 +784,21 @@ impl eframe::App for OverlayApp {
                 }
                 AgentEvent::TranscriptionPartial(text) => {
                     if self.is_recording && !self.is_hidden {
-                        self.input_text = text.clone();
                         self.live_transcript = text;
                     }
                 }
                 AgentEvent::VoicePromptReady(prompt) => {
                     self.is_recording = false;
                     self.live_transcript.clear();
+                    let is_user_typing = ctx.memory(|m| m.has_focus(egui::Id::new("prompt_input_text")))
+                        && !self.input_text.trim().is_empty();
+                    if is_user_typing {
+                        // L'utilisateur est activement en train de taper au clavier : on préserve son texte
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
                     let _ = self.tts_sender.send(TtsCommand::Stop);
                     if self.is_hidden {
                         if is_show_command(&prompt) {
@@ -860,13 +905,25 @@ impl eframe::App for OverlayApp {
             }
         }
 
-        // Raccourci clavier d'urgence global (Échap)
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.trigger_emergency_stop(&ctx);
+        // Gestion de la touche Échap : quitte le mode dictée si actif, sinon arrêt d'urgence global
+        let egui_escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        #[cfg(windows)]
+        let global_escape = self.dictation_mode && unsafe {
+            (GetAsyncKeyState(0x1B) as u16 & 0x8000) != 0
+        };
+        #[cfg(not(windows))]
+        let global_escape = false;
+
+        if egui_escape || global_escape {
+            if self.dictation_mode {
+                self.exit_dictation_mode();
+            } else {
+                self.trigger_emergency_stop(&ctx);
+            }
         }
 
-        // Raccourci clavier 'R' pour basculer le micro (autorisé pour couper le micro même avec focus)
-        let is_typing = ctx.memory(|m| m.focused().is_some()) && !self.is_recording;
+        // Raccourci clavier 'R' pour basculer le micro (désactivé si l'utilisateur est en train de taper du texte)
+        let is_typing = ctx.memory(|m| m.focused().is_some());
         if !self.is_hidden && !is_typing && ctx.input(|i| i.key_pressed(egui::Key::R)) {
             self.toggle_recording(&ctx);
         }
@@ -1019,6 +1076,26 @@ impl eframe::App for OverlayApp {
                                         ui.add_space(if is_highlighted { 8.0 } else { 5.0 });
                                     }
 
+                                    // Retour visuel en direct de l'écoute micro
+                                    if self.is_recording && !self.live_transcript.is_empty() {
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("🗣 Vous (en direct...)")
+                                                    .size(10.5)
+                                                    .color(egui::Color32::from_rgb(255, 215, 120))
+                                                    .italics(),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(&self.live_transcript)
+                                                    .size(13.5)
+                                                    .line_height(Some(18.0))
+                                                    .color(egui::Color32::from_rgb(255, 230, 160))
+                                                    .italics(),
+                                            );
+                                        });
+                                        ui.add_space(6.0);
+                                    }
+
                                     if let Some(prompt) = clicked_quick_suggestion {
                                         if self.is_recording {
                                             self.stop_recording();
@@ -1140,7 +1217,11 @@ impl eframe::App for OverlayApp {
                         });
                 });
 
-                self.chat_height = computed_chat_h;
+                // Hystérésis asymétrique pour self.chat_height :
+                // Empêche le clignotement / rebond continu à la frontière de saut de ligne de scrollbar
+                if computed_chat_h > self.chat_height + 4.0 || computed_chat_h < self.chat_height - 8.0 {
+                    self.chat_height = computed_chat_h;
+                }
 
                 // 2. Zone inférieure (30 %) : contrôles, avatar et saisie
                 ui.scope_builder(egui::UiBuilder::new().max_rect(control_rect), |ui| {
@@ -1161,15 +1242,21 @@ impl eframe::App for OverlayApp {
 
                             ui.scope_builder(egui::UiBuilder::new().max_rect(content_area), |ui| {
                                 ui.vertical(|ui| {
-                                    let status_badge = match self.status {
-                                        AgentStatus::Idle => "DeepSeek · en veille",
-                                        AgentStatus::Thinking => "DeepSeek · réflexion...",
-                                        AgentStatus::Speaking => "DeepSeek · en direct",
-                                        AgentStatus::Listening => "DeepSeek · écoute active (r)...",
-                                        AgentStatus::EmergencyStopped => "Système verrouillé",
+                                    let status_badge = if self.dictation_mode {
+                                        "DeepSeek · ✍ Mode dictée actif (Échap pour quitter)"
+                                    } else {
+                                        match self.status {
+                                            AgentStatus::Idle => "DeepSeek · en veille",
+                                            AgentStatus::Thinking => "DeepSeek · réflexion...",
+                                            AgentStatus::Speaking => "DeepSeek · en direct",
+                                            AgentStatus::Listening => "DeepSeek · écoute active (r)...",
+                                            AgentStatus::EmergencyStopped => "Système verrouillé",
+                                        }
                                     };
 
-                                    let badge_color = if self.status == AgentStatus::Listening {
+                                    let badge_color = if self.dictation_mode {
+                                        egui::Color32::from_rgb(255, 205, 70)
+                                    } else if self.status == AgentStatus::Listening {
                                         egui::Color32::from_rgb(255, 80, 80)
                                     } else {
                                         egui::Color32::from_rgb(0, 200, 255)
@@ -1215,6 +1302,30 @@ impl eframe::App for OverlayApp {
 
                                         if mic_btn.clicked() {
                                             self.toggle_recording(ui.ctx());
+                                        }
+
+                                        let dict_text = if self.dictation_mode {
+                                            egui::RichText::new("✍ Dictée ON")
+                                                .color(egui::Color32::from_rgb(255, 205, 70))
+                                                .strong()
+                                        } else {
+                                            egui::RichText::new("✍ Dictée")
+                                                .color(egui::Color32::from_rgb(180, 210, 235))
+                                        };
+                                        let dict_btn = ui.button(dict_text).on_hover_text(
+                                            "Activer ou désactiver le mode dictée vocale directe (Échap pour quitter)",
+                                        );
+                                        if dict_btn.clicked() {
+                                            if self.dictation_mode {
+                                                self.exit_dictation_mode();
+                                            } else {
+                                                self.dictation_mode = true;
+                                                IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
+                                                restore_external_focus();
+                                                if !self.is_recording {
+                                                    self.start_recording(ui.ctx());
+                                                }
+                                            }
                                         }
 
                                         let edit_width = (ui.available_width() - 124.0).max(80.0);
@@ -1378,6 +1489,26 @@ impl eframe::App for OverlayApp {
 
                 // Poignées visuelles de redimensionnement discrètes aux coins
                 let painter = ui.painter();
+
+                // Tracé de l'outline rect de la zone cible en mode dictée
+                if self.dictation_mode {
+                    if let Ok(guard) = LAST_FOCUSED_RECT.lock() {
+                        if let Some([left, top, right, bottom]) = *guard {
+                            let ppp = ctx.pixels_per_point().max(0.5);
+                            let screen_rect = egui::Rect::from_min_max(
+                                egui::pos2(left as f32 / ppp, top as f32 / ppp),
+                                egui::pos2(right as f32 / ppp, bottom as f32 / ppp),
+                            );
+                            // Dessin d'un halo semi-transparent et d'une bordure dorée
+                            ui.painter().rect_stroke(
+                                screen_rect,
+                                egui::CornerRadius::same(4),
+                                egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 205, 70)),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                    }
+                }
                 let grip_nw = egui::Rect::from_min_size(egui::pos2(padding + 2.0, padding + 2.0), egui::vec2(10.0, 10.0));
                 painter.line_segment(
                     [egui::pos2(grip_nw.min.x, grip_nw.max.y), egui::pos2(grip_nw.max.x, grip_nw.min.y)],
@@ -1626,6 +1757,116 @@ async fn compact_history_if_needed(
     *history = recent;
 }
 
+const STANDARD_SYSTEM_INSTRUCTIONS: &str = r#"Tu es l'agent d'exploration Libertide pour Windows.
+Réponds STRICTEMENT en JSON sans texte autour. Narration concise en français (max 2 phrases).
+
+Règles d'action et d'arbitrage :
+- Silence ("invalid_request": true) : réservé aux bruits de micro et phrases inintelligibles.
+- Salutations et discussion : valide ("invalid_request": false), réponds courtoisement dans "narration" avec "actions": [].
+- Interface et contenu : consulte toujours "[État actuel de l'écran]". Il contient le texte intégral de la page web (résultats de recherche, météo, prix, articles, données de tableaux), les contrôles et les liens.
+  * Les contrôles de l'interface du navigateur portent le préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse", "[Navigateur] Actualiser"). Pour interagir avec le navigateur hôte, inclus explicitement ce préfixe dans la cible.
+  * Les éléments internes au site web (champs de formulaire, boutons d'action, liens, textes de données) figurent dans "[Page web - ...]" sans préfixe. Cible-les par leur libellé direct (ex: "Destination", "Rechercher", "Tout accepter").
+  * Pour répondre à une question sur le contenu (météo, prix, comparaison, progression), lis et exploite directement les données textuelles déjà présentes dans "[État actuel de l'écran]".
+- Lecture de fichier ou code dans un éditeur ("read_editor_content") :
+  * Lorsque l'utilisateur demande de lire, consulter, analyser, vérifier ou résumer un fichier ouvert ou le code dans un éditeur (VS Code, Notepad, IDE, etc.), utilise impérativement "read_editor_content" (avec "window": "titre_optionnel", "target": "onglet_ou_fichier_optionnel").
+  * Le moteur placera la fenêtre au premier plan, sélectionnera le champ d'édition/l'onglet approprié, copiera le contenu (Ctrl+A, Ctrl+C) et te réinjectera l'intégralité du texte extrait dans le retour de l'étape suivante pour que tu puisses l'analyser.
+- Fermeture d'onglets ou sous-pages (ex: "ferme Google") : JAMAIS "close_app" ! Enchaîne "focus_window" puis "accessibility_shortcut": "close_tab" ou clique la croix ("click_button" / "click_element"). Réserve "close_app" à la fermeture d'une application entière.
+- Détection d'obstruction et éléments surgissants (bannières cookies, popups, notifications Windows) :
+  * Analyse systématiquement [État actuel de l'écran] pour repérer toute notification Windows, toast, modale ou bannière de consentement qui masque l'écran ou demande validation.
+  * Sélection impérative du sous-bouton d'action ou de fermeture : n'envoie JAMAIS "escape" ! Identifie et clique directement sur le sous-bouton approprié présent dans [Boutons / contrôles cliquables] ou [Liens / résultats cliquables] :
+    - Bannières de cookies / RGPD : sous-bouton "Tout accepter", "Accepter", "J'accepte", "Autoriser", "Continuer sans accepter" ou croix de fermeture.
+    - Notifications Windows et toasts système : sous-bouton "Fermer", "Ignorer", "Supprimer", "Dismiss" ou le bouton d'action contextuel de la notification.
+    - Popups, modales et dialogues d'application : sous-bouton "Fermer", "Annuler", "Plus tard", "Non merci" ou bouton de rejet.
+  * Dès que l'obstacle n'apparaît plus à l'écran, reprends immédiatement le cours de la consigne initiale là où elle s'était arrêtée.
+- Validation et saisie : pour valider un champ ou une recherche par la touche Entrée, passe "press_enter": true dans "write_text" ou utilise "accessibility_shortcut": "enter". N'utilise JAMAIS "run_command" pour simuler une touche !
+- Éléments cliquables et saisie : utilise "click_element" pour les liens et onglets, "click_button" pour les boutons. Pour saisir sans cible précise, mets "target": null dans "write_text" ou "replace_field_text".
+- Mode dictée ("dictate", "activate_dictation", "deactivate_dictation") :
+  * Tu contrôles le flag de dictée via les actions "activate_dictation", "deactivate_dictation" ou "toggle_dictation".
+  * Si le prompt utilisateur demande d'activer la dictée (ex: "mode dictée", "active la dictée", "prends note de ce que je dis"), utilise "activate_dictation".
+- Démarrage automatique Windows ("enable_autostart", "disable_autostart", "check_autostart", "set_autostart") :
+  * Si l'utilisateur demande que Libertide se lance au démarrage de Windows (ex: "lance toi au démarrage", "active le démarrage auto", "démarre avec mon PC"), utilise "enable_autostart" (ou "set_autostart": {"enabled": true}).
+  * S'il demande de ne plus se lancer au démarrage (ex: "désactive le démarrage auto", "ne te lance plus au démarrage"), utilise "disable_autostart" (ou "set_autostart": {"enabled": false}).
+  * S'il demande si Libertide est configuré au démarrage, utilise "check_autostart".
+- Sélection de texte entre deux bornes ("select_text_between") :
+  * Pour sélectionner une portion de texte délimitée entre un point de départ et un point d'arrivée (ex: "sélectionne entre Bonjour et Cordialement", "sélectionne du début de la fonction jusqu'à la fin"), utilise l'action "select_text_between" avec "from": "borne_debut", "to": "borne_fin".
+- Défilement de page et scrollbar ("scroll") :
+  * L'analyse d'écran intègre automatiquement un autoscroll par tranches de viewport (jusqu'à 10 chunks) pour agréger l'ensemble des éléments de la page.
+  * Si une barre de défilement est signalée ou si tu as besoin de positionner la vue sur un conteneur précis, utilise "scroll" ("direction": "down" | "up" | "bottom" | "top", "amount": 1 ou 2).
+  * Tu réévalueras le nouvel état de l'écran à l'étape suivante pour cliquer ou interagir avec les éléments révélés.
+- Navigation web et shopping : génère l'URL pertinente avec "navigate_to_url". Par défaut, elle s'ouvre TOUJOURS dans un NOUVEL ONGLET ("target": "new_tab"). Ne remplace JAMAIS l'onglet/page en cours sauf demande expresse ("target": "current_tab"). Tu peux également spécifier "target": "new_window" pour une nouvelle fenêtre ou cibler un navigateur via "target": "titre_fenetre".
+  * Achat multi-étapes : 1. Ajoute au panier ("click_element" ou "click_button") -> 2. Ouvre le panier / commande ("click_element") -> 3. Devant le paiement, stoppe toute action et demande confirmation orale dans "narration" avec "actions": [].
+  * Recherche exploratoire : dès l'affichage des résultats, résume 2-3 options observées et pose une question de cadrage (budget, dimensions) dans "narration" avec "actions": [].
+- Suggestions rapides ("quick_suggestions") : quand tu poses une question ou suggères des options, propose 2 à 4 choix brefs sous forme de tableau de chaînes textuelles dans "quick_suggestions" (ex: ["Tennis de course, 80-120€", "Modèle lifestyle"]). Ces options seront affichées sous forme de boutons-onglets directement cliquables par l'utilisateur.
+- Immersion : "activate_immersion" pour créer le bureau virtuel (Win+Ctrl+D). Silence absolu lors du suivi périodique si l'activité est normale. "deactivate_immersion" pour le fermer.
+- Cycle d'exécution et fin de mission : analyse le retour d'étape et l'état d'écran. Dès que la tâche est finie ou nécessite une précision de l'utilisateur, renvoie "actions": [].
+  * OBLIGATION DE FIN DE PASSES : Dès que "actions" est vide (tâche terminée ou attente), fournis TOUJOURS dans "quick_suggestions" 2 à 4 suggestions contextuelles concrètes basées sur ton analyse de l'écran et des éléments observés (ex: produits aperçus, avis, défilement, choix suivants).
+
+Format json obligatoire :
+{
+  "narration": "Explication vocale en français (2 phrases max ou vide pour silence).",
+  "actions": [
+    {"action": "open_app", "name": "nom_executable"},
+    {"action": "close_app", "name": "nom_ou_titre"},
+    {"action": "click_element", "window": "titre_optionnel", "target_name": "nom_du_lien_ou_element"},
+    {"action": "click_button", "window": "titre_optionnel", "button_name": "nom_du_bouton"},
+    {"action": "focus_element", "window": "titre_optionnel", "target_name": "nom_ou_id_element"},
+    {"action": "scroll", "direction": "down" | "up" | "bottom" | "top", "amount": 1, "window": "titre_optionnel"},
+    {"action": "focus_window", "title": "titre_optionnel", "pid": 1234},
+    {"action": "read_editor_content", "window": "titre_optionnel", "target": "nom_onglet_ou_element_optionnel"},
+    {"action": "clear_text", "window": "titre_optionnel"},
+    {"action": "write_text", "text": "texte à écrire", "target": null, "press_enter": false},
+    {"action": "dictate", "text": "texte dicté et ponctué", "window": null, "target": null, "press_enter": false},
+    {"action": "activate_dictation", "window": null, "target": null},
+    {"action": "deactivate_dictation"},
+    {"action": "toggle_dictation", "window": null},
+    {"action": "select_text_between", "from": "texte_debut", "to": "texte_fin", "window": null, "target": null},
+    {"action": "replace_field_text", "text": "texte complet modifié", "target": null},
+    {"action": "run_command", "command": "commande_ou_outil"},
+    {"action": "kill_process", "pid": 1234, "name": "app.exe"},
+    {"action": "open_browser", "url": "https://..."},
+    {"action": "navigate_to_url", "url": "https://...", "target": "new_tab" | "current_tab" | "new_window" | "titre_fenetre_optionnel"},
+    {"action": "tile_windows", "layout": "split_horizontal" | "split_vertical" | "grid_2x2" | "master_stack", "windows": ["titre_fenetre_1", "titre_fenetre_2"]},
+    {"action": "arrange_window", "title": "mot_cle", "position": "left" | "right" | "top" | "bottom" | "center" | "maximize" | "minimize"},
+    {"action": "move_window", "title": "mot_cle", "x": 0, "y": 0, "width": 960, "height": 1040},
+    {"action": "accessibility_shortcut", "shortcut": "enter" | "close_tab" | "snap_left" | "snap_right" | "snap_up" | "snap_down" | "task_manager" | "undo" | "copy" | "refresh_page"},
+    {"action": "summarize_screen", "window": "titre_optionnel"},
+    {"action": "activate_immersion", "apps": ["code"], "urls": ["https://..."], "layout": "grid_2x2"},
+    {"action": "deactivate_immersion"},
+    {"action": "enable_autostart"},
+    {"action": "disable_autostart"},
+    {"action": "check_autostart"},
+    {"action": "set_autostart", "enabled": true}
+  ],
+  "quick_suggestions": ["Suggestion 1", "Suggestion 2"]
+}"#;
+
+const DICTATION_SYSTEM_INSTRUCTIONS: &str = r#"Tu es l'assistant de dictée vocale et de saisie textuelle pour Windows.
+Tu ne traites AUCUNE tâche d'exploration, navigation web, clic d'interface ou manipulation de fenêtres.
+Tu analyses STRICTEMENT la voix pour retranscrire du texte, déplacer le curseur ou stopper la dictée.
+Réponds STRICTEMENT en JSON sans aucun texte autour.
+
+Règles de décision :
+1. Arrêt de la dictée ("deactivate_dictation") :
+   - Si l'utilisateur demande d'arrêter, quitter, couper ou stopper la dictée (ex: "arrête la dictée", "stop dictée", "quitter la dictée", "pause dictée", "c'est fini", "termine la dictée") :
+     N'écris JAMAIS cette consigne dans le document ! Émets l'action "deactivate_dictation" avec "narration": "Dictée désactivée.".
+2. Contrôle et déplacement du curseur ("cursor_move") :
+   - Si l'utilisateur donne un ordre de mise en page ou de déplacement de curseur ("à la ligne", "nouveau paragraphe", "curseur à gauche", "efface le mot", "début de ligne"), utilise l'action "cursor_move" avec le libellé de commande adéquat. Maintiens "narration": "".
+3. Retranscription de texte dicté ("dictate") :
+   - Pour tout autre propos dicté : retranscris fidèlement le texte parlé avec ponctuation naturelle et soignée (points, virgules, majuscules).
+   - Utilise l'action "dictate" avec "target": null, "window": null, "press_enter": false (ou true si "entrée" explicite).
+   - Maintiens STRICTEMENT "narration": "" (silence complet).
+4. Silence / Bruit :
+   - Si inintelligible ou bruit de micro : "invalid_request": true, "narration": "", "actions": [].
+
+Format JSON obligatoire :
+{
+  "narration": "",
+  "actions": [
+    {"action": "dictate", "text": "texte à insérer", "target": null, "window": null, "press_enter": false}
+  ],
+  "quick_suggestions": []
+}"#;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PromptTrigger {
     User,
@@ -1635,7 +1876,8 @@ enum PromptTrigger {
 
 async fn call_deepseek_prompt(
     api_key: String,
-    user_prompt: String,
+    user_instruction: String,
+    full_prompt: String,
     history: Arc<tokio::sync::Mutex<Vec<ChatMessage>>>,
     event_tx: StdSender<AgentEvent>,
     last_call_time: Arc<tokio::sync::Mutex<Option<Instant>>>,
@@ -1660,71 +1902,20 @@ async fn call_deepseek_prompt(
     }
 
     let client = reqwest::Client::new();
-    let system_instructions = r#"Tu es l'agent d'exploration Libertide pour Windows.
-Réponds STRICTEMENT en JSON sans texte autour. Narration concise en français (max 2 phrases).
+    let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::SeqCst);
+    let system_instructions = if is_dictation {
+        DICTATION_SYSTEM_INSTRUCTIONS
+    } else {
+        STANDARD_SYSTEM_INSTRUCTIONS
+    };
 
-Règles d'action et d'arbitrage :
-- Silence ("invalid_request": true) : réservé aux bruits de micro et phrases inintelligibles.
-- Salutations et discussion : valide ("invalid_request": false), réponds courtoisement dans "narration" avec "actions": [].
-- Interface : consulte toujours "[État actuel de l'écran]" (fenêtres, onglets, boutons, liens).
-  * Les contrôles de l'interface du navigateur portent le préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse", "[Navigateur] Actualiser"). Pour interagir avec le navigateur hôte, inclus explicitement ce préfixe dans la cible.
-  * Les éléments internes au site web (champs de formulaire, boutons d'action, liens) figurent dans "[Page web - ...]" sans préfixe. Cible-les par leur libellé direct (ex: "Destination", "Rechercher", "Tout accepter").
-- Fermeture d'onglets ou sous-pages (ex: "ferme Google") : JAMAIS "close_app" ! Enchaîne "focus_window" puis "accessibility_shortcut": "close_tab" ou clique la croix ("click_button" / "click_element"). Réserve "close_app" à la fermeture d'une application entière.
-- Détection d'obstruction et éléments surgissants (bannières cookies, popups, notifications Windows) :
-  * Analyse systématiquement [État actuel de l'écran] pour repérer toute notification Windows, toast, modale ou bannière de consentement qui masque l'écran ou demande validation.
-  * Sélection impérative du sous-bouton d'action ou de fermeture : n'envoie JAMAIS "escape" ! Identifie et clique directement sur le sous-bouton approprié présent dans [Boutons / contrôles cliquables] ou [Liens / résultats cliquables] :
-    - Bannières de cookies / RGPD : sous-bouton "Tout accepter", "Accepter", "J'accepte", "Autoriser", "Continuer sans accepter" ou croix de fermeture.
-    - Notifications Windows et toasts système : sous-bouton "Fermer", "Ignorer", "Supprimer", "Dismiss" ou le bouton d'action contextuel de la notification.
-    - Popups, modales et dialogues d'application : sous-bouton "Fermer", "Annuler", "Plus tard", "Non merci" ou bouton de rejet.
-  * Dès que l'obstacle n'apparaît plus à l'écran, reprends immédiatement le cours de la consigne initiale là où elle s'était arrêtée.
-- Éléments cliquables et saisie : utilise "click_element" pour les liens et onglets, "click_button" pour les boutons. Pour saisir sans cible précise, mets "target": null dans "write_text" ou "replace_field_text".
-- Défilement de page et scrollbar ("scroll") :
-  * L'analyse d'écran intègre automatiquement un autoscroll par tranches de viewport (jusqu'à 10 chunks) pour agréger l'ensemble des éléments de la page.
-  * Si une barre de défilement est signalée ou si tu as besoin de positionner la vue sur un conteneur précis, utilise "scroll" ("direction": "down" | "up" | "bottom" | "top", "amount": 1 ou 2).
-  * Tu réévalueras le nouvel état de l'écran à l'étape suivante pour cliquer ou interagir avec les éléments révélés.
-- Navigation et shopping autonome : génère l'URL pertinente (ex: "https://www.google.com/search?tbm=shop&q=..." pour shopping) avec "navigate_to_url".
-  * Achat multi-étapes : 1. Ajoute au panier ("click_element" ou "click_button") -> 2. Ouvre le panier / commande ("click_element") -> 3. Devant le paiement, stoppe toute action et demande confirmation orale dans "narration" avec "actions": [].
-  * Recherche exploratoire : dès l'affichage des résultats, résume 2-3 options observées et pose une question de cadrage (budget, dimensions) dans "narration" avec "actions": [].
-- Suggestions rapides ("quick_suggestions") : quand tu poses une question ou suggères des options, propose 2 à 4 choix brefs sous forme de tableau de chaînes textuelles dans "quick_suggestions" (ex: ["Tennis de course, 80-120€", "Modèle lifestyle"]). Ces options seront affichées sous forme de boutons-onglets directement cliquables par l'utilisateur.
-- Immersion : "activate_immersion" pour créer le bureau virtuel (Win+Ctrl+D). Silence absolu lors du suivi périodique si l'activité est normale. "deactivate_immersion" pour le fermer.
-- Cycle d'exécution et fin de mission : analyse le retour d'étape et l'état d'écran. Dès que la tâche est finie ou nécessite une précision de l'utilisateur, renvoie "actions": [].
-  * OBLIGATION DE FIN DE PASSES : Dès que "actions" est vide (tâche terminée ou attente), fournis TOUJOURS dans "quick_suggestions" 2 à 4 suggestions contextuelles concrètes basées sur ton analyse de l'écran et des éléments observés (ex: produits aperçus, avis, défilement, choix suivants).
-
-Format json obligatoire :
-{
-  "narration": "Explication vocale en français (2 phrases max ou vide pour silence).",
-  "actions": [
-    {"action": "open_app", "name": "nom_executable"},
-    {"action": "close_app", "name": "nom_ou_titre"},
-    {"action": "click_element", "window": "titre_optionnel", "target_name": "nom_du_lien_ou_element"},
-    {"action": "click_button", "window": "titre_optionnel", "button_name": "nom_du_bouton"},
-    {"action": "focus_element", "window": "titre_optionnel", "target_name": "nom_ou_id_element"},
-    {"action": "scroll", "direction": "down" | "up" | "bottom" | "top", "amount": 1, "window": "titre_optionnel"},
-    {"action": "focus_window", "title": "titre_optionnel", "pid": 1234},
-    {"action": "clear_text", "window": "titre_optionnel"},
-    {"action": "write_text", "text": "texte à écrire", "target": null},
-    {"action": "replace_field_text", "text": "texte complet modifié", "target": null},
-    {"action": "run_command", "command": "commande_ou_outil"},
-    {"action": "kill_process", "pid": 1234, "name": "app.exe"},
-    {"action": "open_browser", "url": "https://..."},
-    {"action": "navigate_to_url", "url": "https://..."},
-    {"action": "tile_windows", "layout": "split_horizontal" | "split_vertical" | "grid_2x2" | "master_stack", "windows": ["titre_fenetre_1", "titre_fenetre_2"]},
-    {"action": "arrange_window", "title": "mot_cle", "position": "left" | "right" | "top" | "bottom" | "center" | "maximize" | "minimize"},
-    {"action": "move_window", "title": "mot_cle", "x": 0, "y": 0, "width": 960, "height": 1040},
-    {"action": "accessibility_shortcut", "shortcut": "close_tab" | "snap_left" | "snap_right" | "snap_up" | "snap_down" | "task_manager" | "undo" | "copy" | "refresh_page"},
-    {"action": "summarize_screen", "window": "titre_optionnel"},
-    {"action": "activate_immersion", "apps": ["code"], "urls": ["https://..."], "layout": "grid_2x2"},
-    {"action": "deactivate_immersion"}
-  ],
-  "quick_suggestions": ["Suggestion 1", "Suggestion 2"]
-}"#;
-
-    let safe_user_prompt = truncate_with_notice(&user_prompt, 4000);
+    let safe_user_instruction = truncate_with_notice(&user_instruction, 1000);
+    let safe_full_prompt = truncate_with_notice(&full_prompt, 32000);
     {
         let mut hist_guard = history.lock().await;
         hist_guard.push(ChatMessage {
             role: "user".to_string(),
-            content: safe_user_prompt.clone(),
+            content: safe_full_prompt,
         });
     }
 
@@ -1749,7 +1940,13 @@ Format json obligatoire :
         }
 
         // Debounce : pause minimale entre deux requêtes API
-        let min_debounce = if pass == 1 { Duration::from_millis(3000) } else { Duration::from_millis(2000) };
+        let min_debounce = if is_dictation {
+            Duration::from_millis(400)
+        } else if pass == 1 {
+            Duration::from_millis(3000)
+        } else {
+            Duration::from_millis(2000)
+        };
         let prev_call = { *last_call_time.lock().await };
         if let Some(prev) = prev_call {
             let elapsed = prev.elapsed();
@@ -1769,11 +1966,17 @@ Format json obligatoire :
         });
         messages.extend(history.lock().await.iter().cloned());
 
+        let (temperature, max_tokens) = if is_dictation {
+            (0.3, 300)
+        } else {
+            (1.0, 600)
+        };
+
         let request = DeepSeekChatRequest {
             model: "deepseek-chat".to_string(),
             messages,
-            temperature: 1.0,
-            max_tokens: 600,
+            temperature,
+            max_tokens,
             top_p: 1.0,
             stream: false,
         };
@@ -1958,7 +2161,7 @@ Format json obligatoire :
                 let screen = {
                     LAST_SCREEN_SUMMARY.lock().ok().and_then(|s| s.clone()).unwrap_or_else(|| {
                         #[cfg(windows)]
-                        { summarize_screen_state(None, false) }
+                        { summarize_screen_state(None, true) }
                         #[cfg(not(windows))]
                         { String::new() }
                     })
@@ -1992,6 +2195,19 @@ Format json obligatoire :
         }
 
         let actions_to_run = payload.actions;
+        let has_web_action = actions_to_run.iter().any(|a| {
+            matches!(
+                a,
+                AgentAction::OpenBrowser { .. }
+                    | AgentAction::NavigateToUrl { .. }
+                    | AgentAction::ClickElement { .. }
+                    | AgentAction::ClickButton { .. }
+                    | AgentAction::Scroll { .. }
+                    | AgentAction::SummarizeScreen { .. }
+                    | AgentAction::FocusWindow { .. }
+            )
+        });
+
         let (report, screen_after) = tokio::task::spawn_blocking(move || {
             if is_request_cancelled(request_id) {
                 return ("Actions interrompues.".to_string(), String::new());
@@ -2001,12 +2217,16 @@ Format json obligatoire :
                 if is_request_cancelled(request_id) {
                     return (rep, String::new());
                 }
-                std::thread::sleep(Duration::from_millis(1200));
+                if is_dictation {
+                    return (rep, String::new());
+                }
+                let wait_ms = if has_web_action { 2200 } else { 1200 };
+                std::thread::sleep(Duration::from_millis(wait_ms));
                 if is_request_cancelled(request_id) {
                     return (rep, String::new());
                 }
                 #[cfg(windows)]
-                let sc = summarize_screen_state(None, false);
+                let sc = summarize_screen_state(None, true);
                 #[cfg(not(windows))]
                 let sc = String::new();
                 (rep, sc)
@@ -2024,6 +2244,11 @@ Format json obligatoire :
             return;
         }
 
+        if is_dictation {
+            println!("[Dictée] Action exécutée instantanément, fin de séquence.");
+            break;
+        }
+
         if !screen_after.trim().is_empty() {
             if let Ok(mut lock) = LAST_SCREEN_SUMMARY.lock() {
                 *lock = Some(screen_after.clone());
@@ -2031,23 +2256,34 @@ Format json obligatoire :
         }
 
         if pass < MAX_AGENT_PASSES {
-            let compact_report = truncate_with_notice(&report, 1200);
+            let compact_report = truncate_with_notice(&report, 10000);
             let mut step_feedback = format!("[Retour d'exécution étape {pass}] :\n{compact_report}");
             if !screen_after.trim().is_empty() {
-                let safe_screen = truncate_with_notice(screen_after.trim(), 3500);
+                let screen_after_clean = if screen_after.contains("<html") || screen_after.contains("<table") || screen_after.contains("<body") {
+                    html_util::sanitize_html_to_markdown(&screen_after)
+                } else {
+                    screen_after.clone()
+                };
+                let max_screen = if screen_after_clean.contains("[Page web") || screen_after_clean.contains("[Navigateur]") {
+                    24000
+                } else {
+                    12000
+                };
+                let safe_screen = truncate_with_notice(screen_after_clean.trim(), max_screen);
                 step_feedback.push_str(&format!("\n\n[État de l'écran suite aux actions] :\n{safe_screen}"));
             }
 
             step_feedback.push_str(&format!(
                 "\n\nConsignes pour cette nouvelle étape :\n\
                 - Analyse attentivement [État de l'écran suite aux actions].\n\
+                - Si un contenu de fichier ou de code a été extrait via 'read_editor_content', analyse-le en profondeur et réponds directement à la question de l'utilisateur dans 'narration' avec 'actions': [].\n\
                 - Pour cibler un contrôle de l'application hôte (navigateur), utilise le libellé commençant par '[Navigateur]'. Pour la page web, utilise le nom direct affiché dans les sections '[Page web - ...]'.\n\
                 - Détection d'obstacle : si une notification Windows, un popup ou une bannière de consentement obstrue la vue, sélectionne et clique immédiatement sur le sous-bouton approprié de la notification ('click_button' ou 'click_element' vers 'Tout accepter', 'Accepter', 'Fermer', 'Ignorer', etc.). Ne jamais envoyer 'escape'.\n\
                 - Si l'élément cible n'est pas encore visible sur la page, émets un défilement ('scroll' direction: 'down') pour explorer le reste de la page.\n\
                 - Si l'écran est dégagé, poursuis immédiatement l'exécution de la consigne initiale : \"{}\".\n\
                 - Pour une recherche ou un achat web : relève les modèles ou prix observés et formule 2 ou 3 suggestions concrètes dans \"narration\" si un choix utilisateur est nécessaire.\n\
                 - Si la tâche est terminée ou attend un choix, confirme-le dans \"narration\" avec \"actions\": [] et fournis impérativement 2 à 4 suggestions contextuelles dans \"quick_suggestions\" basées sur ton analyse des éléments à l'écran.",
-                safe_user_prompt
+                safe_user_instruction
             ));
 
             history.lock().await.push(ChatMessage {
@@ -2074,6 +2310,9 @@ Format json obligatoire :
             });
         }
     }
+
+    // Libération explicite du verrou d'activité avant d'émettre l'état Idle
+    drop(_busy_guard);
 
     if !is_request_cancelled(request_id) && !has_spoken {
         let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
@@ -2150,11 +2389,27 @@ fn main() -> eframe::Result<()> {
                                     quick_suggestions: Vec::new(),
                                 });
                                 let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                            } else if IS_DICTATION_ACTIVE.load(Ordering::SeqCst) {
+                                if is_request_cancelled(request_id) { return; }
+                                let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
+                                let final_prompt = format!(
+                                    "[MODE DICTÉE ACTIF] : L'utilisateur est en mode dictée vocale. Analyse sa voix : s'il s'agit d'une consigne pour arrêter/quitter la dictée, appelle 'deactivate_dictation'. S'il s'agit de texte à insérer, retranscris-le avec ponctuation soignée via 'dictate' (target: null) et garde narration: \"\".\n\n[Demande utilisateur]\n{prompt}"
+                                );
+                                call_deepseek_prompt(
+                                    deepseek_chat_key,
+                                    prompt.clone(),
+                                    final_prompt,
+                                    history,
+                                    event_tx,
+                                    last_call_time,
+                                    PromptTrigger::User,
+                                    request_id,
+                                ).await;
                             } else {
                                 let (field_content, screen_state) = tokio::task::spawn_blocking(|| {
                                     #[cfg(windows)]
                                     {
-                                        (get_active_field_content(), summarize_screen_state(None, false))
+                                        (get_active_field_content(), summarize_screen_state(None, true))
                                     }
                                     #[cfg(not(windows))]
                                     {
@@ -2170,7 +2425,17 @@ fn main() -> eframe::Result<()> {
                                     if let Ok(mut lock) = LAST_SCREEN_SUMMARY.lock() {
                                         *lock = Some(screen_state.clone());
                                     }
-                                    let safe_screen = truncate_with_notice(screen_state.trim(), 3800);
+                                    let screen_state = if screen_state.contains("<html") || screen_state.contains("<table") || screen_state.contains("<body") {
+                                        html_util::sanitize_html_to_markdown(&screen_state)
+                                    } else {
+                                        screen_state
+                                    };
+                                    let max_screen = if screen_state.contains("[Page web") || screen_state.contains("[Navigateur]") {
+                                        24000
+                                    } else {
+                                        12000
+                                    };
+                                    let safe_screen = truncate_with_notice(screen_state.trim(), max_screen);
                                     let kb = safe_screen.len() as f32 / 1024.0;
                                     let _ = event_tx.send(AgentEvent::ScreenPayloadSize(kb));
                                     prompt_sections.push(format!("[État actuel de l'écran]\n{safe_screen}"));
@@ -2190,6 +2455,7 @@ fn main() -> eframe::Result<()> {
 
                                 call_deepseek_prompt(
                                     deepseek_chat_key,
+                                    prompt.clone(),
                                     final_prompt,
                                     history,
                                     event_tx,
@@ -2207,6 +2473,7 @@ fn main() -> eframe::Result<()> {
                         }
                         let _ = bg_tts_tx.send(TtsCommand::Stop);
                         IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
+                        IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
                         if let Ok(mut hist) = IMMERSION_SCREEN_HISTORY.lock() {
                             hist.clear();
                         }
@@ -2292,7 +2559,7 @@ fn main() -> eframe::Result<()> {
                                 };
 
                                 println!("[Immersion] Changement détecté (diff: {} octets), transmission du diff au LLM...", screen_diff.len());
-                                call_deepseek_prompt(deepseek_chat_key, immersion_prompt, history, event_tx, last_call_time, PromptTrigger::Immersion { screen_changed: true }, request_id).await;
+                                call_deepseek_prompt(deepseek_chat_key, "Suivi immersion".to_string(), immersion_prompt, history, event_tx, last_call_time, PromptTrigger::Immersion { screen_changed: true }, request_id).await;
                                 return;
                             }
 
@@ -2322,7 +2589,7 @@ fn main() -> eframe::Result<()> {
                                     truncate_with_notice(&current_summary, 1500)
                                 );
 
-                                call_deepseek_prompt(deepseek_chat_key, diff_prompt, history, event_tx, last_call_time, PromptTrigger::Surveillance, request_id).await;
+                                call_deepseek_prompt(deepseek_chat_key, "Surveillance écran".to_string(), diff_prompt, history, event_tx, last_call_time, PromptTrigger::Surveillance, request_id).await;
                             } else {
                                 println!("[Surveillance] Premier instantané d'écran enregistré.");
                             }

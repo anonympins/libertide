@@ -115,7 +115,11 @@ pub enum AgentAction {
     NavigateToUrl {
         url: String,
         #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
         window: Option<String>,
+        #[serde(default)]
+        new_window: Option<bool>,
     },
     WriteText {
         text: String,
@@ -123,6 +127,8 @@ pub enum AgentAction {
         target: Option<String>,
         #[serde(default)]
         window: Option<String>,
+        #[serde(default)]
+        press_enter: Option<bool>,
     },
     ReplaceFieldText {
         text: String,
@@ -177,6 +183,12 @@ pub enum AgentAction {
         #[serde(default)]
         window: Option<String>,
     },
+    ReadEditorContent {
+        #[serde(default)]
+        window: Option<String>,
+        #[serde(default, alias = "target_name")]
+        target: Option<String>,
+    },
     ActivateImmersion {
         #[serde(default)]
         apps: Vec<String>,
@@ -185,7 +197,51 @@ pub enum AgentAction {
         #[serde(default)]
         layout: Option<String>,
     },
+    Dictate {
+        text: String,
+        #[serde(default)]
+        window: Option<String>,
+        #[serde(default, alias = "target_name")]
+        target: Option<String>,
+        #[serde(default)]
+        press_enter: Option<bool>,
+    },
+    ActivateDictation {
+        #[serde(default)]
+        window: Option<String>,
+        #[serde(default, alias = "target_name")]
+        target: Option<String>,
+    },
+    ToggleDictation {
+        #[serde(default)]
+        window: Option<String>,
+    },
+    #[serde(alias = "move_cursor", alias = "cursor_action")]
+    CursorMove {
+        #[serde(alias = "direction", alias = "type", alias = "movement")]
+        command: String,
+    },
     DeactivateImmersion,
+    DeactivateDictation,
+    SelectTextBetween {
+        from: String,
+        to: String,
+        #[serde(default)]
+        window: Option<String>,
+        #[serde(default, alias = "target_name")]
+        target: Option<String>,
+    },
+    #[serde(alias = "activate_autostart", alias = "enable_startup", alias = "register_autostart")]
+    EnableAutostart,
+    #[serde(alias = "deactivate_autostart", alias = "disable_startup", alias = "unregister_autostart")]
+    DisableAutostart,
+    #[serde(alias = "query_autostart", alias = "get_autostart_status")]
+    CheckAutostart,
+    #[serde(alias = "set_startup")]
+    SetAutostart {
+        #[serde(default)]
+        enabled: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -217,10 +273,35 @@ impl QuickSuggestionItem {
             }
             QuickSuggestionItem::Action(act) => match act {
                 AgentAction::OpenApp { name } => Some(format!("Ouvrir {name}")),
+                AgentAction::NavigateToUrl { url, .. } => Some(format!("Naviguer vers {url}")),
                 AgentAction::ClickElement { target_name, .. } => Some(format!("Cliquer {target_name}")),
                 AgentAction::ClickButton { button_name, .. } => Some(format!("Cliquer {button_name}")),
                 AgentAction::CloseApp { name } => Some(format!("Fermer {name}")),
                 AgentAction::Scroll { direction, .. } => Some(format!("Faire défiler ({direction})")),
+                AgentAction::ReadEditorContent { window, .. } => Some(format!("Lire le fichier ({})", window.as_deref().unwrap_or("éditeur"))),
+                AgentAction::Dictate { text, .. } => {
+                    let preview: String = text.chars().take(22).collect();
+                    Some(format!("Dicter : \"{preview}\""))
+                }
+                AgentAction::CursorMove { command } => {
+                    Some(format!("Curseur : {command}"))
+                }
+                AgentAction::ActivateDictation { .. } => Some("Activer le mode dictée".to_string()),
+                AgentAction::DeactivateDictation => Some("Arrêter la dictée".to_string()),
+                AgentAction::ToggleDictation { .. } => Some("Basculer la dictée".to_string()),
+                AgentAction::SelectTextBetween { from, to, .. } => {
+                    Some(format!("Sélectionner de \"{from}\" à \"{to}\""))
+                }
+                AgentAction::EnableAutostart => Some("Activer le démarrage automatique".to_string()),
+                AgentAction::DisableAutostart => Some("Désactiver le démarrage automatique".to_string()),
+                AgentAction::CheckAutostart => Some("Statut du démarrage automatique".to_string()),
+                AgentAction::SetAutostart { enabled } => {
+                    if *enabled {
+                        Some("Activer le démarrage automatique".to_string())
+                    } else {
+                        Some("Désactiver le démarrage automatique".to_string())
+                    }
+                }
                 _ => None,
             },
         }

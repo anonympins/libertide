@@ -1,3 +1,4 @@
+use std::path::Path;
 #[cfg(windows)]
 use std::time::Duration;
 #[cfg(windows)]
@@ -19,17 +20,271 @@ use crate::pattern::{extract_target_propositions, matches_pattern};
 use crate::send_hotkey;
 
 #[cfg(windows)]
+pub fn is_window_hung(hwnd: HWND) -> bool {
+    extern "system" {
+        fn IsHungAppWindow(hwnd: HWND) -> BOOL;
+    }
+    if hwnd.0.is_null() {
+        return false;
+    }
+    unsafe { IsHungAppWindow(hwnd).as_bool() }
+}
+
+#[cfg(windows)]
+pub fn is_terminal_window(hwnd: HWND, title: &str) -> bool {
+    let (_pid, exe_name) = get_window_process_info(hwnd);
+    let exe_lower = exe_name.to_lowercase();
+    let title_lower = title.to_lowercase();
+
+    if exe_lower.contains("putty")
+        || exe_lower.contains("kitty")
+        || exe_lower.contains("cmd")
+        || exe_lower.contains("powershell")
+        || exe_lower.contains("pwsh")
+        || exe_lower.contains("windowsterminal")
+        || exe_lower.contains("wt")
+        || exe_lower.contains("bash")
+        || exe_lower.contains("mintty")
+        || exe_lower.contains("conemu")
+        || exe_lower.contains("alacritty")
+        || exe_lower.contains("wezterm")
+    {
+        return true;
+    }
+
+    if title_lower.contains("putty")
+        || title_lower.contains("terminal")
+        || title_lower.contains("invite de commandes")
+        || title_lower.contains("powershell")
+        || title_lower.contains("bash")
+    {
+        return true;
+    }
+
+    unsafe {
+        let mut class_buf = [0u16; 256];
+        let len = GetClassNameW(hwnd, &mut class_buf);
+        if len > 0 {
+            let class_name = String::from_utf16_lossy(&class_buf[..len as usize]).to_lowercase();
+            if class_name.contains("putty")
+                || class_name.contains("consolewindowclass")
+                || class_name.contains("mintty")
+                || class_name.contains("virtualconsoleclass")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(windows)]
+pub fn is_windows_terminal(hwnd: HWND) -> bool {
+    let (_pid, exe) = get_window_process_info(hwnd);
+    let exe_lower = exe.to_lowercase();
+    if exe_lower.contains("windowsterminal") || exe_lower == "wt.exe" {
+        return true;
+    }
+    unsafe {
+        let mut class_buf = [0u16; 256];
+        let len = GetClassNameW(hwnd, &mut class_buf);
+        if len > 0 {
+            let class_name = String::from_utf16_lossy(&class_buf[..len as usize]).to_lowercase();
+            if class_name.contains("cascadia") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(not(windows))]
+pub fn is_windows_terminal(_hwnd: ()) -> bool {
+    false
+}
+
+#[cfg(windows)]
+pub fn is_putty_window(hwnd: HWND) -> bool {
+    unsafe {
+        let mut class_buf = [0u16; 256];
+        let len = GetClassNameW(hwnd, &mut class_buf);
+        if len > 0 {
+            let class_name = String::from_utf16_lossy(&class_buf[..len as usize]).to_lowercase();
+            if class_name.contains("putty") {
+                return true;
+            }
+        }
+    }
+    let (_pid, exe) = get_window_process_info(hwnd);
+    let exe_lower = exe.to_lowercase();
+    exe_lower.contains("putty") || exe_lower.contains("kitty")
+}
+
+#[cfg(not(windows))]
+pub fn is_putty_window(_hwnd: ()) -> bool {
+    false
+}
+
+/// Extrait le nom de fichier actif depuis le titre d'une fenêtre d'éditeur (ex: "projet – main.rs" -> "main.rs").
+pub fn extract_filename_from_title(title: &str) -> Option<String> {
+    const KNOWN_EXTS: &[&str] = &[
+        "rs", "toml", "json", "md", "txt", "js", "ts", "tsx", "jsx", "py", "java", "c", "cpp",
+        "h", "hpp", "cs", "go", "html", "css", "scss", "yaml", "yml", "sh", "bat", "cmd", "ps1",
+        "sql", "env", "lock", "properties", "gradle", "xml", "kt", "kts", "dart", "php", "rb", "lua",
+    ];
+
+    let segments: Vec<&str> = title.split(|c: char| c == '–' || c == '—' || c == '-' || c == '|' || c == ':').collect();
+
+    for seg in segments.iter().rev() {
+        let clean = seg.trim().trim_start_matches(['●', '*', '•']).trim();
+        let candidate_path = Path::new(clean);
+        if let Some(ext) = candidate_path.extension().and_then(|e| e.to_str()) {
+            if KNOWN_EXTS.iter().any(|k| ext.eq_ignore_ascii_case(k)) {
+                let fname = candidate_path.file_name().and_then(|n| n.to_str()).unwrap_or(clean);
+                return Some(fname.to_string());
+            }
+        }
+
+        for word in clean.split_whitespace() {
+            let w_clean = word.trim_matches(|c: char| c == '[' || c == ']' || c == '(' || c == ')' || c == '"' || c == '\'');
+            let p = Path::new(w_clean);
+            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                if KNOWN_EXTS.iter().any(|k| ext.eq_ignore_ascii_case(k)) {
+                    let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or(w_clean);
+                    return Some(fname.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+pub fn is_editor_window(_hwnd: HWND, title: &str, exe_name: &str) -> bool {
+    if is_browser_hwnd(_hwnd, title) {
+        return false;
+    }
+    let exe_lower = exe_name.to_lowercase();
+    let title_lower = title.to_lowercase();
+
+    exe_lower.contains("idea")
+        || exe_lower.contains("rustrover")
+        || exe_lower.contains("clion")
+        || exe_lower.contains("pycharm")
+        || exe_lower.contains("rider")
+        || exe_lower.contains("webstorm")
+        || exe_lower.contains("goland")
+        || exe_lower.contains("phpstorm")
+        || exe_lower.contains("rubymine")
+        || exe_lower.contains("code")
+        || exe_lower.contains("vscodium")
+        || exe_lower.contains("cursor")
+        || exe_lower.contains("sublime")
+        || exe_lower.contains("zed")
+        || exe_lower.contains("notepad")
+        || exe_lower.contains("devenv")
+        || title_lower.contains("intellij")
+        || title_lower.contains("rustrover")
+        || title_lower.contains("visual studio")
+        || title_lower.contains("sublime text")
+        || title_lower.contains("bloc-notes")
+        || title_lower.contains("notepad")
+        || extract_filename_from_title(title).is_some()
+}
+
+#[cfg(not(windows))]
+pub fn is_editor_window(_hwnd: (), title: &str, exe_name: &str) -> bool {
+    let exe_lower = exe_name.to_lowercase();
+    let title_lower = title.to_lowercase();
+    exe_lower.contains("code") || title_lower.contains("code") || extract_filename_from_title(title).is_some()
+}
+
+#[cfg(not(windows))]
+pub fn is_terminal_window(_hwnd: (), _title: &str) -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+pub fn is_window_hung(_hwnd: ()) -> bool {
+    false
+}
+
+#[cfg(windows)]
+pub fn is_toast_notification_window(hwnd: HWND, class_name: &str, title: &str) -> bool {
+    let c_lower = class_name.to_lowercase();
+    let t_lower = title.to_lowercase();
+
+    if t_lower.contains("notification") || t_lower.contains("toast") {
+        return true;
+    }
+
+    if c_lower.contains("toast") {
+        return true;
+    }
+
+    if c_lower == "windows.ui.core.corewindow"
+        || c_lower.contains("xamlexplorerhostislandwindow")
+        || c_lower.contains("toplevelwindowforoverflowxamlisland")
+    {
+        let (_pid, exe) = get_window_process_info(hwnd);
+        let exe_lower = exe.to_lowercase();
+        if exe_lower.contains("shellexperiencehost") || exe_lower.contains("explorer") {
+            let mut r = RECT::default();
+            if unsafe { GetWindowRect(hwnd, &mut r).is_ok() } {
+                let w = r.right - r.left;
+                let h = r.bottom - r.top;
+                let wa = get_desktop_work_area();
+                // Toasts situés dans le coin inférieur droit de l'écran
+                if w >= 150 && w <= 700 && h >= 40 && h <= 600 {
+                    if r.right >= wa.right - 100 && r.bottom >= wa.bottom - 650 && r.left >= wa.left + (wa.right - wa.left) / 3 {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+#[cfg(not(windows))]
+pub fn is_toast_notification_window(_hwnd: (), _class_name: &str, _title: &str) -> bool {
+    false
+}
+
+#[cfg(windows)]
 unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let list = &mut *(lparam.0 as *mut Vec<(HWND, String)>);
     if IsWindowVisible(hwnd).as_bool() {
         let length = GetWindowTextLengthW(hwnd);
-        if length > 0 {
+        let title = if length > 0 {
             let mut buf = vec![0u16; (length + 1) as usize];
             let copied = GetWindowTextW(hwnd, &mut buf);
             if copied > 0 {
-                let title = String::from_utf16_lossy(&buf[..copied as usize]);
-                list.push((hwnd, title));
+                String::from_utf16_lossy(&buf[..copied as usize])
+            } else {
+                String::new()
             }
+        } else {
+            String::new()
+        };
+
+        let mut class_buf = [0u16; 256];
+        let class_len = GetClassNameW(hwnd, &mut class_buf);
+        let class_name = if class_len > 0 {
+            String::from_utf16_lossy(&class_buf[..class_len as usize])
+        } else {
+            String::new()
+        };
+
+        if is_toast_notification_window(hwnd, &class_name, &title) {
+            let display_title = if title.trim().is_empty() {
+                "Notification Windows".to_string()
+            } else {
+                title
+            };
+            list.push((hwnd, display_title));
+        } else if !title.trim().is_empty() {
+            list.push((hwnd, title));
         }
     }
     BOOL(1)
@@ -170,10 +425,21 @@ pub fn get_active_or_best_window(user_windows: &[(HWND, String)]) -> Option<HWND
         FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()))
     };
     let fg = unsafe { GetForegroundWindow() };
-    if !fg.0.is_null() && fg != overlay_hwnd && user_windows.iter().any(|(h, _)| *h == fg) {
+    let current_pid = std::process::id();
+    let (fg_pid, _) = get_window_process_info(fg);
+    if !fg.0.is_null()
+        && fg != overlay_hwnd
+        && fg_pid != current_pid
+        && !is_window_hung(fg)
+        && user_windows.iter().any(|(h, _)| *h == fg)
+    {
         Some(fg)
     } else {
-        find_largest_and_most_centered_window(user_windows)
+        user_windows
+            .iter()
+            .find(|(h, t)| is_browser_hwnd(*h, t))
+            .map(|(h, _)| *h)
+            .or_else(|| find_largest_and_most_centered_window(user_windows))
     }
 }
 

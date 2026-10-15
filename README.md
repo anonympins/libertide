@@ -2,6 +2,8 @@
 
 Libertide is a voice and visual assistant for autonomous exploration on Windows. It combines a discreet transparent overlay interface (developed with [egui](https://github.com/emilk/egui)), continuous local voice recognition with **Whisper**, reasoning from the **DeepSeek-Chat** model, as well as advanced graphical interface automation (Windows UI Automation, windowing, web navigation, and input).
 
+![Libertide Screenshot](public/screenshot-1.png)
+
 ---
 
 ## 📋 Prerequisites
