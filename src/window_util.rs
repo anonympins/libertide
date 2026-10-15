@@ -425,10 +425,21 @@ pub fn get_active_or_best_window(user_windows: &[(HWND, String)]) -> Option<HWND
         FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()))
     };
     let fg = unsafe { GetForegroundWindow() };
-    if !fg.0.is_null() && fg != overlay_hwnd && !is_window_hung(fg) && user_windows.iter().any(|(h, _)| *h == fg) {
+    let current_pid = std::process::id();
+    let (fg_pid, _) = get_window_process_info(fg);
+    if !fg.0.is_null()
+        && fg != overlay_hwnd
+        && fg_pid != current_pid
+        && !is_window_hung(fg)
+        && user_windows.iter().any(|(h, _)| *h == fg)
+    {
         Some(fg)
     } else {
-        find_largest_and_most_centered_window(user_windows)
+        user_windows
+            .iter()
+            .find(|(h, t)| is_browser_hwnd(*h, t))
+            .map(|(h, _)| *h)
+            .or_else(|| find_largest_and_most_centered_window(user_windows))
     }
 }
 

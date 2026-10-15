@@ -1,6 +1,7 @@
 mod audio;
 mod automation;
 mod fs_util;
+mod html_util;
 mod pattern;
 mod twitch;
 mod types;
@@ -569,8 +570,6 @@ impl OverlayApp {
         }
         if self.dictation_mode {
             restore_external_focus();
-        } else {
-            ctx.memory_mut(|m| m.request_focus(egui::Id::new("prompt_input_text")));
         }
         let _ = self.audio_sender.send(AudioCommand::Start);
     }
@@ -785,11 +784,6 @@ impl eframe::App for OverlayApp {
                 }
                 AgentEvent::TranscriptionPartial(text) => {
                     if self.is_recording && !self.is_hidden {
-                        let is_user_typing = ctx.memory(|m| m.has_focus(egui::Id::new("prompt_input_text")))
-                            && !self.input_text.is_empty();
-                        if !is_user_typing {
-                            self.input_text = text.clone();
-                        }
                         self.live_transcript = text;
                     }
                 }
@@ -800,6 +794,9 @@ impl eframe::App for OverlayApp {
                         && !self.input_text.trim().is_empty();
                     if is_user_typing {
                         // L'utilisateur est activement en train de taper au clavier : on préserve son texte
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
                         return;
                     }
                     let _ = self.tts_sender.send(TtsCommand::Stop);
@@ -1077,6 +1074,26 @@ impl eframe::App for OverlayApp {
                                             }
                                         });
                                         ui.add_space(if is_highlighted { 8.0 } else { 5.0 });
+                                    }
+
+                                    // Retour visuel en direct de l'écoute micro
+                                    if self.is_recording && !self.live_transcript.is_empty() {
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("🗣 Vous (en direct...)")
+                                                    .size(10.5)
+                                                    .color(egui::Color32::from_rgb(255, 215, 120))
+                                                    .italics(),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(&self.live_transcript)
+                                                    .size(13.5)
+                                                    .line_height(Some(18.0))
+                                                    .color(egui::Color32::from_rgb(255, 230, 160))
+                                                    .italics(),
+                                            );
+                                        });
+                                        ui.add_space(6.0);
                                     }
 
                                     if let Some(prompt) = clicked_quick_suggestion {
@@ -1746,9 +1763,10 @@ Réponds STRICTEMENT en JSON sans texte autour. Narration concise en français (
 Règles d'action et d'arbitrage :
 - Silence ("invalid_request": true) : réservé aux bruits de micro et phrases inintelligibles.
 - Salutations et discussion : valide ("invalid_request": false), réponds courtoisement dans "narration" avec "actions": [].
-- Interface : consulte toujours "[État actuel de l'écran]" (fenêtres, onglets, boutons, liens).
+- Interface et contenu : consulte toujours "[État actuel de l'écran]". Il contient le texte intégral de la page web (résultats de recherche, météo, prix, articles, données de tableaux), les contrôles et les liens.
   * Les contrôles de l'interface du navigateur portent le préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse", "[Navigateur] Actualiser"). Pour interagir avec le navigateur hôte, inclus explicitement ce préfixe dans la cible.
-  * Les éléments internes au site web (champs de formulaire, boutons d'action, liens) figurent dans "[Page web - ...]" sans préfixe. Cible-les par leur libellé direct (ex: "Destination", "Rechercher", "Tout accepter").
+  * Les éléments internes au site web (champs de formulaire, boutons d'action, liens, textes de données) figurent dans "[Page web - ...]" sans préfixe. Cible-les par leur libellé direct (ex: "Destination", "Rechercher", "Tout accepter").
+  * Pour répondre à une question sur le contenu (météo, prix, comparaison, progression), lis et exploite directement les données textuelles déjà présentes dans "[État actuel de l'écran]".
 - Lecture de fichier ou code dans un éditeur ("read_editor_content") :
   * Lorsque l'utilisateur demande de lire, consulter, analyser, vérifier ou résumer un fichier ouvert ou le code dans un éditeur (VS Code, Notepad, IDE, etc.), utilise impérativement "read_editor_content" (avec "window": "titre_optionnel", "target": "onglet_ou_fichier_optionnel").
   * Le moteur placera la fenêtre au premier plan, sélectionnera le champ d'édition/l'onglet approprié, copiera le contenu (Ctrl+A, Ctrl+C) et te réinjectera l'intégralité du texte extrait dans le retour de l'étape suivante pour que tu puisses l'analyser.
@@ -1765,6 +1783,10 @@ Règles d'action et d'arbitrage :
 - Mode dictée ("dictate", "activate_dictation", "deactivate_dictation") :
   * Tu contrôles le flag de dictée via les actions "activate_dictation", "deactivate_dictation" ou "toggle_dictation".
   * Si le prompt utilisateur demande d'activer la dictée (ex: "mode dictée", "active la dictée", "prends note de ce que je dis"), utilise "activate_dictation".
+- Démarrage automatique Windows ("enable_autostart", "disable_autostart", "check_autostart", "set_autostart") :
+  * Si l'utilisateur demande que Libertide se lance au démarrage de Windows (ex: "lance toi au démarrage", "active le démarrage auto", "démarre avec mon PC"), utilise "enable_autostart" (ou "set_autostart": {"enabled": true}).
+  * S'il demande de ne plus se lancer au démarrage (ex: "désactive le démarrage auto", "ne te lance plus au démarrage"), utilise "disable_autostart" (ou "set_autostart": {"enabled": false}).
+  * S'il demande si Libertide est configuré au démarrage, utilise "check_autostart".
 - Sélection de texte entre deux bornes ("select_text_between") :
   * Pour sélectionner une portion de texte délimitée entre un point de départ et un point d'arrivée (ex: "sélectionne entre Bonjour et Cordialement", "sélectionne du début de la fonction jusqu'à la fin"), utilise l'action "select_text_between" avec "from": "borne_debut", "to": "borne_fin".
 - Défilement de page et scrollbar ("scroll") :
@@ -1809,7 +1831,11 @@ Format json obligatoire :
     {"action": "accessibility_shortcut", "shortcut": "enter" | "close_tab" | "snap_left" | "snap_right" | "snap_up" | "snap_down" | "task_manager" | "undo" | "copy" | "refresh_page"},
     {"action": "summarize_screen", "window": "titre_optionnel"},
     {"action": "activate_immersion", "apps": ["code"], "urls": ["https://..."], "layout": "grid_2x2"},
-    {"action": "deactivate_immersion"}
+    {"action": "deactivate_immersion"},
+    {"action": "enable_autostart"},
+    {"action": "disable_autostart"},
+    {"action": "check_autostart"},
+    {"action": "set_autostart", "enabled": true}
   ],
   "quick_suggestions": ["Suggestion 1", "Suggestion 2"]
 }"#;
@@ -1850,7 +1876,8 @@ enum PromptTrigger {
 
 async fn call_deepseek_prompt(
     api_key: String,
-    user_prompt: String,
+    user_instruction: String,
+    full_prompt: String,
     history: Arc<tokio::sync::Mutex<Vec<ChatMessage>>>,
     event_tx: StdSender<AgentEvent>,
     last_call_time: Arc<tokio::sync::Mutex<Option<Instant>>>,
@@ -1882,12 +1909,13 @@ async fn call_deepseek_prompt(
         STANDARD_SYSTEM_INSTRUCTIONS
     };
 
-    let safe_user_prompt = truncate_with_notice(&user_prompt, 4000);
+    let safe_user_instruction = truncate_with_notice(&user_instruction, 1000);
+    let safe_full_prompt = truncate_with_notice(&full_prompt, 32000);
     {
         let mut hist_guard = history.lock().await;
         hist_guard.push(ChatMessage {
             role: "user".to_string(),
-            content: safe_user_prompt.clone(),
+            content: safe_full_prompt,
         });
     }
 
@@ -2133,7 +2161,7 @@ async fn call_deepseek_prompt(
                 let screen = {
                     LAST_SCREEN_SUMMARY.lock().ok().and_then(|s| s.clone()).unwrap_or_else(|| {
                         #[cfg(windows)]
-                        { summarize_screen_state(None, false) }
+                        { summarize_screen_state(None, true) }
                         #[cfg(not(windows))]
                         { String::new() }
                     })
@@ -2167,6 +2195,19 @@ async fn call_deepseek_prompt(
         }
 
         let actions_to_run = payload.actions;
+        let has_web_action = actions_to_run.iter().any(|a| {
+            matches!(
+                a,
+                AgentAction::OpenBrowser { .. }
+                    | AgentAction::NavigateToUrl { .. }
+                    | AgentAction::ClickElement { .. }
+                    | AgentAction::ClickButton { .. }
+                    | AgentAction::Scroll { .. }
+                    | AgentAction::SummarizeScreen { .. }
+                    | AgentAction::FocusWindow { .. }
+            )
+        });
+
         let (report, screen_after) = tokio::task::spawn_blocking(move || {
             if is_request_cancelled(request_id) {
                 return ("Actions interrompues.".to_string(), String::new());
@@ -2179,12 +2220,13 @@ async fn call_deepseek_prompt(
                 if is_dictation {
                     return (rep, String::new());
                 }
-                std::thread::sleep(Duration::from_millis(1200));
+                let wait_ms = if has_web_action { 2200 } else { 1200 };
+                std::thread::sleep(Duration::from_millis(wait_ms));
                 if is_request_cancelled(request_id) {
                     return (rep, String::new());
                 }
                 #[cfg(windows)]
-                let sc = summarize_screen_state(None, false);
+                let sc = summarize_screen_state(None, true);
                 #[cfg(not(windows))]
                 let sc = String::new();
                 (rep, sc)
@@ -2217,7 +2259,17 @@ async fn call_deepseek_prompt(
             let compact_report = truncate_with_notice(&report, 10000);
             let mut step_feedback = format!("[Retour d'exécution étape {pass}] :\n{compact_report}");
             if !screen_after.trim().is_empty() {
-                let safe_screen = truncate_with_notice(screen_after.trim(), 3500);
+                let screen_after_clean = if screen_after.contains("<html") || screen_after.contains("<table") || screen_after.contains("<body") {
+                    html_util::sanitize_html_to_markdown(&screen_after)
+                } else {
+                    screen_after.clone()
+                };
+                let max_screen = if screen_after_clean.contains("[Page web") || screen_after_clean.contains("[Navigateur]") {
+                    24000
+                } else {
+                    12000
+                };
+                let safe_screen = truncate_with_notice(screen_after_clean.trim(), max_screen);
                 step_feedback.push_str(&format!("\n\n[État de l'écran suite aux actions] :\n{safe_screen}"));
             }
 
@@ -2231,7 +2283,7 @@ async fn call_deepseek_prompt(
                 - Si l'écran est dégagé, poursuis immédiatement l'exécution de la consigne initiale : \"{}\".\n\
                 - Pour une recherche ou un achat web : relève les modèles ou prix observés et formule 2 ou 3 suggestions concrètes dans \"narration\" si un choix utilisateur est nécessaire.\n\
                 - Si la tâche est terminée ou attend un choix, confirme-le dans \"narration\" avec \"actions\": [] et fournis impérativement 2 à 4 suggestions contextuelles dans \"quick_suggestions\" basées sur ton analyse des éléments à l'écran.",
-                safe_user_prompt
+                safe_user_instruction
             ));
 
             history.lock().await.push(ChatMessage {
@@ -2345,6 +2397,7 @@ fn main() -> eframe::Result<()> {
                                 );
                                 call_deepseek_prompt(
                                     deepseek_chat_key,
+                                    prompt.clone(),
                                     final_prompt,
                                     history,
                                     event_tx,
@@ -2356,7 +2409,7 @@ fn main() -> eframe::Result<()> {
                                 let (field_content, screen_state) = tokio::task::spawn_blocking(|| {
                                     #[cfg(windows)]
                                     {
-                                        (get_active_field_content(), summarize_screen_state(None, false))
+                                        (get_active_field_content(), summarize_screen_state(None, true))
                                     }
                                     #[cfg(not(windows))]
                                     {
@@ -2372,7 +2425,17 @@ fn main() -> eframe::Result<()> {
                                     if let Ok(mut lock) = LAST_SCREEN_SUMMARY.lock() {
                                         *lock = Some(screen_state.clone());
                                     }
-                                    let safe_screen = truncate_with_notice(screen_state.trim(), 3800);
+                                    let screen_state = if screen_state.contains("<html") || screen_state.contains("<table") || screen_state.contains("<body") {
+                                        html_util::sanitize_html_to_markdown(&screen_state)
+                                    } else {
+                                        screen_state
+                                    };
+                                    let max_screen = if screen_state.contains("[Page web") || screen_state.contains("[Navigateur]") {
+                                        24000
+                                    } else {
+                                        12000
+                                    };
+                                    let safe_screen = truncate_with_notice(screen_state.trim(), max_screen);
                                     let kb = safe_screen.len() as f32 / 1024.0;
                                     let _ = event_tx.send(AgentEvent::ScreenPayloadSize(kb));
                                     prompt_sections.push(format!("[État actuel de l'écran]\n{safe_screen}"));
@@ -2392,6 +2455,7 @@ fn main() -> eframe::Result<()> {
 
                                 call_deepseek_prompt(
                                     deepseek_chat_key,
+                                    prompt.clone(),
                                     final_prompt,
                                     history,
                                     event_tx,
@@ -2495,7 +2559,7 @@ fn main() -> eframe::Result<()> {
                                 };
 
                                 println!("[Immersion] Changement détecté (diff: {} octets), transmission du diff au LLM...", screen_diff.len());
-                                call_deepseek_prompt(deepseek_chat_key, immersion_prompt, history, event_tx, last_call_time, PromptTrigger::Immersion { screen_changed: true }, request_id).await;
+                                call_deepseek_prompt(deepseek_chat_key, "Suivi immersion".to_string(), immersion_prompt, history, event_tx, last_call_time, PromptTrigger::Immersion { screen_changed: true }, request_id).await;
                                 return;
                             }
 
@@ -2525,7 +2589,7 @@ fn main() -> eframe::Result<()> {
                                     truncate_with_notice(&current_summary, 1500)
                                 );
 
-                                call_deepseek_prompt(deepseek_chat_key, diff_prompt, history, event_tx, last_call_time, PromptTrigger::Surveillance, request_id).await;
+                                call_deepseek_prompt(deepseek_chat_key, "Surveillance écran".to_string(), diff_prompt, history, event_tx, last_call_time, PromptTrigger::Surveillance, request_id).await;
                             } else {
                                 println!("[Surveillance] Premier instantané d'écran enregistré.");
                             }

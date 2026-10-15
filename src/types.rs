@@ -231,6 +231,17 @@ pub enum AgentAction {
         #[serde(default, alias = "target_name")]
         target: Option<String>,
     },
+    #[serde(alias = "activate_autostart", alias = "enable_startup", alias = "register_autostart")]
+    EnableAutostart,
+    #[serde(alias = "deactivate_autostart", alias = "disable_startup", alias = "unregister_autostart")]
+    DisableAutostart,
+    #[serde(alias = "query_autostart", alias = "get_autostart_status")]
+    CheckAutostart,
+    #[serde(alias = "set_startup")]
+    SetAutostart {
+        #[serde(default)]
+        enabled: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -280,6 +291,16 @@ impl QuickSuggestionItem {
                 AgentAction::ToggleDictation { .. } => Some("Basculer la dictée".to_string()),
                 AgentAction::SelectTextBetween { from, to, .. } => {
                     Some(format!("Sélectionner de \"{from}\" à \"{to}\""))
+                }
+                AgentAction::EnableAutostart => Some("Activer le démarrage automatique".to_string()),
+                AgentAction::DisableAutostart => Some("Désactiver le démarrage automatique".to_string()),
+                AgentAction::CheckAutostart => Some("Statut du démarrage automatique".to_string()),
+                AgentAction::SetAutostart { enabled } => {
+                    if *enabled {
+                        Some("Activer le démarrage automatique".to_string())
+                    } else {
+                        Some("Désactiver le démarrage automatique".to_string())
+                    }
                 }
                 _ => None,
             },

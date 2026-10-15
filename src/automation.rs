@@ -41,6 +41,80 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 #[cfg(windows)]
 const CREATE_NEW_CONSOLE: u32 = 0x00000010;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[cfg(windows)]
+pub fn is_autostart_enabled() -> bool {
+    let output = std::process::Command::new("reg")
+        .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Libertide"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    if let Ok(out) = output {
+        out.status.success()
+    } else {
+        false
+    }
+}
+
+#[cfg(windows)]
+pub fn set_autostart(enable: bool) -> Result<String, String> {
+    if enable {
+        let exe_path = std::env::current_exe()
+            .map_err(|e| format!("Impossible de déterminer le chemin de l'exécutable : {e}"))?;
+        let exe_str = exe_path.to_string_lossy();
+        let val = format!("\"{}\"", exe_str);
+        let status = std::process::Command::new("reg")
+            .args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "Libertide",
+                "/t",
+                "REG_SZ",
+                "/d",
+                &val,
+                "/f",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .map_err(|e| format!("Erreur lors de l'exécution de reg.exe : {e}"))?;
+
+        if status.success() {
+            Ok(format!("Lancement au démarrage de Windows activé (exécutable : {}).", exe_str))
+        } else {
+            Err("Échec de l'écriture dans le Registre Windows.".to_string())
+        }
+    } else {
+        let status = std::process::Command::new("reg")
+            .args([
+                "delete",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "Libertide",
+                "/f",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .map_err(|e| format!("Erreur lors de l'exécution de reg.exe : {e}"))?;
+
+        if status.success() {
+            Ok("Lancement au démarrage de Windows désactivé.".to_string())
+        } else {
+            Ok("Lancement au démarrage désactivé (aucune entrée existante dans le Registre).".to_string())
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn is_autostart_enabled() -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+pub fn set_autostart(_enable: bool) -> Result<String, String> {
+    Ok("Lancement au démarrage non pris en charge sur ce système d'exploitation.".to_string())
+}
 
 #[cfg(windows)]
 static LAST_TXT_HWND: Mutex<Option<isize>> = Mutex::new(None);
@@ -141,16 +215,23 @@ pub fn update_last_external_focus() {
 pub fn update_last_external_focus() {}
 
 #[cfg(windows)]
-pub fn restore_external_focus() -> bool {
+pub fn restore_external_focus_target(target: Option<HWND>) -> bool {
     extern "system" {
         fn GetCurrentThreadId() -> u32;
         fn AttachThreadInput(idattach: u32, idattachto: u32, fattach: i32) -> i32;
     }
 
-    let target = LAST_EXTERNAL_HWND.lock().ok().and_then(|g| *g);
-    if let Some(raw_hwnd) = target {
-        let hwnd = HWND(raw_hwnd as _);
+    let target_hwnd = target.or_else(|| {
+        LAST_EXTERNAL_HWND.lock().ok().and_then(|g| *g).map(|raw| HWND(raw as _))
+    });
+
+    if let Some(hwnd) = target_hwnd {
         if !hwnd.0.is_null() && !is_window_hung(hwnd) {
+            // Contournement universel de l'inhibition de focus Windows via simulation de la touche Alt
+            const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
+            send_key_event(VK_MENU, KEYBD_EVENT_FLAGS(0));
+            send_key_event(VK_MENU, KEYEVENTF_KEYUP);
+
             force_foreground_window(hwnd);
             std::thread::sleep(Duration::from_millis(40));
 
@@ -191,10 +272,38 @@ pub fn restore_external_focus() -> bool {
     false
 }
 
+#[cfg(windows)]
+pub fn restore_external_focus() -> bool {
+    restore_external_focus_target(None)
+}
+
+#[cfg(windows)]
+pub fn release_modifier_keys() {
+    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+    const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
+    const VK_SHIFT: VIRTUAL_KEY = VIRTUAL_KEY(0x10);
+    const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
+    const VK_RWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5C);
+
+    send_key_event(VK_CONTROL, KEYEVENTF_KEYUP);
+    send_key_event(VK_MENU, KEYEVENTF_KEYUP);
+    send_key_event(VK_SHIFT, KEYEVENTF_KEYUP);
+    send_key_event(VK_LWIN, KEYEVENTF_KEYUP);
+    send_key_event(VK_RWIN, KEYEVENTF_KEYUP);
+}
+
+#[cfg(not(windows))]
+pub fn restore_external_focus_target(_target: Option<()>) -> bool {
+    false
+}
+
 #[cfg(not(windows))]
 pub fn restore_external_focus() -> bool {
     false
 }
+
+#[cfg(not(windows))]
+pub fn release_modifier_keys() {}
 
 #[cfg(windows)]
 mod clipboard {
@@ -2412,35 +2521,57 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
     let wa_h = work_area.bottom - work_area.top;
 
     let user_windows = list_user_windows();
-    let fg = unsafe { GetForegroundWindow() };
+    let raw_fg = unsafe { GetForegroundWindow() };
+    let current_pid = std::process::id();
+    let (raw_fg_pid, _) = get_window_process_info(raw_fg);
+
+    // 1. Bypass de l'overlay : si au premier plan c'est Libertide ou inconnu, cibler l'application externe réelle
+    let is_libertide_or_unknown = raw_fg.0.is_null()
+        || raw_fg_pid == current_pid
+        || !user_windows.iter().any(|(h, _)| *h == raw_fg);
+
+    let active_hwnd = if !is_libertide_or_unknown && !is_window_hung(raw_fg) {
+        raw_fg
+    } else {
+        LAST_EXTERNAL_HWND
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .map(|raw| HWND(raw as _))
+            .filter(|&h| user_windows.iter().any(|(w, _)| *w == h) && !is_window_hung(h))
+            .or_else(|| get_active_or_best_window(&user_windows))
+            .or_else(|| user_windows.iter().find(|(h, t)| is_browser_hwnd(*h, t)).map(|(h, _)| *h))
+            .or_else(|| user_windows.first().map(|(h, _)| *h))
+            .unwrap_or(raw_fg)
+    };
 
     let mut out = String::new();
     out.push_str(&format!(
-        "=== Rapport d'analyse de l'écran ===\nEspace de travail : {}x{}\n[Note d'intention contextuelle] : La fenêtre au premier plan est le contexte direct de l'utilisateur. Toute instruction relative à un achat, formulaire ou clic doit être résolue prioritairement dans cette fenêtre active.\n",
+        "=== Rapport d'analyse de l'écran ===\nEspace de travail : {}x{}\n",
         wa_w, wa_h
     ));
 
     let fg_title = user_windows
         .iter()
-        .find(|(h, _)| *h == fg)
+        .find(|(h, _)| *h == active_hwnd)
         .map(|(_, t)| t.as_str())
-        .unwrap_or("Inconnue ou overlay");
-    out.push_str(&format!("Fenêtre au premier plan : \"{}\"\n\n", fg_title));
+        .unwrap_or("Application active");
+    out.push_str(&format!(
+        "Fenêtre au premier plan (contexte actif) : \"{}\"\n[Note d'intention contextuelle] : Cette fenêtre est le contexte direct de l'utilisateur. Toute instruction relative à une question, recherche, météo, achat ou formulaire doit être résolue prioritairement dans cette fenêtre active.\n\n",
+        fg_title
+    ));
 
-    out.push_str("Fenêtres et processus actifs :\n");
     let mut inspect_hwnds = Vec::new();
 
     if let Some(target) = target_window.filter(|t| !t.trim().is_empty()) {
-        let matched = find_windows_matching(target, &user_windows, Some(fg));
+        let matched = find_windows_matching(target, &user_windows, Some(active_hwnd));
         if let Some(&h) = matched.first() {
             inspect_hwnds.push(h);
         }
     }
 
     if inspect_hwnds.is_empty() {
-        if let Some(best) = get_active_or_best_window(&user_windows) {
-            inspect_hwnds.push(best);
-        }
+        inspect_hwnds.push(active_hwnd);
         for (h, _) in &user_windows {
             if !inspect_hwnds.contains(h) && inspect_hwnds.len() < 3 {
                 inspect_hwnds.push(*h);
@@ -2457,36 +2588,8 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         }
     }
 
-    for (hwnd, title) in &user_windows {
-        let (pid, exe_name) = get_window_process_info(*hwnd);
-        let mut r = RECT::default();
-        let rect_str = if unsafe { GetWindowRect(*hwnd, &mut r).is_ok() } {
-            let w = r.right - r.left;
-            let h = r.bottom - r.top;
-            format!("pos: ({}, {}), taille: {}x{}", r.left, r.top, w, h)
-        } else {
-            "position inconnue".to_string()
-        };
-
-        let is_hung = is_window_hung(*hwnd);
-        let is_minimized = unsafe { IsIconic(*hwnd).as_bool() };
-        let state = if is_hung {
-            "ne répond pas (gelée / sablier)"
-        } else if is_minimized {
-            "réduite"
-        } else if *hwnd == fg {
-            "active/premier plan"
-        } else {
-            "visible"
-        };
-
-        out.push_str(&format!(
-            "- \"{}\" [{}] ({}) | PID: {}, Exe: \"{}\" | Accéder: focus_window(title: \"{}\") | Tuer: kill_process(pid: {}, name: \"{}\")\n",
-            title, state, rect_str, pid, exe_name, title, pid, exe_name
-        ));
-    }
-
-    out.push_str("\n=== Contenu détaillé des fenêtres principales ===\n");
+    // 2. Priorisation : l'arbre UIA de la fenêtre active est généré en premier
+    out.push_str("=== Contenu détaillé de la fenêtre active ===\n");
     for (win_idx, hwnd) in inspect_hwnds.iter().enumerate() {
         let win_title = user_windows
             .iter()
@@ -2494,11 +2597,11 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             .map(|(_, t)| t.as_str())
             .unwrap_or("Fenêtre");
 
-        let is_foreground = *hwnd == fg;
-        if is_foreground {
+        let is_active = *hwnd == active_hwnd;
+        if is_active {
             out.push_str(&format!("\n--- Fenêtre : \"{}\" [AU PREMIER PLAN - CONTEXTE ACTIF PRIORITAIRE] ---\n", win_title));
         } else {
-            out.push_str(&format!("\n--- Fenêtre : \"{}\" ---\n", win_title));
+            out.push_str(&format!("\n--- Fenêtre secondaire : \"{}\" ---\n", win_title));
         }
         if is_window_hung(*hwnd) {
             out.push_str("  (Application figée / ne répond pas - UIA ignoré)\n");
@@ -2556,14 +2659,14 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             }
         }
 
-        // 1. PRIMAUTÉ DU CONTENU HTML / WEB : Champs de formulaire
+        // A. Champs de formulaire et barres de recherche
         let edits: Vec<&UiaElementInfo> = elements.iter()
             .filter(|e| (!has_web_doc || e.is_web_content) && (e.is_edit_or_textarea || e.is_input))
             .collect();
         if !edits.is_empty() {
-            let prefix = if has_web_doc { "  [Page web - champs de saisie] :\n" } else { "  [Champs de texte / saisie] :\n" };
+            let prefix = if has_web_doc { "  [Page web - champs de saisie / recherche] :\n" } else { "  [Champs de texte / saisie] :\n" };
             out.push_str(prefix);
-            for edit in edits.iter().take(5) {
+            for edit in edits.iter().take(8) {
                 let mut label = if !edit.name.is_empty() { edit.name.clone() } else { "Champ".to_string() };
                 if !edit.aria_indications.is_empty() {
                     label.push_str(&format!(" ({})", edit.aria_indications));
@@ -2572,12 +2675,76 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                     label.push_str(&format!(" [info: {}]", edit.aria_description));
                 }
                 let val = if !edit.value_text.is_empty() {
-                    format!(" = \"{}\"", edit.value_text.chars().take(100).collect::<String>())
+                    format!(" = \"{}\"", edit.value_text.chars().take(120).collect::<String>())
                 } else {
                     String::new()
                 };
                 out.push_str(&format!("  • {}{}\n", label, val));
             }
+        }
+
+        // B. Titres et en-têtes de sections
+        let mut headings: Vec<String> = elements
+            .iter()
+            .filter(|e| {
+                (!has_web_doc || e.is_web_content)
+                    && !e.name.is_empty()
+                    && e.name.len() >= 2
+                    && (e.localized_type.contains("en-tête")
+                        || e.localized_type.contains("heading")
+                        || e.aria_role.contains("heading")
+                        || e.class_name.contains("heading")
+                        || e.class_name.contains("title"))
+            })
+            .map(|e| e.name.clone())
+            .collect();
+        headings.dedup();
+        if !headings.is_empty() {
+            let display_headings: Vec<String> = headings.into_iter().take(15).collect();
+            let prefix = if has_web_doc { "  [Page web - titres / en-têtes] : " } else { "  [Titres / en-têtes] : " };
+            out.push_str(&format!("{}{}\n", prefix, display_headings.join(" | ")));
+        }
+
+        // C. Textes informatifs, encarts météo, prévisions, données et prix
+        let mut text_items: Vec<String> = elements
+            .iter()
+            .filter(|e| {
+                (!has_web_doc || e.is_web_content)
+                    && !e.is_edit_or_textarea
+                    && !e.name.is_empty()
+                    && e.name.len() >= 2
+                    && !e.is_link
+                    && !e.aria_role.contains("link")
+                    && !e.localized_type.contains("lien")
+                    && !e.localized_type.contains("link")
+                    && (e.localized_type.contains("texte")
+                        || e.localized_type.contains("text")
+                        || e.localized_type.contains("en-tête")
+                        || e.localized_type.contains("heading")
+                        || e.name.contains('°')
+                        || e.name.contains('€')
+                        || e.name.contains('$')
+                        || e.name.contains('%')
+                        || e.name.to_lowercase().contains("météo")
+                        || e.name.to_lowercase().contains("meteo")
+                        || e.name.to_lowercase().contains("km/h")
+                        || e.name.to_lowercase().contains("humidité")
+                        || e.name.to_lowercase().contains("humidite")
+                        || e.name.to_lowercase().contains("vent")
+                        || e.name.to_lowercase().contains("pluie")
+                        || e.name.to_lowercase().contains("soleil")
+                        || e.name.to_lowercase().contains("nuag")
+                        || e.name.to_lowercase().contains("orage")
+                        || e.name.to_lowercase().contains("eur")
+                        || e.name.to_lowercase().contains("usd"))
+            })
+            .map(|e| e.name.clone())
+            .collect();
+        text_items.dedup();
+        if !text_items.is_empty() {
+            let display_texts: Vec<String> = text_items.into_iter().take(80).collect();
+            let prefix = if has_web_doc { "  [Page web - encarts météo / données / prix observés] : " } else { "  [Textes / données / prix observés] : " };
+            out.push_str(&format!("{}{}\n", prefix, display_texts.join(" | ")));
         }
 
         // 2. PRIMAUTÉ DU CONTENU HTML / WEB : Boutons cliquables d'action
@@ -2626,7 +2793,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         let mut display_btns: Vec<String> = scored_buttons.into_iter().map(|(_, b)| b).collect();
         display_btns.dedup();
         if !display_btns.is_empty() {
-            display_btns.truncate(30);
+            display_btns.truncate(40);
             let prefix = if has_web_doc { "  [Page web - boutons cliquables] : " } else { "  [Boutons / contrôles cliquables] : " };
             out.push_str(&format!("{}{}\n", prefix, display_btns.join(", ")));
         }
@@ -2676,40 +2843,11 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             .collect();
 
         scored_links.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let display_links: Vec<String> = scored_links.into_iter().take(25).map(|(_, l)| l).collect();
+        let display_links: Vec<String> = scored_links.into_iter().take(40).map(|(_, l)| l).collect();
 
         if !display_links.is_empty() {
             let prefix = if has_web_doc { "  [Page web - liens cliquables] : " } else { "  [Liens / résultats cliquables] : " };
             out.push_str(&format!("{}{}\n", prefix, display_links.join(" | ")));
-        }
-
-        // 4. PRIMAUTÉ DU CONTENU HTML / WEB : Textes informatifs et prix
-        let mut text_items: Vec<String> = elements
-            .iter()
-            .filter(|e| {
-                (!has_web_doc || e.is_web_content)
-                    && !e.is_edit_or_textarea
-                    && !e.name.is_empty()
-                    && e.name.len() >= 3
-                    && !e.is_link
-                    && !e.aria_role.contains("link")
-                    && !e.localized_type.contains("lien")
-                    && !e.localized_type.contains("link")
-                    && (e.localized_type.contains("texte")
-                        || e.localized_type.contains("text")
-                        || e.localized_type.contains("en-tête")
-                        || e.localized_type.contains("heading")
-                        || e.name.contains('€')
-                        || e.name.contains('$')
-                        || e.name.to_lowercase().contains("eur"))
-            })
-            .map(|e| e.name.clone())
-            .collect();
-        text_items.dedup();
-        if !text_items.is_empty() {
-            let display_texts: Vec<String> = text_items.into_iter().take(10).collect();
-            let prefix = if has_web_doc { "  [Page web - textes / prix observés] : " } else { "  [Textes / prix observés] : " };
-            out.push_str(&format!("{}{}\n", prefix, display_texts.join(" | ")));
         }
 
         // 5. Informations secondaires de la fenêtre hôte (Onglets et contrôles navigateur)
@@ -2747,7 +2885,35 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         }
     }
 
-    let summary = truncate_with_notice(&out, 4500);
+    // 2. Relégation et compactage de la liste des autres fenêtres ouvertes en fin de rapport
+    out.push_str("\n=== Autres fenêtres ouvertes ===\n");
+    let other_windows: Vec<String> = user_windows
+        .iter()
+        .filter(|(h, _)| !inspect_hwnds.contains(h))
+        .map(|(hwnd, title)| {
+            let (pid, exe_name) = get_window_process_info(*hwnd);
+            let is_hung = is_window_hung(*hwnd);
+            let is_minimized = unsafe { IsIconic(*hwnd).as_bool() };
+            let state = if is_hung {
+                " [ne répond pas]"
+            } else if is_minimized {
+                " [réduite]"
+            } else {
+                ""
+            };
+            format!("- \"{}\" ({}, PID: {}){}", title, exe_name, pid, state)
+        })
+        .collect();
+
+    if other_windows.is_empty() {
+        out.push_str("(Aucune autre fenêtre ouverte)\n");
+    } else {
+        out.push_str(&other_windows.join("\n"));
+        out.push('\n');
+    }
+
+    // 3. Augmentation du quota interne à 24 000 caractères
+    let summary = truncate_with_notice(&out, 24000);
     println!("\n=================== [Analyse d'écran UIA] ===================");
     println!("{}", summary.trim());
     println!("============================================================\n");
@@ -2896,7 +3062,9 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
         let overlay_hwnd = unsafe {
             FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()))
         };
-        if !fg.0.is_null() && fg != overlay_hwnd && !is_window_hung(fg) {
+        let current_pid = std::process::id();
+        let (fg_pid, _) = get_window_process_info(fg);
+        if !fg.0.is_null() && fg != overlay_hwnd && fg_pid != current_pid && !is_window_hung(fg) {
             active_user_hwnd = Some(fg);
         }
 
@@ -4412,28 +4580,13 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         .map(|(_, t)| t.as_str())
                         .unwrap_or("");
 
-                    restore_external_focus();
-                    std::thread::sleep(Duration::from_millis(60));
+                    restore_external_focus_target(Some(hwnd));
+                    release_modifier_keys();
+                    std::thread::sleep(Duration::from_millis(40));
 
                     if is_terminal_window(hwnd, win_title) {
                         send_terminal_input(hwnd, text, should_enter);
                         feedback.push(format!("Texte dicté inséré dans le terminal '{}'.", win_title));
-                    } else if target_desc_opt.is_none() && window.is_none() {
-                        let text_to_insert = if !text.ends_with(' ') && !text.ends_with('\n') {
-                            format!("{text} ")
-                        } else {
-                            text.to_string()
-                        };
-
-                        clipboard::set_text(&text_to_insert);
-                        std::thread::sleep(Duration::from_millis(30));
-                        send_paste();
-
-                        if should_enter {
-                            std::thread::sleep(Duration::from_millis(30));
-                            send_hotkey(&[], VIRTUAL_KEY(0x0D));
-                        }
-                        feedback.push(format!("Texte dicté inséré à la position du curseur ({} caractères).", text.len()));
                     } else {
                         if let Some(target_desc) = target_desc_opt {
                             let elements = list_interactive_elements(hwnd);
@@ -4442,14 +4595,18 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                                 click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                                 std::thread::sleep(Duration::from_millis(50));
                             }
-                        } else {
-                            if !has_focused_textarea(hwnd) {
-                                refocus_largest_textarea_or_fallback(hwnd);
-                                std::thread::sleep(Duration::from_millis(40));
-                            }
+                        } else if window.is_some() && !has_focused_textarea(hwnd) {
+                            refocus_largest_textarea_or_fallback(hwnd);
+                            std::thread::sleep(Duration::from_millis(40));
                         }
 
-                        for c in text.chars() {
+                        let text_to_type = if !text.ends_with(' ') && !text.ends_with('\n') {
+                            format!("{text} ")
+                        } else {
+                            text.to_string()
+                        };
+
+                        for c in text_to_type.chars() {
                             if c == '\n' || c == '\r' {
                                 send_hotkey(&[], VIRTUAL_KEY(0x0D));
                                 std::thread::sleep(Duration::from_millis(15));
@@ -4462,7 +4619,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                             std::thread::sleep(Duration::from_millis(30));
                             send_hotkey(&[], VIRTUAL_KEY(0x0D));
                         }
-                        feedback.push(format!("Texte dicté inséré avec succès ({} caractères).", text.len()));
+                        feedback.push(format!("Texte dicté inséré directement au clavier ({} caractères).", text.len()));
                     }
                 } else {
                     let _ = write_to_browser_or_txt(text);
@@ -4470,6 +4627,17 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 }
             }
             AgentAction::CursorMove { command } => {
+                let target_hwnd = LAST_EXTERNAL_HWND.lock().ok().and_then(|g| *g).map(|raw| HWND(raw as _))
+                    .filter(|h| !h.0.is_null() && !is_window_hung(*h))
+                    .or(active_user_hwnd)
+                    .or(preferred_target_hwnd);
+
+                if let Some(hwnd) = target_hwnd {
+                    restore_external_focus_target(Some(hwnd));
+                    release_modifier_keys();
+                    std::thread::sleep(Duration::from_millis(40));
+                }
+
                 let cmd_lower = command.to_lowercase();
                 const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
                 const VK_LEFT: VIRTUAL_KEY = VIRTUAL_KEY(0x25);
@@ -4666,6 +4834,32 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         send_hotkey(&[], VK_ESCAPE);
                     }
                     feedback.push(format!("Plage de texte entre \"{from}\" et \"{to}\" ciblée avec succès."));
+                }
+            }
+            AgentAction::EnableAutostart => {
+                match set_autostart(true) {
+                    Ok(msg) => feedback.push(msg),
+                    Err(err) => feedback.push(format!("Erreur lors de l'activation du démarrage auto : {err}")),
+                }
+            }
+            AgentAction::DisableAutostart => {
+                match set_autostart(false) {
+                    Ok(msg) => feedback.push(msg),
+                    Err(err) => feedback.push(format!("Erreur lors de la désactivation du démarrage auto : {err}")),
+                }
+            }
+            AgentAction::CheckAutostart => {
+                let enabled = is_autostart_enabled();
+                if enabled {
+                    feedback.push("Statut : Libertide est configuré pour se lancer au démarrage de Windows.".to_string());
+                } else {
+                    feedback.push("Statut : Libertide n'est pas configuré au démarrage de Windows.".to_string());
+                }
+            }
+            AgentAction::SetAutostart { enabled } => {
+                match set_autostart(*enabled) {
+                    Ok(msg) => feedback.push(msg),
+                    Err(err) => feedback.push(format!("Erreur configuration démarrage auto : {err}")),
                 }
             }
         }
