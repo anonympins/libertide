@@ -84,6 +84,14 @@ pub enum AgentCommand {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ScheduledTaskItem {
+    #[serde(default, alias = "delay", alias = "seconds", alias = "wait_seconds", alias = "delay_sec")]
+    pub delay_seconds: u64,
+    #[serde(default, alias = "instruction", alias = "command", alias = "text")]
+    pub prompt: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum AgentAction {
     OpenApp {
@@ -248,6 +256,18 @@ pub enum AgentAction {
         #[serde(default)]
         reason: Option<String>,
     },
+    #[serde(alias = "schedule", alias = "delay_prompt", alias = "schedule_task")]
+    SchedulePrompt {
+        #[serde(default, alias = "delay", alias = "seconds", alias = "wait_seconds", alias = "delay_sec")]
+        delay_seconds: u64,
+        #[serde(default, alias = "instruction", alias = "command", alias = "text")]
+        prompt: String,
+    },
+    #[serde(alias = "schedule_tasks", alias = "delayed_prompts")]
+    SchedulePrompts {
+        #[serde(default, alias = "prompts", alias = "scheduled_tasks", alias = "items")]
+        tasks: Vec<ScheduledTaskItem>,
+    },
     #[serde(alias = "mute_sound", alias = "sound_mute", alias = "couper_son")]
     MuteAudio,
     #[serde(alias = "volume", alias = "adjust_volume", alias = "sound")]
@@ -317,6 +337,12 @@ impl QuickSuggestionItem {
                 }
                 AgentAction::SetReasoningPasses { passes, .. } => {
                     Some(format!("Ajuster à {passes} passes"))
+                }
+                AgentAction::SchedulePrompt { delay_seconds, prompt } => {
+                    Some(format!("Différer ({delay_seconds}s) : {prompt}"))
+                }
+                AgentAction::SchedulePrompts { tasks } => {
+                    Some(format!("Planifier {} tâche(s) différée(s)", tasks.len()))
                 }
                 AgentAction::MuteAudio => Some("Couper les flux audio parasites".to_string()),
                 AgentAction::SetVolume { command } => Some(format!("Volume : {command}")),

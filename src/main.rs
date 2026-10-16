@@ -1046,6 +1046,7 @@ impl OverlayApp {
         self.continuous_mode = false;
         self.dictation_mode = false;
         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
+        cancel_all_scheduled_tasks();
         IS_EMERGENCY_STOPPED.store(true, Ordering::SeqCst);
         TARGET_REASONING_PASSES.store(5, Ordering::SeqCst);
         let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
@@ -1464,6 +1465,74 @@ impl eframe::App for OverlayApp {
                     // 1. Arrêt d'urgence local universel (<50ms, sans requête LLM)
                     if is_emergency_stop_command(&prompt) {
                         self.trigger_emergency_stop(&ctx);
+                        return;
+                    }
+
+                    // Annulation instantanée des commandes différées
+                    if is_cancel_scheduled_command(&prompt) {
+                        let cancelled = cancel_all_scheduled_tasks();
+                        play_earcon(Earcon::Success);
+                        let reply = if cancelled > 0 {
+                            format!("Toutes les commandes différées ont été annulées ({cancelled} annulée{}).", if cancelled > 1 { "s" } else { "" })
+                        } else {
+                            "Toutes les commandes différées ont été annulées.".to_string()
+                        };
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::User,
+                            text: prompt,
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: reply.clone(),
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+
+                    // Détection et planification locale immédiate des commandes différées (<10 ms, 0 token LLM)
+                    if let Some(tasks) = parse_scheduled_prompts(&prompt) {
+                        for (dur, task_prompt) in &tasks {
+                            schedule_prompt_execution(*dur, task_prompt.clone());
+                        }
+                        play_earcon(Earcon::Success);
+                        let (reply_chat, reply_tts) = if tasks.len() == 1 {
+                            let friendly = format_duration_friendly(tasks[0].0);
+                            let cmd = &tasks[0].1;
+                            (format!("Commande planifiée dans {friendly} : « {cmd} »."), format!("Commande planifiée dans {friendly}."))
+                        } else {
+                            let mut chat = format!("{} commandes différées planifiées :", tasks.len());
+                            for (dur, cmd) in &tasks {
+                                chat.push_str(&format!("\n• Dans {} : « {} »", format_duration_friendly(*dur), cmd));
+                            }
+                            (chat, format!("{} commandes différées planifiées.", tasks.len()))
+                        };
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::User,
+                            text: prompt,
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: reply_chat,
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(reply_tts));
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
                         return;
                     }
 
@@ -2304,6 +2373,53 @@ impl eframe::App for OverlayApp {
                                                 quick_suggestions: Vec::new(),
                                                 screen_size_kb: None,
                                             });
+                                            if is_cancel_scheduled_command(&prompt) {
+                                                let cancelled = cancel_all_scheduled_tasks();
+                                                play_earcon(Earcon::Success);
+                                                let reply = if cancelled > 0 {
+                                                    format!("Toutes les commandes différées ont été annulées ({cancelled} annulée{}).", if cancelled > 1 { "s" } else { "" })
+                                                } else {
+                                                    "Toutes les commandes différées ont été annulées.".to_string()
+                                                };
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::Agent,
+                                                    text: reply.clone(),
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                                                self.status = AgentStatus::Idle;
+                                                self.continuous_mode = false;
+                                                return;
+                                            } else if let Some(tasks) = parse_scheduled_prompts(&prompt) {
+                                                for (dur, task_prompt) in &tasks {
+                                                    schedule_prompt_execution(*dur, task_prompt.clone());
+                                                }
+                                                play_earcon(Earcon::Success);
+                                                let (reply_chat, reply_tts) = if tasks.len() == 1 {
+                                                    let friendly = format_duration_friendly(tasks[0].0);
+                                                    let cmd = &tasks[0].1;
+                                                    (format!("Commande planifiée dans {friendly} : « {cmd} »."), format!("Commande planifiée dans {friendly}."))
+                                                } else {
+                                                    let mut chat = format!("{} commandes différées planifiées :", tasks.len());
+                                                    for (dur, cmd) in &tasks {
+                                                        chat.push_str(&format!("\n• Dans {} : « {} »", format_duration_friendly(*dur), cmd));
+                                                    }
+                                                    (chat, format!("{} commandes différées planifiées.", tasks.len()))
+                                                };
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::Agent,
+                                                    text: reply_chat,
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply_tts));
+                                                self.status = AgentStatus::Idle;
+                                                self.continuous_mode = false;
+                                                return;
+                                            }
                                             if is_api_key_command(&prompt) {
                                                 self.show_api_key_modal = true;
                                                 let reply = "Boîte de configuration de la clé API ouverte.".to_string();
@@ -2905,6 +3021,7 @@ Règles principales :
    - Démarrage : "enable_autostart", "disable_autostart", "check_autostart", "set_autostart".
    - Sélection : "select_text_between" (from, to).
    - Immersion : "activate_immersion" (Win+Ctrl+D), "deactivate_immersion".
+   - Temporisation & Différé : "schedule_prompt" (delay_seconds: 1..3600, prompt: "...") ou "schedule_prompts" (tasks: [{{"delay_seconds": 10, "prompt": "..."}}]) pour différer des consignes futures (téléchargement en cours, rappel, temporisation).
 8. Fin de passes : Dès que "actions" est vide (tâche finie ou choix requis), fournis OBLIGATOIREMENT 2 à 4 suggestions concrètes dans "quick_suggestions".
 
 Format JSON obligatoire :
@@ -2934,6 +3051,8 @@ Format JSON obligatoire :
     {{"action": "accessibility_shortcut", "shortcut": "enter"|"close_tab"|"refresh_page"|"copy"|"undo"}},
     {{"action": "deactivate_immersion"}},
     {{"action": "set_reasoning_passes", "passes": 5, "reason": null}},
+    {{"action": "schedule_prompt", "delay_seconds": 10, "prompt": "..."}},
+    {{"action": "schedule_prompts", "tasks": [{{"delay_seconds": 10, "prompt": "..."}}]}},
     {{"action": "mute_audio"}},
     {{"action": "set_volume", "command": "mute"|"down"|"up"|"min"}}
   ],
@@ -3459,8 +3578,10 @@ fn main() -> eframe::Result<()> {
     // Runtime Tokio en arrière-plan pour requêter DeepSeek
     let deepseek_chat_key = deepseek_key.clone();
     let bg_tts_tx = tts_tx.clone();
+    let scheduler_cmd_tx = cmd_tx.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("Échec d'initialisation du runtime Tokio");
+        automation::init_scheduler(scheduler_cmd_tx, rt.handle().clone());
         rt.block_on(async move {
             let history = Arc::new(tokio::sync::Mutex::new(Vec::<ChatMessage>::new()));
             let last_call_time = Arc::new(tokio::sync::Mutex::new(None));
@@ -3591,6 +3712,7 @@ fn main() -> eframe::Result<()> {
                             handle.abort();
                         }
                         let _ = bg_tts_tx.send(TtsCommand::Stop);
+                        cancel_all_scheduled_tasks();
                         IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
                         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
                         TARGET_REASONING_PASSES.store(5, Ordering::SeqCst);
