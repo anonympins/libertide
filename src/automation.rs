@@ -2536,7 +2536,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             .map(|raw| HWND(raw as _))
             .filter(|&h| user_windows.iter().any(|(w, _)| *w == h) && !is_window_hung(h))
             .or_else(|| get_active_or_best_window(&user_windows))
-            .or_else(|| user_windows.iter().find(|(h, t)| is_browser_hwnd(*h, t)).map(|(h, _)| *h))
+            .or_else(|| find_best_browser_window(&user_windows, None))
             .or_else(|| user_windows.first().map(|(h, _)| *h))
             .unwrap_or(raw_fg)
     };
@@ -3188,11 +3188,18 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 }
             }
             AgentAction::ClickElement { window, target_name } => {
+                let is_browser_target = is_address_bar_target(target_name) || is_browser_chrome_target(target_name);
                 let target_hwnd = match window.as_deref() {
                     Some(w) if !w.trim().is_empty() => {
                         find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
                     }
-                    _ => active_user_hwnd,
+                    _ => {
+                        if is_browser_target {
+                            find_best_browser_window(&user_windows, active_user_hwnd)
+                        } else {
+                            active_user_hwnd
+                        }
+                    }
                 };
 
                 if let Some(hwnd) = target_hwnd {
@@ -3360,11 +3367,18 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 }
             }
             AgentAction::ClickButton { window, button_name } => {
+                let is_browser_target = is_browser_chrome_target(button_name);
                 let target_hwnd = match window.as_deref() {
                     Some(w) if !w.trim().is_empty() => {
                         find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
                     }
-                    _ => active_user_hwnd,
+                    _ => {
+                        if is_browser_target {
+                            find_best_browser_window(&user_windows, active_user_hwnd)
+                        } else {
+                            active_user_hwnd
+                        }
+                    }
                 };
 
                 if let Some(hwnd) = target_hwnd {
@@ -3417,11 +3431,18 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 }
             }
             AgentAction::FocusElement { window, target_name } => {
+                let is_browser_target = is_address_bar_target(target_name) || is_browser_chrome_target(target_name);
                 let target_hwnd = match window.as_deref() {
                     Some(w) if !w.trim().is_empty() => {
                         find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
                     }
-                    _ => active_user_hwnd,
+                    _ => {
+                        if is_browser_target {
+                            find_best_browser_window(&user_windows, active_user_hwnd)
+                        } else {
+                            active_user_hwnd
+                        }
+                    }
                 };
 
                 if let Some(hwnd) = target_hwnd {
@@ -3559,7 +3580,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     }
                     _ => {
                         if is_address_bar {
-                            user_windows.iter().find(|(h, t)| is_browser_hwnd(*h, t)).map(|(h, _)| *h).or(active_user_hwnd)
+                            find_best_browser_window(&user_windows, active_user_hwnd)
                         } else {
                             active_user_hwnd
                         }
@@ -3568,6 +3589,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
 
                 let mut handled = false;
 
+                if !is_address_bar {
                 let candidate_hwnd = target_hwnd.or(active_user_hwnd).or(preferred_target_hwnd);
                 if let Some(hwnd) = candidate_hwnd {
                     let win_title = user_windows
@@ -3594,27 +3616,39 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         handled = true;
                     }
                 }
+                }
 
                 if !handled {
                     if is_address_bar {
-                        if let Some(h) = target_hwnd.filter(|&h| is_window_hung(h)) {
-                            feedback.push(format!("Navigateur [HWND {:?}] non réactif (sablier). Écriture ignorée.", h.0));
-                            continue;
-                        }
-                        if let Some(hwnd) = target_hwnd {
+                        let browser_hwnd = target_hwnd.filter(|&h| {
+                            let title = user_windows.iter().find(|(wh, _)| *wh == h).map(|(_, t)| t.as_str()).unwrap_or("");
+                            is_browser_hwnd(h, title)
+                        });
+
+                        if let Some(hwnd) = browser_hwnd {
+                            if is_window_hung(hwnd) {
+                                feedback.push(format!("Navigateur [HWND {:?}] non réactif (sablier). Écriture ignorée.", hwnd.0));
+                                continue;
+                            }
                             let win_title = user_windows.iter().find(|(h, _)| *h == hwnd).map(|(_, t)| t.as_str()).unwrap_or("Navigateur");
-                            let is_browser = is_browser_hwnd(hwnd, win_title);
                             println!("[Actions] Ciblage barre d'adresse sur [HWND {:?}] '{}'", hwnd.0, win_title);
                             force_foreground_window(hwnd);
                             unsafe {
-                                let _ = ShowWindow(hwnd, if is_browser { SW_MAXIMIZE } else { SW_RESTORE });
+                                let _ = ShowWindow(hwnd, SW_MAXIMIZE);
                             }
                             std::thread::sleep(Duration::from_millis(50));
                             navigate_browser_address_bar(hwnd, text);
                             handled = true;
                         } else {
-                            println!("[Actions] Aucun navigateur ouvert trouvé, ouverture d'une nouvelle fenêtre pour : {}", text);
-                            launch_browser_new_window(text);
+                            println!("[Actions] Aucun navigateur ouvert trouvé pour la barre d'adresse, ouverture d'une nouvelle fenêtre pour : {}", text);
+                            let spawned = launch_browser_new_window(text);
+                            if let Some(h) = spawned {
+                                newly_spawned_hwnd = Some(h);
+                                active_user_hwnd = Some(h);
+                                preferred_target_hwnd = Some(h);
+                                user_windows = list_user_windows();
+                            }
+                            feedback.push(format!("Navigateur ouvert vers '{}'.", text));
                             handled = true;
                         }
                 } else if is_generic {
@@ -3729,7 +3763,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     }
                     _ => {
                         if is_address_bar {
-                            user_windows.iter().find(|(h, t)| is_browser_hwnd(*h, t)).map(|(h, _)| *h).or(active_user_hwnd)
+                            find_best_browser_window(&user_windows, active_user_hwnd)
                         } else {
                             active_user_hwnd
                         }
@@ -3738,6 +3772,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
 
                 let mut handled = false;
 
+                if !is_address_bar {
                 let candidate_hwnd = target_hwnd.or(active_user_hwnd).or(preferred_target_hwnd);
                 if let Some(hwnd) = candidate_hwnd {
                     let win_title = user_windows
@@ -3764,27 +3799,39 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         handled = true;
                     }
                 }
+                }
 
                 if !handled {
                     if is_address_bar {
-                        if let Some(hwnd) = target_hwnd {
+                        let browser_hwnd = target_hwnd.filter(|&h| {
+                            let title = user_windows.iter().find(|(wh, _)| *wh == h).map(|(_, t)| t.as_str()).unwrap_or("");
+                            is_browser_hwnd(h, title)
+                        });
+
+                        if let Some(hwnd) = browser_hwnd {
                             if is_window_hung(hwnd) {
                                 feedback.push(format!("Navigateur [HWND {:?}] non réactif. Remplacement ignoré.", hwnd.0));
                                 continue;
                             }
                             let win_title = user_windows.iter().find(|(h, _)| *h == hwnd).map(|(_, t)| t.as_str()).unwrap_or("Navigateur");
-                            let is_browser = is_browser_hwnd(hwnd, win_title);
                             println!("[Actions] Remplacement d'url barre d'adresse sur [HWND {:?}] '{}'", hwnd.0, win_title);
                             force_foreground_window(hwnd);
                             unsafe {
-                                let _ = ShowWindow(hwnd, if is_browser { SW_MAXIMIZE } else { SW_RESTORE });
+                                let _ = ShowWindow(hwnd, SW_MAXIMIZE);
                             }
                             std::thread::sleep(Duration::from_millis(50));
                             navigate_browser_address_bar(hwnd, text);
                             handled = true;
                         } else {
-                            println!("[Actions] Aucun navigateur ouvert trouvé, ouverture avec : {}", text);
-                            launch_browser_new_window(text);
+                            println!("[Actions] Aucun navigateur ouvert trouvé pour la barre d'adresse, ouverture avec : {}", text);
+                            let spawned = launch_browser_new_window(text);
+                            if let Some(h) = spawned {
+                                newly_spawned_hwnd = Some(h);
+                                active_user_hwnd = Some(h);
+                                preferred_target_hwnd = Some(h);
+                                user_windows = list_user_windows();
+                            }
+                            feedback.push(format!("Navigateur ouvert vers '{}'.", text));
                             handled = true;
                         }
                 } else if is_generic {
@@ -3899,9 +3946,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     }
                     feedback.push(format!("Nouvelle fenêtre ouverte vers '{}'.", formatted_url));
                 } else if is_current {
-                    let target_hwnd = active_user_hwnd
-                        .filter(|h| user_windows.iter().any(|(wh, t)| *wh == *h && is_browser_hwnd(*wh, t)))
-                        .or_else(|| user_windows.iter().find(|(h, t)| is_browser_hwnd(*h, t)).map(|(h, _)| *h));
+                    let target_hwnd = find_best_browser_window(&user_windows, active_user_hwnd);
 
                     if let Some(hwnd) = target_hwnd {
                         if is_window_hung(hwnd) {
@@ -3937,11 +3982,13 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 } else {
                     // Par défaut (sans target, "new_tab", ou si target désigne un navigateur spécifique) : NOUVEL ONGLET
                     let target_hwnd = if is_explicit_new_tab || target_mode.is_none() {
-                        active_user_hwnd
-                            .filter(|h| user_windows.iter().any(|(wh, t)| *wh == *h && is_browser_hwnd(*wh, t)))
-                            .or_else(|| user_windows.iter().find(|(h, t)| is_browser_hwnd(*h, t)).map(|(h, _)| *h))
+                        find_best_browser_window(&user_windows, active_user_hwnd)
                     } else {
-                        find_windows_matching(target_mode.unwrap(), &user_windows, active_user_hwnd).first().copied()
+                        let matched = find_windows_matching(target_mode.unwrap(), &user_windows, active_user_hwnd);
+                        matched.first().copied().filter(|&h| {
+                            let title = user_windows.iter().find(|(wh, _)| *wh == h).map(|(_, t)| t.as_str()).unwrap_or("");
+                            is_browser_hwnd(h, title)
+                        }).or_else(|| find_best_browser_window(&user_windows, active_user_hwnd))
                     };
 
                     if let Some(hwnd) = target_hwnd {

@@ -159,9 +159,36 @@ pub fn extract_filename_from_title(title: &str) -> Option<String> {
     None
 }
 
+/// Vérifie si l'exécutable correspond à un véritable navigateur Web
+pub fn is_browser_executable(exe: &str) -> bool {
+    let lower = exe.to_lowercase();
+    let name = lower.strip_suffix(".exe").unwrap_or(&lower);
+    matches!(
+        name,
+        "chrome"
+            | "google-chrome"
+            | "google-chrome-stable"
+            | "msedge"
+            | "firefox"
+            | "brave"
+            | "brave-browser"
+            | "opera"
+            | "opera_gx"
+            | "vivaldi"
+            | "arc"
+            | "chromium"
+            | "waterfox"
+            | "librewolf"
+            | "zen"
+            | "thorium"
+            | "floorp"
+            | "ladybird"
+    )
+}
+
 #[cfg(windows)]
 pub fn is_editor_window(_hwnd: HWND, title: &str, exe_name: &str) -> bool {
-    if is_browser_hwnd(_hwnd, title) {
+    if is_browser_executable(exe_name) {
         return false;
     }
     let exe_lower = exe_name.to_lowercase();
@@ -553,12 +580,72 @@ pub fn get_active_or_best_window(user_windows: &[(HWND, String)]) -> Option<HWND
     {
         Some(fg)
     } else {
-        user_windows
-            .iter()
-            .find(|(h, t)| is_browser_hwnd(*h, t))
-            .map(|(h, _)| *h)
+        crate::automation::LAST_EXTERNAL_HWND
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .map(|raw| HWND(raw as _))
+            .filter(|&h| user_windows.iter().any(|(w, _)| *w == h) && !is_window_hung(h))
+            .or_else(|| {
+                user_windows
+                    .iter()
+                    .find(|(h, t)| is_browser_hwnd(*h, t))
+                    .map(|(h, _)| *h)
+            })
             .or_else(|| find_largest_and_most_centered_window(user_windows))
     }
+}
+
+#[cfg(windows)]
+pub fn find_best_browser_window(
+    user_windows: &[(HWND, String)],
+    preferred_hwnd: Option<HWND>,
+) -> Option<HWND> {
+    if let Some(pref) = preferred_hwnd {
+        if let Some((_, title)) = user_windows.iter().find(|(h, _)| *h == pref) {
+            if is_browser_hwnd(pref, title) && !is_window_hung(pref) {
+                return Some(pref);
+            }
+        }
+    }
+
+    if let Some(last_ext) = crate::automation::LAST_EXTERNAL_HWND
+        .lock()
+        .ok()
+        .and_then(|g| *g)
+        .map(|raw| HWND(raw as _))
+    {
+        if Some(last_ext) != preferred_hwnd {
+            if let Some((_, title)) = user_windows.iter().find(|(h, _)| *h == last_ext) {
+                if is_browser_hwnd(last_ext, title) && !is_window_hung(last_ext) {
+                    return Some(last_ext);
+                }
+            }
+        }
+    }
+
+    user_windows
+        .iter()
+        .find(|(h, t)| is_browser_hwnd(*h, t) && !is_window_hung(*h))
+        .map(|(h, _)| *h)
+}
+
+#[cfg(not(windows))]
+pub fn find_best_browser_window(
+    user_windows: &[(String, String)],
+    preferred_id: Option<&str>,
+) -> Option<String> {
+    if let Some(pref) = preferred_id {
+        if let Some((id, title)) = user_windows.iter().find(|(id, _)| id == pref) {
+            if is_browser_window(title) {
+                return Some(id.clone());
+            }
+        }
+    }
+    user_windows
+        .iter()
+        .find(|(_, title)| is_browser_window(title))
+        .map(|(id, _)| id.clone())
 }
 
 #[cfg(windows)]
@@ -583,19 +670,18 @@ pub fn window_matches_keyword(hwnd: HWND, title: &str, kw: &str) -> bool {
 
         let is_generic_browser = p_lower == "browser" || p_lower == "navigateur" || p_lower == "web" || p_lower == "internet";
         if is_generic_browser {
-            if is_browser_hwnd(hwnd, title)
-                || t_lower.contains("chrome")
-                || t_lower.contains("edge")
-                || t_lower.contains("firefox")
-                || t_lower.contains("brave")
-            {
+            if is_browser_hwnd(hwnd, title) {
                 return true;
             }
             continue;
         }
 
         if p_lower == "google" || p_lower == "chrome" || p_lower == "google chrome" {
-            if t_lower.contains("chrome") || t_lower.contains("google") {
+            let (_pid, exe) = get_window_process_info(hwnd);
+            if exe.to_lowercase().contains("chrome") {
+                return true;
+            }
+            if is_browser_hwnd(hwnd, title) && (t_lower.contains("chrome") || t_lower.contains("google")) {
                 return true;
             }
             continue;
@@ -676,26 +762,44 @@ pub fn find_windows_matching(
 
 #[cfg(windows)]
 pub fn is_browser_hwnd(hwnd: HWND, title: &str) -> bool {
+    let (_pid, exe_name) = get_window_process_info(hwnd);
+    if is_browser_executable(&exe_name) {
+        return true;
+    }
+
+    // Exclusion explicite des applications Electron / non-navigateurs
+    let exe_lower = exe_name.to_lowercase();
+    if is_editor_window(hwnd, title, &exe_name)
+        || is_terminal_window(hwnd, title)
+        || exe_lower.contains("discord")
+        || exe_lower.contains("slack")
+        || exe_lower.contains("spotify")
+        || exe_lower.contains("steam")
+        || exe_lower.contains("obsidian")
+        || exe_lower.contains("notion")
+        || exe_lower.contains("postman")
+        || exe_lower.contains("teams")
+        || exe_lower.contains("thunderbird")
+        || exe_lower.contains("explorer")
+    {
+        return false;
+    }
+
     let t = title.to_lowercase();
-    if t.contains("chrome")
-        || t.contains("edge")
-        || t.contains("firefox")
-        || t.contains("brave")
-        || t.contains("opera")
-        || t.contains("vivaldi")
+    if t.ends_with(" - google chrome")
+        || t.ends_with(" - microsoft edge")
+        || t.ends_with(" - mozilla firefox")
+        || t.ends_with(" - brave")
+        || t.ends_with(" - opera")
+        || t.ends_with(" - vivaldi")
+        || t.ends_with(" - arc")
+        || t.ends_with(" - waterfox")
+        || t.ends_with(" - librewolf")
+        || t.ends_with(" - zen browser")
     {
         return true;
     }
-    unsafe {
-        let mut class_buf = [0u16; 256];
-        let len = GetClassNameW(hwnd, &mut class_buf);
-        if len > 0 {
-            let class_name = String::from_utf16_lossy(&class_buf[..len as usize]);
-            if class_name.contains("Chrome_WidgetWin") || class_name.contains("MozillaWindowClass") {
-                return true;
-            }
-        }
-    }
+
     false
 }
 
