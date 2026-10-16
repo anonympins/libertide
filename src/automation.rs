@@ -325,6 +325,14 @@ mod clipboard {
     }
 }
 
+pub fn get_clipboard_text() -> Option<String> {
+    clipboard::get_text()
+}
+
+pub fn set_clipboard_text(text: &str) -> bool {
+    clipboard::set_text(text)
+}
+
 #[cfg(not(windows))]
 pub fn release_modifier_keys() {}
 

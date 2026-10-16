@@ -19,6 +19,37 @@ pub fn read_env_var_from_file(file_path: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Met à jour ou ajoute une variable d'environnement dans un fichier texte (ex: `.env`).
+pub fn write_env_var_to_file(file_path: &str, key: &str, value: &str) -> std::io::Result<()> {
+    let prefix = format!("{key}=");
+    let content = std::fs::read_to_string(file_path).unwrap_or_default();
+    let mut replaced = false;
+    let mut new_lines = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('#') && trimmed.starts_with(&prefix) {
+            new_lines.push(format!("{key}={value}"));
+            replaced = true;
+        } else {
+            new_lines.push(line.to_string());
+        }
+    }
+
+    if !replaced {
+        if !content.is_empty() && !content.ends_with('\n') {
+            new_lines.push(String::new());
+        }
+        new_lines.push(format!("{key}={value}"));
+    }
+
+    let mut out = new_lines.join("\n");
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    std::fs::write(file_path, out)
+}
+
 /// Crée un fichier texte temporaire contenant le texte fourni.
 pub fn create_temp_note_file(content: &str) -> std::io::Result<PathBuf> {
     let temp_dir = std::env::temp_dir();
