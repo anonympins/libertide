@@ -9,6 +9,65 @@ pub enum AgentStatus {
     EmergencyStopped,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VoiceProfile {
+    Denise,
+    Henri,
+    Hortense,
+    Paul,
+    Sylvie,
+    Jean,
+}
+
+pub type VoiceGender = VoiceProfile;
+
+impl VoiceProfile {
+    pub const Female: Self = Self::Denise;
+    pub const Male: Self = Self::Henri;
+
+    pub const ALL: &'static [Self] = &[
+        Self::Denise,
+        Self::Henri,
+        Self::Hortense,
+        Self::Paul,
+        Self::Sylvie,
+        Self::Jean,
+    ];
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Denise => "Denise (Féminine naturelle)",
+            Self::Henri => "Henri (Masculin naturel)",
+            Self::Hortense => "Hortense (Féminine studio)",
+            Self::Paul => "Paul (Masculin posé)",
+            Self::Sylvie => "Sylvie (Féminine canadienne)",
+            Self::Jean => "Jean (Masculin dynamique)",
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            Self::Denise => Self::Henri,
+            Self::Henri => Self::Hortense,
+            Self::Hortense => Self::Paul,
+            Self::Paul => Self::Sylvie,
+            Self::Sylvie => Self::Jean,
+            Self::Jean => Self::Denise,
+        }
+    }
+
+    pub fn edge_voice_id(&self) -> &'static str {
+        match self {
+            Self::Denise => "fr-FR-DeniseNeural",
+            Self::Henri => "fr-FR-HenriNeural",
+            Self::Hortense => "fr-FR-EloiseNeural",
+            Self::Paul => "fr-FR-AlainNeural",
+            Self::Sylvie => "fr-CA-SylvieNeural",
+            Self::Jean => "fr-FR-JeanNeural",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTab {
     Assistance,
@@ -73,6 +132,7 @@ pub enum AudioCommand {
 pub enum TtsCommand {
     Speak(String),
     Stop,
+    SetGender(VoiceGender),
 }
 
 #[derive(Debug, Clone)]

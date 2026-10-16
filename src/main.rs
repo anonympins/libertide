@@ -5,16 +5,18 @@ mod automation;
 mod fs_util;
 mod html_util;
 mod pattern;
+mod tts;
 mod twitch;
 mod types;
 mod window_util;
 
+use audio::spawn_audio_worker;
 use automation::*;
 use fs_util::*;
 use pattern::clean_words;
-use window_util::*;
-use audio::spawn_audio_worker;
+use tts::{sanitize_for_tts, spawn_tts_worker};
 use twitch::{search_twitch_channels, spawn_twitch_worker};
+use window_util::*;
 use eframe::egui;
 use types::*;
 use std::sync::Arc;
@@ -25,12 +27,6 @@ use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use windows::Win32::Foundation::POINT;
-#[cfg(windows)]
-use windows::Win32::Media::Speech::{
-    ISpVoice, SpVoice, SPF_ASYNC, SPF_IS_NOT_XML, SPF_PURGEBEFORESPEAK, SPVOICESTATUS,
-};
-#[cfg(windows)]
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 #[cfg(windows)]
@@ -105,6 +101,7 @@ pub struct OverlayApp {
     continuous_mode: bool,
     dictation_mode: bool,
     zoom_factor: f32,
+    voice_gender: VoiceGender,
 
     // Accessibilité : Ciblage par numéros & Mode contacteur unique (Switch Access)
     numbered_targets: Vec<NumberedElementTarget>,
@@ -156,65 +153,6 @@ fn get_screen_cursor_pos(ctx: &egui::Context) -> Option<egui::Pos2> {
 #[cfg(not(windows))]
 fn get_screen_cursor_pos(ctx: &egui::Context) -> Option<egui::Pos2> {
     ctx.input(|i| i.pointer.latest_pos())
-}
-
-fn sanitize_for_tts(text: &str) -> String {
-    let mut cleaned = String::new();
-    let mut in_code_block = false;
-
-    // 1. Élimination complète des blocs de code markdown (```...```)
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            in_code_block = !in_code_block;
-            continue;
-        }
-        if in_code_block {
-            continue;
-        }
-        cleaned.push_str(line);
-        cleaned.push(' ');
-    }
-
-    // 2. Nettoyage des balises XML/HTML, URLs et caractères de balisage
-    let chars: Vec<char> = cleaned.chars().collect();
-    let mut result = String::with_capacity(cleaned.len());
-    let mut i = 0;
-    let mut in_xml_tag = false;
-
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '<' {
-            in_xml_tag = true;
-            i += 1;
-            continue;
-        }
-        if in_xml_tag {
-            if c == '>' {
-                in_xml_tag = false;
-            }
-            i += 1;
-            continue;
-        }
-        if (c == 'h' || c == 'H') && i + 7 < chars.len() {
-            let slice: String = chars[i..i + 8.min(chars.len())].iter().collect();
-            if slice.eq_ignore_ascii_case("https://") || slice.starts_with("http://") {
-                while i < chars.len() && !chars[i].is_whitespace() && chars[i] != ')' && chars[i] != ']' {
-                    i += 1;
-                }
-                continue;
-            }
-        }
-        match c {
-            '*' | '#' | '`' | '_' | '~' | '{' | '}' | '[' | ']' | '|' | '\\' | '/' | '^' | '@' => result.push(' '),
-            '&' => result.push_str(" et "),
-            '>' | '<' => result.push(' '),
-            _ if !c.is_control() => result.push(c),
-            _ => {}
-        }
-        i += 1;
-    }
-    result.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
 fn normalize_for_command_match(text: &str) -> String {
@@ -694,168 +632,6 @@ pub(crate) fn current_time_str() -> String {
     }
 }
 
-#[cfg(windows)]
-fn spawn_tts_worker(event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
-    let (tx, rx) = channel::<TtsCommand>();
-
-    std::thread::spawn(move || {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            let voice: Result<ISpVoice, _> = CoCreateInstance(&SpVoice, None, CLSCTX_ALL);
-
-            let Ok(voice) = voice else {
-                eprintln!("Échec de l'initialisation du synthétiseur vocal SAPI Windows");
-                return;
-            };
-
-            // Amélioration du timbre : Volume maximal et cadence légèrement dynamisée (+1)
-            let _ = voice.SetVolume(100);
-            let _ = voice.SetRate(1);
-
-            let base_flags = (SPF_ASYNC.0 | SPF_PURGEBEFORESPEAK.0 | SPF_IS_NOT_XML.0) as u32;
-
-            while let Ok(cmd) = rx.recv() {
-                match cmd {
-                    TtsCommand::Stop => {
-                        let _ = voice.Speak(
-                            windows::core::PCWSTR::null(),
-                            base_flags,
-                            None,
-                        );
-                        set_tts_audio_level(0.0);
-                    }
-                    TtsCommand::Speak(raw_text) => {
-                        let clean_text = sanitize_for_tts(&raw_text);
-                        if clean_text.trim().is_empty() {
-                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
-                            let _ = event_tx.send(AgentEvent::TtsFinished);
-                            continue;
-                        }
-
-                        // Conservation du buffer UTF-16 en mémoire vive pendant toute la lecture asynchrone
-                        let mut active_wide_buf: Vec<u16> = clean_text.encode_utf16().chain(std::iter::once(0)).collect();
-
-                        if voice
-                            .Speak(windows::core::PCWSTR(active_wide_buf.as_ptr()), base_flags, None)
-                            .is_ok()
-                        {
-                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Speaking));
-                            let start_wait = Instant::now();
-                            let mut has_started = false;
-
-                            loop {
-                                std::thread::sleep(Duration::from_millis(20));
-
-                                if let Ok(next_cmd) = rx.try_recv() {
-                                    match next_cmd {
-                                        TtsCommand::Stop => {
-                                            let _ = voice.Speak(
-                                                windows::core::PCWSTR::null(),
-                                                base_flags,
-                                                None,
-                                            );
-                                            set_tts_audio_level(0.0);
-                                            break;
-                                        }
-                                        TtsCommand::Speak(next_text) => {
-                                            let clean_next = sanitize_for_tts(&next_text);
-                                            if !clean_next.trim().is_empty() {
-                                                active_wide_buf =
-                                                    clean_next.encode_utf16().chain(std::iter::once(0)).collect();
-                                                let _ = voice.Speak(
-                                                    windows::core::PCWSTR(active_wide_buf.as_ptr()),
-                                                    base_flags,
-                                                    None,
-                                                );
-                                                has_started = false;
-                                                set_tts_audio_level(0.0);
-                                                std::thread::sleep(Duration::from_millis(80));
-                                            }
-                                        }
-                                    }
-                                }
-
-                                let mut status = SPVOICESTATUS::default();
-                                if voice.GetStatus(&mut status, std::ptr::null_mut()).is_ok() {
-                                    if status.dwRunningState == 2 {
-                                        has_started = true;
-                                        let level = if status.PhonemeId > 0 {
-                                            let p = status.PhonemeId as f32;
-                                            let t = start_wait.elapsed().as_millis() as f32 * 0.025;
-                                            (0.40 + 0.35 * (p * 0.17 + t).sin().abs() + 0.25 * (t * 1.6).cos().abs()).clamp(0.2, 1.0)
-                                        } else {
-                                            0.05
-                                        };
-                                        set_tts_audio_level(level);
-                                    } else if has_started || start_wait.elapsed() > Duration::from_millis(350) {
-                                        set_tts_audio_level(0.0);
-                                        let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
-                                        let _ = event_tx.send(AgentEvent::TtsFinished);
-                                        break;
-                                    } else {
-                                        set_tts_audio_level(0.0);
-                                    }
-                                } else {
-                                    set_tts_audio_level(0.0);
-                                    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
-                                    let _ = event_tx.send(AgentEvent::TtsFinished);
-                                    break;
-                                }
-                            }
-                        } else {
-                            set_tts_audio_level(0.0);
-                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
-                            let _ = event_tx.send(AgentEvent::TtsFinished);
-                        }
-                    }
-                }
-            }
-        }
-    });
-
-    tx
-}
-
-#[cfg(not(windows))]
-fn spawn_tts_worker(_event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
-    let (tx, rx) = channel::<TtsCommand>();
-    let event_tx = _event_tx;
-    std::thread::spawn(move || {
-        let mut current_process: Option<std::process::Child> = None;
-        while let Ok(cmd) = rx.recv() {
-            match cmd {
-                TtsCommand::Stop => {
-                    if let Some(mut child) = current_process.take() {
-                        let _ = child.kill();
-                    }
-                    set_tts_audio_level(0.0);
-                }
-                TtsCommand::Speak(text) => {
-                    if let Some(mut child) = current_process.take() {
-                        let _ = child.kill();
-                    }
-                    let clean_text = sanitize_for_tts(&text);
-                    if clean_text.trim().is_empty() {
-                        let _ = event_tx.send(AgentEvent::TtsFinished);
-                        continue;
-                    }
-                    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Speaking));
-                    // Tentative avec spd-say (Speech Dispatcher), puis repli sur espeak-ng / espeak
-                    let child = std::process::Command::new("spd-say")
-                        .args(["-l", "fr", "-t", "female1", &clean_text])
-                        .spawn()
-                        .or_else(|_| std::process::Command::new("espeak-ng").args(["-v", "fr", &clean_text]).spawn())
-                        .or_else(|_| std::process::Command::new("espeak").args(["-v", "fr", &clean_text]).spawn())
-                        .ok();
-                    current_process = child;
-                    let _ = event_tx.send(AgentEvent::TtsFinished);
-                }
-            }
-        }
-    });
-    tx
-}
-
 impl OverlayApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
@@ -895,6 +671,7 @@ impl OverlayApp {
             continuous_mode: true,
             dictation_mode: false,
             zoom_factor: 1.0,
+            voice_gender: VoiceGender::Denise,
 
             numbered_targets: Vec::new(),
             show_numbered_targets: false,
@@ -1031,6 +808,27 @@ impl OverlayApp {
             let bar_rect = egui::Rect::from_min_size(egui::pos2(x, rect.max.y - h), egui::vec2(bar_width, h));
             painter.rect_filled(bar_rect, egui::CornerRadius::same(1), base_color);
         }
+    }
+
+    pub fn set_voice_gender(&mut self, gender: VoiceGender) {
+        self.voice_gender = gender;
+        let _ = self.tts_sender.send(TtsCommand::SetGender(gender));
+        let confirmation = match gender {
+            VoiceProfile::Denise => "Voix de Denise activée.",
+            VoiceProfile::Henri => "Voix d'Henri activée.",
+            VoiceProfile::Hortense => "Voix d'Hortense activée.",
+            VoiceProfile::Paul => "Voix de Paul activée.",
+            VoiceProfile::Sylvie => "Voix de Sylvie activée.",
+            VoiceProfile::Jean => "Voix de Jean activée.",
+        };
+        self.chat_history.push(ChatEntry {
+            role: ChatRole::Agent,
+            text: confirmation.to_string(),
+            timestamp: current_time_str(),
+            quick_suggestions: Vec::new(),
+            screen_size_kb: None,
+        });
+        let _ = self.tts_sender.send(TtsCommand::Speak(confirmation.to_string()));
     }
 
     pub fn stop_speaking(&mut self) {
@@ -1372,6 +1170,64 @@ impl eframe::App for OverlayApp {
                     self.stop_speaking();
 
                     let norm_prompt = normalize_for_command_match(&prompt);
+
+                    // Changement de voix à la voix
+                    if norm_prompt.contains("voix suivante") || norm_prompt.contains("autre voix") || norm_prompt.contains("change de voix") || norm_prompt.contains("changer voix") || norm_prompt.contains("changer de voix") {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(self.voice_gender.next());
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("voix de denise") || norm_prompt == "denise" || norm_prompt.contains("voix feminine") || norm_prompt.contains("voix féminine") {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(VoiceProfile::Denise);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("voix d henri") || norm_prompt.contains("voix d'henri") || norm_prompt == "henri" || norm_prompt.contains("voix masculine") {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(VoiceProfile::Henri);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("voix d hortense") || norm_prompt.contains("voix d'hortense") || norm_prompt.contains("voix de hortense") || norm_prompt == "hortense" {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(VoiceProfile::Hortense);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("voix de paul") || norm_prompt == "paul" {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(VoiceProfile::Paul);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("voix de sylvie") || norm_prompt == "sylvie" || norm_prompt.contains("voix quebecoise") || norm_prompt.contains("voix québécoise") || norm_prompt.contains("voix canadienne") {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(VoiceProfile::Sylvie);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("voix de jean") || norm_prompt == "jean" {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(VoiceProfile::Jean);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
 
                     // Traitement du zoom adaptatif vocal
                     if norm_prompt.contains("grossis") || norm_prompt.contains("zoom plus") || norm_prompt.contains("agrandis") || norm_prompt.contains("zoom in") {
@@ -2303,6 +2159,35 @@ impl eframe::App for OverlayApp {
                                                 }
                                             }
                                         }
+
+                                        // Sélecteur visuel de profil vocal étendu
+                                        let (voice_icon_text, voice_color) = match self.voice_gender {
+                                            VoiceProfile::Denise => ("👩 Denise", egui::Color32::from_rgb(255, 170, 220)),
+                                            VoiceProfile::Henri => ("👨 Henri", egui::Color32::from_rgb(130, 200, 255)),
+                                            VoiceProfile::Hortense => ("🎙️ Hortense", egui::Color32::from_rgb(255, 195, 130)),
+                                            VoiceProfile::Paul => ("🎩 Paul", egui::Color32::from_rgb(160, 220, 180)),
+                                            VoiceProfile::Sylvie => ("🍁 Sylvie", egui::Color32::from_rgb(255, 150, 150)),
+                                            VoiceProfile::Jean => ("⚡ Jean", egui::Color32::from_rgb(205, 170, 255)),
+                                        };
+                                        let next_gender = self.voice_gender.next();
+                                        let voice_btn = ui.button(egui::RichText::new(voice_icon_text).color(voice_color))
+                                            .on_hover_text(format!(
+                                                "Voix active : {}\nClic gauche : basculer vers {}\nClic droit : choisir parmi toutes les voix",
+                                                self.voice_gender.display_name(),
+                                                next_gender.display_name()
+                                            ));
+                                        if voice_btn.clicked() {
+                                            self.set_voice_gender(next_gender);
+                                        }
+                                        voice_btn.context_menu(|ui| {
+                                            for &profile in VoiceProfile::ALL {
+                                                let is_selected = self.voice_gender == profile;
+                                                if ui.selectable_label(is_selected, profile.display_name()).clicked() {
+                                                    self.set_voice_gender(profile);
+                                                    ui.close();
+                                                }
+                                            }
+                                        });
 
                                         let edit_width = (ui.available_width() - 156.0).max(60.0);
                                         let input_id = egui::Id::new("prompt_input_text");
