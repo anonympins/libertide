@@ -4,8 +4,7 @@ on:
   push:
     branches: [ "main" ]
     tags:
-      - "v*"
-      - "libertide-*"
+      - "*"
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
@@ -65,7 +64,8 @@ jobs:
       - name: Prepare distribution package
         run: |
           mkdir -p dist
-          cp target/release/libertide dist/
+          BIN=$(find target/release -maxdepth 1 -type f -executable ! -name "*.so" ! -name "*.d" | head -n 1)
+          cp "$BIN" dist/libertide
           [ -f README.md ] && cp README.md dist/
           [ -f LICENSE ] && cp LICENSE dist/
           tar -czvf libertide-linux-x64.tar.gz -C dist .
@@ -86,3 +86,5 @@ jobs:
           files: |
             libertide-linux-x64.tar.gz
             target/release/libertide
+          fail_on_unmatched_files: false
+          token: ${{ secrets.GITHUB_TOKEN }}
