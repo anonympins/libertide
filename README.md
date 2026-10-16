@@ -1,4 +1,5 @@
-# Libertide
+
+# <img src="public/favicon-256x256.png" width="64" alt="Libertide Overlay Interface" valign="middle"> Libertide
 
 [![https://github.com/anonympins/libertide/releases/tag/libertide-0.5.0](https://img.shields.io/github/v/release/anonympins/libertide)](https://github.com/anonympins/libertide/releases)
 [![https://raw.githubusercontent.com/anonympins/libertide/refs/heads/main/LICENSE](https://img.shields.io/github/license/anonympins/libertide)](https://github.com/anonympins/libertide/blob/main/LICENSE)
