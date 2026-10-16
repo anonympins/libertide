@@ -12,6 +12,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
 jobs:
   build-linux:
@@ -31,6 +32,7 @@ jobs:
             build-essential \
             cmake \
             pkg-config \
+            mold \
             libasound2-dev \
             libxkbcommon-dev \
             libx11-xcb-dev \
@@ -51,12 +53,14 @@ jobs:
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "true"
 
-      - name: Run tests
-        run: cargo test --verbose
+      - name: Run tests (release profile)
+        run: cargo test --release
 
       - name: Build optimized release executable
-        run: cargo build --release --verbose
+        run: cargo build --release
 
       - name: Prepare distribution package
         run: |
