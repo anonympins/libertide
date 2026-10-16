@@ -1586,10 +1586,10 @@ pub fn run_system_command(command: &str) -> bool {
 
     let mut cur = trimmed;
 
-    // 1. Déballage des préfixes "cmd.exe /c" ou "cmd /c" superflus
-    if cur.len() >= 11 && cur[..11].eq_ignore_ascii_case("cmd.exe /c ") {
+    // 1. Déballage des préfixes "cmd.exe /c", "cmd.exe /k", "cmd /c", "cmd /k" superflus
+    if cur.len() >= 11 && (cur[..11].eq_ignore_ascii_case("cmd.exe /c ") || cur[..11].eq_ignore_ascii_case("cmd.exe /k ")) {
         cur = cur[11..].trim();
-    } else if cur.len() >= 7 && cur[..7].eq_ignore_ascii_case("cmd /c ") {
+    } else if cur.len() >= 7 && (cur[..7].eq_ignore_ascii_case("cmd /c ") || cur[..7].eq_ignore_ascii_case("cmd /k ")) {
         cur = cur[7..].trim();
     }
 
@@ -1600,23 +1600,9 @@ pub fn run_system_command(command: &str) -> bool {
         cur = cur[6..].trim();
     }
 
-    // 3. Détection de /k (maintien de l'invite ouverte) ou /c (exécution puis fermeture)
-    if cur.len() >= 11 && cur[..11].eq_ignore_ascii_case("cmd.exe /k ") {
-        let rest = cur[11..].trim();
-        process.raw_arg(format!("/K {rest}"));
-    } else if cur.len() >= 7 && cur[..7].eq_ignore_ascii_case("cmd /k ") {
-        let rest = cur[7..].trim();
-        process.raw_arg(format!("/K {rest}"));
-    } else if cur.len() >= 11 && cur[..11].eq_ignore_ascii_case("cmd.exe /c ") {
-        let rest = cur[11..].trim();
-        process.raw_arg(format!("/C {rest}"));
-    } else if cur.len() >= 7 && cur[..7].eq_ignore_ascii_case("cmd /c ") {
-        let rest = cur[7..].trim();
-        process.raw_arg(format!("/C {rest}"));
-    } else {
-        // raw_arg préserve intacts les guillemets et les opérateurs shell (&&, |, etc.)
-        process.raw_arg(format!("/C {cur}"));
-    }
+    // 3. Maintien impératif de la console ouverte via /K au lieu de /C
+    // afin d'afficher la sortie sans fermer la fenêtre à la fin de l'exécution.
+    process.raw_arg(format!("/K {cur}"));
 
     process.spawn().is_ok()
 }
