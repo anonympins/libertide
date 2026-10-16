@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::fs_util::{create_temp_note_file, find_executable_in_path, find_file_in_workspace};
 use crate::pattern::{clean_words, extract_target_propositions, matches_pattern};
@@ -17,7 +17,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationElement2, IUIAutomationInvokePattern,
+    CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationElement2, IUIAutomationInvokePattern,
     IUIAutomationScrollItemPattern, IUIAutomationTextPattern, IUIAutomationValuePattern,
     TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
     UIA_TabControlTypeId, UIA_TabItemControlTypeId,
@@ -120,20 +120,18 @@ pub fn set_autostart(_enable: bool) -> Result<String, String> {
 static LAST_TXT_HWND: Mutex<Option<isize>> = Mutex::new(None);
 pub static LAST_EXTERNAL_HWND: Mutex<Option<isize>> = Mutex::new(None);
 pub static LAST_FOCUSED_CHILD_HWND: Mutex<Option<isize>> = Mutex::new(None);
-
-#[derive(Clone)]
-pub struct SendableUiaElement(pub IUIAutomationElement);
-unsafe impl Send for SendableUiaElement {}
-unsafe impl Sync for SendableUiaElement {}
-pub static LAST_FOCUSED_UIA_ELEMENT: Mutex<Option<SendableUiaElement>> = Mutex::new(None);
 pub static LAST_FOCUSED_RECT: Mutex<Option<[i32; 4]>> = Mutex::new(None);
 
 pub static CURRENT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 pub static IS_EMERGENCY_STOPPED: AtomicBool = AtomicBool::new(false);
+pub static AGENT_BUSY: AtomicBool = AtomicBool::new(false);
 
 pub fn is_request_cancelled(request_id: u64) -> bool {
     CURRENT_REQUEST_ID.load(Ordering::SeqCst) != request_id || IS_EMERGENCY_STOPPED.load(Ordering::SeqCst)
 }
+
+#[cfg(windows)]
+static LAST_FOCUS_UPDATE: Mutex<Option<Instant>> = Mutex::new(None);
 
 pub static LAST_SCREEN_SUMMARY: Mutex<Option<String>> = Mutex::new(None);
 pub static IS_IMMERSION_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -142,9 +140,23 @@ pub static IMMERSION_SCREEN_HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new())
 
 #[cfg(windows)]
 pub fn update_last_external_focus() {
-    // En mode dictée actif, on verrouille la cible capturée avant le clic sur Dictée
-    if IS_DICTATION_ACTIVE.load(Ordering::SeqCst) {
+    // Ne pas surcharger le thread UI egui si l'agent est actif ou en dictée
+    if AGENT_BUSY.load(Ordering::Relaxed) || IS_DICTATION_ACTIVE.load(Ordering::SeqCst) {
         return;
+    }
+
+    // Limitation stricte de fréquence à 5 Hz max (200 ms)
+    {
+        let mut last_update = match LAST_FOCUS_UPDATE.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(prev) = *last_update {
+            if prev.elapsed() < Duration::from_millis(200) {
+                return;
+            }
+        }
+        *last_update = Some(Instant::now());
     }
 
     let fg = unsafe { GetForegroundWindow() };
@@ -153,14 +165,11 @@ pub fn update_last_external_focus() {
     }
     let current_pid = std::process::id();
     let mut fg_pid = 0u32;
-    unsafe {
-        GetWindowThreadProcessId(fg, Some(&mut fg_pid));
-    }
+    let fg_thread_id = unsafe { GetWindowThreadProcessId(fg, Some(&mut fg_pid)) };
     if fg_pid != current_pid {
         if let Ok(mut lock) = LAST_EXTERNAL_HWND.lock() {
             *lock = Some(fg.0 as isize);
         }
-        let fg_thread_id = unsafe { GetWindowThreadProcessId(fg, None) };
         let mut gti = GUITHREADINFO::default();
         gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
         if unsafe { GetGUIThreadInfo(fg_thread_id, &mut gti).is_ok() } && !gti.hwndFocus.0.is_null() {
@@ -171,40 +180,6 @@ pub fn update_last_external_focus() {
             if unsafe { GetWindowRect(gti.hwndFocus, &mut r).is_ok() } && (r.right - r.left) > 10 && (r.bottom - r.top) > 10 {
                 if let Ok(mut rlock) = LAST_FOCUSED_RECT.lock() {
                     *rlock = Some([r.left, r.top, r.right, r.bottom]);
-                }
-            }
-        }
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            if let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
-                if let Ok(elem) = uia.GetFocusedElement() {
-                    // Ne capturer l'élément UIA que s'il s'agit d'une vraie zone d'édition textuelle
-                    let ctype = elem.CurrentControlType().unwrap_or_default();
-                    let is_edit = ctype == UIA_EditControlTypeId || ctype == UIA_DocumentControlTypeId;
-                    let has_text_pat = elem.GetCurrentPattern(UIA_TextPatternId).is_ok();
-                    let has_val_pat = elem.GetCurrentPattern(UIA_ValuePatternId).is_ok();
-
-                    if is_edit || has_text_pat || has_val_pat {
-                        if let Ok(rect) = elem.CurrentBoundingRectangle() {
-                            let w = rect.right - rect.left;
-                            let h = rect.bottom - rect.top;
-                            let mut win_r = RECT::default();
-                            let is_whole_window = GetWindowRect(fg, &mut win_r).is_ok()
-                                && (rect.left - win_r.left).abs() < 12
-                                && (rect.top - win_r.top).abs() < 12
-                                && (rect.right - win_r.right).abs() < 12
-                                && (rect.bottom - win_r.bottom).abs() < 12;
-
-                            if w > 8 && h > 8 && !is_whole_window && (w < 2500 || h < 1800) {
-                                if let Ok(mut rlock) = LAST_FOCUSED_RECT.lock() {
-                                    *rlock = Some([rect.left, rect.top, rect.right, rect.bottom]);
-                                }
-                                if let Ok(mut elock) = LAST_FOCUSED_UIA_ELEMENT.lock() {
-                                    *elock = Some(SendableUiaElement(elem));
-                                }
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -234,15 +209,6 @@ pub fn restore_external_focus_target(target: Option<HWND>) -> bool {
 
             force_foreground_window(hwnd);
             std::thread::sleep(Duration::from_millis(40));
-
-            // 1. Repositionner le focus si un vrai champ de texte UIA a été validé
-            let uia_elem_opt = LAST_FOCUSED_UIA_ELEMENT.lock().ok().and_then(|g| g.clone());
-            if let Some(sendable) = uia_elem_opt {
-                unsafe {
-                    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-                    let _ = sendable.0.SetFocus();
-                }
-            }
 
             // 2. Si c'est un contrôle Win32 enfant (ex: canevas Java Swing IntelliJ, Notepad, champs de dialogue)
             if let Ok(clock) = LAST_FOCUSED_CHILD_HWND.lock() {
@@ -978,7 +944,7 @@ fn extract_inner_text(uia: &IUIAutomation, element: &IUIAutomationElement, max_c
         }
 
         // 4. Parcourir les descendants pour extraire le texte innerText des sous-nœuds (spans, labels, etc.)
-        if let Ok(cond) = uia.CreateTrueCondition() {
+        if let Ok(cond) = uia.ControlViewCondition() {
             if let Ok(children) = element.FindAll(TreeScope_Descendants, &cond) {
                 let child_count = children.Length().unwrap_or(0).min(8);
                 let mut collected = String::new();
@@ -1022,11 +988,16 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
             return results;
         };
 
+        if let Ok(uia2) = uia.cast::<IUIAutomation2>() {
+            let _ = uia2.SetTransactionTimeout(2000);
+            let _ = uia2.SetConnectionTimeout(2000);
+        }
+
         let Ok(window_element) = uia.ElementFromHandle(hwnd) else {
             return results;
         };
 
-        let Ok(cond) = uia.CreateTrueCondition() else {
+        let Ok(cond) = uia.ControlViewCondition() else {
             return results;
         };
 
@@ -1043,7 +1014,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
             false
         };
 
-        let count = elements.Length().unwrap_or(0).clamp(0, 3000);
+        let count = elements.Length().unwrap_or(0).clamp(0, 250);
 
         // Délimitation géométrique du document web par rapport à la fenêtre
         let mut doc_rect: Option<RECT> = None;
@@ -1380,10 +1351,6 @@ fn has_focused_textarea(_hwnd: HWND) -> bool {
 fn refocus_largest_textarea_or_fallback(hwnd: HWND) -> bool {
     let mut elements = list_interactive_elements(hwnd);
     if elements.is_empty() {
-        std::thread::sleep(Duration::from_millis(100));
-        elements = list_interactive_elements(hwnd);
-    }
-    if elements.is_empty() {
         return false;
     }
 
@@ -1431,10 +1398,6 @@ fn refocus_largest_textarea_or_fallback(hwnd: HWND) -> bool {
 fn find_largest_textarea(hwnd: HWND) -> Option<UiaElementInfo> {
     let mut elements = list_interactive_elements(hwnd);
     if elements.is_empty() {
-        std::thread::sleep(Duration::from_millis(100));
-        elements = list_interactive_elements(hwnd);
-    }
-    if elements.is_empty() {
         return None;
     }
 
@@ -1467,9 +1430,6 @@ fn find_largest_textarea_on_screen(
     user_windows: &[(HWND, String)],
     preferred_hwnd: Option<HWND>,
 ) -> Option<(HWND, UiaElementInfo)> {
-    let mut best_explicit: Option<(HWND, UiaElementInfo)> = None;
-    let mut best_fallback: Option<(HWND, UiaElementInfo)> = None;
-
     let mut ordered: Vec<HWND> = Vec::new();
     if let Some(pref) = preferred_hwnd {
         ordered.push(pref);
@@ -1480,34 +1440,13 @@ fn find_largest_textarea_on_screen(
         }
     }
 
-    for hwnd in ordered.into_iter().take(4) {
-        let elements = list_interactive_elements(hwnd);
-        let has_web = elements.iter().any(|e| e.is_web_content);
-        for elem in elements {
-            if has_web && elem.is_browser_chrome {
-                continue;
-            }
-            if elem.is_explicit_textarea {
-                let replace = match &best_explicit {
-                    Some((_, cur)) => elem.area > cur.area,
-                    None => true,
-                };
-                if replace {
-                    best_explicit = Some((hwnd, elem));
-                }
-            } else if elem.is_edit_or_textarea || elem.is_input {
-                let replace = match &best_fallback {
-                    Some((_, cur)) => elem.area > cur.area,
-                    None => true,
-                };
-                if replace {
-                    best_fallback = Some((hwnd, elem));
-                }
-            }
+    for hwnd in ordered.into_iter().take(3) {
+        if let Some(target) = find_largest_textarea(hwnd) {
+            return Some((hwnd, target));
         }
     }
 
-    best_explicit.or(best_fallback)
+    None
 }
 
 #[cfg(windows)]
