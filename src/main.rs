@@ -535,6 +535,15 @@ impl OverlayApp {
         }
     }
 
+    pub fn stop_speaking(&mut self) {
+        let _ = self.tts_sender.send(TtsCommand::Stop);
+        set_tts_audio_level(0.0);
+        self.smoothed_audio_level = 0.0;
+        if self.status == AgentStatus::Speaking {
+            self.status = AgentStatus::Idle;
+        }
+    }
+
     fn trigger_emergency_stop(&mut self, _ctx: &egui::Context) {
         self.continuous_mode = false;
         self.dictation_mode = false;
@@ -586,11 +595,11 @@ impl OverlayApp {
         if self.status == AgentStatus::EmergencyStopped {
             return;
         }
+        self.stop_speaking();
         IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
         self.continuous_mode = true;
         self.is_recording = true;
         self.status = AgentStatus::Listening;
-        let _ = self.tts_sender.send(TtsCommand::Stop);
         if !self.is_hidden {
             self.live_transcript = "Écoute Whisper active... parlez à votre micro.".to_string();
         } else {
@@ -812,6 +821,7 @@ impl eframe::App for OverlayApp {
                     });
                 }
                 AgentEvent::TranscriptionPartial(text) => {
+                    self.stop_speaking();
                     if self.is_recording && !self.is_hidden {
                         self.live_transcript = text;
                     }
@@ -828,7 +838,7 @@ impl eframe::App for OverlayApp {
                         }
                         return;
                     }
-                    let _ = self.tts_sender.send(TtsCommand::Stop);
+                    self.stop_speaking();
                     if self.is_hidden {
                         if is_show_command(&prompt) {
                             self.is_hidden = false;
@@ -944,7 +954,9 @@ impl eframe::App for OverlayApp {
         let global_escape = false;
 
         if egui_escape || global_escape {
-            if self.dictation_mode {
+            if self.status == AgentStatus::Speaking {
+                self.stop_speaking();
+            } else if self.dictation_mode {
                 self.exit_dictation_mode();
             } else {
                 self.trigger_emergency_stop(&ctx);
@@ -1065,6 +1077,7 @@ impl eframe::App for OverlayApp {
                                     let last_user_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::User);
                                     let last_agent_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::Agent);
                                     let mut clicked_quick_suggestion: Option<String> = None;
+                                    let mut request_stop_speaking = false;
 
                                     for (idx, entry) in self.chat_history.iter().enumerate() {
                                         let is_highlighted = Some(idx) == last_user_idx || Some(idx) == last_agent_idx;
@@ -1093,6 +1106,22 @@ impl eframe::App for OverlayApp {
                                                         .size(if is_highlighted { 10.0 } else { 9.0 })
                                                         .color(egui::Color32::from_rgba_unmultiplied(170, 185, 205, 140)),
                                                 );
+
+                                                if entry.role == ChatRole::Agent && Some(idx) == last_agent_idx && self.status == AgentStatus::Speaking {
+                                                    ui.add_space(4.0);
+                                                    let stop_btn = ui.add(
+                                                        egui::Button::new(
+                                                            egui::RichText::new("🔇 Couper")
+                                                                .size(9.5)
+                                                                .color(egui::Color32::from_rgb(255, 130, 130)),
+                                                        )
+                                                        .small()
+                                                        .corner_radius(egui::CornerRadius::same(6)),
+                                                    );
+                                                    if stop_btn.on_hover_text("Interrompre la lecture vocale (Échap)").clicked() {
+                                                        request_stop_speaking = true;
+                                                    }
+                                                }
                                             });
 
                                             let (text_size, line_height, text_color, is_strong) = match entry.role {
@@ -1171,10 +1200,10 @@ impl eframe::App for OverlayApp {
                                     }
 
                                     if let Some(prompt) = clicked_quick_suggestion {
+                                        self.stop_speaking();
                                         if self.is_recording {
                                             self.stop_recording();
                                         }
-                                        let _ = self.tts_sender.send(TtsCommand::Stop);
                                         self.status = AgentStatus::Thinking;
                                         self.continuous_mode = true;
                                         self.live_transcript.clear();
@@ -1186,6 +1215,10 @@ impl eframe::App for OverlayApp {
                                             screen_size_kb: None,
                                         });
                                         let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
+                                    }
+
+                                    if request_stop_speaking {
+                                        self.stop_speaking();
                                     }
                                 });
                             computed_chat_h = (scroll_out.content_size.y + 44.0).clamp(min_chat_h, max_chat_h);
@@ -1309,6 +1342,17 @@ impl eframe::App for OverlayApp {
                             let avatar_pos = egui::pos2(inner_rect.max.x - 20.0, inner_rect.min.y + 22.0);
                             self.draw_avatar(ui, avatar_pos, 14.0, time);
 
+                            let avatar_rect = egui::Rect::from_center_size(avatar_pos, egui::vec2(32.0, 32.0));
+                            let avatar_resp = ui.interact(avatar_rect, egui::Id::new("avatar_interact"), egui::Sense::click());
+                            if self.status == AgentStatus::Speaking {
+                                if avatar_resp.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
+                                if avatar_resp.on_hover_text("Cliquer pour couper la parole (Échap)").clicked() {
+                                    self.stop_speaking();
+                                }
+                            }
+
                             let content_area = egui::Rect::from_min_max(
                                 inner_rect.min,
                                 egui::pos2(inner_rect.max.x - 48.0, inner_rect.max.y),
@@ -1337,13 +1381,41 @@ impl eframe::App for OverlayApp {
                                     };
 
                                     ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(status_badge)
-                                                .size(11.0)
-                                                .color(badge_color),
+                                        let badge_resp = ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(status_badge)
+                                                    .size(11.0)
+                                                    .color(badge_color),
+                                            )
+                                            .sense(if self.status == AgentStatus::Speaking { egui::Sense::click() } else { egui::Sense::hover() }),
                                         );
+                                        if self.status == AgentStatus::Speaking {
+                                            if badge_resp.hovered() {
+                                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                            }
+                                            if badge_resp.on_hover_text("Cliquer pour couper la parole (Échap)").clicked() {
+                                                self.stop_speaking();
+                                            }
+                                        }
                                         ui.add_space(4.0);
                                         self.draw_mini_equalizer(ui, time);
+
+                                        if self.status == AgentStatus::Speaking {
+                                            ui.add_space(6.0);
+                                            let stop_speech_btn = ui.add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("🔇 Couper la parole")
+                                                        .size(10.5)
+                                                        .color(egui::Color32::from_rgb(255, 140, 140))
+                                                        .strong(),
+                                                )
+                                                .small()
+                                                .corner_radius(egui::CornerRadius::same(6)),
+                                            );
+                                            if stop_speech_btn.on_hover_text("Interrompre la synthèse vocale immédiatement (Échap)").clicked() {
+                                                self.stop_speaking();
+                                            }
+                                        }
                                     });
 
                                     if self.is_recording && !self.live_transcript.is_empty() {
@@ -1415,13 +1487,17 @@ impl eframe::App for OverlayApp {
                                                 }),
                                         );
 
+                                        if response.changed() {
+                                            self.stop_speaking();
+                                        }
+
                                         let enter_hit = (response.lost_focus() || response.has_focus())
                                             && ctx.input(|i| i.key_pressed(egui::Key::Enter));
                                         if (ui.button("Envoyer").clicked() || enter_hit) && !self.input_text.trim().is_empty() {
+                                            self.stop_speaking();
                                             if self.is_recording {
                                                 self.stop_recording();
                                             }
-                                            let _ = self.tts_sender.send(TtsCommand::Stop);
                                             self.continuous_mode = true;
                                             let prompt = std::mem::take(&mut self.input_text).trim().to_string();
                                             self.live_transcript.clear();
