@@ -711,7 +711,8 @@ impl eframe::App for OverlayApp {
         }
 
         // Redimensionnement dynamique avec hystérésis (seuil >= 3.0 px)
-        if self.position_initialized && (target_win_h - self.current_win_h).abs() >= 3.0 {
+        let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        if self.position_initialized && !is_maximized && (target_win_h - self.current_win_h).abs() >= 3.0 {
             self.current_win_h = target_win_h;
             let bot_y = self.window_bottom_y.unwrap_or(taskbar_top);
             let cur_x = self.window_pos.map_or(work_x + work_w - win_w - 16.0, |p| p.x);
@@ -1004,6 +1005,51 @@ impl eframe::App for OverlayApp {
                                     self.active_tab = ActiveTab::Chat;
                                 }
                                 tab_bar_max_x = tab_assist.rect.max.x.max(tab_chat.rect.max.x);
+
+                                // Boutons système en haut à droite : Réduire, Agrandir/Restaurer, Fermer
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+
+                                    let close_btn = ui.add(
+                                        egui::Button::new(
+                                            egui::RichText::new("×")
+                                                .size(13.0)
+                                                .color(egui::Color32::from_rgb(235, 235, 245)),
+                                        )
+                                        .min_size(egui::vec2(20.0, 18.0))
+                                        .corner_radius(egui::CornerRadius::same(4)),
+                                    );
+                                    if close_btn.on_hover_text("Fermer").clicked() {
+                                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                    }
+
+                                    let max_icon = if is_maximized { "⧉" } else { "□" };
+                                    let max_btn = ui.add(
+                                        egui::Button::new(
+                                            egui::RichText::new(max_icon)
+                                                .size(10.5)
+                                                .color(egui::Color32::from_rgb(200, 215, 230)),
+                                        )
+                                        .min_size(egui::vec2(20.0, 18.0))
+                                        .corner_radius(egui::CornerRadius::same(4)),
+                                    );
+                                    if max_btn.on_hover_text(if is_maximized { "Restaurer" } else { "Agrandir" }).clicked() {
+                                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
+                                    }
+
+                                    let min_btn = ui.add(
+                                        egui::Button::new(
+                                            egui::RichText::new("—")
+                                                .size(10.5)
+                                                .color(egui::Color32::from_rgb(200, 215, 230)),
+                                        )
+                                        .min_size(egui::vec2(20.0, 18.0))
+                                        .corner_radius(egui::CornerRadius::same(4)),
+                                    );
+                                    if min_btn.on_hover_text("Réduire").clicked() {
+                                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                                    }
+                                });
                             });
                             ui.separator();
 
@@ -1425,10 +1471,11 @@ impl eframe::App for OverlayApp {
                         });
                 });
 
-                // Zones de déplacement : en-tête supérieur et bandeau de la capsule inférieure
+                // Zones de déplacement : en-tête supérieur (en réservant l'espace des boutons à droite) et bandeau inférieur
+                let window_buttons_width = 84.0;
                 let drag_rect_top = egui::Rect::from_min_max(
                     egui::pos2(tab_bar_max_x + 6.0, response_rect.min.y),
-                    egui::pos2(win_w - padding - 4.0, response_rect.min.y + 30.0),
+                    egui::pos2((win_w - padding - window_buttons_width).max(tab_bar_max_x + 6.0), response_rect.min.y + 30.0),
                 );
                 let drag_rect_bot = egui::Rect::from_min_max(
                     egui::pos2(control_rect.min.x + 8.0, control_rect.min.y + 4.0),
@@ -1453,7 +1500,7 @@ impl eframe::App for OverlayApp {
                     }
                 }
 
-                if is_dragged {
+                if is_dragged && !is_maximized {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                     let offset = self.drag_offset.unwrap_or(egui::vec2(win_w / 2.0, 16.0));
 
