@@ -108,12 +108,40 @@ pub fn set_autostart(enable: bool) -> Result<String, String> {
 
 #[cfg(not(windows))]
 pub fn is_autostart_enabled() -> bool {
-    false
+    if let Ok(home) = std::env::var("HOME") {
+        let path = std::path::PathBuf::from(home)
+            .join(".config/autostart/libertide.desktop");
+        path.exists()
+    } else {
+        false
+    }
 }
 
 #[cfg(not(windows))]
-pub fn set_autostart(_enable: bool) -> Result<String, String> {
-    Ok("Lancement au démarrage non pris en charge sur ce système d'exploitation.".to_string())
+pub fn set_autostart(enable: bool) -> Result<String, String> {
+    let home = std::env::var("HOME").map_err(|e| format!("Variable HOME introuvable : {e}"))?;
+    let autostart_dir = std::path::PathBuf::from(home).join(".config/autostart");
+    let desktop_file = autostart_dir.join("libertide.desktop");
+
+    if enable {
+        std::fs::create_dir_all(&autostart_dir)
+            .map_err(|e| format!("Impossible de créer le dossier autostart : {e}"))?;
+        let exe = std::env::current_exe()
+            .map_err(|e| format!("Chemin exécutable introuvable : {e}"))?;
+        let content = format!(
+            "[Desktop Entry]\nType=Application\nName=Libertide\nExec={}\nTerminal=false\nStartupNotify=false\n",
+            exe.display()
+        );
+        std::fs::write(&desktop_file, content)
+            .map_err(|e| format!("Échec d'écriture du fichier .desktop : {e}"))?;
+        Ok("Démarrage automatique activé dans ~/.config/autostart/libertide.desktop.".to_string())
+    } else {
+        if desktop_file.exists() {
+            std::fs::remove_file(&desktop_file)
+                .map_err(|e| format!("Échec de suppression du fichier .desktop : {e}"))?;
+        }
+        Ok("Démarrage automatique désactivé (fichier .desktop supprimé).".to_string())
+    }
 }
 
 #[cfg(windows)]
@@ -266,6 +294,34 @@ pub fn restore_external_focus_target(_target: Option<()>) -> bool {
 #[cfg(not(windows))]
 pub fn restore_external_focus() -> bool {
     false
+}
+
+#[cfg(not(windows))]
+mod clipboard {
+    use std::io::Write;
+
+    pub fn set_text(text: &str) -> bool {
+        let mut child = match std::process::Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        child.wait().map(|s| s.success()).unwrap_or(false)
+    }
+
+    pub fn get_text() -> Option<String> {
+        let output = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-o"])
+            .output()
+            .ok()?;
+        Some(String::from_utf8_lossy(&output.stdout).to_string())
+    }
 }
 
 #[cfg(not(windows))]
@@ -2861,7 +2917,68 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
 
 #[cfg(not(windows))]
 pub fn summarize_screen_state(_target_window: Option<&str>, _autoscroll: bool) -> String {
-    "[Analyse de l'écran] Environnement non-Windows (simulation).".to_string()
+    let user_windows = list_user_windows();
+    let active_id = get_active_x11_window();
+
+    let mut out = String::new();
+    out.push_str("=== Rapport d'analyse de l'écran (Serveur X11 Unix) ===\n");
+
+    if let Some(ref act) = active_id {
+        let active_title = user_windows
+            .iter()
+            .find(|(id, _)| id.contains(act) || act.contains(id))
+            .map(|(_, t)| t.as_str())
+            .unwrap_or("Fenêtre active");
+        out.push_str(&format!("Fenêtre au premier plan : \"{}\" [ID: {}]\n\n", active_title, act));
+    }
+
+    out.push_str("=== Fenêtres X11 détectées ===\n");
+    for (win_id, title) in &user_windows {
+        let (wm_class, pid) = get_x11_window_properties(win_id);
+        let is_term = is_terminal_window(win_id, title);
+        let is_browser = is_browser_window(title);
+        let kind = if is_term {
+            " [Terminal]"
+        } else if is_browser {
+            " [Navigateur web]"
+        } else {
+            ""
+        };
+
+        out.push_str(&format!(
+            "- Fenêtre \"{}\" (ID: {}, Classe: {}, PID: {}){}\n",
+            title, win_id, wm_class, pid, kind
+        ));
+
+        // Si c'est la fenêtre ciblée ou la fenêtre active, essayer de capter son texte
+        let is_target = target_window.map_or(false, |tw| title.to_lowercase().contains(&tw.to_lowercase()));
+        let is_current = active_id.as_deref().map_or(false, |act| win_id.contains(act) || act.contains(win_id));
+
+        if is_target || is_current {
+            // Tenter de lire le contenu sélectionné (Primary selection X11)
+            if let Ok(output) = std::process::Command::new("xclip")
+                .args(["-selection", "primary", "-o"])
+                .output()
+            {
+                let sel = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !sel.is_empty() {
+                    out.push_str(&format!(
+                        "  [Sélection texte active (X11 Primary)] :\n\"\"\"\n{}\n\"\"\"\n",
+                        truncate_with_notice(&sel, 800)
+                    ));
+                }
+            }
+        }
+    }
+
+    if let Some(clip) = clipboard::get_text() {
+        let clip_trim = clip.trim();
+        if !clip_trim.is_empty() {
+            out.push_str(&format!("\n[Contenu presse-papiers X11 (Clipboard)] :\n\"\"\"\n{}\n\"\"\"\n", truncate_with_notice(clip_trim, 600)));
+        }
+    }
+
+    truncate_with_notice(&out, 12000)
 }
 
 #[cfg(windows)]
@@ -4812,6 +4929,60 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
 }
 
 #[cfg(not(windows))]
-pub fn execute_system_actions(_actions: &[AgentAction], _request_id: u64) -> String {
-    "Actions simulées (environnement non-Windows).".to_string()
+pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> String {
+    let mut feedback = Vec::new();
+    for action in actions {
+        match action {
+            AgentAction::OpenApp { name } => {
+                let _ = std::process::Command::new(name).spawn();
+                feedback.push(format!("Application '{}' lancée en arrière-plan.", name));
+            }
+            AgentAction::CloseApp { name } => {
+                let _ = std::process::Command::new("pkill").arg("-f").arg(name).spawn();
+                feedback.push(format!("Signal de fermeture envoyé à '{}'.", name));
+            }
+            AgentAction::OpenBrowser { url } => {
+                let u = url.as_deref().unwrap_or("https://www.google.com");
+                let _ = std::process::Command::new("xdg-open").arg(u).spawn();
+                feedback.push(format!("Navigateur ouvert sur '{}'.", u));
+            }
+            AgentAction::NavigateToUrl { url, .. } => {
+                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+                feedback.push(format!("Navigation vers '{}'.", url));
+            }
+            AgentAction::WriteText { text, press_enter, .. } | AgentAction::Dictate { text, press_enter, .. } => {
+                let _ = std::process::Command::new("xdotool").args(["type", "--delay", "12", text]).status();
+                if press_enter.unwrap_or(false) {
+                    let _ = std::process::Command::new("xdotool").args(["key", "Return"]).status();
+                }
+                feedback.push(format!("Texte saisi sous X11 ({} caractères).", text.len()));
+            }
+            AgentAction::RunCommand { command } => {
+                let ok = std::process::Command::new("sh").arg("-c").arg(command).spawn().is_ok();
+                feedback.push(format!("Commande shell '{}' ({})", command, if ok { "succès" } else { "échec" }));
+            }
+            AgentAction::AccessibilityShortcut { shortcut } => {
+                match shortcut.as_str() {
+                    "enter" | "press_enter" => { let _ = std::process::Command::new("xdotool").args(["key", "Return"]).status(); }
+                    "escape" => { let _ = std::process::Command::new("xdotool").args(["key", "Escape"]).status(); }
+                    "copy" => { let _ = std::process::Command::new("xdotool").args(["key", "ctrl+c"]).status(); }
+                    "close_tab" => { let _ = std::process::Command::new("xdotool").args(["key", "ctrl+w"]).status(); }
+                    "refresh_page" => { let _ = std::process::Command::new("xdotool").args(["key", "F5"]).status(); }
+                    _ => {}
+                }
+                feedback.push(format!("Raccourci '{}' envoyé via xdotool.", shortcut));
+            }
+            AgentAction::EnableAutostart => {
+                feedback.push(set_autostart(true).unwrap_or_else(|e| e));
+            }
+            AgentAction::DisableAutostart => {
+                feedback.push(set_autostart(false).unwrap_or_else(|e| e));
+            }
+            AgentAction::CheckAutostart => {
+                feedback.push(format!("Autostart XDG actif : {}", is_autostart_enabled()));
+            }
+            _ => {}
+        }
+    }
+    if feedback.is_empty() { "Aucune action exécutée.".to_string() } else { feedback.join("\n") }
 }

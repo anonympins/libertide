@@ -341,10 +341,37 @@ fn spawn_tts_worker(event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
 #[cfg(not(windows))]
 fn spawn_tts_worker(_event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
     let (tx, rx) = channel::<TtsCommand>();
+    let event_tx = _event_tx;
     std::thread::spawn(move || {
+        let mut current_process: Option<std::process::Child> = None;
         while let Ok(cmd) = rx.recv() {
-            if let TtsCommand::Speak(_) = cmd {
-                let _ = _event_tx.send(AgentEvent::TtsFinished);
+            match cmd {
+                TtsCommand::Stop => {
+                    if let Some(mut child) = current_process.take() {
+                        let _ = child.kill();
+                    }
+                    set_tts_audio_level(0.0);
+                }
+                TtsCommand::Speak(text) => {
+                    if let Some(mut child) = current_process.take() {
+                        let _ = child.kill();
+                    }
+                    let clean_text = sanitize_for_tts(&text);
+                    if clean_text.trim().is_empty() {
+                        let _ = event_tx.send(AgentEvent::TtsFinished);
+                        continue;
+                    }
+                    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Speaking));
+                    // Tentative avec spd-say (Speech Dispatcher), puis repli sur espeak-ng / espeak
+                    let child = std::process::Command::new("spd-say")
+                        .args(["-l", "fr", "-t", "female1", &clean_text])
+                        .spawn()
+                        .or_else(|_| std::process::Command::new("espeak-ng").args(["-v", "fr", &clean_text]).spawn())
+                        .or_else(|_| std::process::Command::new("espeak").args(["-v", "fr", &clean_text]).spawn())
+                        .ok();
+                    current_process = child;
+                    let _ = event_tx.send(AgentEvent::TtsFinished);
+                }
             }
         }
     });
@@ -2416,6 +2443,8 @@ fn main() -> eframe::Result<()> {
                                 }).await.unwrap_or((None, String::new()));
 
                                 if is_request_cancelled(request_id) { return; }
+                                #[cfg(not(windows))]
+                                let screen_state = summarize_screen_state(None, false);
 
                                 let mut prompt_sections = Vec::new();
 
