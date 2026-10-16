@@ -4,18 +4,21 @@
 [![https://raw.githubusercontent.com/anonympins/libertide/refs/heads/main/LICENSE](https://img.shields.io/github/license/anonympins/libertide)](https://github.com/anonympins/libertide/blob/main/LICENSE)
 [![https://github.com/anonympins/libertide](https://img.shields.io/github/repo-size/anonympins/libertide)](https://github.com/anonympins/libertide)
 
-Libertide is a voice and visual assistant for autonomous exploration on Windows. It combines a discreet transparent overlay interface (developed with [egui](https://github.com/emilk/egui)), continuous local voice recognition with **Whisper**, reasoning from the **DeepSeek-Chat** model, as well as advanced graphical interface automation (Windows UI Automation, windowing, web navigation, and input).
+Libertide is a voice and visual assistant for autonomous exploration on Windows and Unix / Linux (X11). It combines a discreet transparent overlay interface (developed with [egui](https://github.com/emilk/egui)), continuous local voice recognition with **Whisper**, reasoning from the **DeepSeek-Chat** model, as well as graphical interface automation (Windows UI Automation & X11 EWMH tools, window tiling, web navigation, and input).
 
 
 ---
 
 ## 📋 Prerequisites
 
-1. **Operating System**: Windows 10 / 11 (64-bit).
+1. **Operating System**:
+   - **Windows**: Windows 10 / 11 (64-bit).
+   - **Unix / Linux**: Any modern distribution running an X11 / Xorg desktop session (Ubuntu, Debian, Fedora, Arch Linux, etc.).
 2. **Rust & Cargo**: Recent stable version (1.75+ recommended).  
    Install it via [rustup.rs](https://rustup.rs/).
-3. **Visual Studio C++ Build Tools**: Required to compile native C/C++ dependencies (notably `whisper-rs` / `whisper.cpp`).  
-   Install automatically in an administrator PowerShell terminal:
+3. **C/C++ Build Tools & Native Dependencies**:
+   - **Windows**: Visual Studio C++ Build Tools (required for `whisper.cpp`).
+     Install automatically in an administrator PowerShell terminal:
    ```powershell
    # Via winget:
    winget install --id Microsoft.VisualStudio.2022.BuildTools -e --silent --override "--wait --quiet --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
@@ -23,14 +26,26 @@ Libertide is a voice and visual assistant for autonomous exploration on Windows.
    # Or via direct bootstrapper download:
    Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vs_buildtools.exe" -OutFile "$env:TEMP\vs_buildtools.exe"; Start-Process -FilePath "$env:TEMP\vs_buildtools.exe" -ArgumentList "--quiet", "--wait", "--norestart", "--nocache", "--add", "Microsoft.VisualStudio.Workload.VCTools", "--includeRecommended" -Wait
    ```
-4. **Microphone and speakers**: For Whisper dictation and voice feedback via Windows speech synthesis (SAPI).
+   - **Unix / Linux**: C/C++ toolchain, CMake, ALSA, X11 libraries, and automation utilities (`xdotool`, `wmctrl`, `xclip`, `speech-dispatcher` or `espeak-ng`):
+     ```bash
+     # Debian / Ubuntu / Linux Mint:
+     sudo apt update && sudo apt install -y build-essential cmake pkg-config \
+         libasound2-dev libx11-dev xdotool wmctrl xclip speech-dispatcher espeak-ng
+
+     # Fedora / RHEL:
+     sudo dnf install -y gcc gcc-c++ cmake alsa-lib-devel libX11-devel xdotool wmctrl xclip speech-dispatcher espeak-ng
+
+     # Arch Linux:
+     sudo pacman -S --needed base-devel cmake alsa-lib libx11 xdotool wmctrl xclip speech-dispatcher espeak-ng
+     ```
+4. **Microphone and speakers**: For Whisper dictation and voice feedback (via Windows SAPI or Unix `spd-say` / `espeak-ng`).
 5. **DeepSeek API Key**: Obtain it from the DeepSeek Platform.
 
 ---
 
 ## ⚙️ Configuration (`.env`)
 
-Create a `.env` file at the project root (`C:/Dev/libertide-new/.env`).
+Create a `.env` file at the project root (`.env`).
 
 ### Example `.env` configuration
 
