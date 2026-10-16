@@ -292,6 +292,54 @@ fn restart_application() {
     }
 }
 
+/// Détecte la langue principale du système d'exploitation de l'utilisateur
+pub fn get_system_locale_language() -> (String, String) {
+    #[cfg(windows)]
+    {
+        extern "system" {
+            fn GetUserDefaultLocaleName(lpLocaleName: *mut u16, cchLocaleName: i32) -> i32;
+        }
+        let mut buf = [0u16; 85];
+        let len = unsafe { GetUserDefaultLocaleName(buf.as_mut_ptr(), buf.len() as i32) };
+        if len > 0 {
+            let locale = String::from_utf16_lossy(&buf[..(len - 1) as usize]).to_lowercase();
+            let lang_prefix = locale.split('-').next().unwrap_or(&locale);
+            let name: String = match lang_prefix {
+                "fr" => "français".to_string(),
+                "en" => "English".to_string(),
+                "es" => "español".to_string(),
+                "de" => "Deutsch".to_string(),
+                "it" => "italiano".to_string(),
+                "pt" => "português".to_string(),
+                "ja" => "日本語 (Japanese)".to_string(),
+                "zh" => "中文 (Chinese)".to_string(),
+                "ru" => "русский".to_string(),
+                other => other.to_string(),
+            };
+            return (locale, name);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let env_lang = std::env::var("LC_ALL").or_else(|_| std::env::var("LC_MESSAGES")).or_else(|_| std::env::var("LANG")).unwrap_or_else(|_| "fr_FR".to_string()).to_lowercase();
+        let lang_prefix = env_lang.split(['_', '.']).next().unwrap_or("fr");
+        let name: String = match lang_prefix {
+            "fr" => "français".to_string(),
+            "en" => "English".to_string(),
+            "es" => "español".to_string(),
+            "de" => "Deutsch".to_string(),
+            "it" => "italiano".to_string(),
+            "pt" => "português".to_string(),
+            "ja" => "日本語 (Japanese)".to_string(),
+            "zh" => "中文 (Chinese)".to_string(),
+            "ru" => "русский".to_string(),
+            other => other.to_string(),
+        };
+        return (env_lang, name);
+    }
+    ("fr".to_string(), "français (French)".to_string())
+}
+
 fn setup_custom_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
@@ -2224,12 +2272,13 @@ async fn compact_history_if_needed(
         }
     }
 
+    let (_, system_lang_name) = get_system_locale_language();
     let summary_request = DeepSeekChatRequest {
         model: "deepseek-chat".to_string(),
         messages: vec![
             ChatMessage {
                 role: "system".to_string(),
-                content: "Tu es un synthétiseur de mémoire conversationnelle. Résume fidèlement les points clés, décisions et actions passées en 250 mots maximum en français sous forme de points synthétiques.".to_string(),
+                content: format!("Tu es un synthétiseur de mémoire conversationnelle. Résume fidèlement les points clés, décisions et actions passées en 250 mots maximum dans la langue du système de l'utilisateur ({system_lang_name}) sous forme de points synthétiques."),
             },
             ChatMessage {
                 role: "user".to_string(),
@@ -2281,8 +2330,9 @@ async fn compact_history_if_needed(
     *history = recent;
 }
 
-const STANDARD_SYSTEM_INSTRUCTIONS: &str = r#"Tu es l'agent d'exploration Libertide pour Windows.
-Réponds STRICTEMENT en JSON sans texte hors JSON. "narration" concise en français (max 2 phrases).
+fn build_standard_system_instructions(lang_name: &str) -> String {
+    format!(r#"Tu es l'agent d'exploration Libertide pour Windows.
+Réponds STRICTEMENT en JSON sans texte hors JSON. "narration" concise rédigée impérativement dans la langue du système de l'utilisateur : {lang_name} (max 2 phrases).
 
 Règles principales :
 1. Filtrage requête : Bruit/inintelligible -> "invalid_request": true. Salutations/chit-chat -> "invalid_request": false, "actions": [], narration courtoise.
@@ -2320,37 +2370,38 @@ Règles principales :
 8. Fin de passes : Dès que "actions" est vide (tâche finie ou choix requis), fournis OBLIGATOIREMENT 2 à 4 suggestions concrètes dans "quick_suggestions".
 
 Format JSON obligatoire :
-{
+{{
   "narration": "Explication vocale concise ou vide.",
   "next_passes": 5,
   "actions": [
-    {"action": "open_app", "name": "nom_executable"},
-    {"action": "close_app", "name": "nom_ou_titre"},
-    {"action": "click_element", "window": null, "target_name": "nom"},
-    {"action": "click_button", "window": null, "button_name": "nom"},
-    {"action": "focus_element", "window": null, "target_name": "nom"},
-    {"action": "scroll", "direction": "down"|"up"|"bottom"|"top", "amount": 1, "window": null},
-    {"action": "focus_window", "title": null, "pid": null},
-    {"action": "read_editor_content", "window": null, "target": null},
-    {"action": "clear_text", "window": null},
-    {"action": "write_text", "text": "...", "target": null, "press_enter": false},
-    {"action": "dictate", "text": "...", "window": null, "target": null, "press_enter": false},
-    {"action": "activate_dictation", "window": null, "target": null},
-    {"action": "deactivate_dictation"},
-    {"action": "toggle_dictation"},
-    {"action": "select_text_between", "from": "...", "to": "...", "window": null, "target": null},
-    {"action": "replace_field_text", "text": "...", "target": null},
-    {"action": "run_command", "command": "..."},
-    {"action": "kill_process", "pid": null, "name": null},
-    {"action": "navigate_to_url", "url": "...", "target": "new_tab"|"current_tab"|"new_window"},
-    {"action": "accessibility_shortcut", "shortcut": "enter"|"close_tab"|"refresh_page"|"copy"|"undo"},
-    {"action": "deactivate_immersion"},
-    {"action": "set_reasoning_passes", "passes": 5, "reason": null},
-    {"action": "mute_audio"},
-    {"action": "set_volume", "command": "mute"|"down"|"up"|"min"}
+    {{"action": "open_app", "name": "nom_executable"}},
+    {{"action": "close_app", "name": "nom_ou_titre"}},
+    {{"action": "click_element", "window": null, "target_name": "nom"}},
+    {{"action": "click_button", "window": null, "button_name": "nom"}},
+    {{"action": "focus_element", "window": null, "target_name": "nom"}},
+    {{"action": "scroll", "direction": "down"|"up"|"bottom"|"top", "amount": 1, "window": null}},
+    {{"action": "focus_window", "title": null, "pid": null}},
+    {{"action": "read_editor_content", "window": null, "target": null}},
+    {{"action": "clear_text", "window": null}},
+    {{"action": "write_text", "text": "...", "target": null, "press_enter": false}},
+    {{"action": "dictate", "text": "...", "window": null, "target": null, "press_enter": false}},
+    {{"action": "activate_dictation", "window": null, "target": null}},
+    {{"action": "deactivate_dictation"}},
+    {{"action": "toggle_dictation"}},
+    {{"action": "select_text_between", "from": "...", "to": "...", "window": null, "target": null}},
+    {{"action": "replace_field_text", "text": "...", "target": null}},
+    {{"action": "run_command", "command": "..."}},
+    {{"action": "kill_process", "pid": null, "name": null}},
+    {{"action": "navigate_to_url", "url": "...", "target": "new_tab"|"current_tab"|"new_window"}},
+    {{"action": "accessibility_shortcut", "shortcut": "enter"|"close_tab"|"refresh_page"|"copy"|"undo"}},
+    {{"action": "deactivate_immersion"}},
+    {{"action": "set_reasoning_passes", "passes": 5, "reason": null}},
+    {{"action": "mute_audio"}},
+    {{"action": "set_volume", "command": "mute"|"down"|"up"|"min"}}
   ],
   "quick_suggestions": ["Option 1", "Option 2"]
-}"#;
+}}"#)
+}
 
 const DICTATION_SYSTEM_INSTRUCTIONS: &str = r#"Tu es l'assistant de dictée vocale et de saisie textuelle pour Windows.
 Tu ne traites AUCUNE tâche d'exploration, navigation web, clic d'interface ou manipulation de fenêtres.
@@ -2415,11 +2466,12 @@ async fn call_deepseek_prompt(
     }
 
     let client = reqwest::Client::new();
+    let (_, system_lang) = get_system_locale_language();
     let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::SeqCst);
     let system_instructions = if is_dictation {
-        DICTATION_SYSTEM_INSTRUCTIONS
+        DICTATION_SYSTEM_INSTRUCTIONS.to_string()
     } else {
-        STANDARD_SYSTEM_INSTRUCTIONS
+        build_standard_system_instructions(&system_lang)
     };
 
     let safe_user_instruction = truncate_with_notice(&user_instruction, 1000);
