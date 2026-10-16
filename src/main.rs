@@ -582,7 +582,7 @@ impl OverlayApp {
         let _ = self.tts_sender.send(TtsCommand::Speak(msg));
     }
 
-    fn start_recording(&mut self, ctx: &egui::Context) {
+    fn start_recording(&mut self, _ctx: &egui::Context) {
         if self.status == AgentStatus::EmergencyStopped {
             return;
         }
