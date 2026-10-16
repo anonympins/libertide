@@ -21,7 +21,7 @@ Libertide is a voice and visual assistant for autonomous exploration on Windows 
    - **Windows**: Windows 10 / 11 (64-bit).
    - **Unix / Linux**: Any modern distribution running an X11 / Xorg desktop session (Ubuntu, Debian, Fedora, Arch Linux, etc.).
 2. **Microphone and speakers**: For Whisper dictation and voice feedback (via Windows SAPI or Unix `spd-say` / `espeak-ng`).
-3. **DeepSeek API Key**: Obtain it from the DeepSeek Platform.
+3. **DeepSeek API Key**: Obtain it from the [DeepSeek Platform](https://platform.deepseek.com/). Data consumption : 5-10ko per input message, and very low on output messages.
 
 Go to [the current release](https://github.com/anonympins/libertide/releases) and select the executable for your operating system.
 
