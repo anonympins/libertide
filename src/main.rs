@@ -540,6 +540,7 @@ impl OverlayApp {
         self.dictation_mode = false;
         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
         IS_EMERGENCY_STOPPED.store(true, Ordering::SeqCst);
+        TARGET_REASONING_PASSES.store(5, Ordering::SeqCst);
         let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
         if self.is_recording {
             self.stop_recording();
@@ -1630,6 +1631,7 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
             actions: Vec::new(),
             quick_suggestions: Vec::new(),
             invalid_request: true,
+            next_passes: None,
         };
     }
 
@@ -1637,19 +1639,18 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
         return payload;
     }
 
-    let unquoted = if let Some(start) = clean.find("```json") {
-        let rest = &clean[start + 7..];
-        if let Some(end) = rest.rfind("```") {
-            rest[..end].trim()
+    // Extraction fiabilisée des blocs Markdown (```json, ``` json, ```)
+    let unquoted = if let Some(start) = clean.find("```") {
+        let after_ticks = clean[start + 3..].trim_start();
+        let content_start = if after_ticks.len() >= 4 && after_ticks[..4].eq_ignore_ascii_case("json") {
+            after_ticks[4..].trim_start()
         } else {
-            rest.trim()
-        }
-    } else if let Some(start) = clean.find("```") {
-        let rest = &clean[start + 3..];
-        if let Some(end) = rest.rfind("```") {
-            rest[..end].trim()
+            after_ticks
+        };
+        if let Some(end) = content_start.rfind("```") {
+            content_start[..end].trim()
         } else {
-            rest.trim()
+            content_start.trim()
         }
     } else {
         clean
@@ -1668,7 +1669,7 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
                 return payload;
             }
 
-            // 3. Repli dynamique : extraction ciblée de la narration et des actions via serde_json::Value
+            // 3. Repli dynamique : extraction ciblée de la narration, passes et actions via serde_json::Value
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_candidate) {
                 let narration = val
                     .get("narration")
@@ -1680,6 +1681,13 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
                     .get("invalid_request")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+
+                let next_passes = val
+                    .get("next_passes")
+                    .or_else(|| val.get("max_passes"))
+                    .or_else(|| val.get("reasoning_passes"))
+                    .and_then(|v| v.as_u64())
+                    .map(|n| (n as usize).clamp(1, 15));
 
                 let mut actions = Vec::new();
                 if let Some(arr) = val.get("actions").and_then(|v| v.as_array()) {
@@ -1699,12 +1707,13 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
                     }
                 }
 
-                if !narration.is_empty() || !actions.is_empty() || invalid_request {
+                if !narration.is_empty() || !actions.is_empty() || invalid_request || next_passes.is_some() {
                     return AgentResponsePayload {
                         narration,
                         actions,
                         quick_suggestions,
                         invalid_request,
+                        next_passes,
                     };
                 }
             }
@@ -1717,6 +1726,7 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
             actions: Vec::new(),
             quick_suggestions: Vec::new(),
             invalid_request: true,
+            next_passes: None,
         };
     }
 
@@ -1724,6 +1734,7 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
         narration: clean.to_string(),
         actions: Vec::new(),
         quick_suggestions: Vec::new(),
+        next_passes: None,
         invalid_request: false,
     }
 }
@@ -1830,86 +1841,74 @@ async fn compact_history_if_needed(
 }
 
 const STANDARD_SYSTEM_INSTRUCTIONS: &str = r#"Tu es l'agent d'exploration Libertide pour Windows.
-Réponds STRICTEMENT en JSON sans texte autour. Narration concise en français (max 2 phrases).
+Réponds STRICTEMENT en JSON sans texte hors JSON. "narration" concise en français (max 2 phrases).
 
-Règles d'action et d'arbitrage :
-- Silence ("invalid_request": true) : réservé aux bruits de micro et phrases inintelligibles.
-- Salutations et discussion : valide ("invalid_request": false), réponds courtoisement dans "narration" avec "actions": [].
-- Interface et contenu : consulte toujours "[État actuel de l'écran]". Il contient le texte intégral de la page web (résultats de recherche, météo, prix, articles, données de tableaux), les contrôles et les liens.
-  * Les contrôles de l'interface du navigateur portent le préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse", "[Navigateur] Actualiser"). Pour interagir avec le navigateur hôte, inclus explicitement ce préfixe dans la cible.
-  * Les éléments internes au site web (champs de formulaire, boutons d'action, liens, textes de données) figurent dans "[Page web - ...]" sans préfixe. Cible-les par leur libellé direct (ex: "Destination", "Rechercher", "Tout accepter").
-  * Pour répondre à une question sur le contenu (météo, prix, comparaison, progression), lis et exploite directement les données textuelles déjà présentes dans "[État actuel de l'écran]".
-- Lecture de fichier ou code dans un éditeur ("read_editor_content") :
-  * Lorsque l'utilisateur demande de lire, consulter, analyser, vérifier ou résumer un fichier ouvert ou le code dans un éditeur (VS Code, Notepad, IDE, etc.), utilise impérativement "read_editor_content" (avec "window": "titre_optionnel", "target": "onglet_ou_fichier_optionnel").
-  * Le moteur placera la fenêtre au premier plan, sélectionnera le champ d'édition/l'onglet approprié, copiera le contenu (Ctrl+A, Ctrl+C) et te réinjectera l'intégralité du texte extrait dans le retour de l'étape suivante pour que tu puisses l'analyser.
-- Fermeture d'onglets ou sous-pages (ex: "ferme Google") : JAMAIS "close_app" ! Enchaîne "focus_window" puis "accessibility_shortcut": "close_tab" ou clique la croix ("click_button" / "click_element"). Réserve "close_app" à la fermeture d'une application entière.
-- Détection d'obstruction et éléments surgissants (bannières cookies, popups, notifications Windows) :
-  * Analyse systématiquement [État actuel de l'écran] pour repérer toute notification Windows, toast, modale ou bannière de consentement qui masque l'écran ou demande validation.
-  * Sélection impérative du sous-bouton d'action ou de fermeture : n'envoie JAMAIS "escape" ! Identifie et clique directement sur le sous-bouton approprié présent dans [Boutons / contrôles cliquables] ou [Liens / résultats cliquables] :
-    - Bannières de cookies / RGPD : sous-bouton "Tout accepter", "Accepter", "J'accepte", "Autoriser", "Continuer sans accepter" ou croix de fermeture.
-    - Notifications Windows et toasts système : sous-bouton "Fermer", "Ignorer", "Supprimer", "Dismiss" ou le bouton d'action contextuel de la notification.
-    - Popups, modales et dialogues d'application : sous-bouton "Fermer", "Annuler", "Plus tard", "Non merci" ou bouton de rejet.
-  * Dès que l'obstacle n'apparaît plus à l'écran, reprends immédiatement le cours de la consigne initiale là où elle s'était arrêtée.
-- Validation et saisie : pour valider un champ ou une recherche par la touche Entrée, passe "press_enter": true dans "write_text" ou utilise "accessibility_shortcut": "enter". N'utilise JAMAIS "run_command" pour simuler une touche !
-- Éléments cliquables et saisie : utilise "click_element" pour les liens et onglets, "click_button" pour les boutons. Pour saisir sans cible précise, mets "target": null dans "write_text" ou "replace_field_text".
-- Mode dictée ("dictate", "activate_dictation", "deactivate_dictation") :
-  * Tu contrôles le flag de dictée via les actions "activate_dictation", "deactivate_dictation" ou "toggle_dictation".
-  * Si le prompt utilisateur demande d'activer la dictée (ex: "mode dictée", "active la dictée", "prends note de ce que je dis"), utilise "activate_dictation".
-- Démarrage automatique Windows ("enable_autostart", "disable_autostart", "check_autostart", "set_autostart") :
-  * Si l'utilisateur demande que Libertide se lance au démarrage de Windows (ex: "lance toi au démarrage", "active le démarrage auto", "démarre avec mon PC"), utilise "enable_autostart" (ou "set_autostart": {"enabled": true}).
-  * S'il demande de ne plus se lancer au démarrage (ex: "désactive le démarrage auto", "ne te lance plus au démarrage"), utilise "disable_autostart" (ou "set_autostart": {"enabled": false}).
-  * S'il demande si Libertide est configuré au démarrage, utilise "check_autostart".
-- Sélection de texte entre deux bornes ("select_text_between") :
-  * Pour sélectionner une portion de texte délimitée entre un point de départ et un point d'arrivée (ex: "sélectionne entre Bonjour et Cordialement", "sélectionne du début de la fonction jusqu'à la fin"), utilise l'action "select_text_between" avec "from": "borne_debut", "to": "borne_fin".
-- Défilement de page et scrollbar ("scroll") :
-  * L'analyse d'écran intègre automatiquement un autoscroll par tranches de viewport (jusqu'à 10 chunks) pour agréger l'ensemble des éléments de la page.
-  * Si une barre de défilement est signalée ou si tu as besoin de positionner la vue sur un conteneur précis, utilise "scroll" ("direction": "down" | "up" | "bottom" | "top", "amount": 1 ou 2).
-  * Tu réévalueras le nouvel état de l'écran à l'étape suivante pour cliquer ou interagir avec les éléments révélés.
-- Navigation web et shopping : génère l'URL pertinente avec "navigate_to_url". Par défaut, elle s'ouvre TOUJOURS dans un NOUVEL ONGLET ("target": "new_tab"). Ne remplace JAMAIS l'onglet/page en cours sauf demande expresse ("target": "current_tab"). Tu peux également spécifier "target": "new_window" pour une nouvelle fenêtre ou cibler un navigateur via "target": "titre_fenetre".
-  * Achat multi-étapes : 1. Ajoute au panier ("click_element" ou "click_button") -> 2. Ouvre le panier / commande ("click_element") -> 3. Devant le paiement, stoppe toute action et demande confirmation orale dans "narration" avec "actions": [].
-  * Recherche exploratoire : dès l'affichage des résultats, résume 2-3 options observées et pose une question de cadrage (budget, dimensions) dans "narration" avec "actions": [].
-- Suggestions rapides ("quick_suggestions") : quand tu poses une question ou suggères des options, propose 2 à 4 choix brefs sous forme de tableau de chaînes textuelles dans "quick_suggestions" (ex: ["Tennis de course, 80-120€", "Modèle lifestyle"]). Ces options seront affichées sous forme de boutons-onglets directement cliquables par l'utilisateur.
-- Immersion : "activate_immersion" pour créer le bureau virtuel (Win+Ctrl+D). Silence absolu lors du suivi périodique si l'activité est normale. "deactivate_immersion" pour le fermer.
-- Cycle d'exécution et fin de mission : analyse le retour d'étape et l'état d'écran. Dès que la tâche est finie ou nécessite une précision de l'utilisateur, renvoie "actions": [].
-  * OBLIGATION DE FIN DE PASSES : Dès que "actions" est vide (tâche terminée ou attente), fournis TOUJOURS dans "quick_suggestions" 2 à 4 suggestions contextuelles concrètes basées sur ton analyse de l'écran et des éléments observés (ex: produits aperçus, avis, défilement, choix suivants).
+Règles principales :
+1. Filtrage requête : Bruit/inintelligible -> "invalid_request": true. Salutations/chit-chat -> "invalid_request": false, "actions": [], narration courtoise.
+2. Budget de raisonnement ("next_passes": 1..15) :
+   - Réponse directe/clic unique : 1-3 passes.
+   - Tâche multi-étapes standard (web, formulaire) : 4-7 passes.
+   - Urgence technique/humaine/départ : 10-15 passes ("next_passes": 15 ou set_reasoning_passes: 15).
+3. PROTOCOLE URGENCE VITALE & SANTÉ :
+   - Malaise/douleur/vertige/appel à l'aide : IMMÉDIATEMENT "next_passes": 15.
+   - SANS CONFIRMATION NI CHAT : Si demande d'alerte/message à un proche (Robin Ruaux, médecin, famille), exécute immédiatement l'envoi sans attendre ("actions": [...]).
+   - Narration : 1 phrase courte confirmant l'envoi + rappelle secours (15 SAMU, 18 Pompiers, 112).
+   - Silence parasite : appelle "mute_audio" (isole bruits tiers, garde voix Libertide audible).
+   - PIVOT OBLIGATOIRE : Tant que l'alerte n'est pas envoyée et qu'il reste des passes, INTERDICTION de renvoyer "actions": []. Si l'app échoue, pivote (open_app, navigate_to_url vers WhatsApp Web/Discord/Teams/Email, ou autre fenêtre).
+   - Départ précipité : autonomie pour sauver fichiers et fermer session / verrouiller écran.
+4. Interface & Ciblage :
+   - Hôte navigateur : préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse").
+   - Contenu web : libellé direct sans préfixe issu de "[Page web - ...]".
+   - Obstacles (cookies/toasts/popups) : clique le bouton adéquat ("Tout accepter", "Fermer", etc.). Ne JAMAIS envoyer "escape".
+   - "click_element" pour liens/onglets, "click_button" pour boutons. "target": null si saisie sans cible.
+   - Validation : "press_enter": true dans "write_text" ou shortcut "enter". Jamais "run_command" pour simuler une touche.
+   - Lecture code/fichier : "read_editor_content" (focalise et extrait Ctrl+A/Ctrl+C).
+   - Onglet/page : "accessibility_shortcut": "close_tab" (jamais "close_app" pour un onglet).
+5. Audio & Volume :
+   - "mute_audio" coupe sons tiers sans altérer la voix Libertide (à utiliser en urgence ou demande mute).
+   - "set_volume" ("down"|"up"|"min"|"mute") pour régler le volume.
+6. Navigation & Web :
+   - "navigate_to_url" ouvre par défaut un nouvel onglet ("target": "new_tab").
+   - Achat : panier -> valider panier -> AVANT paiement stopper avec "actions": [] et demander confirmation.
+   - "scroll" ("down"|"up"|"bottom"|"top", amount: 1..2) pour explorer.
+7. Autres actions :
+   - Dictée : "activate_dictation", "deactivate_dictation", "toggle_dictation", "dictate".
+   - Démarrage : "enable_autostart", "disable_autostart", "check_autostart", "set_autostart".
+   - Sélection : "select_text_between" (from, to).
+   - Immersion : "activate_immersion" (Win+Ctrl+D), "deactivate_immersion".
+8. Fin de passes : Dès que "actions" est vide (tâche finie ou choix requis), fournis OBLIGATOIREMENT 2 à 4 suggestions concrètes dans "quick_suggestions".
 
-Format json obligatoire :
+Format JSON obligatoire :
 {
-  "narration": "Explication vocale en français (2 phrases max ou vide pour silence).",
+  "narration": "Explication vocale concise ou vide.",
+  "next_passes": 5,
   "actions": [
     {"action": "open_app", "name": "nom_executable"},
     {"action": "close_app", "name": "nom_ou_titre"},
-    {"action": "click_element", "window": "titre_optionnel", "target_name": "nom_du_lien_ou_element"},
-    {"action": "click_button", "window": "titre_optionnel", "button_name": "nom_du_bouton"},
-    {"action": "focus_element", "window": "titre_optionnel", "target_name": "nom_ou_id_element"},
-    {"action": "scroll", "direction": "down" | "up" | "bottom" | "top", "amount": 1, "window": "titre_optionnel"},
-    {"action": "focus_window", "title": "titre_optionnel", "pid": 1234},
-    {"action": "read_editor_content", "window": "titre_optionnel", "target": "nom_onglet_ou_element_optionnel"},
-    {"action": "clear_text", "window": "titre_optionnel"},
-    {"action": "write_text", "text": "texte à écrire", "target": null, "press_enter": false},
-    {"action": "dictate", "text": "texte dicté et ponctué", "window": null, "target": null, "press_enter": false},
+    {"action": "click_element", "window": null, "target_name": "nom"},
+    {"action": "click_button", "window": null, "button_name": "nom"},
+    {"action": "focus_element", "window": null, "target_name": "nom"},
+    {"action": "scroll", "direction": "down"|"up"|"bottom"|"top", "amount": 1, "window": null},
+    {"action": "focus_window", "title": null, "pid": null},
+    {"action": "read_editor_content", "window": null, "target": null},
+    {"action": "clear_text", "window": null},
+    {"action": "write_text", "text": "...", "target": null, "press_enter": false},
+    {"action": "dictate", "text": "...", "window": null, "target": null, "press_enter": false},
     {"action": "activate_dictation", "window": null, "target": null},
     {"action": "deactivate_dictation"},
-    {"action": "toggle_dictation", "window": null},
-    {"action": "select_text_between", "from": "texte_debut", "to": "texte_fin", "window": null, "target": null},
-    {"action": "replace_field_text", "text": "texte complet modifié", "target": null},
-    {"action": "run_command", "command": "commande_ou_outil"},
-    {"action": "kill_process", "pid": 1234, "name": "app.exe"},
-    {"action": "open_browser", "url": "https://..."},
-    {"action": "navigate_to_url", "url": "https://...", "target": "new_tab" | "current_tab" | "new_window" | "titre_fenetre_optionnel"},
-    {"action": "tile_windows", "layout": "split_horizontal" | "split_vertical" | "grid_2x2" | "master_stack", "windows": ["titre_fenetre_1", "titre_fenetre_2"]},
-    {"action": "arrange_window", "title": "mot_cle", "position": "left" | "right" | "top" | "bottom" | "center" | "maximize" | "minimize"},
-    {"action": "move_window", "title": "mot_cle", "x": 0, "y": 0, "width": 960, "height": 1040},
-    {"action": "accessibility_shortcut", "shortcut": "enter" | "close_tab" | "snap_left" | "snap_right" | "snap_up" | "snap_down" | "task_manager" | "undo" | "copy" | "refresh_page"},
-    {"action": "summarize_screen", "window": "titre_optionnel"},
-    {"action": "activate_immersion", "apps": ["code"], "urls": ["https://..."], "layout": "grid_2x2"},
+    {"action": "toggle_dictation"},
+    {"action": "select_text_between", "from": "...", "to": "...", "window": null, "target": null},
+    {"action": "replace_field_text", "text": "...", "target": null},
+    {"action": "run_command", "command": "..."},
+    {"action": "kill_process", "pid": null, "name": null},
+    {"action": "navigate_to_url", "url": "...", "target": "new_tab"|"current_tab"|"new_window"},
+    {"action": "accessibility_shortcut", "shortcut": "enter"|"close_tab"|"refresh_page"|"copy"|"undo"},
     {"action": "deactivate_immersion"},
-    {"action": "enable_autostart"},
-    {"action": "disable_autostart"},
-    {"action": "check_autostart"},
-    {"action": "set_autostart", "enabled": true}
+    {"action": "set_reasoning_passes", "passes": 5, "reason": null},
+    {"action": "mute_audio"},
+    {"action": "set_volume", "command": "mute"|"down"|"up"|"min"}
   ],
-  "quick_suggestions": ["Suggestion 1", "Suggestion 2"]
+  "quick_suggestions": ["Option 1", "Option 2"]
 }"#;
 
 const DICTATION_SYSTEM_INSTRUCTIONS: &str = r#"Tu es l'assistant de dictée vocale et de saisie textuelle pour Windows.
@@ -1991,10 +1990,11 @@ async fn call_deepseek_prompt(
         });
     }
 
-    const MAX_AGENT_PASSES: usize = 5;
+    let mut max_agent_passes = TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, 15);
     let mut has_spoken = false;
+    let mut pass = 1;
 
-    for pass in 1..=MAX_AGENT_PASSES {
+    while pass <= max_agent_passes {
         if is_request_cancelled(request_id) {
             return;
         }
@@ -2080,7 +2080,7 @@ async fn call_deepseek_prompt(
                     if let Ok(body) = res.json::<DeepSeekChatResponse>().await {
                         if let Some(choice) = body.choices.first() {
                             let raw_content = &choice.message.content;
-                            println!("\n=================== [Réponse deepseek brute (passe {}/{})] ===================", pass, MAX_AGENT_PASSES);
+                            println!("\n=================== [Réponse deepseek brute (passe {}/{})] ===================", pass, max_agent_passes);
                             println!("{}", raw_content.trim());
                             println!("============================================================");
 
@@ -2125,6 +2125,7 @@ async fn call_deepseek_prompt(
                             });
                         }
                         history.lock().await.clear();
+                        TARGET_REASONING_PASSES.store(5, Ordering::SeqCst);
                         break;
                     }
 
@@ -2187,6 +2188,14 @@ async fn call_deepseek_prompt(
 
         if is_request_cancelled(request_id) {
             return;
+        }
+
+        // Prise en compte immédiate du champ racine next_passes
+        if let Some(np) = payload.next_passes {
+            let clamped = np.clamp(1, 15);
+            max_agent_passes = clamped;
+            TARGET_REASONING_PASSES.store(clamped, Ordering::SeqCst);
+            println!("[Agent] Quota de raisonnement mis à jour via next_passes : {max_agent_passes} passe(s) max");
         }
 
         if payload.invalid_request || payload.narration.trim().eq_ignore_ascii_case("invalid_request") {
@@ -2316,6 +2325,13 @@ async fn call_deepseek_prompt(
             return;
         }
 
+        // Re-synchronisation du quota de passes si l'action SetReasoningPasses a été invoquée
+        let synced_passes = TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, 15);
+        if synced_passes != max_agent_passes {
+            max_agent_passes = synced_passes;
+            println!("[Agent] Quota de raisonnement resynchronisé avec TARGET_REASONING_PASSES : {max_agent_passes} passe(s) max");
+        }
+
         if is_dictation {
             println!("[Dictée] Action exécutée instantanément, fin de séquence.");
             break;
@@ -2327,7 +2343,7 @@ async fn call_deepseek_prompt(
             }
         }
 
-        if pass < MAX_AGENT_PASSES {
+        if pass < max_agent_passes {
             let compact_report = truncate_with_notice(&report, 10000);
             let mut step_feedback = format!("[Retour d'exécution étape {pass}] :\n{compact_report}");
             if !screen_after.trim().is_empty() {
@@ -2346,15 +2362,10 @@ async fn call_deepseek_prompt(
             }
 
             step_feedback.push_str(&format!(
-                "\n\nConsignes pour cette nouvelle étape :\n\
-                - Analyse attentivement [État de l'écran suite aux actions].\n\
-                - Si un contenu de fichier ou de code a été extrait via 'read_editor_content', analyse-le en profondeur et réponds directement à la question de l'utilisateur dans 'narration' avec 'actions': [].\n\
-                - Pour cibler un contrôle de l'application hôte (navigateur), utilise le libellé commençant par '[Navigateur]'. Pour la page web, utilise le nom direct affiché dans les sections '[Page web - ...]'.\n\
-                - Détection d'obstacle : si une notification Windows, un popup ou une bannière de consentement obstrue la vue, sélectionne et clique immédiatement sur le sous-bouton approprié de la notification ('click_button' ou 'click_element' vers 'Tout accepter', 'Accepter', 'Fermer', 'Ignorer', etc.). Ne jamais envoyer 'escape'.\n\
-                - Si l'élément cible n'est pas encore visible sur la page, émets un défilement ('scroll' direction: 'down') pour explorer le reste de la page.\n\
-                - Si l'écran est dégagé, poursuis immédiatement l'exécution de la consigne initiale : \"{}\".\n\
-                - Pour une recherche ou un achat web : relève les modèles ou prix observés et formule 2 ou 3 suggestions concrètes dans \"narration\" si un choix utilisateur est nécessaire.\n\
-                - Si la tâche est terminée ou attend un choix, confirme-le dans \"narration\" avec \"actions\": [] et fournis impérativement 2 à 4 suggestions contextuelles dans \"quick_suggestions\" basées sur ton analyse des éléments à l'écran.",
+                "\n\n[Consigne étape] : Poursuis : \"{}\".\n\
+                - Obstacle (cookie/toast) -> clique le sous-bouton approprié.\n\
+                - Échec/blocage -> pivote immédiatement vers une alternative (app, web, autre fenêtre). Ne renvoie JAMAIS 'actions': [] si l'objectif d'urgence/contact n'est pas achevé.\n\
+                - Tâche finie ou choix requis -> 'actions': [] + 2 à 4 'quick_suggestions'.",
                 safe_user_instruction
             ));
 
@@ -2367,8 +2378,9 @@ async fn call_deepseek_prompt(
                 let mut time_guard = last_call_time.lock().await;
                 *time_guard = Some(Instant::now());
             }
+            pass += 1;
         } else {
-            println!("[Agent] Nombre maximal de passes ({MAX_AGENT_PASSES}) atteint.");
+            println!("[Agent] Nombre maximal de passes ({max_agent_passes}) atteint.");
             let screen_for_sug = if !screen_after.trim().is_empty() {
                 screen_after.clone()
             } else {
@@ -2380,6 +2392,7 @@ async fn call_deepseek_prompt(
                 text: "Actions terminées. Voici les suites possibles identifiées à l'écran :".to_string(),
                 quick_suggestions: auto_suggestions,
             });
+            break;
         }
     }
 
@@ -2548,6 +2561,7 @@ fn main() -> eframe::Result<()> {
                         let _ = bg_tts_tx.send(TtsCommand::Stop);
                         IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
                         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
+                        TARGET_REASONING_PASSES.store(5, Ordering::SeqCst);
                         if let Ok(mut hist) = IMMERSION_SCREEN_HISTORY.lock() {
                             hist.clear();
                         }

@@ -242,6 +242,18 @@ pub enum AgentAction {
         #[serde(default)]
         enabled: bool,
     },
+    SetReasoningPasses {
+        passes: usize,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    #[serde(alias = "mute_sound", alias = "sound_mute", alias = "couper_son")]
+    MuteAudio,
+    #[serde(alias = "volume", alias = "adjust_volume", alias = "sound")]
+    SetVolume {
+        #[serde(default, alias = "level", alias = "value", alias = "type", alias = "mode")]
+        command: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -302,6 +314,11 @@ impl QuickSuggestionItem {
                         Some("Désactiver le démarrage automatique".to_string())
                     }
                 }
+                AgentAction::SetReasoningPasses { passes, .. } => {
+                    Some(format!("Ajuster à {passes} passes"))
+                }
+                AgentAction::MuteAudio => Some("Couper les flux audio parasites".to_string()),
+                AgentAction::SetVolume { command } => Some(format!("Volume : {command}")),
                 _ => None,
             },
         }
@@ -318,6 +335,8 @@ pub struct AgentResponsePayload {
     pub quick_suggestions: Vec<QuickSuggestionItem>,
     #[serde(default)]
     pub invalid_request: bool,
+    #[serde(default, alias = "max_passes", alias = "reasoning_passes")]
+    pub next_passes: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

@@ -4,8 +4,7 @@ on:
   push:
     branches: [ "main" ]
     tags:
-      - "v*"
-      - "libertide-*"
+      - "*"
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
@@ -39,8 +38,11 @@ jobs:
       - name: Prepare distribution package
         shell: powershell
         run: |
-          New-Item -ItemType Directory -Path dist -Force
-          Copy-Item target/release/libertide.exe -Destination dist/
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $exe = Get-ChildItem -Path target/release -Filter "*.exe" | Where-Object { $_.Name -notlike "*test*" } | Select-Object -First 1
+          if (-not $exe) { throw "Aucun binaire .exe trouvé dans target/release" }
+          Copy-Item $exe.FullName -Destination "dist/$($exe.Name)"
+          Copy-Item $exe.FullName -Destination "dist/libertide.exe"
           if (Test-Path README.md) { Copy-Item README.md -Destination dist/ }
           if (Test-Path LICENSE) { Copy-Item LICENSE -Destination dist/ }
           Compress-Archive -Path dist/* -DestinationPath libertide-windows-x64.zip -Force
@@ -51,7 +53,7 @@ jobs:
           name: libertide-windows-x64
           path: |
             libertide-windows-x64.zip
-            target/release/libertide.exe
+            dist/*.exe
           if-no-files-found: error
 
       - name: Create GitHub Release
@@ -60,4 +62,6 @@ jobs:
         with:
           files: |
             libertide-windows-x64.zip
-            target/release/libertide.exe
+            dist/*.exe
+          fail_on_unmatched_files: false
+          token: ${{ secrets.GITHUB_TOKEN }}

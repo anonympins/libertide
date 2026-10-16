@@ -1,5 +1,5 @@
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::fs_util::{create_temp_note_file, find_executable_in_path, find_file_in_workspace};
@@ -153,6 +153,7 @@ pub static LAST_FOCUSED_RECT: Mutex<Option<[i32; 4]>> = Mutex::new(None);
 pub static CURRENT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 pub static IS_EMERGENCY_STOPPED: AtomicBool = AtomicBool::new(false);
 pub static AGENT_BUSY: AtomicBool = AtomicBool::new(false);
+pub static TARGET_REASONING_PASSES: AtomicUsize = AtomicUsize::new(5);
 
 pub fn is_request_cancelled(request_id: u64) -> bool {
     CURRENT_REQUEST_ID.load(Ordering::SeqCst) != request_id || IS_EMERGENCY_STOPPED.load(Ordering::SeqCst)
@@ -2535,7 +2536,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             .map(|raw| HWND(raw as _))
             .filter(|&h| user_windows.iter().any(|(w, _)| *w == h) && !is_window_hung(h))
             .or_else(|| get_active_or_best_window(&user_windows))
-            .or_else(|| user_windows.iter().find(|(h, t)| is_browser_hwnd(*h, t)).map(|(h, _)| *h))
+            .or_else(|| find_best_browser_window(&user_windows, None))
             .or_else(|| user_windows.first().map(|(h, _)| *h))
             .unwrap_or(raw_fg)
     };
@@ -3187,11 +3188,18 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 }
             }
             AgentAction::ClickElement { window, target_name } => {
+                let is_browser_target = is_address_bar_target(target_name) || is_browser_chrome_target(target_name);
                 let target_hwnd = match window.as_deref() {
                     Some(w) if !w.trim().is_empty() => {
                         find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
                     }
-                    _ => active_user_hwnd,
+                    _ => {
+                        if is_browser_target {
+                            find_best_browser_window(&user_windows, active_user_hwnd)
+                        } else {
+                            active_user_hwnd
+                        }
+                    }
                 };
 
                 if let Some(hwnd) = target_hwnd {
@@ -3359,11 +3367,18 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 }
             }
             AgentAction::ClickButton { window, button_name } => {
+                let is_browser_target = is_browser_chrome_target(button_name);
                 let target_hwnd = match window.as_deref() {
                     Some(w) if !w.trim().is_empty() => {
                         find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
                     }
-                    _ => active_user_hwnd,
+                    _ => {
+                        if is_browser_target {
+                            find_best_browser_window(&user_windows, active_user_hwnd)
+                        } else {
+                            active_user_hwnd
+                        }
+                    }
                 };
 
                 if let Some(hwnd) = target_hwnd {
@@ -3416,11 +3431,18 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 }
             }
             AgentAction::FocusElement { window, target_name } => {
+                let is_browser_target = is_address_bar_target(target_name) || is_browser_chrome_target(target_name);
                 let target_hwnd = match window.as_deref() {
                     Some(w) if !w.trim().is_empty() => {
                         find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
                     }
-                    _ => active_user_hwnd,
+                    _ => {
+                        if is_browser_target {
+                            find_best_browser_window(&user_windows, active_user_hwnd)
+                        } else {
+                            active_user_hwnd
+                        }
+                    }
                 };
 
                 if let Some(hwnd) = target_hwnd {
@@ -3558,7 +3580,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     }
                     _ => {
                         if is_address_bar {
-                            user_windows.iter().find(|(h, t)| is_browser_hwnd(*h, t)).map(|(h, _)| *h).or(active_user_hwnd)
+                            find_best_browser_window(&user_windows, active_user_hwnd)
                         } else {
                             active_user_hwnd
                         }
@@ -3567,6 +3589,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
 
                 let mut handled = false;
 
+                if !is_address_bar {
                 let candidate_hwnd = target_hwnd.or(active_user_hwnd).or(preferred_target_hwnd);
                 if let Some(hwnd) = candidate_hwnd {
                     let win_title = user_windows
@@ -3593,27 +3616,39 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         handled = true;
                     }
                 }
+                }
 
                 if !handled {
                     if is_address_bar {
-                        if let Some(h) = target_hwnd.filter(|&h| is_window_hung(h)) {
-                            feedback.push(format!("Navigateur [HWND {:?}] non réactif (sablier). Écriture ignorée.", h.0));
-                            continue;
-                        }
-                        if let Some(hwnd) = target_hwnd {
+                        let browser_hwnd = target_hwnd.filter(|&h| {
+                            let title = user_windows.iter().find(|(wh, _)| *wh == h).map(|(_, t)| t.as_str()).unwrap_or("");
+                            is_browser_hwnd(h, title)
+                        });
+
+                        if let Some(hwnd) = browser_hwnd {
+                            if is_window_hung(hwnd) {
+                                feedback.push(format!("Navigateur [HWND {:?}] non réactif (sablier). Écriture ignorée.", hwnd.0));
+                                continue;
+                            }
                             let win_title = user_windows.iter().find(|(h, _)| *h == hwnd).map(|(_, t)| t.as_str()).unwrap_or("Navigateur");
-                            let is_browser = is_browser_hwnd(hwnd, win_title);
                             println!("[Actions] Ciblage barre d'adresse sur [HWND {:?}] '{}'", hwnd.0, win_title);
                             force_foreground_window(hwnd);
                             unsafe {
-                                let _ = ShowWindow(hwnd, if is_browser { SW_MAXIMIZE } else { SW_RESTORE });
+                                let _ = ShowWindow(hwnd, SW_MAXIMIZE);
                             }
                             std::thread::sleep(Duration::from_millis(50));
                             navigate_browser_address_bar(hwnd, text);
                             handled = true;
                         } else {
-                            println!("[Actions] Aucun navigateur ouvert trouvé, ouverture d'une nouvelle fenêtre pour : {}", text);
-                            launch_browser_new_window(text);
+                            println!("[Actions] Aucun navigateur ouvert trouvé pour la barre d'adresse, ouverture d'une nouvelle fenêtre pour : {}", text);
+                            let spawned = launch_browser_new_window(text);
+                            if let Some(h) = spawned {
+                                newly_spawned_hwnd = Some(h);
+                                active_user_hwnd = Some(h);
+                                preferred_target_hwnd = Some(h);
+                                user_windows = list_user_windows();
+                            }
+                            feedback.push(format!("Navigateur ouvert vers '{}'.", text));
                             handled = true;
                         }
                 } else if is_generic {
@@ -3728,7 +3763,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     }
                     _ => {
                         if is_address_bar {
-                            user_windows.iter().find(|(h, t)| is_browser_hwnd(*h, t)).map(|(h, _)| *h).or(active_user_hwnd)
+                            find_best_browser_window(&user_windows, active_user_hwnd)
                         } else {
                             active_user_hwnd
                         }
@@ -3737,6 +3772,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
 
                 let mut handled = false;
 
+                if !is_address_bar {
                 let candidate_hwnd = target_hwnd.or(active_user_hwnd).or(preferred_target_hwnd);
                 if let Some(hwnd) = candidate_hwnd {
                     let win_title = user_windows
@@ -3763,27 +3799,39 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         handled = true;
                     }
                 }
+                }
 
                 if !handled {
                     if is_address_bar {
-                        if let Some(hwnd) = target_hwnd {
+                        let browser_hwnd = target_hwnd.filter(|&h| {
+                            let title = user_windows.iter().find(|(wh, _)| *wh == h).map(|(_, t)| t.as_str()).unwrap_or("");
+                            is_browser_hwnd(h, title)
+                        });
+
+                        if let Some(hwnd) = browser_hwnd {
                             if is_window_hung(hwnd) {
                                 feedback.push(format!("Navigateur [HWND {:?}] non réactif. Remplacement ignoré.", hwnd.0));
                                 continue;
                             }
                             let win_title = user_windows.iter().find(|(h, _)| *h == hwnd).map(|(_, t)| t.as_str()).unwrap_or("Navigateur");
-                            let is_browser = is_browser_hwnd(hwnd, win_title);
                             println!("[Actions] Remplacement d'url barre d'adresse sur [HWND {:?}] '{}'", hwnd.0, win_title);
                             force_foreground_window(hwnd);
                             unsafe {
-                                let _ = ShowWindow(hwnd, if is_browser { SW_MAXIMIZE } else { SW_RESTORE });
+                                let _ = ShowWindow(hwnd, SW_MAXIMIZE);
                             }
                             std::thread::sleep(Duration::from_millis(50));
                             navigate_browser_address_bar(hwnd, text);
                             handled = true;
                         } else {
-                            println!("[Actions] Aucun navigateur ouvert trouvé, ouverture avec : {}", text);
-                            launch_browser_new_window(text);
+                            println!("[Actions] Aucun navigateur ouvert trouvé pour la barre d'adresse, ouverture avec : {}", text);
+                            let spawned = launch_browser_new_window(text);
+                            if let Some(h) = spawned {
+                                newly_spawned_hwnd = Some(h);
+                                active_user_hwnd = Some(h);
+                                preferred_target_hwnd = Some(h);
+                                user_windows = list_user_windows();
+                            }
+                            feedback.push(format!("Navigateur ouvert vers '{}'.", text));
                             handled = true;
                         }
                 } else if is_generic {
@@ -3898,9 +3946,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     }
                     feedback.push(format!("Nouvelle fenêtre ouverte vers '{}'.", formatted_url));
                 } else if is_current {
-                    let target_hwnd = active_user_hwnd
-                        .filter(|h| user_windows.iter().any(|(wh, t)| *wh == *h && is_browser_hwnd(*wh, t)))
-                        .or_else(|| user_windows.iter().find(|(h, t)| is_browser_hwnd(*h, t)).map(|(h, _)| *h));
+                    let target_hwnd = find_best_browser_window(&user_windows, active_user_hwnd);
 
                     if let Some(hwnd) = target_hwnd {
                         if is_window_hung(hwnd) {
@@ -3936,11 +3982,13 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 } else {
                     // Par défaut (sans target, "new_tab", ou si target désigne un navigateur spécifique) : NOUVEL ONGLET
                     let target_hwnd = if is_explicit_new_tab || target_mode.is_none() {
-                        active_user_hwnd
-                            .filter(|h| user_windows.iter().any(|(wh, t)| *wh == *h && is_browser_hwnd(*wh, t)))
-                            .or_else(|| user_windows.iter().find(|(h, t)| is_browser_hwnd(*h, t)).map(|(h, _)| *h))
+                        find_best_browser_window(&user_windows, active_user_hwnd)
                     } else {
-                        find_windows_matching(target_mode.unwrap(), &user_windows, active_user_hwnd).first().copied()
+                        let matched = find_windows_matching(target_mode.unwrap(), &user_windows, active_user_hwnd);
+                        matched.first().copied().filter(|&h| {
+                            let title = user_windows.iter().find(|(wh, _)| *wh == h).map(|(_, t)| t.as_str()).unwrap_or("");
+                            is_browser_hwnd(h, title)
+                        }).or_else(|| find_best_browser_window(&user_windows, active_user_hwnd))
                     };
 
                     if let Some(hwnd) = target_hwnd {
@@ -4219,6 +4267,21 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     "close_tab" => send_hotkey(&[VK_CONTROL], VIRTUAL_KEY(0x57)),
                     "reopen_tab" => send_hotkey(&[VK_CONTROL, VK_SHIFT], VIRTUAL_KEY(0x54)),
                     "refresh_page" => send_hotkey(&[], VK_F5),
+                    "mute_volume" | "volume_mute" | "mute_sound" | "mute_audio" => {
+                        send_hotkey(&[], VIRTUAL_KEY(0xAD));
+                    }
+                    "volume_down" => {
+                        for _ in 0..5 {
+                            send_hotkey(&[], VIRTUAL_KEY(0xAE));
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                    }
+                    "volume_up" => {
+                        for _ in 0..5 {
+                            send_hotkey(&[], VIRTUAL_KEY(0xAF));
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                    }
                     "next_field" => send_hotkey(&[], VK_TAB),
                     "previous_field" => send_hotkey(&[VK_SHIFT], VK_TAB),
                     "escape" => send_hotkey(&[], VK_ESCAPE),
@@ -4918,6 +4981,70 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     Err(err) => feedback.push(format!("Erreur configuration démarrage auto : {err}")),
                 }
             }
+            AgentAction::SetReasoningPasses { passes, reason } => {
+                let clamped = (*passes).clamp(1, 15);
+                TARGET_REASONING_PASSES.store(clamped, Ordering::SeqCst);
+                let reason_desc = reason.as_deref().unwrap_or("ajustement au contexte d'urgence");
+                println!("[Actions] Quota de passes ajusté à {} (motif: {})", clamped, reason_desc);
+                feedback.push(format!("Budget de raisonnement configuré à {} passes ({reason_desc}).", clamped));
+            }
+            AgentAction::MuteAudio => {
+                // Stoppe immédiatement la lecture multimédia (Spotify, YouTube, navigateurs)
+                const VK_MEDIA_STOP: VIRTUAL_KEY = VIRTUAL_KEY(0xB2);
+                send_hotkey(&[], VK_MEDIA_STOP);
+
+                // Isole le son en rendant muettes toutes les sessions audio tierces dans le mélangeur Windows
+                let muted = unsafe { mute_other_audio_sessions() };
+                println!("[Actions] Flux audio tiers coupés ({muted} application(s) mise(s) en sourdine). Voix de Libertide préservée.");
+                feedback.push(format!("Flux audio externes mis en sourdine ({muted} application(s)). Voix de Libertide maintenue active."));
+            }
+            AgentAction::SetVolume { command } => {
+                const VK_VOLUME_MUTE: VIRTUAL_KEY = VIRTUAL_KEY(0xAD);
+                const VK_VOLUME_DOWN: VIRTUAL_KEY = VIRTUAL_KEY(0xAE);
+                const VK_VOLUME_UP: VIRTUAL_KEY = VIRTUAL_KEY(0xAF);
+
+                let cmd_lower = command.to_lowercase();
+                match cmd_lower.as_str() {
+                    "mute" | "couper" | "silence" | "off" => {
+                        send_hotkey(&[], VK_VOLUME_MUTE);
+                        println!("[Actions] Son système coupé via VK_VOLUME_MUTE.");
+                        feedback.push("Son système coupé (muet).".to_string());
+                    }
+                    "unmute" | "reactiver" | "on" => {
+                        send_hotkey(&[], VK_VOLUME_MUTE);
+                        println!("[Actions] Son système réactivé via VK_VOLUME_MUTE.");
+                        feedback.push("Son système réactivé.".to_string());
+                    }
+                    "down" | "baisser" | "diminuer" => {
+                        for _ in 0..5 {
+                            send_hotkey(&[], VK_VOLUME_DOWN);
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        println!("[Actions] Volume système diminué.");
+                        feedback.push("Volume système diminué.".to_string());
+                    }
+                    "up" | "monter" | "augmenter" => {
+                        for _ in 0..5 {
+                            send_hotkey(&[], VK_VOLUME_UP);
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        println!("[Actions] Volume système augmenté.");
+                        feedback.push("Volume système augmenté.".to_string());
+                    }
+                    "min" | "minimum" | "zero" => {
+                        for _ in 0..50 {
+                            send_hotkey(&[], VK_VOLUME_DOWN);
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        println!("[Actions] Volume système mis à zéro.");
+                        feedback.push("Volume système mis au minimum.".to_string());
+                    }
+                    _ => {
+                        send_hotkey(&[], VK_VOLUME_MUTE);
+                        feedback.push(format!("Commande de volume '{command}' appliquée."));
+                    }
+                }
+            }
         }
     }
 
@@ -4926,6 +5053,148 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
     } else {
         truncate_with_notice(&feedback.join("\n"), 12000)
     }
+}
+
+#[cfg(windows)]
+unsafe fn mute_other_audio_sessions() -> usize {
+    use std::ffi::c_void;
+    use windows::core::GUID;
+
+    type HRESULT = i32;
+    const S_OK: HRESULT = 0;
+    const CLSCTX_ALL: u32 = 23;
+
+    extern "system" {
+        fn CoCreateInstance(
+            rclsid: *const GUID,
+            p_unk_outer: *mut c_void,
+            dw_cls_context: u32,
+            riid: *const GUID,
+            ppv: *mut *mut c_void,
+        ) -> HRESULT;
+    }
+
+    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+    let clsid_mm_device_enumerator = GUID::from_u128(0xBCDE0395_E52F_467C_8E3D_C4579291692E);
+    let iid_imm_device_enumerator = GUID::from_u128(0xA95664D2_9614_4D35_A746_DE8DB63617E6);
+    let iid_audio_session_manager2 = GUID::from_u128(0x77AA99A0_1BD6_484F_8BC7_2C654C9A9B6F);
+    let iid_audio_session_control2 = GUID::from_u128(0xBFB7FF88_7239_4FC9_8FA8_880C73E2E7EC);
+    let iid_simple_audio_volume = GUID::from_u128(0x87CE5498_68D6_44E5_AC21_AB2709778022);
+
+    let mut enumerator: *mut c_void = std::ptr::null_mut();
+    if CoCreateInstance(
+        &clsid_mm_device_enumerator,
+        std::ptr::null_mut(),
+        CLSCTX_ALL,
+        &iid_imm_device_enumerator,
+        &mut enumerator,
+    ) != S_OK || enumerator.is_null() {
+        return 0;
+    }
+
+    let vtable_enum = *(enumerator as *const *const usize);
+    let get_default_endpoint: unsafe extern "system" fn(*mut c_void, i32, i32, *mut *mut c_void) -> HRESULT =
+        std::mem::transmute(*vtable_enum.add(4));
+    let release_enum: unsafe extern "system" fn(*mut c_void) -> u32 =
+        std::mem::transmute(*vtable_enum.add(2));
+
+    let mut device: *mut c_void = std::ptr::null_mut();
+    let hr = get_default_endpoint(enumerator, 0, 1, &mut device); // eRender, eMultimedia
+    release_enum(enumerator);
+
+    if hr != S_OK || device.is_null() {
+        return 0;
+    }
+
+    let vtable_dev = *(device as *const *const usize);
+    let activate: unsafe extern "system" fn(*mut c_void, *const GUID, u32, *mut c_void, *mut *mut c_void) -> HRESULT =
+        std::mem::transmute(*vtable_dev.add(3));
+    let release_dev: unsafe extern "system" fn(*mut c_void) -> u32 =
+        std::mem::transmute(*vtable_dev.add(2));
+
+    let mut session_mgr: *mut c_void = std::ptr::null_mut();
+    let hr = activate(device, &iid_audio_session_manager2, CLSCTX_ALL, std::ptr::null_mut(), &mut session_mgr);
+    release_dev(device);
+
+    if hr != S_OK || session_mgr.is_null() {
+        return 0;
+    }
+
+    let vtable_mgr = *(session_mgr as *const *const usize);
+    let get_session_enum: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT =
+        std::mem::transmute(*vtable_mgr.add(5));
+    let release_mgr: unsafe extern "system" fn(*mut c_void) -> u32 =
+        std::mem::transmute(*vtable_mgr.add(2));
+
+    let mut session_enumerator: *mut c_void = std::ptr::null_mut();
+    let hr = get_session_enum(session_mgr, &mut session_enumerator);
+    release_mgr(session_mgr);
+
+    if hr != S_OK || session_enumerator.is_null() {
+        return 0;
+    }
+
+    let vtable_s_enum = *(session_enumerator as *const *const usize);
+    let get_count: unsafe extern "system" fn(*mut c_void, *mut i32) -> HRESULT =
+        std::mem::transmute(*vtable_s_enum.add(3));
+    let get_session: unsafe extern "system" fn(*mut c_void, i32, *mut *mut c_void) -> HRESULT =
+        std::mem::transmute(*vtable_s_enum.add(4));
+    let release_s_enum: unsafe extern "system" fn(*mut c_void) -> u32 =
+        std::mem::transmute(*vtable_s_enum.add(2));
+
+    let mut count = 0i32;
+    let _ = get_count(session_enumerator, &mut count);
+
+    let my_pid = std::process::id();
+    let mut muted_count = 0usize;
+
+    for i in 0..count {
+        let mut session_control: *mut c_void = std::ptr::null_mut();
+        if get_session(session_enumerator, i, &mut session_control) != S_OK || session_control.is_null() {
+            continue;
+        }
+
+        let vtable_sc = *(session_control as *const *const usize);
+        let query_interface_sc: unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT =
+            std::mem::transmute(*vtable_sc.add(0));
+        let release_sc: unsafe extern "system" fn(*mut c_void) -> u32 =
+            std::mem::transmute(*vtable_sc.add(2));
+
+        let mut session_pid = 0u32;
+        let mut session_control2: *mut c_void = std::ptr::null_mut();
+        if query_interface_sc(session_control, &iid_audio_session_control2, &mut session_control2) == S_OK && !session_control2.is_null() {
+            let vtable_sc2 = *(session_control2 as *const *const usize);
+            let get_pid: unsafe extern "system" fn(*mut c_void, *mut u32) -> HRESULT =
+                std::mem::transmute(*vtable_sc2.add(14));
+            let release_sc2: unsafe extern "system" fn(*mut c_void) -> u32 =
+                std::mem::transmute(*vtable_sc2.add(2));
+            let _ = get_pid(session_control2, &mut session_pid);
+            release_sc2(session_control2);
+        }
+
+        let mut simple_volume: *mut c_void = std::ptr::null_mut();
+        if query_interface_sc(session_control, &iid_simple_audio_volume, &mut simple_volume) == S_OK && !simple_volume.is_null() {
+            let vtable_vol = *(simple_volume as *const *const usize);
+            let set_mute: unsafe extern "system" fn(*mut c_void, i32, *mut c_void) -> HRESULT =
+                std::mem::transmute(*vtable_vol.add(5));
+            let release_vol: unsafe extern "system" fn(*mut c_void) -> u32 =
+                std::mem::transmute(*vtable_vol.add(2));
+
+            if session_pid != my_pid {
+                if set_mute(simple_volume, 1, std::ptr::null_mut()) == S_OK {
+                    muted_count += 1;
+                }
+            } else {
+                let _ = set_mute(simple_volume, 0, std::ptr::null_mut());
+            }
+            release_vol(simple_volume);
+        }
+        release_sc(session_control);
+    }
+
+    release_s_enum(session_enumerator);
+    muted_count
 }
 
 #[cfg(not(windows))]
@@ -4980,6 +5249,55 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
             }
             AgentAction::CheckAutostart => {
                 feedback.push(format!("Autostart XDG actif : {}", is_autostart_enabled()));
+            }
+            AgentAction::SetReasoningPasses { passes, reason } => {
+                let clamped = (*passes).clamp(1, 15);
+                TARGET_REASONING_PASSES.store(clamped, Ordering::SeqCst);
+                let reason_desc = reason.as_deref().unwrap_or("ajustement au contexte d'urgence");
+                feedback.push(format!("Budget de raisonnement configuré à {} passes ({reason_desc}).", clamped));
+            }
+            AgentAction::MuteAudio => {
+                let _ = std::process::Command::new("playerctl").arg("pause").spawn();
+                let _ = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg("pactl list sink-inputs short | awk '{print $1}' | xargs -r -I{} pactl set-sink-input-mute {} 1")
+                    .spawn();
+                feedback.push("Flux sonores externes mis en sourdine (voix Libertide préservée).".to_string());
+            }
+            AgentAction::SetVolume { command } => {
+                let cmd_lower = command.to_lowercase();
+                match cmd_lower.as_str() {
+                    "mute" | "couper" => {
+                        let _ = std::process::Command::new("pactl")
+                            .args(["set-sink-mute", "@DEFAULT_SINK@", "1"])
+                            .spawn();
+                        feedback.push("Son système coupé.".to_string());
+                    }
+                    "unmute" => {
+                        let _ = std::process::Command::new("pactl")
+                            .args(["set-sink-mute", "@DEFAULT_SINK@", "0"])
+                            .spawn();
+                        feedback.push("Son système réactivé.".to_string());
+                    }
+                    "down" | "baisser" => {
+                        let _ = std::process::Command::new("pactl")
+                            .args(["set-sink-volume", "@DEFAULT_SINK@", "-10%"])
+                            .spawn();
+                        feedback.push("Volume diminué.".to_string());
+                    }
+                    "up" | "monter" => {
+                        let _ = std::process::Command::new("pactl")
+                            .args(["set-sink-volume", "@DEFAULT_SINK@", "+10%"])
+                            .spawn();
+                        feedback.push("Volume augmenté.".to_string());
+                    }
+                    _ => {
+                        let _ = std::process::Command::new("pactl")
+                            .args(["set-sink-mute", "@DEFAULT_SINK@", "toggle"])
+                            .spawn();
+                        feedback.push("Bascule muet audio système envoyée.".to_string());
+                    }
+                }
             }
             _ => {}
         }
