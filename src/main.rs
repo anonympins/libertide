@@ -16,7 +16,7 @@ use twitch::{search_twitch_channels, spawn_twitch_worker};
 use eframe::egui;
 use types::*;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender as StdSender};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use std::time::{Duration, Instant};
@@ -1653,8 +1653,6 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
         invalid_request: false,
     }
 }
-
-static AGENT_BUSY: AtomicBool = AtomicBool::new(false);
 
 struct BusyGuard;
 impl Drop for BusyGuard {
