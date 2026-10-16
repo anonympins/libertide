@@ -229,11 +229,6 @@ pub fn is_window_hung(_id: &str) -> bool {
     false
 }
 
-#[cfg(not(windows))]
-pub fn is_windows_terminal(_id: &str) -> bool {
-    false
-}
-
 #[cfg(windows)]
 pub fn is_toast_notification_window(hwnd: HWND, class_name: &str, title: &str) -> bool {
     let c_lower = class_name.to_lowercase();
