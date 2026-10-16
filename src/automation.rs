@@ -2916,7 +2916,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
 }
 
 #[cfg(not(windows))]
-pub fn summarize_screen_state(_target_window: Option<&str>, _autoscroll: bool) -> String {
+pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) -> String {
     let user_windows = list_user_windows();
     let active_id = get_active_x11_window();
 
