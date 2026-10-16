@@ -247,6 +247,13 @@ pub enum AgentAction {
         #[serde(default)]
         reason: Option<String>,
     },
+    #[serde(alias = "mute_sound", alias = "sound_mute", alias = "couper_son")]
+    MuteAudio,
+    #[serde(alias = "volume", alias = "adjust_volume", alias = "sound")]
+    SetVolume {
+        #[serde(default, alias = "level", alias = "value", alias = "type", alias = "mode")]
+        command: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -310,6 +317,8 @@ impl QuickSuggestionItem {
                 AgentAction::SetReasoningPasses { passes, .. } => {
                     Some(format!("Ajuster à {passes} passes"))
                 }
+                AgentAction::MuteAudio => Some("Couper les flux audio parasites".to_string()),
+                AgentAction::SetVolume { command } => Some(format!("Volume : {command}")),
                 _ => None,
             },
         }
