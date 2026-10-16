@@ -200,12 +200,32 @@ pub fn is_editor_window(_hwnd: (), title: &str, exe_name: &str) -> bool {
 }
 
 #[cfg(not(windows))]
-pub fn is_terminal_window(_hwnd: (), _title: &str) -> bool {
-    false
+pub fn is_terminal_window(_id: &str, title: &str) -> bool {
+    let t = title.to_lowercase();
+    t.contains("terminal")
+        || t.contains("konsole")
+        || t.contains("alacritty")
+        || t.contains("kitty")
+        || t.contains("wezterm")
+        || t.contains("xterm")
+        || t.contains("bash")
+        || t.contains("zsh")
 }
 
 #[cfg(not(windows))]
-pub fn is_window_hung(_hwnd: ()) -> bool {
+pub fn is_browser_window(title: &str) -> bool {
+    let t = title.to_lowercase();
+    t.contains("firefox")
+        || t.contains("chrome")
+        || t.contains("chromium")
+        || t.contains("brave")
+        || t.contains("edge")
+        || t.contains("opera")
+        || t.contains("vivaldi")
+}
+
+#[cfg(not(windows))]
+pub fn is_window_hung(_id: &str) -> bool {
     false
 }
 
@@ -305,6 +325,104 @@ pub fn list_user_windows() -> Vec<(HWND, String)> {
                 && t != "Settings"
                 && t != "Paramètres"
         })
+        .collect()
+}
+
+#[cfg(not(windows))]
+pub fn list_user_windows() -> Vec<(String, String)> {
+    // Utilisation de wmctrl pour lister les fenêtres X11 gérées par le Window Manager EWMH
+    let output = std::process::Command::new("wmctrl")
+        .args(["-l"])
+        .output();
+
+    let mut list = Vec::new();
+    if let Ok(out) = output {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 {
+                let win_id = parts[0].to_string();
+                let title = parts[3..].join(" ");
+                let t_clean = title.trim();
+                if !t_clean.is_empty()
+                    && !t_clean.contains("Libertide")
+                    && !t_clean.eq_ignore_ascii_case("desktop")
+                {
+                    list.push((win_id, t_clean.to_string()));
+                }
+            }
+        }
+    }
+    list
+}
+
+#[cfg(not(windows))]
+pub fn get_active_x11_window() -> Option<String> {
+    let output = std::process::Command::new("xdotool")
+        .arg("getactivewindow")
+        .output()
+        .ok()?;
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn get_x11_window_properties(win_id: &str) -> (String, String) {
+    // Récupère WM_CLASS et _NET_WM_PID via xprop
+    let output = std::process::Command::new("xprop")
+        .args(["-id", win_id, "WM_CLASS", "_NET_WM_PID"])
+        .output();
+
+    let mut class_name = String::new();
+    let mut pid_str = String::new();
+
+    if let Ok(out) = output {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            if line.contains("WM_CLASS") {
+                if let Some((_, val)) = line.split_once('=') {
+                    class_name = val.replace('"', "").trim().to_string();
+                }
+            } else if line.contains("_NET_WM_PID") {
+                if let Some((_, val)) = line.split_once('=') {
+                    pid_str = val.trim().to_string();
+                }
+            }
+        }
+    }
+    (class_name, pid_str)
+}
+
+#[cfg(not(windows))]
+pub fn get_active_or_best_window(user_windows: &[(String, String)]) -> Option<String> {
+    if let Some(active) = get_active_x11_window() {
+        // Normaliser l'ID décimal / hexadécimal si nécessaire
+        if let Ok(dec_id) = active.parse::<u64>() {
+            let hex_id = format!("0x{:08x}", dec_id);
+            if let Some((id, _)) = user_windows.iter().find(|(w_id, _)| w_id.eq_ignore_ascii_case(&hex_id) || w_id.eq_ignore_ascii_case(&active)) {
+                return Some(id.clone());
+            }
+        }
+        return Some(active);
+    }
+    user_windows.first().map(|(id, _)| id.clone())
+}
+
+#[cfg(not(windows))]
+pub fn find_windows_matching(
+    keyword: &str,
+    user_windows: &[(String, String)],
+    _preferred_id: Option<&str>,
+) -> Vec<String> {
+    let kw = keyword.trim().to_lowercase();
+    user_windows
+        .iter()
+        .filter(|(_, title)| kw.is_empty() || title.to_lowercase().contains(&kw))
+        .map(|(id, _)| id.clone())
         .collect()
 }
 
@@ -788,6 +906,31 @@ pub fn launch_browser_new_window(url: &str) -> Option<HWND> {
                     }
                 }
             }
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+pub fn apply_window_rect(win_id: &str, x: i32, y: i32, width: i32, height: i32) {
+    // wmctrl -i -r <WIN_ID> -e 0,X,Y,W,H
+    let geom = format!("0,{},{},{},{}", x.max(0), y.max(0), width.max(100), height.max(100));
+    let _ = std::process::Command::new("wmctrl")
+        .args(["-i", "-r", win_id, "-e", &geom])
+        .status();
+}
+
+#[cfg(not(windows))]
+pub fn launch_browser_new_window(url: &str) -> Option<String> {
+    let browsers = ["google-chrome", "chromium", "firefox", "brave-browser", "xdg-open"];
+    for b in &browsers {
+        if std::process::Command::new(b)
+            .arg(url)
+            .spawn()
+            .is_ok()
+        {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            return get_active_x11_window();
         }
     }
     None

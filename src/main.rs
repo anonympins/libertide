@@ -341,10 +341,37 @@ fn spawn_tts_worker(event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
 #[cfg(not(windows))]
 fn spawn_tts_worker(_event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
     let (tx, rx) = channel::<TtsCommand>();
+    let event_tx = _event_tx;
     std::thread::spawn(move || {
+        let mut current_process: Option<std::process::Child> = None;
         while let Ok(cmd) = rx.recv() {
-            if let TtsCommand::Speak(_) = cmd {
-                let _ = _event_tx.send(AgentEvent::TtsFinished);
+            match cmd {
+                TtsCommand::Stop => {
+                    if let Some(mut child) = current_process.take() {
+                        let _ = child.kill();
+                    }
+                    set_tts_audio_level(0.0);
+                }
+                TtsCommand::Speak(text) => {
+                    if let Some(mut child) = current_process.take() {
+                        let _ = child.kill();
+                    }
+                    let clean_text = sanitize_for_tts(&text);
+                    if clean_text.trim().is_empty() {
+                        let _ = event_tx.send(AgentEvent::TtsFinished);
+                        continue;
+                    }
+                    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Speaking));
+                    // Tentative avec spd-say (Speech Dispatcher), puis repli sur espeak-ng / espeak
+                    let child = std::process::Command::new("spd-say")
+                        .args(["-l", "fr", "-t", "female1", &clean_text])
+                        .spawn()
+                        .or_else(|_| std::process::Command::new("espeak-ng").args(["-v", "fr", &clean_text]).spawn())
+                        .or_else(|_| std::process::Command::new("espeak").args(["-v", "fr", &clean_text]).spawn())
+                        .ok();
+                    current_process = child;
+                    let _ = event_tx.send(AgentEvent::TtsFinished);
+                }
             }
         }
     });
@@ -684,7 +711,8 @@ impl eframe::App for OverlayApp {
         }
 
         // Redimensionnement dynamique avec hystérésis (seuil >= 3.0 px)
-        if self.position_initialized && (target_win_h - self.current_win_h).abs() >= 3.0 {
+        let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        if self.position_initialized && !is_maximized && (target_win_h - self.current_win_h).abs() >= 3.0 {
             self.current_win_h = target_win_h;
             let bot_y = self.window_bottom_y.unwrap_or(taskbar_top);
             let cur_x = self.window_pos.map_or(work_x + work_w - win_w - 16.0, |p| p.x);
@@ -977,6 +1005,51 @@ impl eframe::App for OverlayApp {
                                     self.active_tab = ActiveTab::Chat;
                                 }
                                 tab_bar_max_x = tab_assist.rect.max.x.max(tab_chat.rect.max.x);
+
+                                // Boutons système en haut à droite : Réduire, Agrandir/Restaurer, Fermer
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+
+                                    let close_btn = ui.add(
+                                        egui::Button::new(
+                                            egui::RichText::new("×")
+                                                .size(13.0)
+                                                .color(egui::Color32::from_rgb(235, 235, 245)),
+                                        )
+                                        .min_size(egui::vec2(20.0, 18.0))
+                                        .corner_radius(egui::CornerRadius::same(4)),
+                                    );
+                                    if close_btn.on_hover_text("Fermer").clicked() {
+                                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                    }
+
+                                    let max_icon = if is_maximized { "⧉" } else { "□" };
+                                    let max_btn = ui.add(
+                                        egui::Button::new(
+                                            egui::RichText::new(max_icon)
+                                                .size(10.5)
+                                                .color(egui::Color32::from_rgb(200, 215, 230)),
+                                        )
+                                        .min_size(egui::vec2(20.0, 18.0))
+                                        .corner_radius(egui::CornerRadius::same(4)),
+                                    );
+                                    if max_btn.on_hover_text(if is_maximized { "Restaurer" } else { "Agrandir" }).clicked() {
+                                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
+                                    }
+
+                                    let min_btn = ui.add(
+                                        egui::Button::new(
+                                            egui::RichText::new("—")
+                                                .size(10.5)
+                                                .color(egui::Color32::from_rgb(200, 215, 230)),
+                                        )
+                                        .min_size(egui::vec2(20.0, 18.0))
+                                        .corner_radius(egui::CornerRadius::same(4)),
+                                    );
+                                    if min_btn.on_hover_text("Réduire").clicked() {
+                                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                                    }
+                                });
                             });
                             ui.separator();
 
@@ -1398,17 +1471,18 @@ impl eframe::App for OverlayApp {
                         });
                 });
 
-                // Zones de déplacement : en-tête supérieur et bandeau de la capsule inférieure
+                // Zones de déplacement : en-tête supérieur (en réservant l'espace des boutons à droite) et bandeau inférieur
+                let window_buttons_width = 84.0;
                 let drag_rect_top = egui::Rect::from_min_max(
                     egui::pos2(tab_bar_max_x + 6.0, response_rect.min.y),
-                    egui::pos2(win_w - padding - 4.0, response_rect.min.y + 30.0),
+                    egui::pos2((win_w - padding - window_buttons_width).max(tab_bar_max_x + 6.0), response_rect.min.y + 30.0),
                 );
                 let drag_rect_bot = egui::Rect::from_min_max(
                     egui::pos2(control_rect.min.x + 8.0, control_rect.min.y + 4.0),
                     egui::pos2(control_rect.max.x - 48.0, control_rect.min.y + 24.0),
                 );
-                let resp_top = ui.interact(drag_rect_top, ui.id().with("capsule_drag_top"), egui::Sense::drag());
-                let resp_bot = ui.interact(drag_rect_bot, ui.id().with("capsule_drag_bot"), egui::Sense::drag());
+                let resp_top = ui.interact(drag_rect_top, egui::Id::new("capsule_drag_top"), egui::Sense::drag());
+                let resp_bot = ui.interact(drag_rect_bot, egui::Id::new("capsule_drag_bot"), egui::Sense::drag());
 
                 let is_hovered = resp_top.hovered() || resp_bot.hovered();
                 let is_dragged = resp_top.dragged() || resp_bot.dragged();
@@ -1426,7 +1500,7 @@ impl eframe::App for OverlayApp {
                     }
                 }
 
-                if is_dragged {
+                if is_dragged && !is_maximized {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                     let offset = self.drag_offset.unwrap_or(egui::vec2(win_w / 2.0, 16.0));
 
@@ -1478,7 +1552,7 @@ impl eframe::App for OverlayApp {
                 ];
 
                 for (rect, direction, cursor_icon) in resize_zones {
-                    let resp = ui.interact(rect, ui.id().with(format!("resize_{:?}", direction)), egui::Sense::drag());
+                    let resp = ui.interact(rect, egui::Id::new(format!("resize_{:?}", direction)), egui::Sense::drag());
                     if resp.hovered() {
                         ui.ctx().set_cursor_icon(cursor_icon);
                     }
@@ -2404,7 +2478,7 @@ fn main() -> eframe::Result<()> {
                                     request_id,
                                 ).await;
                             } else {
-                                let (field_content, screen_state) = tokio::task::spawn_blocking(|| {
+                                let (field_content, screen_state): (Option<String>, String) = tokio::task::spawn_blocking(|| {
                                     #[cfg(windows)]
                                     {
                                         (get_active_field_content(), summarize_screen_state(None, true))
@@ -2416,6 +2490,8 @@ fn main() -> eframe::Result<()> {
                                 }).await.unwrap_or((None, String::new()));
 
                                 if is_request_cancelled(request_id) { return; }
+                                #[cfg(not(windows))]
+                                let screen_state = summarize_screen_state(None, false);
 
                                 let mut prompt_sections = Vec::new();
 
