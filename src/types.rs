@@ -242,6 +242,11 @@ pub enum AgentAction {
         #[serde(default)]
         enabled: bool,
     },
+    SetReasoningPasses {
+        passes: usize,
+        #[serde(default)]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -302,6 +307,9 @@ impl QuickSuggestionItem {
                         Some("Désactiver le démarrage automatique".to_string())
                     }
                 }
+                AgentAction::SetReasoningPasses { passes, .. } => {
+                    Some(format!("Ajuster à {passes} passes"))
+                }
                 _ => None,
             },
         }
@@ -318,6 +326,8 @@ pub struct AgentResponsePayload {
     pub quick_suggestions: Vec<QuickSuggestionItem>,
     #[serde(default)]
     pub invalid_request: bool,
+    #[serde(default, alias = "max_passes", alias = "reasoning_passes")]
+    pub next_passes: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

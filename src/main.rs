@@ -540,6 +540,7 @@ impl OverlayApp {
         self.dictation_mode = false;
         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
         IS_EMERGENCY_STOPPED.store(true, Ordering::SeqCst);
+        TARGET_REASONING_PASSES.store(5, Ordering::SeqCst);
         let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
         if self.is_recording {
             self.stop_recording();
@@ -1630,6 +1631,7 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
             actions: Vec::new(),
             quick_suggestions: Vec::new(),
             invalid_request: true,
+            next_passes: None,
         };
     }
 
@@ -1637,19 +1639,18 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
         return payload;
     }
 
-    let unquoted = if let Some(start) = clean.find("```json") {
-        let rest = &clean[start + 7..];
-        if let Some(end) = rest.rfind("```") {
-            rest[..end].trim()
+    // Extraction fiabilisée des blocs Markdown (```json, ``` json, ```)
+    let unquoted = if let Some(start) = clean.find("```") {
+        let after_ticks = clean[start + 3..].trim_start();
+        let content_start = if after_ticks.len() >= 4 && after_ticks[..4].eq_ignore_ascii_case("json") {
+            after_ticks[4..].trim_start()
         } else {
-            rest.trim()
-        }
-    } else if let Some(start) = clean.find("```") {
-        let rest = &clean[start + 3..];
-        if let Some(end) = rest.rfind("```") {
-            rest[..end].trim()
+            after_ticks
+        };
+        if let Some(end) = content_start.rfind("```") {
+            content_start[..end].trim()
         } else {
-            rest.trim()
+            content_start.trim()
         }
     } else {
         clean
@@ -1668,7 +1669,7 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
                 return payload;
             }
 
-            // 3. Repli dynamique : extraction ciblée de la narration et des actions via serde_json::Value
+            // 3. Repli dynamique : extraction ciblée de la narration, passes et actions via serde_json::Value
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_candidate) {
                 let narration = val
                     .get("narration")
@@ -1680,6 +1681,13 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
                     .get("invalid_request")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+
+                let next_passes = val
+                    .get("next_passes")
+                    .or_else(|| val.get("max_passes"))
+                    .or_else(|| val.get("reasoning_passes"))
+                    .and_then(|v| v.as_u64())
+                    .map(|n| (n as usize).clamp(1, 15));
 
                 let mut actions = Vec::new();
                 if let Some(arr) = val.get("actions").and_then(|v| v.as_array()) {
@@ -1699,12 +1707,13 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
                     }
                 }
 
-                if !narration.is_empty() || !actions.is_empty() || invalid_request {
+                if !narration.is_empty() || !actions.is_empty() || invalid_request || next_passes.is_some() {
                     return AgentResponsePayload {
                         narration,
                         actions,
                         quick_suggestions,
                         invalid_request,
+                        next_passes,
                     };
                 }
             }
@@ -1717,6 +1726,7 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
             actions: Vec::new(),
             quick_suggestions: Vec::new(),
             invalid_request: true,
+            next_passes: None,
         };
     }
 
@@ -1724,6 +1734,7 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
         narration: clean.to_string(),
         actions: Vec::new(),
         quick_suggestions: Vec::new(),
+        next_passes: None,
         invalid_request: false,
     }
 }
@@ -1836,6 +1847,16 @@ Règles d'action et d'arbitrage :
 - Silence ("invalid_request": true) : réservé aux bruits de micro et phrases inintelligibles.
 - Salutations et discussion : valide ("invalid_request": false), réponds courtoisement dans "narration" avec "actions": [].
 - Interface et contenu : consulte toujours "[État actuel de l'écran]". Il contient le texte intégral de la page web (résultats de recherche, météo, prix, articles, données de tableaux), les contrôles et les liens.
+- Évaluation du budget de raisonnement ("next_passes", "set_reasoning_passes") :
+  * Le moteur de raisonnement supporte entre 1 et 15 passes successives pour accomplir les missions.
+  * Tu dois évaluer le degré d'urgence, la complexité et le niveau de risque :
+    - Tâche simple ou réponse directe (salutation, météo, consultation simple, clic unique) : alloue 1 à 3 passes ("next_passes": 1, 2 ou 3).
+    - Tâche standard multi-étapes (recherche web, navigation, formulaire, lecture de document) : alloue 4 à 7 passes ("next_passes": 5 ou 6).
+    - Urgences critiques techniques ET humaines (panne, alerte système, mais AUSSI malaise de l'utilisateur, problème de santé, détresse, indisponibilité soudaine ou départ précipité) : élève automatiquement le plafond jusqu'à 10 à 15 passes ("next_passes": 12 ou 15, ou via l'action "set_reasoning_passes": {"passes": 15, "reason": "urgence utilisateur/système"}).
+  * Spécifie le champ racine "next_passes": N (entier entre 1 et 15) dans ton JSON pour recalibrer dynamiquement le quota de passes.
+  * Gestion spécifique des urgences utilisateur :
+    - Si l'utilisateur exprime un malaise, douleur ou détresse physique ("je ne me sens pas bien", vertiges, appel à l'aide) : réponds avec calme, bienveillance et concision dans "narration", rappelle les secours (15 SAMU, 18 Pompiers, 112 Urgences), coupe toute nuisance sonore et sécurise l'environnement informatique.
+    - Si l'utilisateur signale une indisponibilité soudaine ("je dois partir en urgence", "occupe-toi du reste", imprévu) : prends le relais en autonomie complète sur le budget étendu pour sauvegarder les fichiers ouverts, clore proprement la session ou verrouiller l'écran.
   * Les contrôles de l'interface du navigateur portent le préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse", "[Navigateur] Actualiser"). Pour interagir avec le navigateur hôte, inclus explicitement ce préfixe dans la cible.
   * Les éléments internes au site web (champs de formulaire, boutons d'action, liens, textes de données) figurent dans "[Page web - ...]" sans préfixe. Cible-les par leur libellé direct (ex: "Destination", "Rechercher", "Tout accepter").
   * Pour répondre à une question sur le contenu (météo, prix, comparaison, progression), lis et exploite directement les données textuelles déjà présentes dans "[État actuel de l'écran]".
@@ -1876,6 +1897,7 @@ Règles d'action et d'arbitrage :
 Format json obligatoire :
 {
   "narration": "Explication vocale en français (2 phrases max ou vide pour silence).",
+  "next_passes": 5,
   "actions": [
     {"action": "open_app", "name": "nom_executable"},
     {"action": "close_app", "name": "nom_ou_titre"},
@@ -1907,7 +1929,8 @@ Format json obligatoire :
     {"action": "enable_autostart"},
     {"action": "disable_autostart"},
     {"action": "check_autostart"},
-    {"action": "set_autostart", "enabled": true}
+    {"action": "set_autostart", "enabled": true},
+    {"action": "set_reasoning_passes", "passes": 5, "reason": "motif_optionnel"}
   ],
   "quick_suggestions": ["Suggestion 1", "Suggestion 2"]
 }"#;
@@ -1991,10 +2014,11 @@ async fn call_deepseek_prompt(
         });
     }
 
-    const MAX_AGENT_PASSES: usize = 5;
+    let mut max_agent_passes = TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, 15);
     let mut has_spoken = false;
+    let mut pass = 1;
 
-    for pass in 1..=MAX_AGENT_PASSES {
+    while pass <= max_agent_passes {
         if is_request_cancelled(request_id) {
             return;
         }
@@ -2080,7 +2104,7 @@ async fn call_deepseek_prompt(
                     if let Ok(body) = res.json::<DeepSeekChatResponse>().await {
                         if let Some(choice) = body.choices.first() {
                             let raw_content = &choice.message.content;
-                            println!("\n=================== [Réponse deepseek brute (passe {}/{})] ===================", pass, MAX_AGENT_PASSES);
+                            println!("\n=================== [Réponse deepseek brute (passe {}/{})] ===================", pass, max_agent_passes);
                             println!("{}", raw_content.trim());
                             println!("============================================================");
 
@@ -2125,6 +2149,7 @@ async fn call_deepseek_prompt(
                             });
                         }
                         history.lock().await.clear();
+                        TARGET_REASONING_PASSES.store(5, Ordering::SeqCst);
                         break;
                     }
 
@@ -2187,6 +2212,14 @@ async fn call_deepseek_prompt(
 
         if is_request_cancelled(request_id) {
             return;
+        }
+
+        // Prise en compte immédiate du champ racine next_passes
+        if let Some(np) = payload.next_passes {
+            let clamped = np.clamp(1, 15);
+            max_agent_passes = clamped;
+            TARGET_REASONING_PASSES.store(clamped, Ordering::SeqCst);
+            println!("[Agent] Quota de raisonnement mis à jour via next_passes : {max_agent_passes} passe(s) max");
         }
 
         if payload.invalid_request || payload.narration.trim().eq_ignore_ascii_case("invalid_request") {
@@ -2316,6 +2349,13 @@ async fn call_deepseek_prompt(
             return;
         }
 
+        // Re-synchronisation du quota de passes si l'action SetReasoningPasses a été invoquée
+        let synced_passes = TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, 15);
+        if synced_passes != max_agent_passes {
+            max_agent_passes = synced_passes;
+            println!("[Agent] Quota de raisonnement resynchronisé avec TARGET_REASONING_PASSES : {max_agent_passes} passe(s) max");
+        }
+
         if is_dictation {
             println!("[Dictée] Action exécutée instantanément, fin de séquence.");
             break;
@@ -2327,7 +2367,7 @@ async fn call_deepseek_prompt(
             }
         }
 
-        if pass < MAX_AGENT_PASSES {
+        if pass < max_agent_passes {
             let compact_report = truncate_with_notice(&report, 10000);
             let mut step_feedback = format!("[Retour d'exécution étape {pass}] :\n{compact_report}");
             if !screen_after.trim().is_empty() {
@@ -2367,8 +2407,9 @@ async fn call_deepseek_prompt(
                 let mut time_guard = last_call_time.lock().await;
                 *time_guard = Some(Instant::now());
             }
+            pass += 1;
         } else {
-            println!("[Agent] Nombre maximal de passes ({MAX_AGENT_PASSES}) atteint.");
+            println!("[Agent] Nombre maximal de passes ({max_agent_passes}) atteint.");
             let screen_for_sug = if !screen_after.trim().is_empty() {
                 screen_after.clone()
             } else {
@@ -2380,6 +2421,7 @@ async fn call_deepseek_prompt(
                 text: "Actions terminées. Voici les suites possibles identifiées à l'écran :".to_string(),
                 quick_suggestions: auto_suggestions,
             });
+            break;
         }
     }
 
@@ -2548,6 +2590,7 @@ fn main() -> eframe::Result<()> {
                         let _ = bg_tts_tx.send(TtsCommand::Stop);
                         IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
                         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
+                        TARGET_REASONING_PASSES.store(5, Ordering::SeqCst);
                         if let Ok(mut hist) = IMMERSION_SCREEN_HISTORY.lock() {
                             hist.clear();
                         }

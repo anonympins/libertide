@@ -1,5 +1,5 @@
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::fs_util::{create_temp_note_file, find_executable_in_path, find_file_in_workspace};
@@ -153,6 +153,7 @@ pub static LAST_FOCUSED_RECT: Mutex<Option<[i32; 4]>> = Mutex::new(None);
 pub static CURRENT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 pub static IS_EMERGENCY_STOPPED: AtomicBool = AtomicBool::new(false);
 pub static AGENT_BUSY: AtomicBool = AtomicBool::new(false);
+pub static TARGET_REASONING_PASSES: AtomicUsize = AtomicUsize::new(5);
 
 pub fn is_request_cancelled(request_id: u64) -> bool {
     CURRENT_REQUEST_ID.load(Ordering::SeqCst) != request_id || IS_EMERGENCY_STOPPED.load(Ordering::SeqCst)
@@ -4918,6 +4919,13 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     Err(err) => feedback.push(format!("Erreur configuration démarrage auto : {err}")),
                 }
             }
+            AgentAction::SetReasoningPasses { passes, reason } => {
+                let clamped = (*passes).clamp(1, 15);
+                TARGET_REASONING_PASSES.store(clamped, Ordering::SeqCst);
+                let reason_desc = reason.as_deref().unwrap_or("ajustement au contexte d'urgence");
+                println!("[Actions] Quota de passes ajusté à {} (motif: {})", clamped, reason_desc);
+                feedback.push(format!("Budget de raisonnement configuré à {} passes ({reason_desc}).", clamped));
+            }
         }
     }
 
@@ -4980,6 +4988,12 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
             }
             AgentAction::CheckAutostart => {
                 feedback.push(format!("Autostart XDG actif : {}", is_autostart_enabled()));
+            }
+            AgentAction::SetReasoningPasses { passes, reason } => {
+                let clamped = (*passes).clamp(1, 15);
+                TARGET_REASONING_PASSES.store(clamped, Ordering::SeqCst);
+                let reason_desc = reason.as_deref().unwrap_or("ajustement au contexte d'urgence");
+                feedback.push(format!("Budget de raisonnement configuré à {} passes ({reason_desc}).", clamped));
             }
             _ => {}
         }
