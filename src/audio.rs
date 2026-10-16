@@ -317,7 +317,8 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
             let mut speech_detected = false;
             let mut last_speech_time = Instant::now();
             let mut start_recording_time = Instant::now();
-            const SPEECH_ENERGY_THRESHOLD: f32 = 0.012;
+            // Seuil abaissé à 0.008 pour détecter les voix faibles, chuchotées ou dysarthriques
+            const SPEECH_ENERGY_THRESHOLD: f32 = 0.008;
             const MAX_RECORDING_DURATION: Duration = Duration::from_secs(25);
 
             let is_listening = true;
@@ -375,9 +376,9 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
 
                     let is_dictation = crate::automation::IS_DICTATION_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
                     let silence_timeout = if is_dictation {
-                        Duration::from_millis(2200)
+                        Duration::from_millis(2800)
                     } else {
-                        Duration::from_millis(1750)
+                        Duration::from_millis(2200)
                     };
 
                     if (silence_elapsed >= silence_timeout && audio_16k_buffer.len() >= 8000)

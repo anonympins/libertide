@@ -235,6 +235,51 @@ fn is_stop_dictation_command(text: &str) -> bool {
     TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig))
 }
 
+fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
+    let norm = normalize_for_command_match(prompt);
+    #[cfg(windows)]
+    use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
+
+    match norm.as_str() {
+        "entree" | "entrée" | "valide" | "valider" | "enter" => {
+            #[cfg(windows)]
+            send_hotkey(&[], VIRTUAL_KEY(0x0D));
+            Some("Touche Entrée validée.")
+        }
+        "tab" | "tabulation" | "suivant" | "champ suivant" => {
+            #[cfg(windows)]
+            send_hotkey(&[], VIRTUAL_KEY(0x09));
+            Some("Tabulation.")
+        }
+        "precedent" | "précédent" | "champ precedent" | "champ précédent" => {
+            #[cfg(windows)]
+            send_hotkey(&[VIRTUAL_KEY(0x10)], VIRTUAL_KEY(0x09));
+            Some("Champ précédent.")
+        }
+        "descends" | "descendre" | "page suivante" | "scroll down" => {
+            #[cfg(windows)]
+            send_hotkey(&[], VIRTUAL_KEY(0x22)); // VK_NEXT (Page Down)
+            Some("Défilement vers le bas.")
+        }
+        "monte" | "monter" | "page precedente" | "page précédente" | "scroll up" => {
+            #[cfg(windows)]
+            send_hotkey(&[], VIRTUAL_KEY(0x21)); // VK_PRIOR (Page Up)
+            Some("Défilement vers le haut.")
+        }
+        "copie" | "copier" | "copy" => {
+            #[cfg(windows)]
+            send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x43)); // Ctrl + C
+            Some("Copié.")
+        }
+        "colle" | "coller" | "paste" => {
+            #[cfg(windows)]
+            send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x56)); // Ctrl + V
+            Some("Collé.")
+        }
+        _ => None,
+    }
+}
+
 fn is_hide_command(text: &str) -> bool {
     let norm = normalize_for_command_match(text);
     const DIRECT_PHRASES: &[&str] = &[
@@ -1224,6 +1269,21 @@ impl eframe::App for OverlayApp {
                     // 2. Sortie déterministe immédiate du mode dictée
                     if self.dictation_mode && is_stop_dictation_command(&prompt) {
                         self.exit_dictation_mode();
+                        return;
+                    }
+
+                    // 2 bis. Exécution déterministe locale instantanée des commandes de base (< 20 ms, 0 token LLM)
+                    if let Some(feedback) = try_execute_local_navigation_shortcut(&prompt) {
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::User,
+                            text: prompt,
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
                         return;
                     }
 
