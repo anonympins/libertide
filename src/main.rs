@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod audio;
 mod automation;
 mod fs_util;
@@ -83,6 +85,12 @@ pub struct OverlayApp {
     current_win_h: f32,
     is_hidden: bool,
     mouse_passthrough: bool,
+
+    // Boîte modale de configuration de la clé API
+    show_api_key_modal: bool,
+    api_key_input: String,
+    show_api_key_plain: bool,
+    api_key_error: Option<String>,
 }
 
 #[cfg(windows)]
@@ -183,6 +191,160 @@ fn is_show_command(text: &str) -> bool {
         w == "toi" || w == "overlay" || w == "deepseek" || w == "groq" || w == "libertide"
     });
     has_verb && has_target
+}
+
+fn is_api_key_command(text: &str) -> bool {
+    let words = clean_words(text);
+    let has_key = words.iter().any(|w| w == "cle" || w == "clé" || w == "key");
+    let has_api = words.iter().any(|w| w == "api" || w == "deepseek");
+    (has_key && has_api) || text.to_lowercase().contains("api key") || text.to_lowercase().contains("apikey")
+}
+
+#[cfg(windows)]
+fn restart_application() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    if let Ok(exe) = std::env::current_exe() {
+        let exe_str = exe.to_string_lossy().to_string();
+        let exe_clean = exe_str.strip_prefix(r"\\?\").unwrap_or(&exe_str).to_string();
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let cwd = std::env::current_dir().ok();
+        let working_dir_clean = cwd.as_ref().map(|d| {
+            let s = d.to_string_lossy().to_string();
+            s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+        });
+
+        // 1. Lancement via PowerShell : évite le conflit de dé-échappement de guillemets de cmd.exe
+        // et détache proprement le nouveau processus tout en respectant le temps de libération du GPU/micro.
+        let arg_list = if args.is_empty() {
+            String::new()
+        } else {
+            let formatted_args: Vec<String> = args
+                .iter()
+                .map(|a| format!("'{}'", a.replace('\'', "''")))
+                .collect();
+            format!(" -ArgumentList @({})", formatted_args.join(","))
+        };
+
+        let working_dir_arg = if let Some(ref d) = working_dir_clean {
+            format!(" -WorkingDirectory '{}'", d.replace('\'', "''"))
+        } else {
+            String::new()
+        };
+
+        let ps_script = format!(
+            "Start-Sleep -Milliseconds 800; Start-Process -FilePath '{}'{}{}",
+            exe_clean.replace('\'', "''"),
+            working_dir_arg,
+            arg_list
+        );
+
+        let mut ps_cmd = std::process::Command::new("powershell");
+        ps_cmd
+            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps_script])
+            .creation_flags(CREATE_NO_WINDOW);
+
+        if let Some(ref d) = working_dir_clean {
+            ps_cmd.current_dir(d);
+        }
+
+        if ps_cmd.spawn().is_ok() {
+            std::process::exit(0);
+        }
+
+        // 2. Repli de secours via cmd.exe en utilisant raw_arg (sans ré-échappement de guillemets par Rust)
+        let args_str = if args.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", args.join(" "))
+        };
+        let cmd_line = format!(r#"/C ping 127.0.0.1 -n 2 >nul & start "" "{}"{}"#, exe_clean, args_str);
+        let mut cmd = std::process::Command::new("cmd.exe");
+        cmd.raw_arg(cmd_line)
+            .creation_flags(CREATE_NO_WINDOW);
+
+        if let Some(ref d) = working_dir_clean {
+            cmd.current_dir(d);
+        }
+
+        let _ = cmd.spawn();
+        std::process::exit(0);
+    }
+}
+
+#[cfg(not(windows))]
+fn restart_application() {
+    if let Ok(exe) = std::env::current_exe() {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(format!("sleep 1 && \"{}\" \"$@\"", exe.display()))
+            .arg("--")
+            .args(&args);
+
+        if let Ok(cwd) = std::env::current_dir() {
+            cmd.current_dir(cwd);
+        }
+
+        let _ = cmd.spawn();
+        std::process::exit(0);
+    }
+}
+
+fn setup_custom_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    #[cfg(windows)]
+    {
+        let sys_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let font_candidates = [
+            format!(r"{sys_root}\Fonts\seguiemj.ttf"),
+            format!(r"{sys_root}\Fonts\seguisym.ttf"),
+        ];
+
+        for (idx, path) in font_candidates.iter().enumerate() {
+            if let Ok(font_data) = std::fs::read(path) {
+                let font_name = format!("system_fallback_font_{idx}");
+                fonts.font_data.insert(
+                    font_name.clone(),
+                    Arc::new(egui::FontData::from_owned(font_data)),
+                );
+
+                fonts
+                    .families
+                    .entry(egui::FontFamily::Proportional)
+                    .or_default()
+                    .push(font_name.clone());
+
+                fonts
+                    .families
+                    .entry(egui::FontFamily::Monospace)
+                    .or_default()
+                    .push(font_name);
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let font_candidates = [
+            "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+            "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ];
+        for (idx, path) in font_candidates.iter().enumerate() {
+            if let Ok(font_data) = std::fs::read(path) {
+                let font_name = format!("system_fallback_font_{idx}");
+                fonts.font_data.insert(font_name.clone(), Arc::new(egui::FontData::from_owned(font_data)));
+                fonts.families.entry(egui::FontFamily::Proportional).or_default().push(font_name.clone());
+                fonts.families.entry(egui::FontFamily::Monospace).or_default().push(font_name);
+                break;
+            }
+        }
+    }
+
+    ctx.set_fonts(fonts);
 }
 
 pub(crate) fn current_time_str() -> String {
@@ -380,7 +542,7 @@ fn spawn_tts_worker(_event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
 
 impl OverlayApp {
     pub fn new(
-        _cc: &eframe::CreationContext<'_>,
+        cc: &eframe::CreationContext<'_>,
         event_receiver: Receiver<AgentEvent>,
         command_sender: UnboundedSender<AgentCommand>,
         tts_sender: StdSender<TtsCommand>,
@@ -388,7 +550,15 @@ impl OverlayApp {
         twitch_channel_sender: StdSender<String>,
         initial_twitch_channel: String,
     ) -> Self {
-        let initial_subtitle = "En attente d'instructions d'exploration...".to_string();
+        setup_custom_fonts(&cc.egui_ctx);
+
+        let initial_key = resolve_deepseek_key();
+        let has_no_key = initial_key.is_empty();
+        let initial_subtitle = if has_no_key {
+            "Veuillez renseigner votre clé API DeepSeek pour activer l'assistant.".to_string()
+        } else {
+            "En attente d'instructions d'exploration...".to_string()
+        };
         let _ = tts_sender.send(TtsCommand::Speak(initial_subtitle.clone()));
 
         Self {
@@ -425,6 +595,10 @@ impl OverlayApp {
             current_win_h: 154.0,
             is_hidden: false,
             mouse_passthrough: false,
+            show_api_key_modal: has_no_key,
+            api_key_input: initial_key,
+            show_api_key_plain: false,
+            api_key_error: None,
         }
     }
 
@@ -839,6 +1013,21 @@ impl eframe::App for OverlayApp {
                         return;
                     }
                     self.stop_speaking();
+                    if is_api_key_command(&prompt) {
+                        self.show_api_key_modal = true;
+                        self.is_hidden = false;
+                        let reply = "Boîte de configuration de la clé API ouverte.".to_string();
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: reply.clone(),
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                        self.continuous_mode = false;
+                        continue;
+                    }
                     if self.is_hidden {
                         if is_show_command(&prompt) {
                             self.is_hidden = false;
@@ -940,6 +1129,10 @@ impl eframe::App for OverlayApp {
                     if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                         self.start_recording(&ctx);
                     }
+                }
+                AgentEvent::RequestApiKey => {
+                    self.show_api_key_modal = true;
+                    self.is_hidden = false;
                 }
             }
         }
@@ -1107,6 +1300,20 @@ impl eframe::App for OverlayApp {
                                                         .color(egui::Color32::from_rgba_unmultiplied(170, 185, 205, 140)),
                                                 );
 
+                                                ui.add_space(2.0);
+                                                let copy_msg_btn = ui.add(
+                                                    egui::Button::new(
+                                                        egui::RichText::new("📋")
+                                                            .size(9.0)
+                                                            .color(egui::Color32::from_rgb(180, 205, 230)),
+                                                    )
+                                                    .small()
+                                                    .corner_radius(egui::CornerRadius::same(4)),
+                                                );
+                                                if copy_msg_btn.on_hover_text("Copier ce message dans le presse-papiers").clicked() {
+                                                    set_clipboard_text(&entry.text);
+                                                }
+
                                                 if entry.role == ChatRole::Agent && Some(idx) == last_agent_idx && self.status == AgentStatus::Speaking {
                                                     ui.add_space(4.0);
                                                     let stop_btn = ui.add(
@@ -1148,7 +1355,13 @@ impl eframe::App for OverlayApp {
                                             if is_strong {
                                                 rich = rich.strong();
                                             }
-                                            ui.add(egui::Label::new(rich).wrap());
+                                            let label_resp = ui.add(egui::Label::new(rich).wrap().selectable(true));
+                                            label_resp.context_menu(|ui| {
+                                                if ui.button("📋 Copier le texte").clicked() {
+                                                    set_clipboard_text(&entry.text);
+                                                    ui.close();
+                                                }
+                                            });
 
                                             // Boutons-onglets pour les suggestions rapides
                                             if !entry.quick_suggestions.is_empty() {
@@ -1474,7 +1687,7 @@ impl eframe::App for OverlayApp {
                                             }
                                         }
 
-                                        let edit_width = (ui.available_width() - 124.0).max(80.0);
+                                        let edit_width = (ui.available_width() - 156.0).max(60.0);
                                         let input_id = egui::Id::new("prompt_input_text");
                                         let response = ui.add_sized(
                                             [edit_width, 24.0],
@@ -1486,6 +1699,41 @@ impl eframe::App for OverlayApp {
                                                     "Consigne d'exploration... (entrée)"
                                                 }),
                                         );
+
+                                        response.context_menu(|ui| {
+                                            if ui.button("📋 Coller").clicked() {
+                                                if let Some(clip) = get_clipboard_text() {
+                                                    self.input_text.push_str(&clip);
+                                                }
+                                                ui.close();
+                                            }
+                                            if ui.button("📄 Copier tout").clicked() {
+                                                set_clipboard_text(&self.input_text);
+                                                ui.close();
+                                            }
+                                            if ui.button("✂ Couper tout").clicked() {
+                                                set_clipboard_text(&self.input_text);
+                                                self.input_text.clear();
+                                                ui.close();
+                                            }
+                                            if ui.button("🗑 Effacer").clicked() {
+                                                self.input_text.clear();
+                                                ui.close();
+                                            }
+                                        });
+
+                                        if response.has_focus() {
+                                            let paste_hit = ctx.input(|i| {
+                                                ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
+                                                    || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                            });
+                                            let egui_pasted = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
+                                            if paste_hit && !egui_pasted {
+                                                if let Some(clip) = get_clipboard_text() {
+                                                    self.input_text.push_str(&clip);
+                                                }
+                                            }
+                                        }
 
                                         if response.changed() {
                                             self.stop_speaking();
@@ -1508,7 +1756,20 @@ impl eframe::App for OverlayApp {
                                                 quick_suggestions: Vec::new(),
                                                 screen_size_kb: None,
                                             });
-                                            if is_hide_command(&prompt) {
+                                            if is_api_key_command(&prompt) {
+                                                self.show_api_key_modal = true;
+                                                let reply = "Boîte de configuration de la clé API ouverte.".to_string();
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::Agent,
+                                                    text: reply.clone(),
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                                                self.status = AgentStatus::Idle;
+                                                self.continuous_mode = false;
+                                            } else if is_hide_command(&prompt) {
                                                 self.is_hidden = true;
                                                 self.status = AgentStatus::Idle;
                                                 let reply = "Overlay masqué. Je reste à l'écoute pour « deepseek ouvre toi ».".to_string();
@@ -1524,6 +1785,22 @@ impl eframe::App for OverlayApp {
                                                 self.status = AgentStatus::Thinking;
                                                 let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
                                             }
+                                        }
+
+                                        let paste_btn = ui.button("📋").on_hover_text("Coller le texte du presse-papiers");
+                                        if paste_btn.clicked() {
+                                            if let Some(clip) = get_clipboard_text() {
+                                                self.input_text.push_str(&clip);
+                                            }
+                                        }
+
+                                        let key_btn = ui
+                                            .button("🔑")
+                                            .on_hover_text("Configurer la clé API DeepSeek");
+                                        if key_btn.clicked() {
+                                            self.show_api_key_modal = true;
+                                            self.api_key_error = None;
+                                            self.stop_speaking();
                                         }
 
                                         let clear_btn = ui
@@ -1679,6 +1956,94 @@ impl eframe::App for OverlayApp {
                     [egui::pos2(grip_se.min.x + 3.0, grip_se.max.y), egui::pos2(grip_se.max.x, grip_se.min.y + 3.0)],
                     egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 50)),
                 );
+
+                // Boîte modale de saisie de la clé API DeepSeek
+                if self.show_api_key_modal {
+                    egui::Window::new("🔑 Configuration de la clé API DeepSeek")
+                        .collapsible(false)
+                        .resizable(false)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                        .show(&ctx, |ui| {
+                            ui.label(
+                                egui::RichText::new("Renseignez votre DEEPSEEK_API_KEY :")
+                                    .color(egui::Color32::WHITE)
+                                    .strong(),
+                            );
+                            ui.add_space(4.0);
+
+                            ui.horizontal(|ui| {
+                                let edit = egui::TextEdit::singleline(&mut self.api_key_input)
+                                    .password(!self.show_api_key_plain)
+                                    .hint_text("sk-...")
+                                    .desired_width(230.0);
+                                let edit_resp = ui.add(edit);
+
+                                let eye_icon = if self.show_api_key_plain { "🔒" } else { "👁" };
+                                if ui.button(eye_icon).on_hover_text("Afficher/Masquer la clé").clicked() {
+                                    self.show_api_key_plain = !self.show_api_key_plain;
+                                }
+
+                                if ui.button("📋").on_hover_text("Coller depuis le presse-papiers").clicked() {
+                                    if let Some(clip) = get_clipboard_text() {
+                                        self.api_key_input = clip.trim().to_string();
+                                    }
+                                }
+
+                                edit_resp.context_menu(|ui| {
+                                    if ui.button("📋 Coller").clicked() {
+                                        if let Some(clip) = get_clipboard_text() {
+                                            self.api_key_input = clip.trim().to_string();
+                                        }
+                                        ui.close();
+                                    }
+                                    if ui.button("📄 Copier").clicked() {
+                                        set_clipboard_text(&self.api_key_input);
+                                        ui.close();
+                                    }
+                                    if ui.button("🗑 Effacer").clicked() {
+                                        self.api_key_input.clear();
+                                        ui.close();
+                                    }
+                                });
+
+                                if edit_resp.has_focus() {
+                                    let paste_hit = ctx.input(|i| {
+                                        ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
+                                            || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                    });
+                                    let egui_pasted = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
+                                    if paste_hit && !egui_pasted {
+                                        if let Some(clip) = get_clipboard_text() {
+                                            self.api_key_input = clip.trim().to_string();
+                                        }
+                                    }
+                                }
+                            });
+
+                            if let Some(ref err) = self.api_key_error {
+                                ui.add_space(2.0);
+                                ui.label(egui::RichText::new(err).color(egui::Color32::from_rgb(255, 110, 110)).size(11.0));
+                            }
+
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("💾 Enregistrer & Relancer").clicked() {
+                                    let key = self.api_key_input.trim();
+                                    if key.is_empty() {
+                                        self.api_key_error = Some("La clé API ne peut pas être vide.".to_string());
+                                    } else if let Err(e) = write_env_var_to_file(".env", "DEEPSEEK_API_KEY", key) {
+                                        self.api_key_error = Some(format!("Erreur d'écriture : {e}"));
+                                    } else {
+                                        restart_application();
+                                    }
+                                }
+                                if ui.button("Annuler").clicked() {
+                                    self.show_api_key_modal = false;
+                                    self.api_key_error = None;
+                                }
+                            });
+                        });
+                }
             });
     }
 }
@@ -2044,6 +2409,7 @@ async fn call_deepseek_prompt(
             text: "Veuillez renseigner DEEPSEEK_API_KEY dans le fichier .env.".into(),
             quick_suggestions: Vec::new(),
         });
+        let _ = event_tx.send(AgentEvent::RequestApiKey);
         let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
         return;
     }

@@ -60,6 +60,7 @@ pub enum AgentEvent {
     TwitchChatReceived(TwitchMessage),
     TwitchSearchResults(Vec<TwitchChannelItem>),
     RequestIgnored,
+    RequestApiKey,
 }
 
 #[derive(Debug, Clone)]
