@@ -171,33 +171,157 @@ fn sanitize_for_tts(text: &str) -> String {
     result.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
+fn normalize_for_command_match(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ")
+}
+
+fn is_emergency_stop_command(text: &str) -> bool {
+    let norm = normalize_for_command_match(text);
+    if norm == "stop" || norm == "stopp" || norm == "стоп" || norm == "停止" || norm == "ストップ" {
+        return true;
+    }
+    const TRIGGERS: &[&str] = &[
+        // FR
+        "arret d urgence", "arrêt d urgence", "arrete tout", "arrête tout", "stop tout", "urgence",
+        // EN
+        "emergency stop", "stop all", "stop everything", "abort", "halt", "freeze",
+        // ES
+        "parada de emergencia", "deten todo", "detén todo", "para todo", "emergencia", "alto ahi",
+        // DE
+        "not aus", "notaus", "alles anhalten", "alles stoppen", "notfall", "abbrechen",
+        // IT
+        "arresto d emergenza", "ferma tutto", "blocca tutto", "emergenza", "annulla tutto",
+        // PT
+        "parada de emergencia", "parada de emergência", "pare tudo", "parar tudo", "emergencia", "abortar",
+        // RU
+        "экстренная остановка", "останови все", "останови всё", "стоп все", "стоп всё", "аварийная остановка",
+        // ZH
+        "紧急停止", "全部停止", "立即停止", "停止运行", "中止",
+        // JA
+        "緊急停止", "すべて停止", "すべて止めて", "中止", "直ちに停止",
+    ];
+    TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig))
+}
+
+fn is_stop_dictation_command(text: &str) -> bool {
+    let norm = normalize_for_command_match(text);
+    const TRIGGERS: &[&str] = &[
+        // FR
+        "arrete la dictee", "arrête la dictée", "stop dictee", "stop dictée", "quitter la dictee", "quitter la dictée",
+        "fin de la dictee", "fin de la dictée", "termine la dictee", "termine la dictée", "desactiver dictee", "désactiver dictée",
+        // EN
+        "stop dictation", "exit dictation", "quit dictation", "end dictation", "finish dictation", "disable dictation",
+        // ES
+        "detener dictado", "parar dictado", "salir del dictado", "terminar dictado", "desactivar dictado", "fin del dictado",
+        // DE
+        "diktat beenden", "diktat stoppen", "diktat anhalten", "diktat abbrechen", "diktat deaktivieren",
+        // IT
+        "interrompi dettatura", "ferma dettatura", "esci dalla dettatura", "termina dettatura", "disattiva dettatura",
+        // PT
+        "parar ditado", "encerrar ditado", "sair do ditado", "terminar ditado", "desativar ditado", "fim do ditado",
+        // RU
+        "остановить диктовку", "завершить диктовку", "выход из диктовки", "стоп диктовка", "отключить диктовку",
+        // ZH
+        "停止听写", "退出听写", "结束听写", "关闭听写",
+        // JA
+        "ディクテーション終了", "ディクテーション停止", "入力終了", "音声入力停止",
+    ];
+    TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig))
+}
+
 fn is_hide_command(text: &str) -> bool {
-    let words = clean_words(text);
-    let has_verb = words.iter().any(|w| {
-        w == "ferme" || w == "fermer" || w == "cache" || w == "cacher" || w == "masque" || w == "masquer" || w == "disparais"
-    });
-    let has_target = words.iter().any(|w| {
-        w == "toi" || w == "overlay" || w == "deepseek" || w == "groq" || w == "libertide"
-    });
+    let norm = normalize_for_command_match(text);
+    const DIRECT_PHRASES: &[&str] = &[
+        // FR
+        "ferme toi", "cache toi", "masque toi", "disparais", "fermer overlay", "cacher overlay", "masquer overlay",
+        // EN
+        "hide yourself", "close yourself", "hide overlay", "close overlay", "disappear", "minimize overlay",
+        // ES
+        "ocultate", "ocúltate", "escondete", "escóndete", "ocultar overlay", "cerrar overlay", "desaparece",
+        // DE
+        "versteck dich", "verstecke dich", "overlay schliessen", "overlay schließen", "overlay verstecken", "verschwinde",
+        // IT
+        "nasconditi", "chiuditi", "nascondi overlay", "chiudi overlay", "sparisci",
+        // PT
+        "esconda se", "esconda-se", "oculte se", "oculte-se", "esconder overlay", "fechar overlay", "desapareca", "desapareça",
+        // RU
+        "скройся", "спрячься", "закройся", "скрыть оверлей", "исчезни",
+        // ZH
+        "隐藏", "隐藏自己", "退下", "关闭悬浮窗", "隐藏窗口",
+        // JA
+        "隠れて", "非表示", "消えて", "オーバーレイを隠して",
+    ];
+    if DIRECT_PHRASES.iter().any(|&p| norm.contains(p) || text.contains(p)) {
+        return true;
+    }
+    let has_verb = norm.contains("ferme") || norm.contains("cache") || norm.contains("masque") || norm.contains("hide") || norm.contains("close");
+    let has_target = norm.contains("overlay") || norm.contains("deepseek") || norm.contains("libertide");
     has_verb && has_target
 }
 
 fn is_show_command(text: &str) -> bool {
-    let words = clean_words(text);
-    let has_verb = words.iter().any(|w| {
-        w == "ouvre" || w == "ouvrir" || w == "affiche" || w == "afficher" || w == "montre" || w == "montrer" || w == "reveille" || w == "réveille" || w == "reveiller" || w == "réveiller"
-    });
-    let has_target = words.iter().any(|w| {
-        w == "toi" || w == "overlay" || w == "deepseek" || w == "groq" || w == "libertide"
-    });
+    let norm = normalize_for_command_match(text);
+    const DIRECT_PHRASES: &[&str] = &[
+        // FR
+        "ouvre toi", "affiche toi", "montre toi", "reveille toi", "réveille toi", "ouvrir overlay", "afficher overlay",
+        // EN
+        "show yourself", "open up", "wake up", "appear", "open overlay", "show overlay",
+        // ES
+        "muestrate", "muéstrate", "abrete", "ábrete", "despierta", "aparece", "mostrar overlay", "abrir overlay",
+        // DE
+        "zeige dich", "offne dich", "öffne dich", "aufwachen", "erscheine", "overlay zeigen", "overlay offnen", "overlay öffnen",
+        // IT
+        "mostrati", "apriti", "svegliati", "mostra overlay", "apri overlay",
+        // PT
+        "mostre se", "mostre-se", "abra se", "abra-se", "acorde", "apareca", "apareça", "mostrar overlay", "abrir overlay",
+        // RU
+        "покажись", "откройся", "проснись", "открыть оверлей", "показать оверлей",
+        // ZH
+        "出来", "显示", "唤醒", "打开悬浮窗", "打开",
+        // JA
+        "出てきて", "表示して", "起きて", "オーバーレイを表示",
+    ];
+    if DIRECT_PHRASES.iter().any(|&p| norm.contains(p) || text.contains(p)) {
+        return true;
+    }
+    let has_verb = norm.contains("ouvre") || norm.contains("affiche") || norm.contains("montre") || norm.contains("show") || norm.contains("open");
+    let has_target = norm.contains("overlay") || norm.contains("deepseek") || norm.contains("libertide");
     has_verb && has_target
 }
 
 fn is_api_key_command(text: &str) -> bool {
-    let words = clean_words(text);
-    let has_key = words.iter().any(|w| w == "cle" || w == "clé" || w == "key");
-    let has_api = words.iter().any(|w| w == "api" || w == "deepseek");
-    (has_key && has_api) || text.to_lowercase().contains("api key") || text.to_lowercase().contains("apikey")
+    let norm = normalize_for_command_match(text);
+    const TRIGGERS: &[&str] = &[
+        "api key", "apikey", "api cle", "api clé", "cle api", "clé api",
+        "clave api", "llave api",
+        "api schlussel", "api schlüssel",
+        "chiave api",
+        "chave api",
+        "ключ апи", "апи ключ", "ключ api",
+        "api密钥", "api 密钥",
+        "apiキー", "api キー",
+    ];
+    TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig))
+}
+
+fn localized_speech(lang_code: &str, fr: &str, en: &str, es: &str, de: &str, it: &str, pt: &str, ru: &str, zh: &str, ja: &str) -> String {
+    match lang_code {
+        "en" => en.to_string(),
+        "es" => es.to_string(),
+        "de" => de.to_string(),
+        "it" => it.to_string(),
+        "pt" => pt.to_string(),
+        "ru" => ru.to_string(),
+        "zh" => zh.to_string(),
+        "ja" => ja.to_string(),
+        _ => fr.to_string(),
+    }
 }
 
 #[cfg(windows)]
@@ -779,7 +903,20 @@ impl OverlayApp {
         self.live_transcript.clear();
         self.is_hidden = false;
         self.status = AgentStatus::EmergencyStopped;
-        let stop_msg = "Arrêt d'urgence : contrôle rendu à l'utilisateur.".to_string();
+        let (locale, _) = get_system_locale_language();
+        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+        let stop_msg = localized_speech(
+            lang_prefix,
+            "Arrêt d'urgence : contrôle rendu à l'utilisateur.",
+            "Emergency stop: control returned to the user.",
+            "Parada de emergencia: control devuelto al usuario.",
+            "Not-Aus: Kontrolle an den Benutzer zurückgegeben.",
+            "Arresto di emergenza: controllo restituito all'utente.",
+            "Parada de emergência: controle retornado ao usuário.",
+            "Экстренная остановка: управление возвращено пользователю.",
+            "紧急停止：控制权已交还用户。",
+            "緊急停止：操作権がユーザーに返却されました。",
+        );
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
             text: stop_msg.clone(),
@@ -802,7 +939,20 @@ impl OverlayApp {
         self.live_transcript.clear();
         self.status = AgentStatus::Idle;
         let _ = self.tts_sender.send(TtsCommand::Stop);
-        let msg = "Mode dictée désactivé.".to_string();
+        let (locale, _) = get_system_locale_language();
+        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+        let msg = localized_speech(
+            lang_prefix,
+            "Mode dictée désactivé.",
+            "Dictation mode disabled.",
+            "Modo dictado desactivado.",
+            "Diktatmodus deaktiviert.",
+            "Modalità dettatura disattivata.",
+            "Modo ditado desativado.",
+            "Режим диктовки отключен.",
+            "听写模式已停用。",
+            "音声入力モードを解除しました。",
+        );
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
             text: msg.clone(),
@@ -1061,10 +1211,38 @@ impl eframe::App for OverlayApp {
                         return;
                     }
                     self.stop_speaking();
+
+                    let (locale, _) = get_system_locale_language();
+                    let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+
+                    // 1. Arrêt d'urgence local universel (<50ms, sans requête LLM)
+                    if is_emergency_stop_command(&prompt) {
+                        self.trigger_emergency_stop(&ctx);
+                        return;
+                    }
+
+                    // 2. Sortie déterministe immédiate du mode dictée
+                    if self.dictation_mode && is_stop_dictation_command(&prompt) {
+                        self.exit_dictation_mode();
+                        return;
+                    }
+
+                    // 3. Configuration de la clé API
                     if is_api_key_command(&prompt) {
                         self.show_api_key_modal = true;
                         self.is_hidden = false;
-                        let reply = "Boîte de configuration de la clé API ouverte.".to_string();
+                        let reply = localized_speech(
+                            lang_prefix,
+                            "Boîte de configuration de la clé API ouverte.",
+                            "API key configuration dialog opened.",
+                            "Ventana de configuración de clave API abierta.",
+                            "API-Schlüssel-Konfigurationsdialog geöffnet.",
+                            "Finestra di configurazione chiave API aperta.",
+                            "Caixa de configuração da chave de API aberta.",
+                            "Диалог настройки API-ключа открыт.",
+                            "API密钥配置窗口已打开。",
+                            "APIキー設定ダイアログを開きました。",
+                        );
                         self.chat_history.push(ChatEntry {
                             role: ChatRole::Agent,
                             text: reply.clone(),
@@ -1076,6 +1254,8 @@ impl eframe::App for OverlayApp {
                         self.continuous_mode = false;
                         continue;
                     }
+
+                    // 4. Masquage / Réaffichage de l'overlay
                     if self.is_hidden {
                         if is_show_command(&prompt) {
                             self.is_hidden = false;
@@ -1087,7 +1267,18 @@ impl eframe::App for OverlayApp {
                                 quick_suggestions: Vec::new(),
                                 screen_size_kb: None,
                             });
-                            let reply = "Me revoilà, overlay réaffiché.".to_string();
+                            let reply = localized_speech(
+                                lang_prefix,
+                                "Me revoilà, overlay réaffiché.",
+                                "I'm back, overlay restored.",
+                                "Aquí estoy de nuevo, interfaz mostrada.",
+                                "Hier bin ich wieder, Overlay eingeblendet.",
+                                "Eccomi di nuovo, interfaccia ripristinata.",
+                                "Estou de volta, overlay restaurado.",
+                                "Снова здесь, оверлей отображён.",
+                                "我回来了，悬浮窗已恢复显示。",
+                                "お待たせしました、オーバーレイを再表示しました。",
+                            );
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
@@ -1112,7 +1303,18 @@ impl eframe::App for OverlayApp {
                                 quick_suggestions: Vec::new(),
                                 screen_size_kb: None,
                             });
-                            let reply = "Overlay masqué. Je reste à l'écoute pour « deepseek ouvre toi ».".to_string();
+                            let reply = localized_speech(
+                                lang_prefix,
+                                "Overlay masqué. Je reste à l'écoute.",
+                                "Overlay hidden. Still listening in the background.",
+                                "Interfaz oculta. Sigo escuchando en segundo plano.",
+                                "Overlay ausgeblendet. Ich höre im Hintergrund weiter zu.",
+                                "Interfaccia nascosta. Resto in ascolto in background.",
+                                "Overlay oculto. Continuo ouvindo em segundo plano.",
+                                "Оверлей скрыт. Продолжаю слушать в фоновом режиме.",
+                                "悬浮窗已隐藏，仍在后台监听指令。",
+                                "オーバーレイを非表示にしました。バックグラウンドで待機中です。",
+                            );
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
@@ -1123,7 +1325,18 @@ impl eframe::App for OverlayApp {
                             let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                             self.continuous_mode = true;
                         } else if is_show_command(&prompt) {
-                            let reply = "L'overlay est déjà actif et visible.".to_string();
+                            let reply = localized_speech(
+                                lang_prefix,
+                                "L'overlay est déjà actif et visible.",
+                                "The overlay is already active and visible.",
+                                "La interfaz ya está activa y visible.",
+                                "Das Overlay ist bereits aktiv und sichtbar.",
+                                "L'interfaccia è già attiva e visibile.",
+                                "O overlay já está ativo e visível.",
+                                "Оверлей уже активен и виден.",
+                                "悬浮窗已经处于激活和可见状态。",
+                                "オーバーレイは既に表示されています。",
+                            );
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
