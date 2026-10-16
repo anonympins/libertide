@@ -2690,15 +2690,21 @@ fn main() -> eframe::Result<()> {
     });
 
     // Fenêtre transparente compacte, ferrée en bas à droite
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_always_on_top()
+        .with_resizable(true)
+        .with_min_inner_size([380.0, 134.0])
+        .with_inner_size([560.0, 154.0]);
+
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../public/favicon-256x256.png")) {
+        viewport = viewport.with_icon(Arc::new(icon));
+    }
+
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
-        viewport: egui::ViewportBuilder::default()
-            .with_decorations(false)
-            .with_transparent(true)
-            .with_always_on_top()
-            .with_resizable(true)
-            .with_min_inner_size([380.0, 134.0])
-            .with_inner_size([560.0, 154.0]),
+        viewport,
         ..Default::default()
     };
 
