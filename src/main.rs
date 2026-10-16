@@ -36,6 +36,44 @@ use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
+#[cfg(windows)]
+extern "system" {
+    fn Beep(dwFreq: u32, dwDuration: u32) -> i32;
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Earcon {
+    MicOpen,
+    MicClose,
+    Success,
+    Emergency,
+}
+
+pub fn play_earcon(earcon: Earcon) {
+    #[cfg(windows)]
+    std::thread::spawn(move || unsafe {
+        match earcon {
+            Earcon::MicOpen => {
+                Beep(600, 40);
+                Beep(900, 50);
+            }
+            Earcon::MicClose => {
+                Beep(750, 40);
+                Beep(500, 50);
+            }
+            Earcon::Success => {
+                Beep(1000, 50);
+            }
+            Earcon::Emergency => {
+                for _ in 0..3 {
+                    Beep(1200, 60);
+                    Beep(800, 60);
+                }
+            }
+        }
+    });
+}
+
 static TTS_AUDIO_LEVEL: AtomicU32 = AtomicU32::new(0);
 static MIC_AUDIO_LEVEL: AtomicU32 = AtomicU32::new(0);
 
@@ -66,6 +104,14 @@ pub struct OverlayApp {
     smoothed_audio_level: f32,
     continuous_mode: bool,
     dictation_mode: bool,
+    zoom_factor: f32,
+
+    // Accessibilité : Ciblage par numéros & Mode contacteur unique (Switch Access)
+    numbered_targets: Vec<NumberedElementTarget>,
+    show_numbered_targets: bool,
+    switch_access_mode: bool,
+    switch_focus_index: usize,
+    switch_last_tick: Instant,
 
     // Canaux de communication asynchrones
     event_receiver: Receiver<AgentEvent>,
@@ -241,6 +287,59 @@ fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
     use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
 
     match norm.as_str() {
+        "clic" | "clic gauche" | "click" | "left click" => {
+            #[cfg(windows)]
+            unsafe {
+                windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
+                    windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0,
+                );
+                std::thread::sleep(Duration::from_millis(25));
+                windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
+                    windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTUP, 0, 0, 0, 0,
+                );
+            }
+            Some("Clic gauche.")
+        }
+        "clic droit" | "right click" => {
+            #[cfg(windows)]
+            unsafe {
+                windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
+                    windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0,
+                );
+                std::thread::sleep(Duration::from_millis(25));
+                windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
+                    windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0,
+                );
+            }
+            Some("Clic droit.")
+        }
+        "double clic" | "double click" => {
+            #[cfg(windows)]
+            unsafe {
+                use windows::Win32::UI::Input::KeyboardAndMouse::{mouse_event, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP};
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                std::thread::sleep(Duration::from_millis(50));
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+            }
+            Some("Double clic.")
+        }
+        "enregistre" | "enregistrer" | "sauvegarde" | "sauvegarder" | "save" => {
+            #[cfg(windows)]
+            send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x53)); // Ctrl + S
+            Some("Sauvegardé (Ctrl+S).")
+        }
+        "annule" | "annuler" | "undo" => {
+            #[cfg(windows)]
+            send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x5A)); // Ctrl + Z
+            Some("Annulé (Ctrl+Z).")
+        }
+        "selectionne tout" | "sélectionne tout" | "select all" | "tout selectionner" => {
+            #[cfg(windows)]
+            send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x41)); // Ctrl + A
+            Some("Tout sélectionné.")
+        }
         "entree" | "entrée" | "valide" | "valider" | "enter" => {
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x0D));
@@ -795,6 +894,14 @@ impl OverlayApp {
             is_recording: false,
             continuous_mode: true,
             dictation_mode: false,
+            zoom_factor: 1.0,
+
+            numbered_targets: Vec::new(),
+            show_numbered_targets: false,
+            switch_access_mode: false,
+            switch_focus_index: 0,
+            switch_last_tick: Instant::now(),
+
             event_receiver,
             command_sender,
             tts_sender,
@@ -948,6 +1055,7 @@ impl OverlayApp {
         self.live_transcript.clear();
         self.is_hidden = false;
         self.status = AgentStatus::EmergencyStopped;
+        play_earcon(Earcon::Emergency);
         let (locale, _) = get_system_locale_language();
         let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
         let stop_msg = localized_speech(
@@ -977,6 +1085,7 @@ impl OverlayApp {
         self.dictation_mode = false;
         self.continuous_mode = false;
         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
+        play_earcon(Earcon::Success);
         let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
         if self.is_recording {
             self.stop_recording();
@@ -1017,6 +1126,7 @@ impl OverlayApp {
         self.continuous_mode = true;
         self.is_recording = true;
         self.status = AgentStatus::Listening;
+        play_earcon(Earcon::MicOpen);
         if !self.is_hidden {
             self.live_transcript = "Écoute Whisper active... parlez à votre micro.".to_string();
         } else {
@@ -1032,6 +1142,7 @@ impl OverlayApp {
         self.is_recording = false;
         self.continuous_mode = false;
         let _ = self.audio_sender.send(AudioCommand::Stop);
+        play_earcon(Earcon::MicClose);
         set_mic_audio_level(0.0);
         self.live_transcript.clear();
         self.status = AgentStatus::Idle;
@@ -1058,6 +1169,8 @@ impl eframe::App for OverlayApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        ctx.set_zoom_factor(self.zoom_factor);
 
         update_last_external_focus();
 
@@ -1257,6 +1370,94 @@ impl eframe::App for OverlayApp {
                     }
                     self.stop_speaking();
 
+                    let norm_prompt = normalize_for_command_match(&prompt);
+
+                    // Traitement du zoom adaptatif vocal
+                    if norm_prompt.contains("grossis") || norm_prompt.contains("zoom plus") || norm_prompt.contains("agrandis") || norm_prompt.contains("zoom in") {
+                        self.zoom_factor = (self.zoom_factor + 0.15).clamp(0.7, 2.5);
+                        play_earcon(Earcon::Success);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("zoom moins") || norm_prompt.contains("retrecis") || norm_prompt.contains("rétrécis") || norm_prompt.contains("zoom out") {
+                        self.zoom_factor = (self.zoom_factor - 0.15).clamp(0.7, 2.5);
+                        play_earcon(Earcon::Success);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("zoom normal") || norm_prompt.contains("taille normale") || norm_prompt.contains("reset zoom") {
+                        self.zoom_factor = 1.0;
+                        play_earcon(Earcon::Success);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+
+                    // Bascule / activation du ciblage par numéros
+                    if norm_prompt == "numeros" || norm_prompt == "numéros" || norm_prompt == "badges" || norm_prompt == "afficher les numeros" || norm_prompt == "click by number" {
+                        self.numbered_targets = collect_numbered_targets_for_active_window();
+                        self.show_numbered_targets = !self.numbered_targets.is_empty();
+                        play_earcon(Earcon::Success);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+
+                    // Sélection directe d'un badge numéroté
+                    if self.show_numbered_targets {
+                        let parsed_idx = match norm_prompt.as_str() {
+                            "un" | "1" => Some(1),
+                            "deux" | "2" => Some(2),
+                            "trois" | "3" => Some(3),
+                            "quatre" | "4" => Some(4),
+                            "cinq" | "5" => Some(5),
+                            "six" | "6" => Some(6),
+                            "sept" | "7" => Some(7),
+                            "huit" | "8" => Some(8),
+                            "neuf" | "9" => Some(9),
+                            "dix" | "10" => Some(10),
+                            other => other.split_whitespace().find_map(|s| s.parse::<usize>().ok()),
+                        };
+                        if let Some(idx) = parsed_idx {
+                            if let Some(target) = self.numbered_targets.iter().find(|t| t.index == idx) {
+                                #[cfg(windows)]
+                                unsafe {
+                                    windows::Win32::UI::WindowsAndMessaging::SetCursorPos(target.click_x, target.click_y);
+                                    std::thread::sleep(Duration::from_millis(30));
+                                    windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
+                                        windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0,
+                                    );
+                                    std::thread::sleep(Duration::from_millis(25));
+                                    windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
+                                        windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTUP, 0, 0, 0, 0,
+                                    );
+                                }
+                                play_earcon(Earcon::Success);
+                                self.show_numbered_targets = false;
+                                self.numbered_targets.clear();
+                                if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                                    self.start_recording(&ctx);
+                                }
+                                return;
+                            }
+                        }
+                    }
+
+                    if norm_prompt.contains("mode contacteur") || norm_prompt.contains("switch access") {
+                        self.switch_access_mode = !self.switch_access_mode;
+                        play_earcon(Earcon::Success);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+
                     let (locale, _) = get_system_locale_language();
                     let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
 
@@ -1274,6 +1475,7 @@ impl eframe::App for OverlayApp {
 
                     // 2 bis. Exécution déterministe locale instantanée des commandes de base (< 20 ms, 0 token LLM)
                     if let Some(feedback) = try_execute_local_navigation_shortcut(&prompt) {
+                        play_earcon(Earcon::Success);
                         self.chat_history.push(ChatEntry {
                             role: ChatRole::User,
                             text: prompt,
@@ -1458,6 +1660,32 @@ impl eframe::App for OverlayApp {
             }
         }
 
+        let is_typing = ctx.memory(|m| m.focused().is_some());
+
+        // Gestion du Switch Access : défilement séquentiel périodique et validation sur Espace
+        if self.switch_access_mode && !is_typing {
+            if self.switch_last_tick.elapsed() >= Duration::from_millis(1500) {
+                self.switch_focus_index = self.switch_focus_index.saturating_add(1);
+                self.switch_last_tick = Instant::now();
+            }
+
+            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+                play_earcon(Earcon::Success);
+                // Si des suggestions rapides sont affichées, exécuter celle sous le focus
+                if let Some(last_entry) = self.chat_history.last() {
+                    if !last_entry.quick_suggestions.is_empty() {
+                        let idx = self.switch_focus_index % last_entry.quick_suggestions.len();
+                        if let Some(text) = last_entry.quick_suggestions[idx].to_display_string() {
+                            let _ = self.command_sender.send(AgentCommand::Prompt(text));
+                        }
+                    } else {
+                        self.toggle_recording(&ctx);
+                    }
+                }
+                self.switch_last_tick = Instant::now();
+            }
+        }
+
         // Gestion de la touche Échap : quitte le mode dictée si actif, sinon arrêt d'urgence global
         let egui_escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         #[cfg(windows)]
@@ -1478,7 +1706,6 @@ impl eframe::App for OverlayApp {
         }
 
         // Raccourci clavier 'R' pour basculer le micro (désactivé si l'utilisateur est en train de taper du texte)
-        let is_typing = ctx.memory(|m| m.focused().is_some());
         if !self.is_hidden && !is_typing && ctx.input(|i| i.key_pressed(egui::Key::R)) {
             self.toggle_recording(&ctx);
         }
@@ -2239,6 +2466,44 @@ impl eframe::App for OverlayApp {
                 // Poignées visuelles de redimensionnement discrètes aux coins
                 let painter = ui.painter();
 
+                // Tracé des badges de ciblage numéroté (Click by Number)
+                if self.show_numbered_targets {
+                    for target in &self.numbered_targets {
+                        let ppp = ctx.pixels_per_point().max(0.5);
+                        let left = target.rect[0] as f32 / ppp;
+                        let top = target.rect[1] as f32 / ppp;
+                        let badge_rect = egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(22.0, 18.0));
+                        
+                        painter.rect_filled(
+                            badge_rect,
+                            egui::CornerRadius::same(4),
+                            egui::Color32::from_rgb(255, 215, 0),
+                        );
+                        painter.rect_stroke(
+                            badge_rect,
+                            egui::CornerRadius::same(4),
+                            egui::Stroke::new(1.2, egui::Color32::BLACK),
+                            egui::StrokeKind::Outside,
+                        );
+                        painter.text(
+                            badge_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            target.index.to_string(),
+                            egui::FontId::monospace(11.0),
+                            egui::Color32::BLACK,
+                        );
+                    }
+                }
+
+                // Indicateur visuel du mode Switch Access
+                if self.switch_access_mode {
+                    painter.rect_stroke(
+                        control_rect.expand(2.0),
+                        egui::CornerRadius::same(12),
+                        egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 255, 200)),
+                        egui::StrokeKind::Outside,
+                    );
+                }
                 // Tracé de l'outline rect de la zone cible en mode dictée
                 if self.dictation_mode {
                     if let Ok(guard) = LAST_FOCUSED_RECT.lock() {

@@ -28,7 +28,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     mouse_event, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
     SetFocus,
     KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_WHEEL,
-    MOUSEEVENTF_LEFTUP, MOUSEINPUT, VIRTUAL_KEY,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT, VIRTUAL_KEY,
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -55,6 +55,42 @@ pub fn is_autostart_enabled() -> bool {
     } else {
         false
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct NumberedElementTarget {
+    pub index: usize,
+    pub click_x: i32,
+    pub click_y: i32,
+    pub rect: [i32; 4],
+    pub name: String,
+}
+
+#[cfg(windows)]
+pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget> {
+    let user_windows = list_user_windows();
+    let Some(active_hwnd) = get_active_or_best_window(&user_windows) else {
+        return Vec::new();
+    };
+    let elements = list_interactive_elements(active_hwnd);
+    elements
+        .into_iter()
+        .filter(|e| !e.is_offscreen && (e.is_button || e.is_link || e.is_tab || e.is_edit_or_textarea || e.is_tabindex))
+        .take(30)
+        .enumerate()
+        .map(|(i, e)| NumberedElementTarget {
+            index: i + 1,
+            click_x: e.click_x,
+            click_y: e.click_y,
+            rect: [e.rect.left, e.rect.top, e.rect.right, e.rect.bottom],
+            name: e.name,
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget> {
+    Vec::new()
 }
 
 #[cfg(windows)]
