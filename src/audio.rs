@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -150,8 +152,8 @@ fn ensure_model_downloaded(event_tx: &Sender<AgentEvent>) -> Result<PathBuf, Str
     }
 
     let url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
-    let _ = event_tx.send(AgentEvent::TranscriptionPartial(
-        "Téléchargement du modèle Whisper ggml-base (148 Mo)...".into(),
+    let _ = event_tx.send(AgentEvent::SilentNarration(
+        "⏳ Téléchargement du modèle vocal Whisper (148 Mo) en arrière-plan...".into(),
     ));
     println!("[Whisper] Téléchargement de ggml-base.bin depuis Hugging Face...");
 
@@ -174,40 +176,63 @@ fn handle_cpal_stream_err(err: impl std::fmt::Display) {
 
 pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sender<AudioCommand> {
     let (cmd_tx, cmd_rx) = channel::<AudioCommand>();
+    let whisper_instance: Arc<Mutex<Option<WhisperEngine>>> = Arc::new(Mutex::new(None));
+    let is_model_ready = Arc::new(AtomicBool::new(false));
 
-    std::thread::spawn(move || {
-        let mut whisper_instance: Option<WhisperEngine> = match ensure_model_downloaded(&event_tx) {
-            Ok(path) => match WhisperEngine::load(&path) {
-                Ok(m) => {
-                    println!("[Whisper] Modèle Whisper chargé avec succès depuis {}", path.display());
-                    Some(m)
-                }
-                Err(err) => {
-                    eprintln!("[Whisper] Erreur lors du chargement de Whisper: {err}");
-                    None
-                }
-            },
-            Err(err) => {
-                eprintln!("[Whisper] Modèle introuvable et échec de téléchargement: {err}");
-                None
+    // 1. Thread de chargement asynchrone : ne bloque pas l'affichage de l'interface
+    {
+        let whisper_instance = Arc::clone(&whisper_instance);
+        let is_model_ready = Arc::clone(&is_model_ready);
+        let event_tx = event_tx.clone();
+        std::thread::spawn(move || {
+            let is_download_needed = find_whisper_model_file().is_none();
+            if is_download_needed {
+                let _ = event_tx.send(AgentEvent::SilentNarration(
+                    "⏳ Modèle vocal Whisper introuvable localement : initialisation du téléchargement...".into(),
+                ));
             }
-        };
 
+            match ensure_model_downloaded(&event_tx) {
+                Ok(path) => match WhisperEngine::load(&path) {
+                    Ok(m) => {
+                        println!("[Whisper] Modèle Whisper chargé avec succès depuis {}", path.display());
+                        *whisper_instance.lock().unwrap() = Some(m);
+                        is_model_ready.store(true, Ordering::SeqCst);
+                        let _ = event_tx.send(AgentEvent::SilentNarration(
+                            "✅ Modèle Whisper prêt. Reconnaissance vocale disponible.".into(),
+                        ));
+                    }
+                    Err(err) => {
+                        eprintln!("[Whisper] Erreur lors du chargement de Whisper: {err}");
+                        let _ = event_tx.send(AgentEvent::SilentNarration(
+                            format!("❌ Erreur chargement Whisper : {err}"),
+                        ));
+                    }
+                },
+                Err(err) => {
+                    eprintln!("[Whisper] Modèle introuvable et échec de téléchargement: {err}");
+                    let _ = event_tx.send(AgentEvent::SilentNarration(
+                        format!("❌ Modèle Whisper indisponible : {err}"),
+                    ));
+                }
+            }
+        });
+    }
+
+    // 2. Thread de capture audio : traite les commandes utilisateur
+    std::thread::spawn(move || {
         while let Ok(cmd) = cmd_rx.recv() {
             if !matches!(cmd, AudioCommand::Start) {
                 continue;
             }
 
-            let whisper = match &mut whisper_instance {
-                Some(w) => w,
-                None => {
-                    let _ = event_tx.send(AgentEvent::TranscriptionPartial(
-                        "Modèle Whisper Candle non initialisé.".into(),
-                    ));
-                    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
-                    continue;
-                }
-            };
+            if !is_model_ready.load(Ordering::SeqCst) {
+                let _ = event_tx.send(AgentEvent::SilentNarration(
+                    "⏳ Le modèle vocal est en cours de chargement en arrière-plan, veuillez patienter un instant...".into(),
+                ));
+                let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                continue;
+            }
 
             let host = cpal::default_host();
             let device = match host.default_input_device() {
@@ -292,7 +317,8 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
             let mut speech_detected = false;
             let mut last_speech_time = Instant::now();
             let mut start_recording_time = Instant::now();
-            const SPEECH_ENERGY_THRESHOLD: f32 = 0.012;
+            // Seuil abaissé à 0.008 pour détecter les voix faibles, chuchotées ou dysarthriques
+            const SPEECH_ENERGY_THRESHOLD: f32 = 0.008;
             const MAX_RECORDING_DURATION: Duration = Duration::from_secs(25);
 
             let is_listening = true;
@@ -350,9 +376,9 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
 
                     let is_dictation = crate::automation::IS_DICTATION_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
                     let silence_timeout = if is_dictation {
-                        Duration::from_millis(2200)
+                        Duration::from_millis(2800)
                     } else {
-                        Duration::from_millis(1750)
+                        Duration::from_millis(2200)
                     };
 
                     if (silence_elapsed >= silence_timeout && audio_16k_buffer.len() >= 8000)
@@ -363,7 +389,16 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                             "Transcription locale en cours...".into(),
                         ));
 
-                        match whisper.transcribe(&audio_16k_buffer) {
+                        let transcribe_res = {
+                            let mut guard = whisper_instance.lock().unwrap();
+                            if let Some(ref mut whisper) = *guard {
+                                whisper.transcribe(&audio_16k_buffer)
+                            } else {
+                                Err("Moteur Whisper non disponible.".to_string())
+                            }
+                        };
+
+                        match transcribe_res {
                             Ok(text) if !text.trim().is_empty() => {
                                 let _ = event_tx.send(AgentEvent::VoicePromptReady(text));
                                 break;
@@ -371,9 +406,7 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                             Ok(_) => {
                                 speech_detected = false;
                                 audio_16k_buffer.clear();
-                                let _ = event_tx.send(AgentEvent::TranscriptionPartial(
-                                    "Écoute Whisper active...".into(),
-                                ));
+                                let _ = event_tx.send(AgentEvent::TranscriptionPartial(String::new()));
                             }
                             Err(err) => {
                                 eprintln!("[Whisper] Erreur de transcription : {err}");

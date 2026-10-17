@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+pub use crate::floating_window::FloatingCard;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStatus {
@@ -7,6 +8,95 @@ pub enum AgentStatus {
     Speaking,
     Listening,
     EmergencyStopped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VoiceProfile {
+    Denise,
+    Henri,
+    Hortense,
+    Paul,
+    Sylvie,
+    Jean,
+    Kokoro,
+}
+
+pub type VoiceGender = VoiceProfile;
+
+impl VoiceProfile {
+    pub const Female: Self = Self::Denise;
+    pub const Male: Self = Self::Henri;
+
+    pub const ALL: &'static [Self] = &[
+        Self::Denise,
+        Self::Henri,
+        Self::Hortense,
+        Self::Paul,
+        Self::Sylvie,
+        Self::Jean,
+        Self::Kokoro,
+    ];
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Denise => "Denise (Féminine naturelle)",
+            Self::Henri => "Henri (Masculin naturel)",
+            Self::Hortense => "Hortense (Féminine studio)",
+            Self::Paul => "Paul (Masculin posé)",
+            Self::Sylvie => "Sylvie (Féminine canadienne)",
+            Self::Jean => "Jean (Masculin dynamique)",
+            Self::Kokoro => "Kokoro (Neuronale IA - 82M)",
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            Self::Denise => Self::Henri,
+            Self::Henri => Self::Hortense,
+            Self::Hortense => Self::Paul,
+            Self::Paul => Self::Sylvie,
+            Self::Sylvie => Self::Jean,
+            Self::Jean => Self::Kokoro,
+            Self::Kokoro => Self::Denise,
+        }
+    }
+
+    pub fn to_key_str(&self) -> &'static str {
+        match self {
+            Self::Denise => "denise",
+            Self::Henri => "henri",
+            Self::Hortense => "hortense",
+            Self::Paul => "paul",
+            Self::Sylvie => "sylvie",
+            Self::Jean => "jean",
+            Self::Kokoro => "kokoro",
+        }
+    }
+
+    pub fn from_id_or_name(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "denise" => Some(Self::Denise),
+            "henri" => Some(Self::Henri),
+            "hortense" => Some(Self::Hortense),
+            "paul" => Some(Self::Paul),
+            "sylvie" => Some(Self::Sylvie),
+            "jean" => Some(Self::Jean),
+            "kokoro" => Some(Self::Kokoro),
+            _ => None,
+        }
+    }
+
+    pub fn edge_voice_id(&self) -> &'static str {
+        match self {
+            Self::Denise => "fr-FR-DeniseNeural",
+            Self::Henri => "fr-FR-HenriNeural",
+            Self::Hortense => "fr-FR-EloiseNeural",
+            Self::Paul => "fr-FR-AlainNeural",
+            Self::Sylvie => "fr-CA-SylvieNeural",
+            Self::Jean => "fr-FR-JeanNeural",
+            Self::Kokoro => "fr-FR-DeniseNeural",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +151,8 @@ pub enum AgentEvent {
     TwitchSearchResults(Vec<TwitchChannelItem>),
     RequestIgnored,
     RequestApiKey,
+    ShowFloatingCard(FloatingCard),
+    CloseFloatingCard(String),
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +165,7 @@ pub enum AudioCommand {
 pub enum TtsCommand {
     Speak(String),
     Stop,
+    SetGender(VoiceGender),
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +174,14 @@ pub enum AgentCommand {
     ClearHistory,
     SearchTwitch(String),
     PeriodicScreenCheck,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ScheduledTaskItem {
+    #[serde(default, alias = "delay", alias = "seconds", alias = "wait_seconds", alias = "delay_sec")]
+    pub delay_seconds: u64,
+    #[serde(default, alias = "instruction", alias = "command", alias = "text")]
+    pub prompt: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -112,6 +213,11 @@ pub enum AgentAction {
     },
     OpenBrowser {
         url: Option<String>,
+    },
+    #[serde(alias = "address_bar", alias = "select_address_bar", alias = "barre_adresse")]
+    FocusAddressBar {
+        #[serde(default)]
+        window: Option<String>,
     },
     NavigateToUrl {
         url: String,
@@ -248,12 +354,40 @@ pub enum AgentAction {
         #[serde(default)]
         reason: Option<String>,
     },
+    #[serde(alias = "schedule", alias = "delay_prompt", alias = "schedule_task")]
+    SchedulePrompt {
+        #[serde(default, alias = "delay", alias = "seconds", alias = "wait_seconds", alias = "delay_sec")]
+        delay_seconds: u64,
+        #[serde(default, alias = "instruction", alias = "command", alias = "text")]
+        prompt: String,
+    },
+    #[serde(alias = "schedule_tasks", alias = "delayed_prompts")]
+    SchedulePrompts {
+        #[serde(default, alias = "prompts", alias = "scheduled_tasks", alias = "items")]
+        tasks: Vec<ScheduledTaskItem>,
+    },
     #[serde(alias = "mute_sound", alias = "sound_mute", alias = "couper_son")]
     MuteAudio,
     #[serde(alias = "volume", alias = "adjust_volume", alias = "sound")]
     SetVolume {
         #[serde(default, alias = "level", alias = "value", alias = "type", alias = "mode")]
         command: String,
+    },
+    #[serde(alias = "open_document", alias = "launch_file", alias = "open_media")]
+    OpenFile {
+        path: String,
+    },
+    #[serde(alias = "show_floating_window", alias = "floating_card", alias = "display_card")]
+    ShowFloatingCard {
+        id: Option<String>,
+        title: String,
+        #[serde(default)]
+        card_type: String,
+        #[serde(default)]
+        data: serde_json::Value,
+    },
+    CloseFloatingCard {
+        id: String,
     },
 }
 
@@ -287,6 +421,7 @@ impl QuickSuggestionItem {
             QuickSuggestionItem::Action(act) => match act {
                 AgentAction::OpenApp { name } => Some(format!("Ouvrir {name}")),
                 AgentAction::NavigateToUrl { url, .. } => Some(format!("Naviguer vers {url}")),
+                AgentAction::FocusAddressBar { .. } => Some("Sélectionner la barre d'adresse".to_string()),
                 AgentAction::ClickElement { target_name, .. } => Some(format!("Cliquer {target_name}")),
                 AgentAction::ClickButton { button_name, .. } => Some(format!("Cliquer {button_name}")),
                 AgentAction::CloseApp { name } => Some(format!("Fermer {name}")),
@@ -317,6 +452,12 @@ impl QuickSuggestionItem {
                 }
                 AgentAction::SetReasoningPasses { passes, .. } => {
                     Some(format!("Ajuster à {passes} passes"))
+                }
+                AgentAction::SchedulePrompt { delay_seconds, prompt } => {
+                    Some(format!("Différer ({delay_seconds}s) : {prompt}"))
+                }
+                AgentAction::SchedulePrompts { tasks } => {
+                    Some(format!("Planifier {} tâche(s) différée(s)", tasks.len()))
                 }
                 AgentAction::MuteAudio => Some("Couper les flux audio parasites".to_string()),
                 AgentAction::SetVolume { command } => Some(format!("Volume : {command}")),

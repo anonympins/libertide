@@ -1,10 +1,11 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::fs_util::{create_temp_note_file, find_executable_in_path, find_file_in_workspace};
 use crate::pattern::{clean_words, extract_target_propositions, matches_pattern};
-use crate::types::{AgentAction, QuickSuggestionItem};
+use crate::types::{AgentAction, AgentCommand, QuickSuggestionItem, ScheduledTaskItem};
 use crate::window_util::*;
 
 #[cfg(windows)]
@@ -18,17 +19,18 @@ use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPRO
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationElement2, IUIAutomationInvokePattern,
-    IUIAutomationScrollItemPattern, IUIAutomationTextPattern, IUIAutomationValuePattern,
+    IUIAutomationScrollItemPattern, IUIAutomationScrollPattern, IUIAutomationTextPattern, IUIAutomationValuePattern,
     TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
     UIA_TabControlTypeId, UIA_TabItemControlTypeId,
-    UIA_HyperlinkControlTypeId, UIA_InvokePatternId, UIA_ScrollItemPatternId, UIA_TextPatternId, UIA_ValuePatternId,
+    UIA_HyperlinkControlTypeId, UIA_InvokePatternId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
+    UIA_TextPatternId, UIA_ValuePatternId,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     mouse_event, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
     SetFocus,
     KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_WHEEL,
-    MOUSEEVENTF_LEFTUP, MOUSEINPUT, VIRTUAL_KEY,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT, VIRTUAL_KEY,
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -55,6 +57,42 @@ pub fn is_autostart_enabled() -> bool {
     } else {
         false
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct NumberedElementTarget {
+    pub index: usize,
+    pub click_x: i32,
+    pub click_y: i32,
+    pub rect: [i32; 4],
+    pub name: String,
+}
+
+#[cfg(windows)]
+pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget> {
+    let user_windows = list_user_windows();
+    let Some(active_hwnd) = get_active_or_best_window(&user_windows) else {
+        return Vec::new();
+    };
+    let elements = list_interactive_elements(active_hwnd);
+    elements
+        .into_iter()
+        .filter(|e| !e.is_offscreen && (e.is_button || e.is_link || e.is_tab || e.is_edit_or_textarea || e.is_tabindex))
+        .take(30)
+        .enumerate()
+        .map(|(i, e)| NumberedElementTarget {
+            index: i + 1,
+            click_x: e.click_x,
+            click_y: e.click_y,
+            rect: [e.rect.left, e.rect.top, e.rect.right, e.rect.bottom],
+            name: e.name,
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget> {
+    Vec::new()
 }
 
 #[cfg(windows)]
@@ -145,6 +183,44 @@ pub fn set_autostart(enable: bool) -> Result<String, String> {
 }
 
 #[cfg(windows)]
+pub fn open_path_with_default_app(path: &str) -> Result<(), String> {
+    let p = std::path::Path::new(path);
+    let resolved = if p.exists() {
+        p.to_path_buf()
+    } else if let Some((found, _)) = find_file_in_workspace(path) {
+        std::path::PathBuf::from(found)
+    } else {
+        std::path::PathBuf::from(path)
+    };
+
+    let target_str = resolved.to_string_lossy().to_string();
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &target_str])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(|e| format!("Erreur lors de l'ouverture du fichier : {e}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Code de retour non nul lors de l'ouverture de '{target_str}'"))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn open_path_with_default_app(path: &str) -> Result<(), String> {
+    let status = std::process::Command::new("xdg-open")
+        .arg(path)
+        .status()
+        .map_err(|e| format!("Erreur lors de l'ouverture du fichier : {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Code de retour non nul pour xdg-open '{path}'"))
+    }
+}
+
+#[cfg(windows)]
 static LAST_TXT_HWND: Mutex<Option<isize>> = Mutex::new(None);
 pub static LAST_EXTERNAL_HWND: Mutex<Option<isize>> = Mutex::new(None);
 pub static LAST_FOCUSED_CHILD_HWND: Mutex<Option<isize>> = Mutex::new(None);
@@ -154,6 +230,279 @@ pub static CURRENT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 pub static IS_EMERGENCY_STOPPED: AtomicBool = AtomicBool::new(false);
 pub static AGENT_BUSY: AtomicBool = AtomicBool::new(false);
 pub static TARGET_REASONING_PASSES: AtomicUsize = AtomicUsize::new(5);
+pub static SCHEDULE_GENERATION: AtomicU64 = AtomicU64::new(0);
+pub static SCHEDULED_TASKS_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+static SCHEDULER_CMD_TX: Mutex<Option<UnboundedSender<AgentCommand>>> = Mutex::new(None);
+static TOKIO_HANDLE: Mutex<Option<tokio::runtime::Handle>> = Mutex::new(None);
+
+pub fn init_scheduler(tx: UnboundedSender<AgentCommand>, handle: tokio::runtime::Handle) {
+    if let Ok(mut lock) = SCHEDULER_CMD_TX.lock() {
+        *lock = Some(tx);
+    }
+    if let Ok(mut lock) = TOKIO_HANDLE.lock() {
+        *lock = Some(handle);
+    }
+}
+
+pub fn cancel_all_scheduled_tasks() -> usize {
+    SCHEDULE_GENERATION.fetch_add(1, Ordering::SeqCst);
+    SCHEDULED_TASKS_COUNT.swap(0, Ordering::SeqCst)
+}
+
+pub fn schedule_prompt_execution(delay: Duration, prompt: String) {
+    let current_gen = SCHEDULE_GENERATION.load(Ordering::SeqCst);
+    SCHEDULED_TASKS_COUNT.fetch_add(1, Ordering::SeqCst);
+
+    let tx_opt = SCHEDULER_CMD_TX.lock().ok().and_then(|g| g.clone());
+    let Some(cmd_tx) = tx_opt else {
+        eprintln!("[Scheduler] Erreur : SCHEDULER_CMD_TX non initialisé.");
+        return;
+    };
+
+    if let Ok(guard) = TOKIO_HANDLE.lock() {
+        if let Some(ref handle) = *guard {
+            handle.spawn(async move {
+                tokio::time::sleep(delay).await;
+
+                if SCHEDULE_GENERATION.load(Ordering::SeqCst) != current_gen
+                    || IS_EMERGENCY_STOPPED.load(Ordering::SeqCst)
+                {
+                    println!("[Scheduler] Tâche différée annulée ou invalidée : \"{prompt}\"");
+                    return;
+                }
+
+                SCHEDULED_TASKS_COUNT.fetch_sub(1, Ordering::SeqCst);
+                println!("[Scheduler] Exécution programmée de la tâche : \"{prompt}\"");
+                let _ = cmd_tx.send(AgentCommand::Prompt(prompt));
+            });
+            return;
+        }
+    }
+
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        if SCHEDULE_GENERATION.load(Ordering::SeqCst) != current_gen
+            || IS_EMERGENCY_STOPPED.load(Ordering::SeqCst)
+        {
+            println!("[Scheduler] Tâche différée annulée ou invalidée : \"{prompt}\"");
+            return;
+        }
+        SCHEDULED_TASKS_COUNT.fetch_sub(1, Ordering::SeqCst);
+        println!("[Scheduler] Exécution programmée de la tâche : \"{prompt}\"");
+        let _ = cmd_tx.send(AgentCommand::Prompt(prompt));
+    });
+}
+
+pub fn format_duration_friendly(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 3600 {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        if mins > 0 {
+            format!("{hours} h {mins} min")
+        } else {
+            format!("{hours} heure{}", if hours > 1 { "s" } else { "" })
+        }
+    } else if secs >= 60 {
+        let mins = secs / 60;
+        let rem_secs = secs % 60;
+        if rem_secs > 0 {
+            format!("{mins} min {rem_secs} s")
+        } else {
+            format!("{mins} minute{}", if mins > 1 { "s" } else { "" })
+        }
+    } else {
+        format!("{secs} seconde{}", if secs > 1 { "s" } else { "" })
+    }
+}
+
+fn parse_number_word_or_digit(word: &str) -> Option<u64> {
+    let clean = word.trim().to_lowercase();
+    let clean = clean.trim_matches(|c: char| !c.is_alphanumeric());
+    if let Ok(n) = clean.parse::<u64>() {
+        return Some(n);
+    }
+    match clean {
+        "un" | "une" | "one" => Some(1),
+        "deux" | "two" => Some(2),
+        "trois" | "three" => Some(3),
+        "quatre" | "four" => Some(4),
+        "cinq" | "five" => Some(5),
+        "six" => Some(6),
+        "sept" | "seven" => Some(7),
+        "huit" | "eight" => Some(8),
+        "neuf" | "nine" => Some(9),
+        "dix" | "ten" => Some(10),
+        "onze" | "eleven" => Some(11),
+        "douze" | "twelve" => Some(12),
+        "treize" | "thirteen" => Some(13),
+        "quatorze" | "fourteen" => Some(14),
+        "quinze" | "fifteen" => Some(15),
+        "seize" | "sixteen" => Some(16),
+        "vingt" | "twenty" => Some(20),
+        "trente" | "thirty" => Some(30),
+        "quarante" | "forty" => Some(40),
+        "cinquante" | "fifty" => Some(50),
+        "soixante" | "sixty" => Some(60),
+        _ => None,
+    }
+}
+
+fn parse_duration_tokens(tokens: &[&str]) -> Option<(Duration, usize)> {
+    if tokens.is_empty() {
+        return None;
+    }
+    let first = tokens[0].trim().to_lowercase();
+    let first_clean = first.trim_matches(|c: char| c == ',' || c == '.' || c == ';');
+
+    // Formats compacts : "10s", "30sec", "5min", "2h"
+    let unit_suffixes: &[(&str, u64)] = &[
+        ("secondes", 1), ("seconds", 1), ("seconde", 1), ("second", 1), ("secs", 1), ("sec", 1), ("s", 1),
+        ("minutes", 60), ("minute", 60), ("mins", 60), ("min", 60), ("m", 60),
+        ("heures", 3600), ("heure", 3600), ("hours", 3600), ("hour", 3600), ("hrs", 3600), ("hr", 3600), ("h", 3600),
+    ];
+
+    for &(sfx, mult) in unit_suffixes {
+        if first_clean.ends_with(sfx) && first_clean.len() > sfx.len() {
+            let num_part = &first_clean[..first_clean.len() - sfx.len()];
+            if let Some(val) = parse_number_word_or_digit(num_part) {
+                return Some((Duration::from_secs(val.saturating_mul(mult)), 1));
+            }
+        }
+    }
+
+    // Formats séparés : "10" "secondes", "cinq" "minutes", "une" "heure"
+    if let Some(val) = parse_number_word_or_digit(first_clean) {
+        if tokens.len() >= 2 {
+            let unit_raw = tokens[1].trim().to_lowercase();
+            let unit = unit_raw.trim_matches(|c: char| c == ',' || c == '.' || c == ';');
+            for &(sfx, mult) in unit_suffixes {
+                if unit == sfx {
+                    return Some((Duration::from_secs(val.saturating_mul(mult)), 2));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn parse_single_scheduled_clause(clause: &str) -> Option<(Duration, String)> {
+    let tokens: Vec<&str> = clause.split_whitespace().collect();
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let first_lower = tokens[0].trim().to_lowercase();
+    let first_clean = first_lower.trim_matches(|c: char| c == ',' || c == '.' || c == ':');
+
+    let (dur, consumed) = if first_clean == "dans" || first_clean == "in" {
+        let (d, c) = parse_duration_tokens(&tokens[1..])?;
+        (d, c + 1)
+    } else if first_clean == "attends" || first_clean == "attendre" || first_clean == "wait" {
+        let (d, c) = parse_duration_tokens(&tokens[1..])?;
+        (d, c + 1)
+    } else {
+        parse_duration_tokens(&tokens)?
+    };
+
+    let mut rem_tokens = &tokens[consumed..];
+    if !rem_tokens.is_empty() {
+        let conn = rem_tokens[0].trim().to_lowercase();
+        let conn_clean = conn.trim_matches(|c: char| c == ',' || c == '.' || c == ':');
+        if conn_clean == "puis" || conn_clean == "ensuite" || conn_clean == "then" || conn_clean == "and" || conn_clean == "et" || conn_clean == "de" {
+            rem_tokens = &rem_tokens[1..];
+        } else if conn_clean == "avant" && rem_tokens.len() >= 2 && rem_tokens[1].eq_ignore_ascii_case("de") {
+            rem_tokens = &rem_tokens[2..];
+        }
+    }
+
+    let cmd = rem_tokens.join(" ").trim().trim_matches(|c: char| c == '.' || c == ',').to_string();
+    Some((dur, cmd))
+}
+
+pub fn parse_scheduled_prompts(input: &str) -> Option<Vec<(Duration, String)>> {
+    let trimmed = input.trim();
+    let lower = trimmed.to_lowercase();
+
+    // 1. Détection du format liste / badges ("différé : 10s ferme notepad, 20s lance chrome")
+    let list_prefixes = ["différé :", "differe :", "différé:", "differe:", "différé ", "differe ", "scheduled :", "scheduled:", "delay :", "delay:"];
+    for pfx in list_prefixes {
+        if lower.starts_with(pfx) {
+            let rest = &trimmed[pfx.len()..].trim();
+            let parts: Vec<&str> = rest.split(|c| c == ',' || c == ';' || c == '\n').collect();
+            let mut results = Vec::new();
+            for part in parts {
+                let p_trim = part.trim();
+                if !p_trim.is_empty() {
+                    if let Some((d, cmd)) = parse_single_scheduled_clause(p_trim) {
+                        if !cmd.is_empty() {
+                            results.push((d, cmd));
+                        }
+                    }
+                }
+            }
+            if !results.is_empty() {
+                return Some(results);
+            }
+        }
+    }
+
+    // 2. Détection en langage naturel direct (unique ou chaîné avec "puis", "ensuite", "and then")
+    let raw_clauses: Vec<&str> = if lower.contains(" puis ") {
+        trimmed.split(" puis ").collect()
+    } else if lower.contains(" ensuite ") {
+        trimmed.split(" ensuite ").collect()
+    } else if lower.contains(" and then ") {
+        trimmed.split(" and then ").collect()
+    } else {
+        vec![trimmed]
+    };
+
+    let mut results: Vec<(Duration, String)> = Vec::new();
+    for clause in raw_clauses {
+        let c_trim = clause.trim();
+        if c_trim.is_empty() {
+            continue;
+        }
+        if let Some((dur, cmd)) = parse_single_scheduled_clause(c_trim) {
+            results.push((dur, cmd));
+        } else if let Some(last) = results.last_mut() {
+            if last.1.is_empty() {
+                last.1 = c_trim.trim_matches(|c: char| c == '.' || c == ',').to_string();
+            }
+        }
+    }
+
+    let valid_tasks: Vec<(Duration, String)> = results.into_iter().filter(|(_, c)| !c.trim().is_empty()).collect();
+    if !valid_tasks.is_empty() {
+        Some(valid_tasks)
+    } else {
+        None
+    }
+}
+
+pub fn is_cancel_scheduled_command(text: &str) -> bool {
+    let norm = clean_words(text).join(" ");
+    const TRIGGERS: &[&str] = &[
+        "annule les commandes differees", "annule les commandes différées",
+        "annuler les commandes differees", "annuler les commandes différées",
+        "annule les taches differees", "annule les tâches différées",
+        "annuler les taches differees", "annuler les tâches différées",
+        "annule la commande differee", "annule la commande différée",
+        "annule les differees", "annule les différées",
+        "annuler differe", "annuler différé", "annule differe", "annule différé",
+        "annule les timers", "annuler les timers", "arrete les timers", "arrête les timers",
+        "supprime les commandes differees", "supprime les commandes différées",
+        "cancel scheduled tasks", "cancel scheduled commands", "cancel scheduled prompt",
+        "cancel scheduled prompts", "cancel timers", "stop timers", "clear timers",
+        "cancelar comandos diferidos", "cancelar tareas programadas",
+        "geplante aufgaben abbrechen", "timer abbrechen",
+        "annulla comandi ritardati", "annulla compiti programmati",
+    ];
+    TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.to_lowercase().contains(trig))
+}
 
 pub fn is_request_cancelled(request_id: u64) -> bool {
     CURRENT_REQUEST_ID.load(Ordering::SeqCst) != request_id || IS_EMERGENCY_STOPPED.load(Ordering::SeqCst)
@@ -231,6 +580,14 @@ pub fn restore_external_focus_target(target: Option<HWND>) -> bool {
 
     if let Some(hwnd) = target_hwnd {
         if !hwnd.0.is_null() && !is_window_hung(hwnd) {
+            let (_pid, exe_name) = get_window_process_info(hwnd);
+            let is_browser = is_browser_executable(&exe_name);
+
+            if is_browser {
+                focus_browser_address_bar(hwnd);
+                return true;
+            }
+
             // Contournement universel de l'inhibition de focus Windows via simulation de la touche Alt
             const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
             send_key_event(VK_MENU, KEYBD_EVENT_FLAGS(0));
@@ -566,6 +923,9 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
             0
         };
 
+        let (_pid, exe_name) = get_window_process_info(hwnd);
+        let is_browser = is_browser_executable(&exe_name);
+
         const ASFW_ANY: u32 = 0xFFFFFFFF;
         let _ = AllowSetForegroundWindow(ASFW_ANY);
 
@@ -577,10 +937,13 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
             let _ = BringWindowToTop(hwnd);
             let _ = SetForegroundWindow(hwnd);
 
-            let mut gti = GUITHREADINFO::default();
-            gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
-            if GetGUIThreadInfo(target_thread_id, &mut gti).is_ok() && !gti.hwndFocus.0.is_null() {
-                let _ = SetFocus(gti.hwndFocus);
+            // Pour les navigateurs, ne pas forcer le focus sur le widget de rendu interne de la page web
+            if !is_browser {
+                let mut gti = GUITHREADINFO::default();
+                gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+                if GetGUIThreadInfo(target_thread_id, &mut gti).is_ok() && !gti.hwndFocus.0.is_null() {
+                    let _ = SetFocus(gti.hwndFocus);
+                }
             }
 
             if fg_thread_id != 0 && fg_thread_id != target_thread_id {
@@ -729,6 +1092,85 @@ pub fn send_hotkey(modifiers: &[VIRTUAL_KEY], key: VIRTUAL_KEY) {
     }
 }
 
+#[cfg(windows)]
+pub fn try_send_key_combination(combo: &str) -> bool {
+    let clean = combo.trim().to_lowercase();
+    if clean.is_empty() {
+        return false;
+    }
+
+    let parts: Vec<&str> = clean
+        .split(|c| c == '+' || c == '-')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if parts.is_empty() {
+        return false;
+    }
+
+    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+    const VK_SHIFT: VIRTUAL_KEY = VIRTUAL_KEY(0x10);
+    const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
+    const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
+
+    let mut modifiers = Vec::new();
+    let mut key: Option<VIRTUAL_KEY> = None;
+
+    for part in parts {
+        match part {
+            "ctrl" | "control" => modifiers.push(VK_CONTROL),
+            "shift" | "sift" | "shif" | "maj" => modifiers.push(VK_SHIFT),
+            "alt" | "menu" => modifiers.push(VK_MENU),
+            "win" | "windows" | "super" | "meta" => modifiers.push(VK_LWIN),
+            "enter" | "return" | "entree" | "entrée" => key = Some(VIRTUAL_KEY(0x0D)),
+            "esc" | "escape" | "echap" | "échap" => key = Some(VIRTUAL_KEY(0x1B)),
+            "tab" => key = Some(VIRTUAL_KEY(0x09)),
+            "space" | "espace" => key = Some(VIRTUAL_KEY(0x20)),
+            "backspace" | "back" | "retour" => key = Some(VIRTUAL_KEY(0x08)),
+            "del" | "delete" | "suppr" => key = Some(VIRTUAL_KEY(0x2E)),
+            "ins" | "insert" => key = Some(VIRTUAL_KEY(0x2D)),
+            "home" | "debut" | "début" => key = Some(VIRTUAL_KEY(0x24)),
+            "end" | "fin" => key = Some(VIRTUAL_KEY(0x23)),
+            "pageup" | "prior" | "pgup" => key = Some(VIRTUAL_KEY(0x21)),
+            "pagedown" | "next" | "pgdown" => key = Some(VIRTUAL_KEY(0x22)),
+            "left" | "gauche" => key = Some(VIRTUAL_KEY(0x25)),
+            "up" | "haut" => key = Some(VIRTUAL_KEY(0x26)),
+            "right" | "droite" => key = Some(VIRTUAL_KEY(0x27)),
+            "down" | "bas" => key = Some(VIRTUAL_KEY(0x28)),
+            single if single.len() == 1 => {
+                let c = single.chars().next().unwrap();
+                if c.is_ascii_alphabetic() {
+                    key = Some(VIRTUAL_KEY(0x41 + (c.to_ascii_uppercase() as u16 - b'A' as u16)));
+                } else if c.is_ascii_digit() {
+                    key = Some(VIRTUAL_KEY(0x30 + (c as u16 - b'0' as u16)));
+                } else {
+                    return false;
+                }
+            }
+            f_key if f_key.starts_with('f') && f_key.len() <= 3 => {
+                if let Ok(num) = f_key[1..].parse::<u16>() {
+                    if (1..=24).contains(&num) {
+                        key = Some(VIRTUAL_KEY(0x70 + num - 1));
+                    } else {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+
+    if let Some(k) = key {
+        send_hotkey(&modifiers, k);
+        true
+    } else {
+        false
+    }
+}
+
 pub fn urlencoding_simple(query: &str) -> String {
     query
         .chars()
@@ -747,21 +1189,25 @@ pub fn truncate_with_notice(text: &str, max_chars: usize) -> String {
 
 pub fn is_address_bar_target(target: &str) -> bool {
     let t = target.trim().to_lowercase();
-    t == "url"
-        || t == "l'url"
-        || t == "adresse"
-        || t == "l'adresse"
-        || t == "barre d'adresse"
-        || t == "barre d adresse"
-        || t == "barre dadresse"
-        || t == "barre d'url"
-        || t == "barre url"
-        || t == "omnibox"
-        || t == "address"
-        || t == "address bar"
-        || t.contains("barre d'adresse")
-        || t.contains("barre d adresse")
-        || t.contains("adresse web")
+    let clean = t
+        .strip_prefix("[navigateur]").unwrap_or(&t)
+        .strip_prefix("navigateur:").unwrap_or(&t)
+        .strip_prefix("[browser]").unwrap_or(&t)
+        .strip_prefix("browser:").unwrap_or(&t)
+        .trim();
+    clean == "url"
+        || clean.contains("url")
+        || clean.contains("adresse")
+        || clean.contains("address")
+        || clean.contains("omnibox")
+        || clean.contains("omnibar")
+        || clean.contains("omniboxview")
+        || clean == "navigateur"
+        || clean == "browser"
+        || clean == "chrome"
+        || clean == "edge"
+        || clean == "firefox"
+        || clean == "brave"
 }
 
 pub fn is_browser_chrome_target(target: &str) -> bool {
@@ -770,6 +1216,7 @@ pub fn is_browser_chrome_target(target: &str) -> bool {
         || t.starts_with("navigateur:")
         || t.starts_with("[browser]")
         || t.starts_with("browser:")
+        || is_address_bar_target(target)
 }
 
 pub fn is_generic_textarea_target(target: &str) -> bool {
@@ -790,57 +1237,94 @@ pub fn is_generic_textarea_target(target: &str) -> bool {
 
 pub fn format_url_for_navigation(raw_url: &str) -> String {
     let trimmed = raw_url.trim();
-    if trimmed.is_empty() || trimmed.starts_with("about:") {
+    if trimmed.is_empty() {
         return "https://www.google.com".to_string();
     }
-    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
-        if trimmed.contains('.') && !trimmed.contains(' ') {
-            format!("https://{trimmed}")
-        } else {
-            format!("https://www.google.com/search?q={}", urlencoding_simple(trimmed))
+
+    // 1. Détection de tous les schémas complets comportant :// (chrome://, edge://, file://, ftp://, http://, etc.)
+    if let Some(pos) = trimmed.find("://") {
+        let scheme = &trimmed[..pos];
+        if !scheme.is_empty()
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+        {
+            return trimmed.to_string();
         }
+    }
+
+    // 2. Détection des pseudo-protocoles sans double barre oblique (about:, data:, view-source:, file:, blob:, etc.)
+    const PSEUDO_SCHEMES: &[&str] = &[
+        "about:",
+        "data:",
+        "view-source:",
+        "file:",
+        "blob:",
+        "javascript:",
+        "mailto:",
+        "tel:",
+    ];
+
+    let lower = trimmed.to_lowercase();
+    for &pseudo in PSEUDO_SCHEMES {
+        if lower.starts_with(pseudo) {
+            return trimmed.to_string();
+        }
+    }
+
+    // 3. Support de localhost (ex: localhost, localhost:8080, localhost/path)
+    if lower == "localhost" || lower.starts_with("localhost:") || lower.starts_with("localhost/") {
+        return format!("http://{trimmed}");
+    }
+
+    // 4. Domaines et adresses valides sans protocole explicite -> préfixage https://
+    if !trimmed.contains(' ') && trimmed.contains('.') {
+        format!("https://{trimmed}")
     } else {
-        trimmed.to_string()
+        // 5. Repli : terme de recherche vers Google
+        format!("https://www.google.com/search?q={}", urlencoding_simple(trimmed))
+    }
+}
+
+#[cfg(windows)]
+pub fn focus_browser_address_bar(hwnd: HWND) {
+    force_foreground_window(hwnd);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+    }
+    std::thread::sleep(Duration::from_millis(50));
+
+    release_modifier_keys();
+
+    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+    const VK_L: VIRTUAL_KEY = VIRTUAL_KEY(0x4C);
+    const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
+    const VK_D: VIRTUAL_KEY = VIRTUAL_KEY(0x44);
+
+    // 1. Sélection universelle directe de l'omnibar (Alt+D puis Ctrl+L) sans clic souris parasite
+    send_hotkey(&[VK_MENU], VK_D);
+    std::thread::sleep(Duration::from_millis(40));
+    send_hotkey(&[VK_CONTROL], VK_L);
+    std::thread::sleep(Duration::from_millis(50));
+
+    // 2. Renforcement du focus UIA sur l'omnibar si accessible
+    let elements = list_interactive_elements(hwnd);
+    let address_elem = elements.iter().find(|e| {
+        e.is_browser_chrome
+            && (e.is_edit_or_textarea || e.is_input || e.class_name.contains("omnibox") || e.automation_id.to_lowercase().contains("omnibox"))
+    });
+
+    if let Some(elem) = address_elem {
+        unsafe { let _ = elem.element.SetFocus(); }
     }
 }
 
 #[cfg(windows)]
 fn navigate_browser_address_bar(hwnd: HWND, url: &str) {
     let formatted_url = format_url_for_navigation(url);
-    force_foreground_window(hwnd);
-    unsafe {
-        let _ = ShowWindow(hwnd, SW_MAXIMIZE);
-    }
-    std::thread::sleep(Duration::from_millis(150));
+    focus_browser_address_bar(hwnd);
 
-    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
-    const VK_L: VIRTUAL_KEY = VIRTUAL_KEY(0x4C);
-    const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
-    const VK_D: VIRTUAL_KEY = VIRTUAL_KEY(0x44);
     const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
-
-    // 1. Clic direct sur la barre d'adresse si elle est repérée dans l'arbre UIA
-    let elements = list_interactive_elements(hwnd);
-    let address_elem = elements.iter().find(|e| {
-        e.is_browser_chrome
-            && (e.class_name.contains("omnibox")
-                || e.automation_id.to_lowercase().contains("omnibox")
-                || e.localized_type.contains("omnibox")
-                || e.name.to_lowercase().contains("adresse")
-                || e.name.to_lowercase().contains("address"))
-    });
-
-    if let Some(elem) = address_elem {
-        unsafe { let _ = elem.element.SetFocus(); }
-        click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
-        std::thread::sleep(Duration::from_millis(80));
-    }
-
-    // 2. Raccourcis universels de sélection de la barre d'adresse (Alt+D puis Ctrl+L)
-    send_hotkey(&[VK_MENU], VK_D);
-    std::thread::sleep(Duration::from_millis(80));
-    send_hotkey(&[VK_CONTROL], VK_L);
-    std::thread::sleep(Duration::from_millis(100));
 
     // 3. Écriture de l'URL via le presse-papiers
     clipboard::set_text(&formatted_url);
@@ -883,12 +1367,16 @@ fn open_browser_new_tab(hwnd: HWND, url: &str) {
 #[cfg(windows)]
 #[derive(Clone)]
 struct UiaElementInfo {
+    index: usize,
     element: IUIAutomationElement,
     automation_id: String,
     help_text: String,
     value_text: String,
     name: String,
     class_name: String,
+    primary_class: String,
+    data_attributes: Vec<(String, String)>,
+    json_metadata: Option<serde_json::Value>,
     localized_type: String,
     aria_role: String,
     aria_label: String,
@@ -933,9 +1421,11 @@ fn parse_aria_property_value(aria_properties: &str, target_key: &str) -> Option<
 
 #[cfg(windows)]
 fn extract_aria_details(aria_properties: &str) -> (Option<String>, Option<String>, Vec<String>) {
-    let label = parse_aria_property_value(aria_properties, "label");
+    let label = parse_aria_property_value(aria_properties, "label")
+        .or_else(|| parse_aria_property_value(aria_properties, "labelledby"));
     let desc = parse_aria_property_value(aria_properties, "description")
-        .or_else(|| parse_aria_property_value(aria_properties, "describedby"));
+        .or_else(|| parse_aria_property_value(aria_properties, "describedby"))
+        .or_else(|| parse_aria_property_value(aria_properties, "details"));
 
     let mut indications = Vec::new();
     if let Some(roledesc) = parse_aria_property_value(aria_properties, "roledescription") {
@@ -964,8 +1454,73 @@ fn extract_aria_details(aria_properties: &str) -> (Option<String>, Option<String
     if let Some(inv) = parse_aria_property_value(aria_properties, "invalid") {
         if inv == "true" { indications.push("invalide".to_string()); }
     }
+    if let Some(ks) = parse_aria_property_value(aria_properties, "keyshortcuts") {
+        indications.push(format!("raccourci: {ks}"));
+    }
 
     (label, desc, indications)
+}
+
+#[cfg(windows)]
+fn parse_data_attributes_and_json(
+    aria_properties: &str,
+    item_status: &str,
+    help_text: &str,
+) -> (Vec<(String, String)>, Option<serde_json::Value>) {
+    let mut data_attrs = Vec::new();
+    let mut json_val: Option<serde_json::Value> = None;
+
+    // 1. Détection et extraction de blocs JSON dans item_status, help_text ou aria_properties
+    for candidate in [item_status, help_text, aria_properties] {
+        let trimmed = candidate.trim();
+        if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+            || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                json_val = Some(v);
+                break;
+            }
+        }
+    }
+
+    // Aplatir le JSON en paires clé-valeur dans data_attrs
+    if let Some(serde_json::Value::Object(ref map)) = json_val {
+        for (k, v) in map {
+            let str_val = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                _ => v.to_string(),
+            };
+            data_attrs.push((k.to_lowercase(), str_val));
+        }
+    }
+
+    // 2. Extraction des attributs data-*, testid, target, action, etc.
+    for source in [aria_properties, item_status] {
+        for part in source.split(';') {
+            let part = part.trim();
+            if let Some((key, val)) = part.split_once('=') {
+                let k = key.trim().to_ascii_lowercase();
+                let v = val.trim().trim_matches('\'').trim_matches('"').trim();
+                if !v.is_empty() {
+                    let is_target_attr = k.starts_with("data-")
+                        || k.starts_with("data_")
+                        || k == "testid"
+                        || k == "test-id"
+                        || k == "target"
+                        || k == "action"
+                        || k == "tag"
+                        || k == "describedby";
+                    if is_target_attr && !data_attrs.iter().any(|(dk, _)| dk == &k) {
+                        data_attrs.push((k, v.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    (data_attrs, json_val)
 }
 
 #[cfg(windows)]
@@ -1037,6 +1592,82 @@ fn extract_inner_text(uia: &IUIAutomation, element: &IUIAutomationElement, max_c
         }
     }
     None
+}
+
+#[cfg(windows)]
+fn extract_web_document_text(element: &IUIAutomationElement, max_chars: usize) -> Option<String> {
+    unsafe {
+        if let Ok(pattern_unk) = element.GetCurrentPattern(UIA_TextPatternId) {
+            if let Ok(text_pattern) = pattern_unk.cast::<IUIAutomationTextPattern>() {
+                if let Ok(range) = text_pattern.DocumentRange() {
+                    if let Ok(bstr) = range.GetText(max_chars as i32) {
+                        let s = bstr.to_string();
+                        let trimmed = s.trim();
+                        if !trimmed.is_empty() {
+                            return Some(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(pattern_unk) = element.GetCurrentPattern(UIA_ValuePatternId) {
+            if let Ok(val_pattern) = pattern_unk.cast::<IUIAutomationValuePattern>() {
+                if let Ok(bstr) = val_pattern.CurrentValue() {
+                    let s = bstr.to_string();
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn extract_scrollable_viewports_content(uia: &IUIAutomation, hwnd: HWND) -> String {
+    let mut output = String::new();
+    unsafe {
+        let Ok(window_element) = uia.ElementFromHandle(hwnd) else {
+            return output;
+        };
+        let Ok(cond) = uia.ControlViewCondition() else {
+            return output;
+        };
+        let Ok(elements) = window_element.FindAll(TreeScope_Descendants, &cond) else {
+            return output;
+        };
+
+        let count = elements.Length().unwrap_or(0).clamp(0, 100);
+        for i in 0..count {
+            if let Ok(item) = elements.GetElement(i) {
+                if let Ok(p_unk) = item.GetCurrentPattern(UIA_ScrollPatternId) {
+                    if let Ok(scroll_pattern) = p_unk.cast::<IUIAutomationScrollPattern>() {
+                        let is_v_scrollable = scroll_pattern.CurrentVerticallyScrollable().map(|b| b.as_bool()).unwrap_or(false);
+                        if is_v_scrollable {
+                            let v_percent = scroll_pattern.CurrentVerticalScrollPercent().unwrap_or(0.0);
+                            let is_at_max = v_percent >= 99.0 || v_percent == 100.0;
+                            let name = item.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+                            let loc_type = item.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default();
+                            let label = if !name.trim().is_empty() { name.trim().to_string() } else { loc_type };
+
+                            if let Some(content) = extract_inner_text(uia, &item, 1800) {
+                                let clean_md = if content.contains('<') && content.contains('>') {
+                                    crate::html_util::sanitize_html_to_markdown(&content)
+                                } else {
+                                    content
+                                };
+                                let status = if is_at_max { "Scrollbar au MAXIMUM (100% - fin de liste/chat)" } else { "Viewport défilable actif" };
+                                output.push_str(&format!("\n> ### Viewport : {} [{}]\n> Défilement : {:.0}%\n```\n{}\n```\n", label, status, v_percent, clean_md.trim()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    output
 }
 
 #[cfg(windows)]
@@ -1121,6 +1752,23 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let mut name = raw_name.trim().to_string();
                     let automation_id = item.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default();
 
+                    // Filtrage des éléments techniques générés par les Chrome DevTools (F12)
+                    let is_devtools = class_name.contains("devtools")
+                        || automation_id.to_lowercase().contains("devtools")
+                        || loc_type.contains("devtools")
+                        || name.to_lowercase().starts_with("devtools")
+                        || class_name.contains("inspector")
+                        || automation_id.to_lowercase().contains("inspector")
+                        || class_name.contains("treeview") && (name.contains("<") && name.contains(">"))
+                        || class_name.contains("consoleview")
+                        || class_name.contains("networkpanel")
+                        || class_name.contains("sourcespanel")
+                        || automation_id.to_lowercase().starts_with("elements-tab")
+                        || automation_id.to_lowercase().starts_with("console-tab");
+                    if is_devtools {
+                        continue;
+                    }
+
                     let is_swing_tab_class = class_name.contains("editortabs")
                         || class_name.contains("jbtabs")
                         || class_name.contains("tablabel")
@@ -1162,7 +1810,14 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let is_edit_type = ctype == UIA_EditControlTypeId || ctype == UIA_DocumentControlTypeId;
                     let help_text = item.CurrentHelpText().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
                     let item_type = item.CurrentItemType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
-                    let item_status = item.CurrentItemStatus().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+                    let item_status_raw = item.CurrentItemStatus().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
+                    let item_status = item_status_raw.to_lowercase();
+
+                    let primary_class = class_name
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
 
                     let (aria_role, aria_properties) = if let Ok(e2) = item.cast::<IUIAutomationElement2>() {
                         let r = e2.CurrentAriaRole().ok()
@@ -1176,6 +1831,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         (String::new(), String::new())
                     };
 
+                    let (data_attrs, json_metadata) = parse_data_attributes_and_json(&aria_properties, &item_status_raw, &help_text);
                     let (aria_label_opt, aria_desc_opt, indications_vec) = extract_aria_details(&aria_properties);
                     let aria_label = aria_label_opt.unwrap_or_default();
                     let aria_description = aria_desc_opt.unwrap_or_default();
@@ -1227,10 +1883,17 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || aria_properties.contains("role='button'")
                         || aria_properties.contains("role=\"button\"");
 
+                    let has_button_data = data_attrs.iter().any(|(k, v)| {
+                        (k.contains("role") && v == "button")
+                            || (k.contains("action") && (v.contains("click") || v.contains("submit") || v.contains("btn")))
+                            || (k.contains("test") && (v.contains("btn") || v.contains("button")))
+                    });
+
                     let is_button = ctype == UIA_ButtonControlTypeId
                         || loc_type.contains("bouton")
                         || loc_type.contains("button")
                         || is_role_button
+                        || has_button_data
                         || class_name.contains("button")
                         || class_name.contains("btn")
                         || automation_id.to_lowercase().contains("button")
@@ -1324,7 +1987,16 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         name = name.chars().take(MAX_INTERACTIVE_TEXT_LEN).collect();
                     }
 
+                    if name.is_empty() {
+                        if let Some((_, val)) = data_attrs.iter().find(|(k, _)| k.contains("test") || k.contains("action") || k.contains("target")) {
+                            name = format!("[data: {val}]");
+                        } else if !primary_class.is_empty() && (is_button || is_link || is_tab || is_edit_or_textarea) {
+                            name = format!(".{primary_class}");
+                        }
+                    }
+
                     if name.is_empty() && aria_label.is_empty() && automation_id.is_empty() && help_text.is_empty() && value_text.is_empty()
+                        && data_attrs.is_empty() && primary_class.is_empty()
                         && !is_edit_or_textarea && !is_button && !is_link && !is_tab && !is_focusable && !is_tabindex {
                         continue;
                     }
@@ -1335,13 +2007,18 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         .ok()
                         .and_then(|p| p.cast::<IUIAutomationInvokePattern>().ok());
                     let area = (width as i64) * (height as i64);
+                    let index = results.len() + 1;
                     results.push(UiaElementInfo {
+                        index,
                         element: item,
                         automation_id,
                         help_text,
                         value_text,
                         name,
                         class_name,
+                        primary_class,
+                        data_attributes: data_attrs,
+                        json_metadata,
                         localized_type: loc_type,
                         aria_role,
                         aria_label,
@@ -1550,10 +2227,10 @@ pub fn run_system_command(command: &str) -> bool {
 
     let mut cur = trimmed;
 
-    // 1. Déballage des préfixes "cmd.exe /c" ou "cmd /c" superflus
-    if cur.len() >= 11 && cur[..11].eq_ignore_ascii_case("cmd.exe /c ") {
+    // 1. Déballage des préfixes "cmd.exe /c", "cmd.exe /k", "cmd /c", "cmd /k" superflus
+    if cur.len() >= 11 && (cur[..11].eq_ignore_ascii_case("cmd.exe /c ") || cur[..11].eq_ignore_ascii_case("cmd.exe /k ")) {
         cur = cur[11..].trim();
-    } else if cur.len() >= 7 && cur[..7].eq_ignore_ascii_case("cmd /c ") {
+    } else if cur.len() >= 7 && (cur[..7].eq_ignore_ascii_case("cmd /c ") || cur[..7].eq_ignore_ascii_case("cmd /k ")) {
         cur = cur[7..].trim();
     }
 
@@ -1564,23 +2241,9 @@ pub fn run_system_command(command: &str) -> bool {
         cur = cur[6..].trim();
     }
 
-    // 3. Détection de /k (maintien de l'invite ouverte) ou /c (exécution puis fermeture)
-    if cur.len() >= 11 && cur[..11].eq_ignore_ascii_case("cmd.exe /k ") {
-        let rest = cur[11..].trim();
-        process.raw_arg(format!("/K {rest}"));
-    } else if cur.len() >= 7 && cur[..7].eq_ignore_ascii_case("cmd /k ") {
-        let rest = cur[7..].trim();
-        process.raw_arg(format!("/K {rest}"));
-    } else if cur.len() >= 11 && cur[..11].eq_ignore_ascii_case("cmd.exe /c ") {
-        let rest = cur[11..].trim();
-        process.raw_arg(format!("/C {rest}"));
-    } else if cur.len() >= 7 && cur[..7].eq_ignore_ascii_case("cmd /c ") {
-        let rest = cur[7..].trim();
-        process.raw_arg(format!("/C {rest}"));
-    } else {
-        // raw_arg préserve intacts les guillemets et les opérateurs shell (&&, |, etc.)
-        process.raw_arg(format!("/C {cur}"));
-    }
+    // 3. Maintien impératif de la console ouverte via /K au lieu de /C
+    // afin d'afficher la sortie sans fermer la fenêtre à la fin de l'exécution.
+    process.raw_arg(format!("/K {cur}"));
 
     process.spawn().is_ok()
 }
@@ -1666,6 +2329,11 @@ pub fn write_to_browser_or_txt(text: &str) -> String {
             ensure_window_textarea_focus(target_hwnd);
         }
         std::thread::sleep(Duration::from_millis(50));
+
+        const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+        const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
+        send_hotkey(&[VK_CONTROL], VK_A);
+        std::thread::sleep(Duration::from_millis(30));
 
         clipboard::set_text(text);
         std::thread::sleep(Duration::from_millis(40));
@@ -2008,6 +2676,80 @@ fn ecommerce_match_bonus(prop: &str, target_text: &str) -> f32 {
 fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
     let prop_clean = prop.trim();
     let prop_lower = prop_clean.to_lowercase();
+
+    // 1. Détection des sélecteurs d'ID directs (ex: "#submit-btn")
+    if let Some(id_part) = prop_clean.strip_prefix('#') {
+        let id_clean = id_part.trim();
+        if !id_clean.is_empty() {
+            if elem.automation_id.eq_ignore_ascii_case(id_clean) {
+                return Some(500.0);
+            }
+            for (k, v) in &elem.data_attributes {
+                if (k == "id" || k == "testid" || k.ends_with("id")) && v.eq_ignore_ascii_case(id_clean) {
+                    return Some(480.0);
+                }
+            }
+            if elem.name.eq_ignore_ascii_case(id_clean) {
+                return Some(420.0);
+            }
+        }
+    }
+
+    // 2. Détection des sélecteurs macro indexés (ex: "@btn:12", "@link:15", "@input:3", "@12")
+    if prop_clean.starts_with('@') && !prop_clean.starts_with("[@") {
+        let tag = prop_clean.trim_start_matches('@');
+        let num_str = tag
+            .strip_prefix("btn:")
+            .or_else(|| tag.strip_prefix("link:"))
+            .or_else(|| tag.strip_prefix("input:"))
+            .or_else(|| tag.strip_prefix("textarea:"))
+            .or_else(|| tag.strip_prefix("select:"))
+            .unwrap_or(tag);
+
+        if let Ok(target_idx) = num_str.trim().parse::<usize>() {
+            if elem.index == target_idx {
+                return Some(500.0);
+            }
+        }
+    }
+
+    // 3. Détection des macros complètes (ex: [@btn:12 id="submit-btn" text="Valider"])
+    if prop_clean.starts_with("[@") && prop_clean.ends_with(']') {
+        let inner = &prop_clean[2..prop_clean.len() - 1];
+
+        let tag_part = inner.split_whitespace().next().unwrap_or("");
+        if let Some((_, idx_str)) = tag_part.split_once(':') {
+            if let Ok(idx) = idx_str.parse::<usize>() {
+                if elem.index == idx {
+                    return Some(520.0);
+                }
+            }
+        }
+
+        if let Some(id_val) = crate::html_util::extract_attribute(inner, "id") {
+            if !id_val.is_empty() && elem.automation_id.eq_ignore_ascii_case(id_val) {
+                return Some(500.0);
+            }
+        }
+        if let Some(testid_val) = crate::html_util::extract_attribute(inner, "data-testid") {
+            if !testid_val.is_empty() && (elem.automation_id.eq_ignore_ascii_case(testid_val)
+                || elem.data_attributes.iter().any(|(_, v)| v.eq_ignore_ascii_case(testid_val)))
+            {
+                return Some(490.0);
+            }
+        }
+        if let Some(name_val) = crate::html_util::extract_attribute(inner, "name") {
+            if !name_val.is_empty() && (elem.automation_id.eq_ignore_ascii_case(name_val) || elem.name.eq_ignore_ascii_case(name_val)) {
+                return Some(460.0);
+            }
+        }
+        if let Some(text_val) = crate::html_util::extract_attribute(inner, "text") {
+            if !text_val.is_empty() && (elem.name.eq_ignore_ascii_case(text_val) || elem.aria_label.eq_ignore_ascii_case(text_val)) {
+                return Some(450.0);
+            }
+        }
+    }
+
     let name_trim = elem.name.trim();
     let name_lower = name_trim.to_lowercase();
     let aria_label_trim = elem.aria_label.trim();
@@ -2053,6 +2795,16 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
     }
     if matches_pattern(prop, &elem.class_name) {
         regex_score = regex_score.max(90.0);
+    }
+    if !elem.primary_class.is_empty() && matches_pattern(prop, &elem.primary_class) {
+        regex_score = regex_score.max(140.0);
+    }
+    for (k, v) in &elem.data_attributes {
+        if matches_pattern(prop, v) {
+            regex_score = regex_score.max(170.0);
+        } else if matches_pattern(prop, k) {
+            regex_score = regex_score.max(120.0);
+        }
     }
 
     regex_score += ecom_bonus;
@@ -2121,6 +2873,15 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
         let s_type = check_attr(&type_lower, &type_words, 1.8);
         let s_class = check_attr(&class_lower, &class_words, 1.2);
         let s_aria = check_attr(&aria_lower, &aria_words, 2.2);
+        let s_primary_class = check_attr(&elem.primary_class, &clean_words(&elem.primary_class), 2.2);
+        let mut s_data = 0.0f32;
+        for (k, v) in &elem.data_attributes {
+            let v_words = clean_words(v);
+            let s_val = check_attr(v, &v_words, 2.6);
+            let k_words = clean_words(k);
+            let s_k = check_attr(k, &k_words, 1.5);
+            s_data = s_data.max(s_val).max(s_k);
+        }
 
         let best_match = s_name
             .max(s_aria_label)
@@ -2131,6 +2892,8 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
             .max(s_val)
             .max(s_type)
             .max(s_class)
+            .max(s_primary_class)
+            .max(s_data)
             .max(s_aria);
         if best_match > 0.0 {
             matched_words_count += 1;
@@ -2187,12 +2950,16 @@ fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option
     let mut scored: Vec<(f32, &'a UiaElementInfo)> = elements
         .iter()
         .filter_map(|elem| {
+            let mut chrome_bias = 0.0f32;
             if has_web_content {
-                if is_chrome_target && !elem.is_browser_chrome {
-                    return None;
-                }
-                if !is_chrome_target && elem.is_browser_chrome {
-                    return None;
+                if is_chrome_target {
+                    if elem.is_browser_chrome {
+                        chrome_bias += 50.0;
+                    } else {
+                        chrome_bias -= 40.0;
+                    }
+                } else if elem.is_browser_chrome {
+                    chrome_bias -= 45.0;
                 }
             }
 
@@ -2202,7 +2969,7 @@ fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option
             }
 
             score_element(elem, target).map(|score| {
-                let mut final_score = score;
+                let mut final_score = score + chrome_bias;
                 if elem.is_tab {
                     final_score += 80.0;
                 } else if elem.is_link {
@@ -2246,17 +3013,21 @@ fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) ->
             if word_count > 15 || elem.name.len() > 120 {
                 return None;
             }
+            let mut chrome_bias = 0.0f32;
             if has_web_content {
-                if is_chrome_target && !elem.is_browser_chrome {
-                    return None;
-                }
-                if !is_chrome_target && elem.is_browser_chrome {
-                    return None;
+                if is_chrome_target {
+                    if elem.is_browser_chrome {
+                        chrome_bias += 50.0;
+                    } else {
+                        chrome_bias -= 40.0;
+                    }
+                } else if elem.is_browser_chrome {
+                    chrome_bias -= 45.0;
                 }
             }
 
             score_element(elem, target).map(|score| {
-                let mut final_score = score;
+                let mut final_score = score + chrome_bias;
                 if elem.is_button || elem.is_tabindex {
                     final_score += 100.0;
                 } else if elem.pattern.is_some() {
@@ -2293,17 +3064,21 @@ fn find_best_input_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> 
     let mut scored: Vec<(f32, &'a UiaElementInfo)> = elements
         .iter()
         .filter_map(|elem| {
+            let mut chrome_bias = 0.0f32;
             if has_web_content {
-                if is_chrome_target && !elem.is_browser_chrome {
-                    return None;
-                }
-                if !is_chrome_target && elem.is_browser_chrome {
-                    return None;
+                if is_chrome_target {
+                    if elem.is_browser_chrome {
+                        chrome_bias += 50.0;
+                    } else {
+                        chrome_bias -= 40.0;
+                    }
+                } else if elem.is_browser_chrome {
+                    chrome_bias -= 45.0;
                 }
             }
 
             score_element(elem, target).map(|score| {
-                let mut final_score = score;
+                let mut final_score = score + chrome_bias;
                 if elem.is_edit_or_textarea || elem.is_input {
                     final_score += 40.0;
                 } else if elem.is_focusable {
@@ -2328,28 +3103,69 @@ fn find_best_input_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> 
     scored.first().map(|(_, elem)| *elem)
 }
 
+fn clean_diff_line(line: &str) -> String {
+    let mut s = line.trim();
+    loop {
+        if let Some(rest) = s.strip_prefix("- ") {
+            s = rest.trim();
+        } else if let Some(rest) = s.strip_prefix("* ") {
+            s = rest.trim();
+        } else if let Some(rest) = s.strip_prefix("• ") {
+            s = rest.trim();
+        } else {
+            break;
+        }
+    }
+    while (s.starts_with("~~") && s.ends_with("~~")) || (s.starts_with("**") && s.ends_with("**")) {
+        if let Some(inside) = s.strip_prefix("~~").and_then(|r| r.strip_suffix("~~")) {
+            s = inside.trim();
+        } else if let Some(inside) = s.strip_prefix("**").and_then(|r| r.strip_suffix("**")) {
+            s = inside.trim();
+        } else {
+            break;
+        }
+    }
+    s.trim().to_string()
+}
+
 pub fn compute_screen_diff(old_summary: &str, new_summary: &str) -> String {
-    let old_lines: Vec<&str> = old_summary.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
-    let new_lines: Vec<&str> = new_summary.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let is_ignored_diff_meta = |l: &str| -> bool {
+        let t = l.trim();
+        t.starts_with("===")
+            || t.starts_with("---")
+            || t.starts_with("####")
+            || t.starts_with("Espace de travail")
+            || t.starts_with("[Consigne prioritaire]")
+            || t.starts_with("[Note d'intention")
+            || t.starts_with("Fenêtre au premier plan")
+    };
+
+    let old_lines: Vec<String> = old_summary
+        .lines()
+        .filter(|l| !is_ignored_diff_meta(l))
+        .map(clean_diff_line)
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let new_lines: Vec<String> = new_summary
+        .lines()
+        .filter(|l| !is_ignored_diff_meta(l))
+        .map(clean_diff_line)
+        .filter(|l| !l.is_empty())
+        .collect();
 
     let mut added = Vec::new();
     let mut removed = Vec::new();
 
-    for &line in &new_lines {
-        if line.starts_with("===") || line.starts_with("Espace de travail") {
-            continue;
-        }
-        if !old_lines.contains(&line) {
-            added.push(line);
+    for line in &new_lines {
+        if !old_lines.contains(line) && !added.contains(line) {
+            added.push(line.clone());
         }
     }
 
-    for &line in &old_lines {
-        if line.starts_with("===") || line.starts_with("Espace de travail") {
-            continue;
-        }
-        if !new_lines.contains(&line) {
-            removed.push(line);
+    for line in &old_lines {
+        if !new_lines.contains(line) && !removed.contains(line) {
+            removed.push(line.clone());
         }
     }
 
@@ -2359,15 +3175,25 @@ pub fn compute_screen_diff(old_summary: &str, new_summary: &str) -> String {
 
     let mut diff = String::new();
     if !removed.is_empty() {
-        diff.push_str("[Éléments disparus ou modifiés] :\n");
+        diff.push_str("#### 🔻 Éléments disparus ou remplacés :\n");
         for r in removed {
-            diff.push_str(&format!("- {}\n", r));
+            let clean_r = if r.contains('<') && r.contains('>') {
+                crate::html_util::sanitize_html_to_markdown(&r)
+            } else {
+                r
+            };
+            diff.push_str(&format!("- ~~{}~~\n", clean_r.trim()));
         }
     }
     if !added.is_empty() {
-        diff.push_str("[Nouveaux éléments ou nouveaux états] :\n");
+        diff.push_str("\n#### 🟢 Nouveaux éléments / Données modifiées (Markdown) :\n");
         for a in added {
-            diff.push_str(&format!("+ {}\n", a));
+            let clean_a = if a.contains('<') && a.contains('>') {
+                crate::html_util::sanitize_html_to_markdown(&a)
+            } else {
+                a
+            };
+            diff.push_str(&format!("- **{}**\n", clean_a.trim()));
         }
     }
     diff
@@ -2426,11 +3252,7 @@ fn is_poor_or_redundant_link(text: &str) -> bool {
         return true;
     }
     const BLACKLIST: &[&str] = &[
-        "précédent", "suivant", "next", "previous", "en savoir plus", "lire la suite",
-        "plus", "voir plus", "connexion", "se connecter", "s'inscrire", "sign in",
-        "login", "accueil", "home", "menu", "conditions d'utilisation", "confidentialité",
-        "cookies", "aide", "help", "contact", "retour", "partager", "haut de page", "top",
-        "fermer", "close", "annuler", "cancel", "ok", "oui", "non",
+
     ];
     BLACKLIST.iter().any(|&b| lower == b)
 }
@@ -2453,6 +3275,12 @@ fn score_enriched_link(text: &str) -> f32 {
 
     if clean.contains("[aria:") {
         score += 25.0;
+    }
+    if clean.contains("[desc:") {
+        score += 15.0;
+    }
+    if clean.contains("[data:") || clean.contains("testid:") {
+        score += 20.0;
     }
 
     const TECH_KEYWORDS: &[&str] = &[
@@ -2505,6 +3333,12 @@ fn score_enriched_button(text: &str) -> f32 {
     if clean.contains("[aria:") {
         score += 15.0;
     }
+    if clean.contains("[desc:") {
+        score += 15.0;
+    }
+    if clean.contains("[data:") || clean.contains("testid:") || clean.contains("action:") {
+        score += 20.0;
+    }
 
     let words = clean.split_whitespace().count();
     if (1..=4).contains(&words) {
@@ -2525,12 +3359,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
     let wa_h = work_area.bottom - work_area.top;
 
     let user_windows = list_user_windows();
-    let raw_fg = unsafe { GetForegroundWindow() };
-    let current_pid = std::process::id();
-    let (raw_fg_pid, _) = get_window_process_info(raw_fg);
-
-    // 1. Bypass de l'overlay : si au premier plan c'est Libertide ou inconnu, cibler l'application externe réelle
-    let is_libertide_or_unknown = raw_fg.0.is_null()
+    let raw_fg = unsafe { GetForegroundWindow() };    let current_pid = std::process::id();    let (raw_fg_pid, _) = get_window_process_info(raw_fg);    let is_libertide_or_unknown = raw_fg.0.is_null()
         || raw_fg_pid == current_pid
         || !user_windows.iter().any(|(h, _)| *h == raw_fg);
 
@@ -2549,21 +3378,13 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             .unwrap_or(raw_fg)
     };
 
-    let mut out = String::new();
-    out.push_str(&format!(
-        "=== Rapport d'analyse de l'écran ===\nEspace de travail : {}x{}\n",
-        wa_w, wa_h
-    ));
+    let prev_screen_snapshot = LAST_SCREEN_SUMMARY.lock().ok().and_then(|g| g.clone());
 
     let fg_title = user_windows
         .iter()
         .find(|(h, _)| *h == active_hwnd)
         .map(|(_, t)| t.as_str())
         .unwrap_or("Application active");
-    out.push_str(&format!(
-        "Fenêtre au premier plan (contexte actif) : \"{}\"\n[Note d'intention contextuelle] : Cette fenêtre est le contexte direct de l'utilisateur. Toute instruction relative à une question, recherche, météo, achat ou formulaire doit être résolue prioritairement dans cette fenêtre active.\n\n",
-        fg_title
-    ));
 
     let mut inspect_hwnds = Vec::new();
 
@@ -2593,8 +3414,9 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
     }
 
     // 2. Priorisation : l'arbre UIA de la fenêtre active est généré en premier
-    out.push_str("=== Contenu détaillé de la fenêtre active ===\n");
-    for (win_idx, hwnd) in inspect_hwnds.iter().enumerate() {
+    let mut active_window_content = String::new();
+    active_window_content.push_str("=== Contenu détaillé de la fenêtre active ===\n");
+    for hwnd in &inspect_hwnds {
         let win_title = user_windows
             .iter()
             .find(|(h, _)| *h == *hwnd)
@@ -2603,12 +3425,12 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
 
         let is_active = *hwnd == active_hwnd;
         if is_active {
-            out.push_str(&format!("\n--- Fenêtre : \"{}\" [AU PREMIER PLAN - CONTEXTE ACTIF PRIORITAIRE] ---\n", win_title));
+            active_window_content.push_str(&format!("\n--- Fenêtre : \"{}\" [AU PREMIER PLAN - CONTEXTE ACTIF PRIORITAIRE] ---\n", win_title));
         } else {
-            out.push_str(&format!("\n--- Fenêtre secondaire : \"{}\" ---\n", win_title));
+            active_window_content.push_str(&format!("\n--- Fenêtre secondaire : \"{}\" ---\n", win_title));
         }
         if is_window_hung(*hwnd) {
-            out.push_str("  (Application figée / ne répond pas - UIA ignoré)\n");
+            active_window_content.push_str("  (Application figée / ne répond pas - UIA ignoré)\n");
             continue;
         }
 
@@ -2619,10 +3441,67 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         let detected_file = extract_filename_from_title(win_title);
         let is_terminal = is_terminal_window(*hwnd, win_title);
 
+        // Extraction des viewports défilables et des conteneurs dont la scrollbar est à son maximum
+        unsafe {
+            if let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+                let viewports_text = extract_scrollable_viewports_content(&uia, *hwnd);
+                if !viewports_text.trim().is_empty() {
+                    active_window_content.push_str(&format!("\n=== Viewports et zones défilables (Scrollbar max / conteneurs actifs) ===\n{}", viewports_text));
+                }
+            }
+        }
+
+        // Extraction du corps textuel natif du Document / RootWebArea via IUIAutomationTextPattern
+        if is_browser {
+            unsafe {
+                if let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+                    if let Ok(win_elem) = uia.ElementFromHandle(*hwnd) {
+                        if let Ok(cond_doc) = uia.CreatePropertyCondition(
+                            windows::Win32::UI::Accessibility::UIA_ControlTypePropertyId,
+                            &windows::core::VARIANT::from(UIA_DocumentControlTypeId.0),
+                        ) {
+                            let mut best_text = String::new();
+                            if let Ok(doc_elements) = win_elem.FindAll(TreeScope_Descendants, &cond_doc) {
+                                let doc_count = doc_elements.Length().unwrap_or(0).min(6);
+                                for di in 0..doc_count {
+                                    if let Ok(doc_elem) = doc_elements.GetElement(di) {
+                                        if let Some(doc_text) = extract_web_document_text(&doc_elem, 15000) {
+                                            if doc_text.len() > best_text.len() {
+                                                best_text = doc_text;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if !best_text.is_empty() {
+                                let clean_text = if best_text.contains('<') && best_text.contains('>') {
+                                    crate::html_util::sanitize_html_to_markdown(&best_text)
+                                } else {
+                                    best_text
+                                };
+                                let filtered_lines: Vec<&str> = clean_text
+                                    .lines()
+                                    .map(str::trim)
+                                    .filter(|l| !l.is_empty() && l.len() >= 2)
+                                    .take(100)
+                                    .collect();
+                                if !filtered_lines.is_empty() {
+                                    active_window_content.push_str(&format!(
+                                        "  [Page web - Corps textuel et résultats rendus] :\n```\n{}\n```\n",
+                                        filtered_lines.join("\n")
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if is_terminal {
             if let Some(term_text) = read_terminal_window_content(*hwnd, win_title) {
                 let preview = truncate_with_notice(&term_text, 2200);
-                out.push_str(&format!("  [Terminal '{}' - Sortie console active] :\n```\n{}\n```\n", win_title, preview.trim()));
+                active_window_content.push_str(&format!("  [Terminal '{}' - Sortie console active] :\n```\n{}\n```\n", win_title, preview.trim()));
             }
         }
         let has_scrollbar = initial_elements.iter().any(|e| {
@@ -2636,17 +3515,17 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             if !is_browser && (is_editor || detected_file.is_some()) {
                 if let Some(ref fname) = detected_file {
                     if let Some((fpath, _)) = find_file_in_workspace(fname) {
-                        out.push_str(&format!("  [Fichier actif dans l'éditeur] : \"{}\" (chemin: {})\n", fname, fpath));
+                        active_window_content.push_str(&format!("  [Fichier actif dans l'éditeur] : \"{}\" (chemin: {})\n", fname, fpath));
                     } else {
-                        out.push_str(&format!("  [Fichier actif détecté d'après le titre] : \"{}\"\n", fname));
+                        active_window_content.push_str(&format!("  [Fichier actif détecté d'après le titre] : \"{}\"\n", fname));
                     }
                 } else {
-                    out.push_str(&format!("  [Éditeur de code actif] : \"{}\"\n", win_title));
+                    active_window_content.push_str(&format!("  [Éditeur de code actif] : \"{}\"\n", win_title));
                 }
             } else if is_terminal {
                 // Déjà renseigné plus haut via read_terminal_window_content
             } else {
-            out.push_str("  (Aucun élément UI interactif accessible)\n");
+                active_window_content.push_str("  (Aucun élément UI interactif accessible)\n");
             }
             continue;
         }
@@ -2656,9 +3535,9 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         if !is_browser && (is_editor || detected_file.is_some()) {
             if let Some(ref fname) = detected_file {
                 if let Some((fpath, _)) = find_file_in_workspace(fname) {
-                    out.push_str(&format!("  [Fichier actif dans l'éditeur] : \"{}\" (chemin: {})\n", fname, fpath));
+                    active_window_content.push_str(&format!("  [Fichier actif dans l'éditeur] : \"{}\" (chemin: {})\n", fname, fpath));
                 } else {
-                    out.push_str(&format!("  [Fichier actif détecté d'après le titre] : \"{}\"\n", fname));
+                    active_window_content.push_str(&format!("  [Fichier actif détecté d'après le titre] : \"{}\"\n", fname));
                 }
             }
         }
@@ -2669,21 +3548,35 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             .collect();
         if !edits.is_empty() {
             let prefix = if has_web_doc { "  [Page web - champs de saisie / recherche] :\n" } else { "  [Champs de texte / saisie] :\n" };
-            out.push_str(prefix);
+            active_window_content.push_str(prefix);
             for edit in edits.iter().take(8) {
-                let mut label = if !edit.name.is_empty() { edit.name.clone() } else { "Champ".to_string() };
+                let mut label = if !edit.name.is_empty() {
+                    edit.name.clone()
+                } else if !edit.primary_class.is_empty() {
+                    format!(".{}", edit.primary_class)
+                } else {
+                    "Champ".to_string()
+                };
                 if !edit.aria_indications.is_empty() {
                     label.push_str(&format!(" ({})", edit.aria_indications));
                 }
                 if !edit.aria_description.is_empty() && edit.aria_description.len() <= 60 {
                     label.push_str(&format!(" [info: {}]", edit.aria_description));
                 }
+                if !edit.data_attributes.is_empty() {
+                    let data_summary = edit.data_attributes.iter()
+                        .take(2)
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    label.push_str(&format!(" [data: {data_summary}]"));
+                }
                 let val = if !edit.value_text.is_empty() {
                     format!(" = \"{}\"", edit.value_text.chars().take(120).collect::<String>())
                 } else {
                     String::new()
                 };
-                out.push_str(&format!("  • {}{}\n", label, val));
+                active_window_content.push_str(&format!("  • {}{}\n", label, val));
             }
         }
 
@@ -2706,22 +3599,25 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         if !headings.is_empty() {
             let display_headings: Vec<String> = headings.into_iter().take(15).collect();
             let prefix = if has_web_doc { "  [Page web - titres / en-têtes] : " } else { "  [Titres / en-têtes] : " };
-            out.push_str(&format!("{}{}\n", prefix, display_headings.join(" | ")));
+            active_window_content.push_str(&format!("{}{}\n", prefix, display_headings.join(" | ")));
         }
 
-        // C. Textes informatifs, encarts météo, prévisions, données et prix
+        // C. Textes informatifs, contacts, e-mails, téléphones, météo, données et prix
         let mut text_items: Vec<String> = elements
             .iter()
             .filter(|e| {
                 (!has_web_doc || e.is_web_content)
                     && !e.is_edit_or_textarea
+                    && !e.is_button
                     && !e.name.is_empty()
                     && e.name.len() >= 2
                     && !e.is_link
                     && !e.aria_role.contains("link")
                     && !e.localized_type.contains("lien")
                     && !e.localized_type.contains("link")
-                    && (e.localized_type.contains("texte")
+                    && (e.name.contains('@')
+                        || e.name.chars().filter(|c| c.is_ascii_digit()).count() >= 5
+                        || e.localized_type.contains("texte")
                         || e.localized_type.contains("text")
                         || e.localized_type.contains("en-tête")
                         || e.localized_type.contains("heading")
@@ -2729,6 +3625,12 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                         || e.name.contains('€')
                         || e.name.contains('$')
                         || e.name.contains('%')
+                        || e.name.to_lowercase().contains("contact")
+                        || e.name.to_lowercase().contains("email")
+                        || e.name.to_lowercase().contains("mail")
+                        || e.name.to_lowercase().contains("tél")
+                        || e.name.to_lowercase().contains("tel")
+                        || e.name.to_lowercase().contains("adresse")
                         || e.name.to_lowercase().contains("météo")
                         || e.name.to_lowercase().contains("meteo")
                         || e.name.to_lowercase().contains("km/h")
@@ -2748,7 +3650,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         if !text_items.is_empty() {
             let display_texts: Vec<String> = text_items.into_iter().take(80).collect();
             let prefix = if has_web_doc { "  [Page web - encarts météo / données / prix observés] : " } else { "  [Textes / données / prix observés] : " };
-            out.push_str(&format!("{}{}\n", prefix, display_texts.join(" | ")));
+            active_window_content.push_str(&format!("{}{}\n", prefix, display_texts.join(" | ")));
         }
 
         // 2. PRIMAUTÉ DU CONTENU HTML / WEB : Boutons cliquables d'action
@@ -2757,7 +3659,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             .filter(|e| {
                 (!has_web_doc || e.is_web_content)
                     && !e.is_edit_or_textarea
-                    && (!e.name.is_empty() || !e.help_text.is_empty() || !e.automation_id.is_empty())
+                    && (!e.name.is_empty() || !e.help_text.is_empty() || !e.automation_id.is_empty() || !e.primary_class.is_empty() || !e.data_attributes.is_empty())
                     && (e.is_button
                         || e.is_tabindex
                         || e.pattern.is_some()
@@ -2772,19 +3674,27 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                     && !e.name.eq_ignore_ascii_case("system")
             })
             .map(|e| {
-                let base = if !e.name.is_empty() {
+                let mut base = if !e.name.is_empty() {
                     e.name.clone()
                 } else if !e.help_text.is_empty() {
                     e.help_text.clone()
-                } else {
+                } else if !e.automation_id.is_empty() {
                     e.automation_id.clone()
-                };
-                let full_label = if !e.aria_indications.is_empty() {
-                    format!("{base} ({})", e.aria_indications)
+                } else if !e.primary_class.is_empty() {
+                    format!(".{}", e.primary_class)
                 } else {
-                    base
+                    String::new()
                 };
-                (e.is_offscreen, full_label)
+                if !e.aria_indications.is_empty() {
+                    base = format!("{base} ({})", e.aria_indications);
+                }
+                if !e.aria_description.is_empty() && e.aria_description.len() <= 50 {
+                    base.push_str(&format!(" [desc: {}]", e.aria_description));
+                }
+                if let Some((k, v)) = e.data_attributes.iter().find(|(k, _)| k.contains("test") || k.contains("action") || k.contains("target")) {
+                    base.push_str(&format!(" [{k}: {v}]"));
+                }
+                (e.is_offscreen, base)
             })
             .collect();
 
@@ -2799,7 +3709,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         if !display_btns.is_empty() {
             display_btns.truncate(40);
             let prefix = if has_web_doc { "  [Page web - boutons cliquables] : " } else { "  [Boutons / contrôles cliquables] : " };
-            out.push_str(&format!("{}{}\n", prefix, display_btns.join(", ")));
+            active_window_content.push_str(&format!("{}{}\n", prefix, display_btns.join(", ")));
         }
 
         // 3. PRIMAUTÉ DU CONTENU HTML / WEB : Liens et résultats
@@ -2808,7 +3718,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             .filter(|e| {
                 (!has_web_doc || e.is_web_content)
                     && !e.is_edit_or_textarea
-                    && !e.name.is_empty()
+                    && (!e.name.is_empty() || !e.primary_class.is_empty() || !e.data_attributes.is_empty())
                     && (e.is_link
                         || e.localized_type.contains("lien")
                         || e.localized_type.contains("link")
@@ -2817,11 +3727,22 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                         || e.aria_role.contains("lien"))
             })
             .map(|e| {
-                let label = if !e.aria_indications.is_empty() {
-                    format!("{} ({})", e.name, e.aria_indications)
-                } else {
+                let mut label = if !e.name.is_empty() {
                     e.name.clone()
+                } else if !e.primary_class.is_empty() {
+                    format!(".{}", e.primary_class)
+                } else {
+                    "Lien".to_string()
                 };
+                if !e.aria_indications.is_empty() {
+                    label = format!("{} ({})", label, e.aria_indications);
+                }
+                if !e.aria_description.is_empty() && e.aria_description.len() <= 50 {
+                    label.push_str(&format!(" [desc: {}]", e.aria_description));
+                }
+                if let Some((k, v)) = e.data_attributes.iter().find(|(k, _)| k.contains("test") || k.contains("target")) {
+                    label.push_str(&format!(" [{k}: {v}]"));
+                }
                 (e.is_offscreen, label)
             })
             .collect();
@@ -2851,7 +3772,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
 
         if !display_links.is_empty() {
             let prefix = if has_web_doc { "  [Page web - liens cliquables] : " } else { "  [Liens / résultats cliquables] : " };
-            out.push_str(&format!("{}{}\n", prefix, display_links.join(" | ")));
+            active_window_content.push_str(&format!("{}{}\n", prefix, display_links.join(" | ")));
         }
 
         // 5. Informations secondaires de la fenêtre hôte (Onglets et contrôles navigateur)
@@ -2863,7 +3784,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         tabs.dedup();
         if !tabs.is_empty() {
             let display_tabs: Vec<String> = tabs.into_iter().take(10).collect();
-            out.push_str(&format!("  [Onglets / pages ouvertes] : {}\n", display_tabs.join(" | ")));
+            active_window_content.push_str(&format!("  [Onglets / pages ouvertes] : {}\n", display_tabs.join(" | ")));
         }
 
         if has_web_doc {
@@ -2880,20 +3801,20 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                 .take(4)
                 .collect();
             if !chrome_controls.is_empty() {
-                out.push_str(&format!("  [Interface navigateur] : {}\n", chrome_controls.join(" | ")));
+                active_window_content.push_str(&format!("  [Interface navigateur] : {}\n", chrome_controls.join(" | ")));
             }
         }
 
         if has_scrollbar {
-            out.push_str("  [Défilement possible] : Une barre de défilement est présente. Utilise l'action 'scroll' ('down'/'up') pour révéler la suite de la page.\n");
+            active_window_content.push_str("  [Défilement possible] : Une barre de défilement est présente. Utilise l'action 'scroll' ('down'/'up') pour révéler la suite de la page.\n");
         }
     }
 
-    // 2. Relégation et compactage de la liste des autres fenêtres ouvertes en fin de rapport
-    out.push_str("\n=== Autres fenêtres ouvertes ===\n");
+    // 3. Relégation et compactage strict des autres fenêtres (8 fenêtres max pour préserver les tokens)
     let other_windows: Vec<String> = user_windows
         .iter()
         .filter(|(h, _)| !inspect_hwnds.contains(h))
+        .take(8)
         .map(|(hwnd, title)| {
             let (pid, exe_name) = get_window_process_info(*hwnd);
             let is_hung = is_window_hung(*hwnd);
@@ -2909,15 +3830,46 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         })
         .collect();
 
+    let mut other_windows_content = String::new();
+    other_windows_content.push_str("\n=== Autres fenêtres ouvertes ===\n");
     if other_windows.is_empty() {
-        out.push_str("(Aucune autre fenêtre ouverte)\n");
+        other_windows_content.push_str("(Aucune autre fenêtre ouverte)\n");
     } else {
-        out.push_str(&other_windows.join("\n"));
-        out.push('\n');
+        other_windows_content.push_str(&other_windows.join("\n"));
+        other_windows_content.push('\n');
     }
 
-    // 3. Augmentation du quota interne à 24 000 caractères
-    let summary = truncate_with_notice(&out, 24000);
+    // 4. Détection et extraction prioritaire du différentiel des changements sur la page web
+    let mut web_changes_section = String::new();
+    if let Some(ref prev_summary) = prev_screen_snapshot {
+        let diff = compute_screen_diff(prev_summary, &active_window_content);
+        if !diff.trim().is_empty() {
+            web_changes_section.push_str("=== INFORMATIONS WEB MODIFIÉES / NOUVELLES (PRIORITÉ ABSOLUE) ===\n");
+            web_changes_section.push_str("[Consigne prioritaire] : Les éléments et données ci-dessous viennent d'apparaître ou d'être modifiés sur la page web active suite à la dernière action. Ils priment sur le reste de la page et sur les autres fenêtres :\n");
+            web_changes_section.push_str(diff.trim());
+            web_changes_section.push_str("\n\n");
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "=== Rapport d'analyse de l'écran ===\nEspace de travail : {}x{}\n",
+        wa_w, wa_h
+    ));
+    out.push_str(&format!(
+        "Fenêtre au premier plan (contexte actif) : \"{}\"\n[Note d'intention contextuelle] : Cette fenêtre est le contexte direct de l'utilisateur. Toute instruction relative à une question, recherche, météo, achat ou formulaire doit être résolue prioritairement dans cette fenêtre active.\n\n",
+        fg_title
+    ));
+
+    // Injection au tout début pour garantir la primauté de tokens
+    if !web_changes_section.is_empty() {
+        out.push_str(&web_changes_section);
+    }
+    out.push_str(&active_window_content);
+    out.push_str(&other_windows_content);
+
+    // 3. Quota interne limité strictement à 15 Ko (15 360 caractères)
+    let summary = truncate_with_notice(&out, 15360);
     println!("\n=================== [Analyse d'écran UIA] ===================");
     println!("{}", summary.trim());
     println!("============================================================\n");
@@ -2928,6 +3880,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
 pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) -> String {
     let user_windows = list_user_windows();
     let active_id = get_active_x11_window();
+    let prev_screen_snapshot = LAST_SCREEN_SUMMARY.lock().ok().and_then(|g| g.clone());
 
     let mut out = String::new();
     out.push_str("=== Rapport d'analyse de l'écran (Serveur X11 Unix) ===\n");
@@ -2940,6 +3893,8 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             .unwrap_or("Fenêtre active");
         out.push_str(&format!("Fenêtre au premier plan : \"{}\" [ID: {}]\n\n", active_title, act));
     }
+
+    let mut x11_active_text = String::new();
 
     out.push_str("=== Fenêtres X11 détectées ===\n");
     for (win_id, title) in &user_windows {
@@ -2971,6 +3926,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             {
                 let sel = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !sel.is_empty() {
+                    x11_active_text.push_str(&sel);
                     out.push_str(&format!(
                         "  [Sélection texte active (X11 Primary)] :\n\"\"\"\n{}\n\"\"\"\n",
                         truncate_with_notice(&sel, 800)
@@ -2984,6 +3940,14 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         let clip_trim = clip.trim();
         if !clip_trim.is_empty() {
             out.push_str(&format!("\n[Contenu presse-papiers X11 (Clipboard)] :\n\"\"\"\n{}\n\"\"\"\n", truncate_with_notice(clip_trim, 600)));
+        }
+    }
+
+    if let Some(ref prev) = prev_screen_snapshot {
+        let diff = compute_screen_diff(prev, &out);
+        if !diff.trim().is_empty() {
+            let changes_hdr = format!("=== CHANGEMENTS RÉCENTS (PRIORITÉ ABSOLUE) ===\n{}\n\n", diff.trim());
+            out = format!("{}{}", changes_hdr, out);
         }
     }
 
@@ -3085,18 +4049,8 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
             return "Actions interrompues par une nouvelle consigne.".to_string();
         }
         if let AgentAction::OpenBrowser { url } = action {
-            let raw_url = url.as_deref().unwrap_or("").trim();
-            let target = if raw_url.is_empty() || raw_url.starts_with("about:") {
-                "https://www.google.com".to_string()
-            } else if !raw_url.starts_with("http://") && !raw_url.starts_with("https://") {
-                if raw_url.contains('.') {
-                    format!("https://{raw_url}")
-                } else {
-                    format!("https://www.google.com/search?q={}", urlencoding_simple(raw_url))
-                }
-            } else {
-                raw_url.to_string()
-            };
+            let raw_url = url.as_deref().unwrap_or("");
+            let target = format_url_for_navigation(raw_url);
 
             let spawned = launch_browser_new_window(&target);
             if spawned.is_some() {
@@ -3183,9 +4137,18 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     if is_window_hung(hwnd) {
                         feedback.push(format!("La fenêtre [HWND {:?}] ne répond pas (sablier / bloquée). Focus annulé.", hwnd.0));
                     } else {
+                        let win_title = user_windows
+                            .iter()
+                            .find(|(h, _)| *h == hwnd)
+                            .map(|(_, t)| t.as_str())
+                            .unwrap_or("");
+                        let is_browser = is_browser_hwnd(hwnd, win_title);
                         force_foreground_window(hwnd);
                         unsafe {
-                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                            let _ = ShowWindow(hwnd, if is_browser { SW_MAXIMIZE } else { SW_RESTORE });
+                        }
+                        if is_browser {
+                            focus_browser_address_bar(hwnd);
                         }
                         active_user_hwnd = Some(hwnd);
                         preferred_target_hwnd = Some(hwnd);
@@ -3193,6 +4156,40 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     }
                 } else {
                     feedback.push("Fenêtre introuvable pour focus.".to_string());
+                }
+            }
+            AgentAction::FocusAddressBar { window } => {
+                let target_hwnd = match window.as_deref() {
+                    Some(w) if !w.trim().is_empty() => {
+                        find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
+                    }
+                    _ => find_best_browser_window(&user_windows, active_user_hwnd),
+                };
+
+                if let Some(hwnd) = target_hwnd {
+                    if is_window_hung(hwnd) {
+                        feedback.push(format!("Navigateur [HWND {:?}] non réactif. Focus barre d'adresse ignoré.", hwnd.0));
+                        continue;
+                    }
+                    force_foreground_window(hwnd);
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+                    }
+                    std::thread::sleep(Duration::from_millis(60));
+                    focus_browser_address_bar(hwnd);
+                    active_user_hwnd = Some(hwnd);
+                    preferred_target_hwnd = Some(hwnd);
+                    feedback.push("Barre d'adresse sélectionnée via focus_address_bar (Alt+D / Ctrl+L).".to_string());
+                } else {
+                    println!("[Actions] Aucun navigateur trouvé pour focus_address_bar, ouverture d'un navigateur.");
+                    let spawned = launch_browser_new_window("https://www.google.com");
+                    if let Some(h) = spawned {
+                        newly_spawned_hwnd = Some(h);
+                        active_user_hwnd = Some(h);
+                        preferred_target_hwnd = Some(h);
+                        user_windows = list_user_windows();
+                    }
+                    feedback.push("Navigateur ouvert pour sélection de la barre d'adresse.".to_string());
                 }
             }
             AgentAction::ClickElement { window, target_name } => {
@@ -3215,8 +4212,17 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         feedback.push(format!("Fenêtre cible [HWND {:?}] non réactive (sablier). Clic ignoré.", hwnd.0));
                         continue;
                     }
-                    println!("[Actions] Clic sur l'élément [HWND {:?}] pour '{}'", hwnd.0, target_name);
                     let is_browser = user_windows.iter().find(|(h, _)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
+
+                    // Dérivation immédiate vers le raccourci universel Alt+D / Ctrl+L si la barre d'adresse est ciblée
+                    if is_browser && is_address_bar_target(target_name) {
+                        println!("[Actions] Activation directe barre d'adresse (Alt+D / Ctrl+L) sur [HWND {:?}]", hwnd.0);
+                        focus_browser_address_bar(hwnd);
+                        feedback.push("Barre d'adresse sélectionnée via raccourci universel (Alt+D / Ctrl+L).".to_string());
+                        continue;
+                    }
+
+                    println!("[Actions] Clic sur l'élément [HWND {:?}] pour '{}'", hwnd.0, target_name);
                     let show_mode = if is_browser { SW_MAXIMIZE } else { SW_RESTORE };
                     force_foreground_window(hwnd);
                     unsafe {
@@ -3231,6 +4237,13 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     }
 
                     if let Some(elem) = find_best_element(&elements, target_name) {
+                        // Détection structurelle : zone de saisie située dans le chrome navigateur -> barre d'adresse
+                        if is_browser && elem.is_browser_chrome && (elem.is_edit_or_textarea || elem.is_input) {
+                            println!("[Actions] Détection structurelle : zone de saisie dans le chrome navigateur résolue -> focus_browser_address_bar");
+                            focus_browser_address_bar(hwnd);
+                            feedback.push("Barre d'adresse sélectionnée via détection structurelle UIA (Alt+D / Ctrl+L).".to_string());
+                            continue;
+                        }
                         println!("[Actions] Élément/lien trouvé : name='{}', id='{}', type='{}', clic en ({}, {})", elem.name, elem.automation_id, elem.localized_type, elem.click_x, elem.click_y);
                         unsafe { let _ = elem.element.SetFocus(); }
                         click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
@@ -3432,8 +4445,8 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                             click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                             feedback.push(format!("Clic effectué sur le bouton '{}' de la notification.", button_name));
                         } else {
-                        println!("[Actions] Aucun bouton correspondant trouvé pour '{}'", button_name);
-                        feedback.push(format!("Bouton '{}' introuvable à l'écran.", button_name));
+                            println!("[Actions] Aucun bouton correspondant trouvé pour '{}'", button_name);
+                            feedback.push(format!("Bouton '{}' introuvable à l'écran.", button_name));
                         }
                     }
                 }
@@ -3458,8 +4471,19 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         feedback.push(format!("Fenêtre cible [HWND {:?}] non réactive (sablier). Focus ignoré.", hwnd.0));
                         continue;
                     }
-                    println!("[Actions] Focus sur l'élément [HWND {:?}] pour '{}'", hwnd.0, target_name);
                     let is_browser = user_windows.iter().find(|(h, _)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
+
+                    // Focus direct et infaillible de la barre d'adresse / omnibar
+                    if is_browser && (is_address_bar_target(target_name) || target_name.trim().is_empty()) {
+                        println!("[Actions] Focus direct omnibar (Alt+D / Ctrl+L) sur [HWND {:?}]", hwnd.0);
+                        focus_browser_address_bar(hwnd);
+                        active_user_hwnd = Some(hwnd);
+                        preferred_target_hwnd = Some(hwnd);
+                        feedback.push("Omnibar du navigateur sélectionnée avec succès.".to_string());
+                        continue;
+                    }
+
+                    println!("[Actions] Focus sur l'élément [HWND {:?}] pour '{}'", hwnd.0, target_name);
                     let show_mode = if is_browser { SW_MAXIMIZE } else { SW_RESTORE };
                     force_foreground_window(hwnd);
                     unsafe {
@@ -3481,6 +4505,14 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         if elements.is_empty() {
                             std::thread::sleep(Duration::from_millis(150));
                             elements = list_interactive_elements(hwnd);
+                        }
+                        if let Some(elem) = find_best_element(&elements, target_name) {
+                            if is_browser && elem.is_browser_chrome && (elem.is_edit_or_textarea || elem.is_input) {
+                                println!("[Actions] Détection structurelle : zone de saisie dans le chrome navigateur résolue -> focus_browser_address_bar");
+                                focus_browser_address_bar(hwnd);
+                                feedback.push("Barre d'adresse sélectionnée via détection structurelle UIA (Alt+D / Ctrl+L).".to_string());
+                                continue;
+                            }
                         }
 
                         if let Some(elem) = find_best_element(&elements, target_name) {
@@ -3549,6 +4581,12 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     feedback.push("Touche Échap envoyée.".to_string());
                     continue;
                 }
+                // Interception préventive : évite de lancer un shell cmd.exe pour une combinaison de touches
+                if try_send_key_combination(&cmd_clean) {
+                    println!("[Actions] Combinaison de touches détectée dans run_command et simulée : {}", command);
+                    feedback.push(format!("Combinaison de touches '{}' simulée avec succès.", command));
+                    continue;
+                }
 
                 let initial_hwnds: std::collections::HashSet<isize> = user_windows
                     .iter()
@@ -3577,6 +4615,8 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
             }
             AgentAction::WriteText { text, target, window, press_enter } => {
                 const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
+                const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+                const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
                 let should_enter = press_enter.unwrap_or(false) || text.ends_with('\n');
                 let target_desc_opt = target.as_deref().filter(|s| !s.trim().is_empty());
                 let is_address_bar = target_desc_opt.map_or(false, is_address_bar_target);
@@ -3686,6 +4726,8 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         unsafe { let _ = elem.element.SetFocus(); }
                         click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                         std::thread::sleep(Duration::from_millis(50));
+                        send_hotkey(&[VK_CONTROL], VK_A);
+                        std::thread::sleep(Duration::from_millis(30));
                         clipboard::set_text(text);
                         std::thread::sleep(Duration::from_millis(30));
                         send_paste();
@@ -3714,6 +4756,9 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                         std::thread::sleep(Duration::from_millis(50));
 
+                        send_hotkey(&[VK_CONTROL], VK_A);
+                        std::thread::sleep(Duration::from_millis(30));
+
                         clipboard::set_text(text);
                         std::thread::sleep(Duration::from_millis(30));
                         send_paste();
@@ -3736,6 +4781,8 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                             unsafe { let _ = elem.element.SetFocus(); }
                             click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                             std::thread::sleep(Duration::from_millis(50));
+                            send_hotkey(&[VK_CONTROL], VK_A);
+                            std::thread::sleep(Duration::from_millis(30));
                             clipboard::set_text(text);
                             std::thread::sleep(Duration::from_millis(30));
                             send_paste();
@@ -4223,6 +5270,8 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 const VK_RIGHT: VIRTUAL_KEY = VIRTUAL_KEY(0x27);
                 const VK_F4: VIRTUAL_KEY = VIRTUAL_KEY(0x73);
                 const VK_F5: VIRTUAL_KEY = VIRTUAL_KEY(0x74);
+                const VK_D: VIRTUAL_KEY = VIRTUAL_KEY(0x44);
+                const VK_L: VIRTUAL_KEY = VIRTUAL_KEY(0x4C);
 
                 match shortcut.as_str() {
                     "magnifier_zoom_in" => send_hotkey(&[VK_LWIN], VK_OEM_PLUS),
@@ -4275,6 +5324,15 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     "close_tab" => send_hotkey(&[VK_CONTROL], VIRTUAL_KEY(0x57)),
                     "reopen_tab" => send_hotkey(&[VK_CONTROL, VK_SHIFT], VIRTUAL_KEY(0x54)),
                     "refresh_page" => send_hotkey(&[], VK_F5),
+                    "bookmarks_bar" | "toggle_bookmarks" | "favoris" => {
+                        // Ctrl + Shift + B (affiche/masque la barre de favoris)
+                        send_hotkey(&[VK_CONTROL, VK_SHIFT], VIRTUAL_KEY(0x42));
+                    }
+                    "focus_address_bar" | "address_bar" | "select_address_bar" => {
+                        send_hotkey(&[VK_MENU], VK_D);
+                        std::thread::sleep(Duration::from_millis(40));
+                        send_hotkey(&[VK_CONTROL], VK_L);
+                    }
                     "mute_volume" | "volume_mute" | "mute_sound" | "mute_audio" => {
                         send_hotkey(&[], VIRTUAL_KEY(0xAD));
                     }
@@ -4294,7 +5352,12 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     "previous_field" => send_hotkey(&[VK_SHIFT], VK_TAB),
                     "escape" => send_hotkey(&[], VK_ESCAPE),
                     "enter" | "press_enter" | "return" => send_hotkey(&[], VK_RETURN),
-                    _ => {}
+                    other => {
+                        if !try_send_key_combination(other) {
+                            feedback.push(format!("Raccourci système '{}' non reconnu.", other));
+                            continue;
+                        }
+                    }
                 }
                 feedback.push(format!("Raccourci système '{}' envoyé.", shortcut));
             }
@@ -4996,6 +6059,29 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 println!("[Actions] Quota de passes ajusté à {} (motif: {})", clamped, reason_desc);
                 feedback.push(format!("Budget de raisonnement configuré à {} passes ({reason_desc}).", clamped));
             }
+            AgentAction::SchedulePrompt { delay_seconds, prompt } => {
+                let dur = Duration::from_secs((*delay_seconds).max(1));
+                schedule_prompt_execution(dur, prompt.clone());
+                crate::play_earcon(crate::Earcon::Success);
+                let friendly = format_duration_friendly(dur);
+                println!("[Actions] Commande différée planifiée dans {} : \"{}\"", friendly, prompt);
+                feedback.push(format!("Commande différée planifiée dans {friendly} : « {prompt} »."));
+            }
+            AgentAction::SchedulePrompts { tasks } => {
+                let mut count = 0;
+                for t in tasks {
+                    if !t.prompt.trim().is_empty() {
+                        let dur = Duration::from_secs(t.delay_seconds.max(1));
+                        schedule_prompt_execution(dur, t.prompt.clone());
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    crate::play_earcon(crate::Earcon::Success);
+                    println!("[Actions] {} commande(s) différée(s) planifiée(s).", count);
+                    feedback.push(format!("{count} commande(s) différée(s) planifiée(s)."));
+                }
+            }
             AgentAction::MuteAudio => {
                 // Stoppe immédiatement la lecture multimédia (Spotify, YouTube, navigateurs)
                 const VK_MEDIA_STOP: VIRTUAL_KEY = VIRTUAL_KEY(0xB2);
@@ -5052,6 +6138,18 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         feedback.push(format!("Commande de volume '{command}' appliquée."));
                     }
                 }
+            }
+            AgentAction::OpenFile { path } => {
+                match open_path_with_default_app(path) {
+                    Ok(_) => feedback.push(format!("Fichier '{path}' ouvert dans son application par défaut.")),
+                    Err(err) => feedback.push(format!("Impossible d'ouvrir le fichier '{path}' : {err}")),
+                }
+            }
+            AgentAction::ShowFloatingCard { title, .. } => {
+                feedback.push(format!("Fenêtre volante '{title}' affichée à l'écran."));
+            }
+            AgentAction::CloseFloatingCard { id } => {
+                feedback.push(format!("Fenêtre volante '{id}' fermée."));
             }
         }
     }
@@ -5219,15 +6317,29 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 feedback.push(format!("Signal de fermeture envoyé à '{}'.", name));
             }
             AgentAction::OpenBrowser { url } => {
-                let u = url.as_deref().unwrap_or("https://www.google.com");
-                let _ = std::process::Command::new("xdg-open").arg(u).spawn();
-                feedback.push(format!("Navigateur ouvert sur '{}'.", u));
+                let url_str = format_url_for_navigation(url.as_deref().unwrap_or(""));
+                let _ = std::process::Command::new("xdg-open").arg(&url_str).spawn();
+                feedback.push(format!("Navigateur ouvert sur '{}'.", url_str));
+            }
+            AgentAction::FocusAddressBar { .. } => {
+                let _ = std::process::Command::new("xdotool").args(["key", "ctrl+l"]).status();
+                feedback.push("Barre d'adresse sélectionnée (Ctrl+L).".to_string());
             }
             AgentAction::NavigateToUrl { url, .. } => {
-                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-                feedback.push(format!("Navigation vers '{}'.", url));
+                let formatted = format_url_for_navigation(url);
+                let _ = std::process::Command::new("xdg-open").arg(&formatted).spawn();
+                feedback.push(format!("Navigation vers '{}'.", formatted));
             }
-            AgentAction::WriteText { text, press_enter, .. } | AgentAction::Dictate { text, press_enter, .. } => {
+            AgentAction::WriteText { text, press_enter, .. } => {
+                let _ = std::process::Command::new("xdotool").args(["key", "ctrl+a"]).status();
+                std::thread::sleep(Duration::from_millis(30));
+                let _ = std::process::Command::new("xdotool").args(["type", "--delay", "12", text]).status();
+                if press_enter.unwrap_or(false) {
+                    let _ = std::process::Command::new("xdotool").args(["key", "Return"]).status();
+                }
+                feedback.push(format!("Texte saisi sous X11 ({} caractères).", text.len()));
+            }
+            AgentAction::Dictate { text, press_enter, .. } => {
                 let _ = std::process::Command::new("xdotool").args(["type", "--delay", "12", text]).status();
                 if press_enter.unwrap_or(false) {
                     let _ = std::process::Command::new("xdotool").args(["key", "Return"]).status();
@@ -5235,6 +6347,12 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 feedback.push(format!("Texte saisi sous X11 ({} caractères).", text.len()));
             }
             AgentAction::RunCommand { command } => {
+                let cmd_clean = command.trim().to_lowercase();
+                if cmd_clean.contains('+') || cmd_clean.starts_with("ctrl") || cmd_clean.starts_with("alt") {
+                    let _ = std::process::Command::new("xdotool").args(["key", &cmd_clean]).status();
+                    feedback.push(format!("Combinaison de touches '{}' envoyée via xdotool.", command));
+                    continue;
+                }
                 let ok = std::process::Command::new("sh").arg("-c").arg(command).spawn().is_ok();
                 feedback.push(format!("Commande shell '{}' ({})", command, if ok { "succès" } else { "échec" }));
             }
@@ -5245,7 +6363,12 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                     "copy" => { let _ = std::process::Command::new("xdotool").args(["key", "ctrl+c"]).status(); }
                     "close_tab" => { let _ = std::process::Command::new("xdotool").args(["key", "ctrl+w"]).status(); }
                     "refresh_page" => { let _ = std::process::Command::new("xdotool").args(["key", "F5"]).status(); }
-                    _ => {}
+                    "bookmarks_bar" | "toggle_bookmarks" | "favoris" => {
+                        let _ = std::process::Command::new("xdotool").args(["key", "ctrl+shift+b"]).status();
+                    }
+                    other => {
+                        let _ = std::process::Command::new("xdotool").args(["key", other]).status();
+                    }
                 }
                 feedback.push(format!("Raccourci '{}' envoyé via xdotool.", shortcut));
             }
@@ -5263,6 +6386,27 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 TARGET_REASONING_PASSES.store(clamped, Ordering::SeqCst);
                 let reason_desc = reason.as_deref().unwrap_or("ajustement au contexte d'urgence");
                 feedback.push(format!("Budget de raisonnement configuré à {} passes ({reason_desc}).", clamped));
+            }
+            AgentAction::SchedulePrompt { delay_seconds, prompt } => {
+                let dur = Duration::from_secs((*delay_seconds).max(1));
+                schedule_prompt_execution(dur, prompt.clone());
+                crate::play_earcon(crate::Earcon::Success);
+                let friendly = format_duration_friendly(dur);
+                feedback.push(format!("Commande différée planifiée dans {friendly} : « {prompt} »."));
+            }
+            AgentAction::SchedulePrompts { tasks } => {
+                let mut count = 0;
+                for t in tasks {
+                    if !t.prompt.trim().is_empty() {
+                        let dur = Duration::from_secs(t.delay_seconds.max(1));
+                        schedule_prompt_execution(dur, t.prompt.clone());
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    crate::play_earcon(crate::Earcon::Success);
+                    feedback.push(format!("{count} commande(s) différée(s) planifiée(s)."));
+                }
             }
             AgentAction::MuteAudio => {
                 let _ = std::process::Command::new("playerctl").arg("pause").spawn();

@@ -1,20 +1,22 @@
-#![cfg_attr(windows, windows_subsystem = "windows")]
-
 mod audio;
 mod automation;
+mod floating_window;
 mod fs_util;
 mod html_util;
 mod pattern;
+mod tts;
 mod twitch;
 mod types;
 mod window_util;
 
+use audio::spawn_audio_worker;
+use floating_window::FloatingCard;
 use automation::*;
 use fs_util::*;
 use pattern::clean_words;
-use window_util::*;
-use audio::spawn_audio_worker;
+use tts::{sanitize_for_tts, spawn_tts_worker};
 use twitch::{search_twitch_channels, spawn_twitch_worker};
+use window_util::*;
 use eframe::egui;
 use types::*;
 use std::sync::Arc;
@@ -26,15 +28,47 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use windows::Win32::Foundation::POINT;
 #[cfg(windows)]
-use windows::Win32::Media::Speech::{
-    ISpVoice, SpVoice, SPF_ASYNC, SPF_IS_NOT_XML, SPF_PURGEBEFORESPEAK, SPVOICESTATUS,
-};
-#[cfg(windows)]
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
-#[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+#[cfg(windows)]
+extern "system" {
+    fn Beep(dwFreq: u32, dwDuration: u32) -> i32;
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Earcon {
+    MicOpen,
+    MicClose,
+    Success,
+    Emergency,
+}
+
+pub fn play_earcon(earcon: Earcon) {
+    #[cfg(windows)]
+    std::thread::spawn(move || unsafe {
+        match earcon {
+            Earcon::MicOpen => {
+                Beep(600, 40);
+                Beep(900, 50);
+            }
+            Earcon::MicClose => {
+                Beep(750, 40);
+                Beep(500, 50);
+            }
+            Earcon::Success => {
+                Beep(1000, 50);
+            }
+            Earcon::Emergency => {
+                for _ in 0..3 {
+                    Beep(1200, 60);
+                    Beep(800, 60);
+                }
+            }
+        }
+    });
+}
 
 static TTS_AUDIO_LEVEL: AtomicU32 = AtomicU32::new(0);
 static MIC_AUDIO_LEVEL: AtomicU32 = AtomicU32::new(0);
@@ -66,6 +100,15 @@ pub struct OverlayApp {
     smoothed_audio_level: f32,
     continuous_mode: bool,
     dictation_mode: bool,
+    zoom_factor: f32,
+    voice_gender: VoiceGender,
+
+    // Accessibilité : Ciblage par numéros & Mode contacteur unique (Switch Access)
+    numbered_targets: Vec<NumberedElementTarget>,
+    show_numbered_targets: bool,
+    switch_access_mode: bool,
+    switch_focus_index: usize,
+    switch_last_tick: Instant,
 
     // Canaux de communication asynchrones
     event_receiver: Receiver<AgentEvent>,
@@ -77,6 +120,7 @@ pub struct OverlayApp {
     twitch_search_query: String,
     twitch_search_results: Vec<TwitchChannelItem>,
     position_initialized: bool,
+    floating_cards: Vec<FloatingCard>,
     window_pos: Option<egui::Pos2>,
     window_bottom_y: Option<f32>,
     drag_offset: Option<egui::Vec2>,
@@ -112,92 +156,255 @@ fn get_screen_cursor_pos(ctx: &egui::Context) -> Option<egui::Pos2> {
     ctx.input(|i| i.pointer.latest_pos())
 }
 
-fn sanitize_for_tts(text: &str) -> String {
-    let mut cleaned = String::new();
-    let mut in_code_block = false;
+fn normalize_for_command_match(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ")
+}
 
-    // 1. Élimination complète des blocs de code markdown (```...```)
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            in_code_block = !in_code_block;
-            continue;
-        }
-        if in_code_block {
-            continue;
-        }
-        cleaned.push_str(line);
-        cleaned.push(' ');
+fn is_emergency_stop_command(text: &str) -> bool {
+    let norm = normalize_for_command_match(text);
+    if norm == "stop" || norm == "stopp" || norm == "стоп" || norm == "停止" || norm == "ストップ" {
+        return true;
     }
+    const TRIGGERS: &[&str] = &[
+        // FR
+        "arret d urgence", "arrêt d urgence", "arrete tout", "arrête tout", "stop tout", "urgence",
+        // EN
+        "emergency stop", "stop all", "stop everything", "abort", "halt", "freeze",
+        // ES
+        "parada de emergencia", "deten todo", "detén todo", "para todo", "emergencia", "alto ahi",
+        // DE
+        "not aus", "notaus", "alles anhalten", "alles stoppen", "notfall", "abbrechen",
+        // IT
+        "arresto d emergenza", "ferma tutto", "blocca tutto", "emergenza", "annulla tutto",
+        // PT
+        "parada de emergencia", "parada de emergência", "pare tudo", "parar tudo", "emergencia", "abortar",
+        // RU
+        "экстренная остановка", "останови все", "останови всё", "стоп все", "стоп всё", "аварийная остановка",
+        // ZH
+        "紧急停止", "全部停止", "立即停止", "停止运行", "中止",
+        // JA
+        "緊急停止", "すべて停止", "すべて止めて", "中止", "直ちに停止",
+    ];
+    TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig))
+}
 
-    // 2. Nettoyage des balises XML/HTML, URLs et caractères de balisage
-    let chars: Vec<char> = cleaned.chars().collect();
-    let mut result = String::with_capacity(cleaned.len());
-    let mut i = 0;
-    let mut in_xml_tag = false;
+fn is_stop_dictation_command(text: &str) -> bool {
+    let norm = normalize_for_command_match(text);
+    const TRIGGERS: &[&str] = &[
+        // FR
+        "arrete la dictee", "arrête la dictée", "stop dictee", "stop dictée", "quitter la dictee", "quitter la dictée",
+        "fin de la dictee", "fin de la dictée", "termine la dictee", "termine la dictée", "desactiver dictee", "désactiver dictée",
+        // EN
+        "stop dictation", "exit dictation", "quit dictation", "end dictation", "finish dictation", "disable dictation",
+        // ES
+        "detener dictado", "parar dictado", "salir del dictado", "terminar dictado", "desactivar dictado", "fin del dictado",
+        // DE
+        "diktat beenden", "diktat stoppen", "diktat anhalten", "diktat abbrechen", "diktat deaktivieren",
+        // IT
+        "interrompi dettatura", "ferma dettatura", "esci dalla dettatura", "termina dettatura", "disattiva dettatura",
+        // PT
+        "parar ditado", "encerrar ditado", "sair do ditado", "terminar ditado", "desativar ditado", "fim do ditado",
+        // RU
+        "остановить диктовку", "завершить диктовку", "выход из диктовки", "стоп диктовка", "отключить диктовку",
+        // ZH
+        "停止听写", "退出听写", "结束听写", "关闭听写",
+        // JA
+        "ディクテーション終了", "ディクテーション停止", "入力終了", "音声入力停止",
+    ];
+    TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig))
+}
 
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '<' {
-            in_xml_tag = true;
-            i += 1;
-            continue;
-        }
-        if in_xml_tag {
-            if c == '>' {
-                in_xml_tag = false;
+fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
+    let norm = normalize_for_command_match(prompt);
+    #[cfg(windows)]
+    use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
+
+    match norm.as_str() {
+        "clic" | "clic gauche" | "click" | "left click" => {
+            #[cfg(windows)]
+            unsafe {
+                windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
+                    windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0,
+                );
+                std::thread::sleep(Duration::from_millis(25));
+                windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
+                    windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTUP, 0, 0, 0, 0,
+                );
             }
-            i += 1;
-            continue;
+            Some("Clic gauche.")
         }
-        if (c == 'h' || c == 'H') && i + 7 < chars.len() {
-            let slice: String = chars[i..i + 8.min(chars.len())].iter().collect();
-            if slice.eq_ignore_ascii_case("https://") || slice.starts_with("http://") {
-                while i < chars.len() && !chars[i].is_whitespace() && chars[i] != ')' && chars[i] != ']' {
-                    i += 1;
-                }
-                continue;
+        "clic droit" | "right click" => {
+            #[cfg(windows)]
+            unsafe {
+                windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
+                    windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0,
+                );
+                std::thread::sleep(Duration::from_millis(25));
+                windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
+                    windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0,
+                );
             }
+            Some("Clic droit.")
         }
-        match c {
-            '*' | '#' | '`' | '_' | '~' | '{' | '}' | '[' | ']' | '|' | '\\' | '/' | '^' | '@' => result.push(' '),
-            '&' => result.push_str(" et "),
-            '>' | '<' => result.push(' '),
-            _ if !c.is_control() => result.push(c),
-            _ => {}
+        "double clic" | "double click" => {
+            #[cfg(windows)]
+            unsafe {
+                use windows::Win32::UI::Input::KeyboardAndMouse::{mouse_event, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP};
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                std::thread::sleep(Duration::from_millis(50));
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+            }
+            Some("Double clic.")
         }
-        i += 1;
+        "enregistre" | "enregistrer" | "sauvegarde" | "sauvegarder" | "save" => {
+            #[cfg(windows)]
+            send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x53)); // Ctrl + S
+            Some("Sauvegardé (Ctrl+S).")
+        }
+        "annule" | "annuler" | "undo" => {
+            #[cfg(windows)]
+            send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x5A)); // Ctrl + Z
+            Some("Annulé (Ctrl+Z).")
+        }
+        "selectionne tout" | "sélectionne tout" | "select all" | "tout selectionner" => {
+            #[cfg(windows)]
+            send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x41)); // Ctrl + A
+            Some("Tout sélectionné.")
+        }
+        "entree" | "entrée" | "valide" | "valider" | "enter" => {
+            #[cfg(windows)]
+            send_hotkey(&[], VIRTUAL_KEY(0x0D));
+            Some("Touche Entrée validée.")
+        }
+        "tab" | "tabulation" | "suivant" | "champ suivant" => {
+            #[cfg(windows)]
+            send_hotkey(&[], VIRTUAL_KEY(0x09));
+            Some("Tabulation.")
+        }
+        "precedent" | "précédent" | "champ precedent" | "champ précédent" => {
+            #[cfg(windows)]
+            send_hotkey(&[VIRTUAL_KEY(0x10)], VIRTUAL_KEY(0x09));
+            Some("Champ précédent.")
+        }
+        "descends" | "descendre" | "page suivante" | "scroll down" => {
+            #[cfg(windows)]
+            send_hotkey(&[], VIRTUAL_KEY(0x22)); // VK_NEXT (Page Down)
+            Some("Défilement vers le bas.")
+        }
+        "monte" | "monter" | "page precedente" | "page précédente" | "scroll up" => {
+            #[cfg(windows)]
+            send_hotkey(&[], VIRTUAL_KEY(0x21)); // VK_PRIOR (Page Up)
+            Some("Défilement vers le haut.")
+        }
+        "copie" | "copier" | "copy" => {
+            #[cfg(windows)]
+            send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x43)); // Ctrl + C
+            Some("Copié.")
+        }
+        "colle" | "coller" | "paste" => {
+            #[cfg(windows)]
+            send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x56)); // Ctrl + V
+            Some("Collé.")
+        }
+        _ => None,
     }
-    result.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
 fn is_hide_command(text: &str) -> bool {
-    let words = clean_words(text);
-    let has_verb = words.iter().any(|w| {
-        w == "ferme" || w == "fermer" || w == "cache" || w == "cacher" || w == "masque" || w == "masquer" || w == "disparais"
-    });
-    let has_target = words.iter().any(|w| {
-        w == "toi" || w == "overlay" || w == "deepseek" || w == "groq" || w == "libertide"
-    });
+    let norm = normalize_for_command_match(text);
+    const DIRECT_PHRASES: &[&str] = &[
+        // FR
+        "ferme toi", "cache toi", "masque toi", "disparais", "fermer overlay", "cacher overlay", "masquer overlay",
+        // EN
+        "hide yourself", "close yourself", "hide overlay", "close overlay", "disappear", "minimize overlay",
+        // ES
+        "ocultate", "ocúltate", "escondete", "escóndete", "ocultar overlay", "cerrar overlay", "desaparece",
+        // DE
+        "versteck dich", "verstecke dich", "overlay schliessen", "overlay schließen", "overlay verstecken", "verschwinde",
+        // IT
+        "nasconditi", "chiuditi", "nascondi overlay", "chiudi overlay", "sparisci",
+        // PT
+        "esconda se", "esconda-se", "oculte se", "oculte-se", "esconder overlay", "fechar overlay", "desapareca", "desapareça",
+        // RU
+        "скройся", "спрячься", "закройся", "скрыть оверлей", "исчезни",
+        // ZH
+        "隐藏", "隐藏自己", "退下", "关闭悬浮窗", "隐藏窗口",
+        // JA
+        "隠れて", "非表示", "消えて", "オーバーレイを隠して",
+    ];
+    if DIRECT_PHRASES.iter().any(|&p| norm.contains(p) || text.contains(p)) {
+        return true;
+    }
+    let has_verb = norm.contains("ferme") || norm.contains("cache") || norm.contains("masque") || norm.contains("hide") || norm.contains("close");
+    let has_target = norm.contains("overlay") || norm.contains("deepseek") || norm.contains("libertide");
     has_verb && has_target
 }
 
 fn is_show_command(text: &str) -> bool {
-    let words = clean_words(text);
-    let has_verb = words.iter().any(|w| {
-        w == "ouvre" || w == "ouvrir" || w == "affiche" || w == "afficher" || w == "montre" || w == "montrer" || w == "reveille" || w == "réveille" || w == "reveiller" || w == "réveiller"
-    });
-    let has_target = words.iter().any(|w| {
-        w == "toi" || w == "overlay" || w == "deepseek" || w == "groq" || w == "libertide"
-    });
+    let norm = normalize_for_command_match(text);
+    const DIRECT_PHRASES: &[&str] = &[
+        // FR
+        "ouvre toi", "affiche toi", "montre toi", "reveille toi", "réveille toi", "ouvrir overlay", "afficher overlay",
+        // EN
+        "show yourself", "open up", "wake up", "appear", "open overlay", "show overlay",
+        // ES
+        "muestrate", "muéstrate", "abrete", "ábrete", "despierta", "aparece", "mostrar overlay", "abrir overlay",
+        // DE
+        "zeige dich", "offne dich", "öffne dich", "aufwachen", "erscheine", "overlay zeigen", "overlay offnen", "overlay öffnen",
+        // IT
+        "mostrati", "apriti", "svegliati", "mostra overlay", "apri overlay",
+        // PT
+        "mostre se", "mostre-se", "abra se", "abra-se", "acorde", "apareca", "apareça", "mostrar overlay", "abrir overlay",
+        // RU
+        "покажись", "откройся", "проснись", "открыть оверлей", "показать оверлей",
+        // ZH
+        "出来", "显示", "唤醒", "打开悬浮窗", "打开",
+        // JA
+        "出てきて", "表示して", "起きて", "オーバーレイを表示",
+    ];
+    if DIRECT_PHRASES.iter().any(|&p| norm.contains(p) || text.contains(p)) {
+        return true;
+    }
+    let has_verb = norm.contains("ouvre") || norm.contains("affiche") || norm.contains("montre") || norm.contains("show") || norm.contains("open");
+    let has_target = norm.contains("overlay") || norm.contains("deepseek") || norm.contains("libertide");
     has_verb && has_target
 }
 
 fn is_api_key_command(text: &str) -> bool {
-    let words = clean_words(text);
-    let has_key = words.iter().any(|w| w == "cle" || w == "clé" || w == "key");
-    let has_api = words.iter().any(|w| w == "api" || w == "deepseek");
-    (has_key && has_api) || text.to_lowercase().contains("api key") || text.to_lowercase().contains("apikey")
+    let norm = normalize_for_command_match(text);
+    const TRIGGERS: &[&str] = &[
+        "api key", "apikey", "api cle", "api clé", "cle api", "clé api",
+        "clave api", "llave api",
+        "api schlussel", "api schlüssel",
+        "chiave api",
+        "chave api",
+        "ключ апи", "апи ключ", "ключ api",
+        "api密钥", "api 密钥",
+        "apiキー", "api キー",
+    ];
+    TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig))
+}
+
+fn localized_speech(lang_code: &str, fr: &str, en: &str, es: &str, de: &str, it: &str, pt: &str, ru: &str, zh: &str, ja: &str) -> String {
+    match lang_code {
+        "en" => en.to_string(),
+        "es" => es.to_string(),
+        "de" => de.to_string(),
+        "it" => it.to_string(),
+        "pt" => pt.to_string(),
+        "ru" => ru.to_string(),
+        "zh" => zh.to_string(),
+        "ja" => ja.to_string(),
+        _ => fr.to_string(),
+    }
 }
 
 #[cfg(windows)]
@@ -292,6 +499,54 @@ fn restart_application() {
     }
 }
 
+/// Détecte la langue principale du système d'exploitation de l'utilisateur
+pub fn get_system_locale_language() -> (String, String) {
+    #[cfg(windows)]
+    {
+        extern "system" {
+            fn GetUserDefaultLocaleName(lpLocaleName: *mut u16, cchLocaleName: i32) -> i32;
+        }
+        let mut buf = [0u16; 85];
+        let len = unsafe { GetUserDefaultLocaleName(buf.as_mut_ptr(), buf.len() as i32) };
+        if len > 0 {
+            let locale = String::from_utf16_lossy(&buf[..(len - 1) as usize]).to_lowercase();
+            let lang_prefix = locale.split('-').next().unwrap_or(&locale);
+            let name: String = match lang_prefix {
+                "fr" => "français".to_string(),
+                "en" => "English".to_string(),
+                "es" => "español".to_string(),
+                "de" => "Deutsch".to_string(),
+                "it" => "italiano".to_string(),
+                "pt" => "português".to_string(),
+                "ja" => "日本語 (Japanese)".to_string(),
+                "zh" => "中文 (Chinese)".to_string(),
+                "ru" => "русский".to_string(),
+                other => other.to_string(),
+            };
+            return (locale, name);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let env_lang = std::env::var("LC_ALL").or_else(|_| std::env::var("LC_MESSAGES")).or_else(|_| std::env::var("LANG")).unwrap_or_else(|_| "fr_FR".to_string()).to_lowercase();
+        let lang_prefix = env_lang.split(['_', '.']).next().unwrap_or("fr");
+        let name: String = match lang_prefix {
+            "fr" => "français".to_string(),
+            "en" => "English".to_string(),
+            "es" => "español".to_string(),
+            "de" => "Deutsch".to_string(),
+            "it" => "italiano".to_string(),
+            "pt" => "português".to_string(),
+            "ja" => "日本語 (Japanese)".to_string(),
+            "zh" => "中文 (Chinese)".to_string(),
+            "ru" => "русский".to_string(),
+            other => other.to_string(),
+        };
+        return (env_lang, name);
+    }
+    ("fr".to_string(), "français (French)".to_string())
+}
+
 fn setup_custom_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
@@ -378,168 +633,6 @@ pub(crate) fn current_time_str() -> String {
     }
 }
 
-#[cfg(windows)]
-fn spawn_tts_worker(event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
-    let (tx, rx) = channel::<TtsCommand>();
-
-    std::thread::spawn(move || {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            let voice: Result<ISpVoice, _> = CoCreateInstance(&SpVoice, None, CLSCTX_ALL);
-
-            let Ok(voice) = voice else {
-                eprintln!("Échec de l'initialisation du synthétiseur vocal SAPI Windows");
-                return;
-            };
-
-            // Amélioration du timbre : Volume maximal et cadence légèrement dynamisée (+1)
-            let _ = voice.SetVolume(100);
-            let _ = voice.SetRate(1);
-
-            let base_flags = (SPF_ASYNC.0 | SPF_PURGEBEFORESPEAK.0 | SPF_IS_NOT_XML.0) as u32;
-
-            while let Ok(cmd) = rx.recv() {
-                match cmd {
-                    TtsCommand::Stop => {
-                        let _ = voice.Speak(
-                            windows::core::PCWSTR::null(),
-                            base_flags,
-                            None,
-                        );
-                        set_tts_audio_level(0.0);
-                    }
-                    TtsCommand::Speak(raw_text) => {
-                        let clean_text = sanitize_for_tts(&raw_text);
-                        if clean_text.trim().is_empty() {
-                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
-                            let _ = event_tx.send(AgentEvent::TtsFinished);
-                            continue;
-                        }
-
-                        // Conservation du buffer UTF-16 en mémoire vive pendant toute la lecture asynchrone
-                        let mut active_wide_buf: Vec<u16> = clean_text.encode_utf16().chain(std::iter::once(0)).collect();
-
-                        if voice
-                            .Speak(windows::core::PCWSTR(active_wide_buf.as_ptr()), base_flags, None)
-                            .is_ok()
-                        {
-                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Speaking));
-                            let start_wait = Instant::now();
-                            let mut has_started = false;
-
-                            loop {
-                                std::thread::sleep(Duration::from_millis(20));
-
-                                if let Ok(next_cmd) = rx.try_recv() {
-                                    match next_cmd {
-                                        TtsCommand::Stop => {
-                                            let _ = voice.Speak(
-                                                windows::core::PCWSTR::null(),
-                                                base_flags,
-                                                None,
-                                            );
-                                            set_tts_audio_level(0.0);
-                                            break;
-                                        }
-                                        TtsCommand::Speak(next_text) => {
-                                            let clean_next = sanitize_for_tts(&next_text);
-                                            if !clean_next.trim().is_empty() {
-                                                active_wide_buf =
-                                                    clean_next.encode_utf16().chain(std::iter::once(0)).collect();
-                                                let _ = voice.Speak(
-                                                    windows::core::PCWSTR(active_wide_buf.as_ptr()),
-                                                    base_flags,
-                                                    None,
-                                                );
-                                                has_started = false;
-                                                set_tts_audio_level(0.0);
-                                                std::thread::sleep(Duration::from_millis(80));
-                                            }
-                                        }
-                                    }
-                                }
-
-                                let mut status = SPVOICESTATUS::default();
-                                if voice.GetStatus(&mut status, std::ptr::null_mut()).is_ok() {
-                                    if status.dwRunningState == 2 {
-                                        has_started = true;
-                                        let level = if status.PhonemeId > 0 {
-                                            let p = status.PhonemeId as f32;
-                                            let t = start_wait.elapsed().as_millis() as f32 * 0.025;
-                                            (0.40 + 0.35 * (p * 0.17 + t).sin().abs() + 0.25 * (t * 1.6).cos().abs()).clamp(0.2, 1.0)
-                                        } else {
-                                            0.05
-                                        };
-                                        set_tts_audio_level(level);
-                                    } else if has_started || start_wait.elapsed() > Duration::from_millis(350) {
-                                        set_tts_audio_level(0.0);
-                                        let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
-                                        let _ = event_tx.send(AgentEvent::TtsFinished);
-                                        break;
-                                    } else {
-                                        set_tts_audio_level(0.0);
-                                    }
-                                } else {
-                                    set_tts_audio_level(0.0);
-                                    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
-                                    let _ = event_tx.send(AgentEvent::TtsFinished);
-                                    break;
-                                }
-                            }
-                        } else {
-                            set_tts_audio_level(0.0);
-                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
-                            let _ = event_tx.send(AgentEvent::TtsFinished);
-                        }
-                    }
-                }
-            }
-        }
-    });
-
-    tx
-}
-
-#[cfg(not(windows))]
-fn spawn_tts_worker(_event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
-    let (tx, rx) = channel::<TtsCommand>();
-    let event_tx = _event_tx;
-    std::thread::spawn(move || {
-        let mut current_process: Option<std::process::Child> = None;
-        while let Ok(cmd) = rx.recv() {
-            match cmd {
-                TtsCommand::Stop => {
-                    if let Some(mut child) = current_process.take() {
-                        let _ = child.kill();
-                    }
-                    set_tts_audio_level(0.0);
-                }
-                TtsCommand::Speak(text) => {
-                    if let Some(mut child) = current_process.take() {
-                        let _ = child.kill();
-                    }
-                    let clean_text = sanitize_for_tts(&text);
-                    if clean_text.trim().is_empty() {
-                        let _ = event_tx.send(AgentEvent::TtsFinished);
-                        continue;
-                    }
-                    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Speaking));
-                    // Tentative avec spd-say (Speech Dispatcher), puis repli sur espeak-ng / espeak
-                    let child = std::process::Command::new("spd-say")
-                        .args(["-l", "fr", "-t", "female1", &clean_text])
-                        .spawn()
-                        .or_else(|_| std::process::Command::new("espeak-ng").args(["-v", "fr", &clean_text]).spawn())
-                        .or_else(|_| std::process::Command::new("espeak").args(["-v", "fr", &clean_text]).spawn())
-                        .ok();
-                    current_process = child;
-                    let _ = event_tx.send(AgentEvent::TtsFinished);
-                }
-            }
-        }
-    });
-    tx
-}
-
 impl OverlayApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
@@ -549,6 +642,7 @@ impl OverlayApp {
         audio_sender: StdSender<AudioCommand>,
         twitch_channel_sender: StdSender<String>,
         initial_twitch_channel: String,
+        initial_voice: VoiceGender,
     ) -> Self {
         setup_custom_fonts(&cc.egui_ctx);
 
@@ -578,6 +672,15 @@ impl OverlayApp {
             is_recording: false,
             continuous_mode: true,
             dictation_mode: false,
+            zoom_factor: 1.0,
+            voice_gender: initial_voice,
+
+            numbered_targets: Vec::new(),
+            show_numbered_targets: false,
+            switch_access_mode: false,
+            switch_focus_index: 0,
+            switch_last_tick: Instant::now(),
+
             event_receiver,
             command_sender,
             tts_sender,
@@ -587,6 +690,7 @@ impl OverlayApp {
             twitch_search_query: String::new(),
             twitch_search_results: Vec::new(),
             position_initialized: false,
+            floating_cards: Vec::new(),
             window_pos: None,
             window_bottom_y: None,
             drag_offset: None,
@@ -709,6 +813,30 @@ impl OverlayApp {
         }
     }
 
+    pub fn set_voice_gender(&mut self, gender: VoiceGender) {
+        self.voice_gender = gender;
+        let _ = self.tts_sender.send(TtsCommand::SetGender(gender));
+        std::env::set_var("VOICE_PROFILE", gender.to_key_str());
+        let _ = write_env_var_to_file(".env", "VOICE_PROFILE", gender.to_key_str());
+        let confirmation = match gender {
+            VoiceProfile::Denise => "Voix de Denise activée.",
+            VoiceProfile::Henri => "Voix d'Henri activée.",
+            VoiceProfile::Hortense => "Voix d'Hortense activée.",
+            VoiceProfile::Paul => "Voix de Paul activée.",
+            VoiceProfile::Sylvie => "Voix de Sylvie activée.",
+            VoiceProfile::Jean => "Voix de Jean activée.",
+            VoiceProfile::Kokoro => "Voix neuronale Kokoro activée.",
+        };
+        self.chat_history.push(ChatEntry {
+            role: ChatRole::Agent,
+            text: confirmation.to_string(),
+            timestamp: current_time_str(),
+            quick_suggestions: Vec::new(),
+            screen_size_kb: None,
+        });
+        let _ = self.tts_sender.send(TtsCommand::Speak(confirmation.to_string()));
+    }
+
     pub fn stop_speaking(&mut self) {
         let _ = self.tts_sender.send(TtsCommand::Stop);
         set_tts_audio_level(0.0);
@@ -722,6 +850,7 @@ impl OverlayApp {
         self.continuous_mode = false;
         self.dictation_mode = false;
         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
+        cancel_all_scheduled_tasks();
         IS_EMERGENCY_STOPPED.store(true, Ordering::SeqCst);
         TARGET_REASONING_PASSES.store(5, Ordering::SeqCst);
         let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
@@ -731,7 +860,21 @@ impl OverlayApp {
         self.live_transcript.clear();
         self.is_hidden = false;
         self.status = AgentStatus::EmergencyStopped;
-        let stop_msg = "Arrêt d'urgence : contrôle rendu à l'utilisateur.".to_string();
+        play_earcon(Earcon::Emergency);
+        let (locale, _) = get_system_locale_language();
+        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+        let stop_msg = localized_speech(
+            lang_prefix,
+            "Arrêt d'urgence : contrôle rendu à l'utilisateur.",
+            "Emergency stop: control returned to the user.",
+            "Parada de emergencia: control devuelto al usuario.",
+            "Not-Aus: Kontrolle an den Benutzer zurückgegeben.",
+            "Arresto di emergenza: controllo restituito all'utente.",
+            "Parada de emergência: controle retornado ao usuário.",
+            "Экстренная остановка: управление возвращено пользователю.",
+            "紧急停止：控制权已交还用户。",
+            "緊急停止：操作権がユーザーに返却されました。",
+        );
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
             text: stop_msg.clone(),
@@ -747,6 +890,7 @@ impl OverlayApp {
         self.dictation_mode = false;
         self.continuous_mode = false;
         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
+        play_earcon(Earcon::Success);
         let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
         if self.is_recording {
             self.stop_recording();
@@ -754,7 +898,20 @@ impl OverlayApp {
         self.live_transcript.clear();
         self.status = AgentStatus::Idle;
         let _ = self.tts_sender.send(TtsCommand::Stop);
-        let msg = "Mode dictée désactivé.".to_string();
+        let (locale, _) = get_system_locale_language();
+        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+        let msg = localized_speech(
+            lang_prefix,
+            "Mode dictée désactivé.",
+            "Dictation mode disabled.",
+            "Modo dictado desactivado.",
+            "Diktatmodus deaktiviert.",
+            "Modalità dettatura disattivata.",
+            "Modo ditado desativado.",
+            "Режим диктовки отключен.",
+            "听写模式已停用。",
+            "音声入力モードを解除しました。",
+        );
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
             text: msg.clone(),
@@ -774,11 +931,8 @@ impl OverlayApp {
         self.continuous_mode = true;
         self.is_recording = true;
         self.status = AgentStatus::Listening;
-        if !self.is_hidden {
-            self.live_transcript = "Écoute Whisper active... parlez à votre micro.".to_string();
-        } else {
-            self.live_transcript.clear();
-        }
+        play_earcon(Earcon::MicOpen);
+        self.live_transcript.clear();
         if self.dictation_mode {
             restore_external_focus();
         }
@@ -789,6 +943,7 @@ impl OverlayApp {
         self.is_recording = false;
         self.continuous_mode = false;
         let _ = self.audio_sender.send(AudioCommand::Stop);
+        play_earcon(Earcon::MicClose);
         set_mic_audio_level(0.0);
         self.live_transcript.clear();
         self.status = AgentStatus::Idle;
@@ -815,6 +970,8 @@ impl eframe::App for OverlayApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        ctx.set_zoom_factor(self.zoom_factor);
 
         update_last_external_focus();
 
@@ -1013,10 +1170,276 @@ impl eframe::App for OverlayApp {
                         return;
                     }
                     self.stop_speaking();
+
+                    let norm_prompt = normalize_for_command_match(&prompt);
+
+                    // Changement de voix à la voix
+                    if norm_prompt.contains("voix suivante") || norm_prompt.contains("autre voix") || norm_prompt.contains("change de voix") || norm_prompt.contains("changer voix") || norm_prompt.contains("changer de voix") {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(self.voice_gender.next());
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("voix de denise") || norm_prompt == "denise" || norm_prompt.contains("voix feminine") || norm_prompt.contains("voix féminine") {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(VoiceProfile::Denise);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("voix d henri") || norm_prompt.contains("voix d'henri") || norm_prompt == "henri" || norm_prompt.contains("voix masculine") {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(VoiceProfile::Henri);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("voix d hortense") || norm_prompt.contains("voix d'hortense") || norm_prompt.contains("voix de hortense") || norm_prompt == "hortense" {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(VoiceProfile::Hortense);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("voix de paul") || norm_prompt == "paul" {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(VoiceProfile::Paul);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("voix de sylvie") || norm_prompt == "sylvie" || norm_prompt.contains("voix quebecoise") || norm_prompt.contains("voix québécoise") || norm_prompt.contains("voix canadienne") {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(VoiceProfile::Sylvie);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("voix de jean") || norm_prompt == "jean" {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(VoiceProfile::Jean);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("voix de kokoro") || norm_prompt == "kokoro" || norm_prompt.contains("voix neuronale") || norm_prompt.contains("voix ia") {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(VoiceProfile::Kokoro);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+
+                    // Traitement du zoom adaptatif vocal
+                    if norm_prompt.contains("grossis") || norm_prompt.contains("zoom plus") || norm_prompt.contains("agrandis") || norm_prompt.contains("zoom in") {
+                        self.zoom_factor = (self.zoom_factor + 0.15).clamp(0.7, 2.5);
+                        play_earcon(Earcon::Success);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("zoom moins") || norm_prompt.contains("retrecis") || norm_prompt.contains("rétrécis") || norm_prompt.contains("zoom out") {
+                        self.zoom_factor = (self.zoom_factor - 0.15).clamp(0.7, 2.5);
+                        play_earcon(Earcon::Success);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("zoom normal") || norm_prompt.contains("taille normale") || norm_prompt.contains("reset zoom") {
+                        self.zoom_factor = 1.0;
+                        play_earcon(Earcon::Success);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+
+                    // Bascule / activation du ciblage par numéros
+                    if norm_prompt == "numeros" || norm_prompt == "numéros" || norm_prompt == "badges" || norm_prompt == "afficher les numeros" || norm_prompt == "click by number" {
+                        self.numbered_targets = collect_numbered_targets_for_active_window();
+                        self.show_numbered_targets = !self.numbered_targets.is_empty();
+                        play_earcon(Earcon::Success);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+
+                    // Sélection directe d'un badge numéroté
+                    if self.show_numbered_targets {
+                        let parsed_idx = match norm_prompt.as_str() {
+                            "un" | "1" => Some(1),
+                            "deux" | "2" => Some(2),
+                            "trois" | "3" => Some(3),
+                            "quatre" | "4" => Some(4),
+                            "cinq" | "5" => Some(5),
+                            "six" | "6" => Some(6),
+                            "sept" | "7" => Some(7),
+                            "huit" | "8" => Some(8),
+                            "neuf" | "9" => Some(9),
+                            "dix" | "10" => Some(10),
+                            other => other.split_whitespace().find_map(|s| s.parse::<usize>().ok()),
+                        };
+                        if let Some(idx) = parsed_idx {
+                            if let Some(target) = self.numbered_targets.iter().find(|t| t.index == idx) {
+                                #[cfg(windows)]
+                                unsafe {
+                                    windows::Win32::UI::WindowsAndMessaging::SetCursorPos(target.click_x, target.click_y);
+                                    std::thread::sleep(Duration::from_millis(30));
+                                    windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
+                                        windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0,
+                                    );
+                                    std::thread::sleep(Duration::from_millis(25));
+                                    windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
+                                        windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTUP, 0, 0, 0, 0,
+                                    );
+                                }
+                                play_earcon(Earcon::Success);
+                                self.show_numbered_targets = false;
+                                self.numbered_targets.clear();
+                                if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                                    self.start_recording(&ctx);
+                                }
+                                return;
+                            }
+                        }
+                    }
+
+                    if norm_prompt.contains("mode contacteur") || norm_prompt.contains("switch access") {
+                        self.switch_access_mode = !self.switch_access_mode;
+                        play_earcon(Earcon::Success);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+
+                    let (locale, _) = get_system_locale_language();
+                    let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+
+                    // 1. Arrêt d'urgence local universel (<50ms, sans requête LLM)
+                    if is_emergency_stop_command(&prompt) {
+                        self.trigger_emergency_stop(&ctx);
+                        return;
+                    }
+
+                    // Annulation instantanée des commandes différées
+                    if is_cancel_scheduled_command(&prompt) {
+                        let cancelled = cancel_all_scheduled_tasks();
+                        play_earcon(Earcon::Success);
+                        let reply = if cancelled > 0 {
+                            format!("Toutes les commandes différées ont été annulées ({cancelled} annulée{}).", if cancelled > 1 { "s" } else { "" })
+                        } else {
+                            "Toutes les commandes différées ont été annulées.".to_string()
+                        };
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::User,
+                            text: prompt,
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: reply.clone(),
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+
+                    // Détection et planification locale immédiate des commandes différées (<10 ms, 0 token LLM)
+                    if let Some(tasks) = parse_scheduled_prompts(&prompt) {
+                        for (dur, task_prompt) in &tasks {
+                            schedule_prompt_execution(*dur, task_prompt.clone());
+                        }
+                        play_earcon(Earcon::Success);
+                        let (reply_chat, reply_tts) = if tasks.len() == 1 {
+                            let friendly = format_duration_friendly(tasks[0].0);
+                            let cmd = &tasks[0].1;
+                            (format!("Commande planifiée dans {friendly} : « {cmd} »."), format!("Commande planifiée dans {friendly}."))
+                        } else {
+                            let mut chat = format!("{} commandes différées planifiées :", tasks.len());
+                            for (dur, cmd) in &tasks {
+                                chat.push_str(&format!("\n• Dans {} : « {} »", format_duration_friendly(*dur), cmd));
+                            }
+                            (chat, format!("{} commandes différées planifiées.", tasks.len()))
+                        };
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::User,
+                            text: prompt,
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: reply_chat,
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(reply_tts));
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+
+                    // 2. Sortie déterministe immédiate du mode dictée
+                    if self.dictation_mode && is_stop_dictation_command(&prompt) {
+                        self.exit_dictation_mode();
+                        return;
+                    }
+
+                    // 2 bis. Exécution déterministe locale instantanée des commandes de base (< 20 ms, 0 token LLM)
+                    if let Some(feedback) = try_execute_local_navigation_shortcut(&prompt) {
+                        play_earcon(Earcon::Success);
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::User,
+                            text: prompt,
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+
+                    // 3. Configuration de la clé API
                     if is_api_key_command(&prompt) {
                         self.show_api_key_modal = true;
                         self.is_hidden = false;
-                        let reply = "Boîte de configuration de la clé API ouverte.".to_string();
+                        let reply = localized_speech(
+                            lang_prefix,
+                            "Boîte de configuration de la clé API ouverte.",
+                            "API key configuration dialog opened.",
+                            "Ventana de configuración de clave API abierta.",
+                            "API-Schlüssel-Konfigurationsdialog geöffnet.",
+                            "Finestra di configurazione chiave API aperta.",
+                            "Caixa de configuração da chave de API aberta.",
+                            "Диалог настройки API-ключа открыт.",
+                            "API密钥配置窗口已打开。",
+                            "APIキー設定ダイアログを開きました。",
+                        );
                         self.chat_history.push(ChatEntry {
                             role: ChatRole::Agent,
                             text: reply.clone(),
@@ -1028,6 +1451,8 @@ impl eframe::App for OverlayApp {
                         self.continuous_mode = false;
                         continue;
                     }
+
+                    // 4. Masquage / Réaffichage de l'overlay
                     if self.is_hidden {
                         if is_show_command(&prompt) {
                             self.is_hidden = false;
@@ -1039,7 +1464,18 @@ impl eframe::App for OverlayApp {
                                 quick_suggestions: Vec::new(),
                                 screen_size_kb: None,
                             });
-                            let reply = "Me revoilà, overlay réaffiché.".to_string();
+                            let reply = localized_speech(
+                                lang_prefix,
+                                "Me revoilà, overlay réaffiché.",
+                                "I'm back, overlay restored.",
+                                "Aquí estoy de nuevo, interfaz mostrada.",
+                                "Hier bin ich wieder, Overlay eingeblendet.",
+                                "Eccomi di nuovo, interfaccia ripristinata.",
+                                "Estou de volta, overlay restaurado.",
+                                "Снова здесь, оверлей отображён.",
+                                "我回来了，悬浮窗已恢复显示。",
+                                "お待たせしました、オーバーレイを再表示しました。",
+                            );
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
@@ -1064,7 +1500,18 @@ impl eframe::App for OverlayApp {
                                 quick_suggestions: Vec::new(),
                                 screen_size_kb: None,
                             });
-                            let reply = "Overlay masqué. Je reste à l'écoute pour « deepseek ouvre toi ».".to_string();
+                            let reply = localized_speech(
+                                lang_prefix,
+                                "Overlay masqué. Je reste à l'écoute.",
+                                "Overlay hidden. Still listening in the background.",
+                                "Interfaz oculta. Sigo escuchando en segundo plano.",
+                                "Overlay ausgeblendet. Ich höre im Hintergrund weiter zu.",
+                                "Interfaccia nascosta. Resto in ascolto in background.",
+                                "Overlay oculto. Continuo ouvindo em segundo plano.",
+                                "Оверлей скрыт. Продолжаю слушать в фоновом режиме.",
+                                "悬浮窗已隐藏，仍在后台监听指令。",
+                                "オーバーレイを非表示にしました。バックグラウンドで待機中です。",
+                            );
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
@@ -1075,7 +1522,18 @@ impl eframe::App for OverlayApp {
                             let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                             self.continuous_mode = true;
                         } else if is_show_command(&prompt) {
-                            let reply = "L'overlay est déjà actif et visible.".to_string();
+                            let reply = localized_speech(
+                                lang_prefix,
+                                "L'overlay est déjà actif et visible.",
+                                "The overlay is already active and visible.",
+                                "La interfaz ya está activa y visible.",
+                                "Das Overlay ist bereits aktiv und sichtbar.",
+                                "L'interfaccia è già attiva e visibile.",
+                                "O overlay já está ativo e visível.",
+                                "Оверлей уже активен и виден.",
+                                "悬浮窗已经处于激活和可见状态。",
+                                "オーバーレイは既に表示されています。",
+                            );
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
@@ -1134,6 +1592,45 @@ impl eframe::App for OverlayApp {
                     self.show_api_key_modal = true;
                     self.is_hidden = false;
                 }
+                AgentEvent::ShowFloatingCard(card) => {
+                    if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == card.id) {
+                        *existing = card;
+                    } else {
+                        self.floating_cards.push(card);
+                    }
+                }
+                AgentEvent::CloseFloatingCard(id) => {
+                    self.floating_cards.retain(|c| c.id != id);
+                }
+            }
+        }
+
+        let is_typing = ctx.memory(|m| {
+            m.has_focus(egui::Id::new("prompt_input_text"))
+                || m.has_focus(egui::Id::new("api_key_input_field"))
+        });
+
+        // Gestion du Switch Access : défilement séquentiel périodique et validation sur Espace
+        if self.switch_access_mode && !is_typing {
+            if self.switch_last_tick.elapsed() >= Duration::from_millis(1500) {
+                self.switch_focus_index = self.switch_focus_index.saturating_add(1);
+                self.switch_last_tick = Instant::now();
+            }
+
+            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+                play_earcon(Earcon::Success);
+                // Si des suggestions rapides sont affichées, exécuter celle sous le focus
+                if let Some(last_entry) = self.chat_history.last() {
+                    if !last_entry.quick_suggestions.is_empty() {
+                        let idx = self.switch_focus_index % last_entry.quick_suggestions.len();
+                        if let Some(text) = last_entry.quick_suggestions[idx].to_display_string() {
+                            let _ = self.command_sender.send(AgentCommand::Prompt(text));
+                        }
+                    } else {
+                        self.toggle_recording(&ctx);
+                    }
+                }
+                self.switch_last_tick = Instant::now();
             }
         }
 
@@ -1157,7 +1654,6 @@ impl eframe::App for OverlayApp {
         }
 
         // Raccourci clavier 'R' pour basculer le micro (désactivé si l'utilisateur est en train de taper du texte)
-        let is_typing = ctx.memory(|m| m.focused().is_some());
         if !self.is_hidden && !is_typing && ctx.input(|i| i.key_pressed(egui::Key::R)) {
             self.toggle_recording(&ctx);
         }
@@ -1183,367 +1679,95 @@ impl eframe::App for OverlayApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT).inner_margin(egui::Margin::ZERO))
             .show(ui, |ui| {
+                // Fond et cadre stylisé de la boîte de discussion
+                ui.painter().rect(
+                    response_rect,
+                    egui::CornerRadius::same(12),
+                    egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 55)),
+                    egui::StrokeKind::Inside,
+                );
+
+                // 1. Barre d'onglets supérieure et boutons système de la fenêtre
                 let mut tab_bar_max_x = response_rect.min.x + 210.0;
 
-                // 1. Boîte de discussion adaptative (s'étend du bas vers le haut)
-                let mut computed_chat_h = current_chat_h;
+                let header_rect = egui::Rect::from_min_max(
+                    egui::pos2(response_rect.min.x + 10.0, response_rect.min.y + 6.0),
+                    egui::pos2(response_rect.max.x - 10.0, response_rect.min.y + 32.0),
+                );
 
-                ui.scope_builder(egui::UiBuilder::new().max_rect(response_rect), |ui| {
-                    egui::Frame::new()
-                        .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 55)))
-                        .corner_radius(egui::CornerRadius::same(12))
-                        .inner_margin(egui::Margin::symmetric(10, 6))
-                        .show(ui, |ui| {
-                            // Barre d'onglets
-                            ui.horizontal(|ui| {
-                                let tab_assist = ui.selectable_label(self.active_tab == ActiveTab::Assistance, "🤖 Assistance");
-                                if tab_assist.clicked() {
-                                    self.active_tab = ActiveTab::Assistance;
-                                }
-                                let chat_title = if self.twitch_messages.is_empty() {
-                                    "💬 Chat twitch".to_string()
-                                } else {
-                                    format!("💬 Chat ({})", self.twitch_messages.len())
-                                };
-                                let tab_chat = ui.selectable_label(self.active_tab == ActiveTab::Chat, chat_title);
-                                if tab_chat.clicked() {
-                                    self.active_tab = ActiveTab::Chat;
-                                }
-                                tab_bar_max_x = tab_assist.rect.max.x.max(tab_chat.rect.max.x);
+                ui.scope_builder(egui::UiBuilder::new().max_rect(header_rect), |ui| {
+                    ui.horizontal(|ui| {
+                        let tab_assist = ui.selectable_label(self.active_tab == ActiveTab::Assistance, "🤖 Assistance");
+                        if tab_assist.clicked() {
+                            self.active_tab = ActiveTab::Assistance;
+                        }
+                        let chat_title = if self.twitch_messages.is_empty() {
+                            "💬 Chat twitch".to_string()
+                        } else {
+                            format!("💬 Chat ({})", self.twitch_messages.len())
+                        };
+                        let tab_chat = ui.selectable_label(self.active_tab == ActiveTab::Chat, chat_title);
+                        if tab_chat.clicked() {
+                            self.active_tab = ActiveTab::Chat;
+                        }
+                        tab_bar_max_x = tab_assist.rect.max.x.max(tab_chat.rect.max.x);
 
-                                // Boutons système en haut à droite : Réduire, Agrandir/Restaurer, Fermer
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.spacing_mut().item_spacing.x = 4.0;
+                        // Boutons système en haut à droite : Réduire, Agrandir/Restaurer, Fermer
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
 
-                                    let close_btn = ui.add(
-                                        egui::Button::new(
-                                            egui::RichText::new("×")
-                                                .size(13.0)
-                                                .color(egui::Color32::from_rgb(235, 235, 245)),
-                                        )
-                                        .min_size(egui::vec2(20.0, 18.0))
-                                        .corner_radius(egui::CornerRadius::same(4)),
-                                    );
-                                    if close_btn.on_hover_text("Fermer").clicked() {
-                                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                                    }
+                            let close_btn = ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new("×")
+                                        .size(13.0)
+                                        .color(egui::Color32::from_rgb(235, 235, 245)),
+                                )
+                                .min_size(egui::vec2(20.0, 18.0))
+                                .corner_radius(egui::CornerRadius::same(4)),
+                            );
+                            if close_btn.on_hover_text("Fermer").clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
 
-                                    let max_icon = if is_maximized { "⧉" } else { "□" };
-                                    let max_btn = ui.add(
-                                        egui::Button::new(
-                                            egui::RichText::new(max_icon)
-                                                .size(10.5)
-                                                .color(egui::Color32::from_rgb(200, 215, 230)),
-                                        )
-                                        .min_size(egui::vec2(20.0, 18.0))
-                                        .corner_radius(egui::CornerRadius::same(4)),
-                                    );
-                                    if max_btn.on_hover_text(if is_maximized { "Restaurer" } else { "Agrandir" }).clicked() {
-                                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
-                                    }
+                            let max_icon = if is_maximized { "⧉" } else { "□" };
+                            let max_btn = ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new(max_icon)
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(200, 215, 230)),
+                                )
+                                .min_size(egui::vec2(20.0, 18.0))
+                                .corner_radius(egui::CornerRadius::same(4)),
+                            );
+                            if max_btn.on_hover_text(if is_maximized { "Restaurer" } else { "Agrandir" }).clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
+                            }
 
-                                    let min_btn = ui.add(
-                                        egui::Button::new(
-                                            egui::RichText::new("—")
-                                                .size(10.5)
-                                                .color(egui::Color32::from_rgb(200, 215, 230)),
-                                        )
-                                        .min_size(egui::vec2(20.0, 18.0))
-                                        .corner_radius(egui::CornerRadius::same(4)),
-                                    );
-                                    if min_btn.on_hover_text("Réduire").clicked() {
-                                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                                    }
-                                });
-                            });
-                            ui.separator();
-
-                            match self.active_tab {
-                                ActiveTab::Assistance => {
-                            let max_scroll_h = (response_rect.height() - 40.0).max(20.0);
-                            let scroll_out = egui::ScrollArea::vertical()
-                                .stick_to_bottom(true)
-                                .max_height(max_scroll_h)
-                                .auto_shrink([false, true])
-                                .show(ui, |ui| {
-                                    let last_user_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::User);
-                                    let last_agent_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::Agent);
-                                    let mut clicked_quick_suggestion: Option<String> = None;
-                                    let mut request_stop_speaking = false;
-
-                                    for (idx, entry) in self.chat_history.iter().enumerate() {
-                                        let is_highlighted = Some(idx) == last_user_idx || Some(idx) == last_agent_idx;
-
-                                        ui.vertical(|ui| {
-                                            ui.horizontal(|ui| {
-                                                let (label_name, label_color) = match entry.role {
-                                                    ChatRole::User => {
-                                                        let name = if let Some(kb) = entry.screen_size_kb {
-                                                            format!("🗣 Vous - {:.1} ko", kb)
-                                                        } else {
-                                                            "🗣 Vous".to_string()
-                                                        };
-                                                        (name, egui::Color32::from_rgb(255, 215, 120))
-                                                    }
-                                                    ChatRole::Agent => ("DeepSeek".to_string(), egui::Color32::from_rgb(0, 195, 255)),
-                                                };
-                                                ui.label(
-                                                    egui::RichText::new(&label_name)
-                                                        .size(if is_highlighted { 11.5 } else { 10.0 })
-                                                        .color(label_color)
-                                                        .strong(),
-                                                );
-                                                ui.label(
-                                                    egui::RichText::new(&entry.timestamp)
-                                                        .size(if is_highlighted { 10.0 } else { 9.0 })
-                                                        .color(egui::Color32::from_rgba_unmultiplied(170, 185, 205, 140)),
-                                                );
-
-                                                ui.add_space(2.0);
-                                                let copy_msg_btn = ui.add(
-                                                    egui::Button::new(
-                                                        egui::RichText::new("📋")
-                                                            .size(9.0)
-                                                            .color(egui::Color32::from_rgb(180, 205, 230)),
-                                                    )
-                                                    .small()
-                                                    .corner_radius(egui::CornerRadius::same(4)),
-                                                );
-                                                if copy_msg_btn.on_hover_text("Copier ce message dans le presse-papiers").clicked() {
-                                                    set_clipboard_text(&entry.text);
-                                                }
-
-                                                if entry.role == ChatRole::Agent && Some(idx) == last_agent_idx && self.status == AgentStatus::Speaking {
-                                                    ui.add_space(4.0);
-                                                    let stop_btn = ui.add(
-                                                        egui::Button::new(
-                                                            egui::RichText::new("🔇 Couper")
-                                                                .size(9.5)
-                                                                .color(egui::Color32::from_rgb(255, 130, 130)),
-                                                        )
-                                                        .small()
-                                                        .corner_radius(egui::CornerRadius::same(6)),
-                                                    );
-                                                    if stop_btn.on_hover_text("Interrompre la lecture vocale (Échap)").clicked() {
-                                                        request_stop_speaking = true;
-                                                    }
-                                                }
-                                            });
-
-                                            let (text_size, line_height, text_color, is_strong) = match entry.role {
-                                                ChatRole::User => {
-                                                    if is_highlighted {
-                                                        (14.5, 20.0, egui::Color32::from_rgb(255, 230, 150), true)
-                                                    } else {
-                                                        (12.0, 16.5, egui::Color32::from_rgba_unmultiplied(225, 210, 160, 185), false)
-                                                    }
-                                                }
-                                                ChatRole::Agent => {
-                                                    if is_highlighted {
-                                                        (15.5, 22.0, egui::Color32::from_rgb(255, 255, 255), true)
-                                                    } else {
-                                                        (12.5, 17.5, egui::Color32::from_rgba_unmultiplied(200, 210, 225, 180), false)
-                                                    }
-                                                }
-                                            };
-
-                                            let mut rich = egui::RichText::new(&entry.text)
-                                                .size(text_size)
-                                                .line_height(Some(line_height))
-                                                .color(text_color);
-                                            if is_strong {
-                                                rich = rich.strong();
-                                            }
-                                            let label_resp = ui.add(egui::Label::new(rich).wrap().selectable(true));
-                                            label_resp.context_menu(|ui| {
-                                                if ui.button("📋 Copier le texte").clicked() {
-                                                    set_clipboard_text(&entry.text);
-                                                    ui.close();
-                                                }
-                                            });
-
-                                            // Boutons-onglets pour les suggestions rapides
-                                            if !entry.quick_suggestions.is_empty() {
-                                                ui.add_space(4.0);
-                                                ui.horizontal_wrapped(|ui| {
-                                                    for sug in &entry.quick_suggestions {
-                                                        if let Some(clean_label) = sug.to_display_string() {
-                                                            let clean_label = clean_label.trim();
-                                                            if clean_label.is_empty() {
-                                                                continue;
-                                                            }
-                                                            let btn_text = egui::RichText::new(format!("💡 {clean_label}"))
-                                                                .size(11.0)
-                                                                .color(egui::Color32::from_rgb(130, 220, 255));
-
-                                                            let btn = egui::Button::new(btn_text)
-                                                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 95)))
-                                                                .corner_radius(egui::CornerRadius::same(10));
-
-                                                            if ui.add(btn).on_hover_text("Cliquer pour choisir cette suggestion").clicked() {
-                                                                clicked_quick_suggestion = Some(clean_label.to_string());
-                                                            }
-                                                        }
-                                                    }
-                                                });
-                                            }
-                                        });
-                                        ui.add_space(if is_highlighted { 8.0 } else { 5.0 });
-                                    }
-
-                                    // Retour visuel en direct de l'écoute micro
-                                    if self.is_recording && !self.live_transcript.is_empty() {
-                                        ui.vertical(|ui| {
-                                            ui.label(
-                                                egui::RichText::new("🗣 Vous (en direct...)")
-                                                    .size(10.5)
-                                                    .color(egui::Color32::from_rgb(255, 215, 120))
-                                                    .italics(),
-                                            );
-                                            ui.label(
-                                                egui::RichText::new(&self.live_transcript)
-                                                    .size(13.5)
-                                                    .line_height(Some(18.0))
-                                                    .color(egui::Color32::from_rgb(255, 230, 160))
-                                                    .italics(),
-                                            );
-                                        });
-                                        ui.add_space(6.0);
-                                    }
-
-                                    if let Some(prompt) = clicked_quick_suggestion {
-                                        self.stop_speaking();
-                                        if self.is_recording {
-                                            self.stop_recording();
-                                        }
-                                        self.status = AgentStatus::Thinking;
-                                        self.continuous_mode = true;
-                                        self.live_transcript.clear();
-                                        self.chat_history.push(ChatEntry {
-                                            role: ChatRole::User,
-                                            text: prompt.clone(),
-                                            timestamp: current_time_str(),
-                                            quick_suggestions: Vec::new(),
-                                            screen_size_kb: None,
-                                        });
-                                        let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
-                                    }
-
-                                    if request_stop_speaking {
-                                        self.stop_speaking();
-                                    }
-                                });
-                            computed_chat_h = (scroll_out.content_size.y + 44.0).clamp(min_chat_h, max_chat_h);
-                                }
-                                ActiveTab::Chat => {
-                                    // Barre de recherche et salon actif
-                                    ui.horizontal(|ui| {
-                                        if !self.current_twitch_channel.is_empty() {
-                                            ui.label(
-                                                egui::RichText::new("Salon :")
-                                                    .size(11.0)
-                                                    .color(egui::Color32::from_rgb(170, 185, 205)),
-                                            );
-                                            ui.hyperlink_to(
-                                                egui::RichText::new(format!("#{}", self.current_twitch_channel))
-                                                    .size(11.0)
-                                                    .color(egui::Color32::from_rgb(0, 195, 255))
-                                                    .underline(),
-                                                format!("https://twitch.tv/{}", self.current_twitch_channel),
-                                            );
-                                            ui.separator();
-                                        }
-
-                                        let search_edit = ui.add_sized(
-                                            [110.0, 18.0],
-                                            egui::TextEdit::singleline(&mut self.twitch_search_query)
-                                                .hint_text("Chaîne..."),
-                                        );
-                                        let enter_pressed = search_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                        if (ui.small_button("🔍").clicked() || enter_pressed) && !self.twitch_search_query.trim().is_empty() {
-                                            let _ = self.command_sender.send(AgentCommand::SearchTwitch(
-                                                self.twitch_search_query.trim().to_string(),
-                                            ));
-                                        }
-                                    });
-
-                                    if !self.twitch_search_results.is_empty() {
-                                        ui.add_space(2.0);
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.label(
-                                                egui::RichText::new("Résultats :")
-                                                    .size(10.5)
-                                                    .color(egui::Color32::from_rgb(255, 215, 120)),
-                                            );
-                                            let mut selected_channel = None;
-                                            for ch in &self.twitch_search_results {
-                                                if ui.small_button(format!("▶ {}", ch.display_name)).on_hover_text("Rejoindre ce salon irc").clicked() {
-                                                    selected_channel = Some(ch.login.clone());
-                                                }
-                                                if ui.small_button("↗").on_hover_text("Ouvrir sur twitch").clicked() {
-                                                    ui.ctx().open_url(egui::OpenUrl::new_tab(format!("https://twitch.tv/{}", ch.login)));
-                                                }
-                                            }
-                                            if let Some(ch) = selected_channel {
-                                                self.current_twitch_channel = ch.clone();
-                                                let _ = self.twitch_channel_sender.send(ch);
-                                                self.twitch_messages.clear();
-                                                self.twitch_search_results.clear();
-                                            }
-                                        });
-                                    }
-                                    ui.separator();
-                                    let max_chat_scroll_h = (response_rect.height() - 68.0).max(20.0);
-                                    let scroll_out = egui::ScrollArea::vertical()
-                                        .stick_to_bottom(true)
-                                        .max_height(max_chat_scroll_h)
-                                        .auto_shrink([false, true])
-                                        .show(ui, |ui| {
-                                            if self.twitch_messages.is_empty() {
-                                                ui.label(
-                                                    egui::RichText::new("En attente de messages twitch...")
-                                                        .size(12.0)
-                                                        .italics()
-                                                        .color(egui::Color32::from_rgba_unmultiplied(180, 190, 205, 150)),
-                                                );
-                                            } else {
-                                                for msg in &self.twitch_messages {
-                                                    ui.horizontal_wrapped(|ui| {
-                                                        ui.label(
-                                                            egui::RichText::new(&msg.timestamp)
-                                                                .size(9.0)
-                                                                .color(egui::Color32::from_rgba_unmultiplied(140, 150, 170, 140)),
-                                                        );
-                                                        ui.label(
-                                                            egui::RichText::new(format!("{}:", msg.author))
-                                                                .size(12.0)
-                                                                .color(egui::Color32::from_rgb(169, 112, 255))
-                                                                .strong(),
-                                                        );
-                                                        ui.label(
-                                                            egui::RichText::new(&msg.text)
-                                                                .size(12.5)
-                                                                .color(egui::Color32::WHITE),
-                                                        );
-                                                    });
-                                                    ui.add_space(3.0);
-                                                }
-                                            }
-                                    });
-                                    computed_chat_h = (scroll_out.content_size.y + 72.0).clamp(min_chat_h, max_chat_h);
-                                }
+                            let min_btn = ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new("—")
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(200, 215, 230)),
+                                )
+                                .min_size(egui::vec2(20.0, 18.0))
+                                .corner_radius(egui::CornerRadius::same(4)),
+                            );
+                            if min_btn.on_hover_text("Réduire").clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                             }
                         });
+                    });
                 });
 
-                // Hystérésis asymétrique pour self.chat_height :
-                // Empêche le clignotement / rebond continu à la frontière de saut de ligne de scrollbar
-                if computed_chat_h > self.chat_height + 4.0 || computed_chat_h < self.chat_height - 8.0 {
-                    self.chat_height = computed_chat_h;
-                }
+                let sep_y = response_rect.min.y + 35.0;
+                ui.painter().hline(
+                    (response_rect.min.x + 8.0)..=(response_rect.max.x - 8.0),
+                    sep_y,
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 45)),
+                );
 
-                // 2. Zone inférieure (30 %) : contrôles, avatar et saisie
+                // 2. Zone inférieure évaluée en deuxième (contrôles, avatar et saisie) pour précéder les messages au focus Tab
                 ui.scope_builder(egui::UiBuilder::new().max_rect(control_rect), |ui| {
                     egui::Frame::new()
                         .fill(egui::Color32::from_rgb(18, 20, 26))
@@ -1687,7 +1911,37 @@ impl eframe::App for OverlayApp {
                                             }
                                         }
 
-                                        let edit_width = (ui.available_width() - 156.0).max(60.0);
+                                        // Sélecteur visuel de profil vocal étendu
+                                        let (voice_icon_text, voice_color) = match self.voice_gender {
+                                            VoiceProfile::Denise => ("👩 Denise", egui::Color32::from_rgb(255, 170, 220)),
+                                            VoiceProfile::Henri => ("👨 Henri", egui::Color32::from_rgb(130, 200, 255)),
+                                            VoiceProfile::Hortense => ("🎙️ Hortense", egui::Color32::from_rgb(255, 195, 130)),
+                                            VoiceProfile::Paul => ("🎩 Paul", egui::Color32::from_rgb(160, 220, 180)),
+                                            VoiceProfile::Sylvie => ("🍁 Sylvie", egui::Color32::from_rgb(255, 150, 150)),
+                                            VoiceProfile::Jean => ("⚡ Jean", egui::Color32::from_rgb(205, 170, 255)),
+                                            VoiceProfile::Kokoro => ("🧠 Kokoro", egui::Color32::from_rgb(120, 255, 180)),
+                                        };
+                                        let next_gender = self.voice_gender.next();
+                                        let voice_btn = ui.button(egui::RichText::new(voice_icon_text).color(voice_color))
+                                            .on_hover_text(format!(
+                                                "Voix active : {}\nClic gauche : basculer vers {}\nClic droit : choisir parmi toutes les voix",
+                                                self.voice_gender.display_name(),
+                                                next_gender.display_name()
+                                            ));
+                                        if voice_btn.clicked() {
+                                            self.set_voice_gender(next_gender);
+                                        }
+                                        voice_btn.context_menu(|ui| {
+                                            for &profile in VoiceProfile::ALL {
+                                                let is_selected = self.voice_gender == profile;
+                                                if ui.selectable_label(is_selected, profile.display_name()).clicked() {
+                                                    self.set_voice_gender(profile);
+                                                    ui.close();
+                                                }
+                                            }
+                                        });
+
+                                        let edit_width = (ui.available_width() - 128.0).max(60.0);
                                         let input_id = egui::Id::new("prompt_input_text");
                                         let response = ui.add_sized(
                                             [edit_width, 24.0],
@@ -1707,7 +1961,7 @@ impl eframe::App for OverlayApp {
                                                 }
                                                 ui.close();
                                             }
-                                            if ui.button("📄 Copier tout").clicked() {
+                                            if ui.button("📄 Copier tout (Ctrl+C)").clicked() {
                                                 set_clipboard_text(&self.input_text);
                                                 ui.close();
                                             }
@@ -1722,14 +1976,24 @@ impl eframe::App for OverlayApp {
                                             }
                                         });
 
-                                        if response.has_focus() {
-                                            let paste_hit = ctx.input(|i| {
-                                                ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
-                                                    || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
-                                            });
-                                            let egui_pasted = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
-                                            if paste_hit && !egui_pasted {
-                                                if let Some(clip) = get_clipboard_text() {
+                                        let copy_hit = ctx.input(|i| {
+                                            i.events.iter().any(|e| matches!(e, egui::Event::Copy))
+                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
+                                        });
+                                        if response.has_focus() && copy_hit && !self.input_text.is_empty() {
+                                            set_clipboard_text(&self.input_text);
+                                            ctx.copy_text(self.input_text.clone());
+                                            play_earcon(Earcon::Success);
+                                        }
+
+                                        let paste_hit = ctx.input(|i| {
+                                            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
+                                                || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                        });
+                                        if (response.has_focus() || response.hovered()) && paste_hit {
+                                            if let Some(clip) = get_clipboard_text() {
+                                                if !clip.is_empty() && !self.input_text.ends_with(&clip) {
                                                     self.input_text.push_str(&clip);
                                                 }
                                             }
@@ -1756,6 +2020,53 @@ impl eframe::App for OverlayApp {
                                                 quick_suggestions: Vec::new(),
                                                 screen_size_kb: None,
                                             });
+                                            if is_cancel_scheduled_command(&prompt) {
+                                                let cancelled = cancel_all_scheduled_tasks();
+                                                play_earcon(Earcon::Success);
+                                                let reply = if cancelled > 0 {
+                                                    format!("Toutes les commandes différées ont été annulées ({cancelled} annulée{}).", if cancelled > 1 { "s" } else { "" })
+                                                } else {
+                                                    "Toutes les commandes différées ont été annulées.".to_string()
+                                                };
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::Agent,
+                                                    text: reply.clone(),
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                                                self.status = AgentStatus::Idle;
+                                                self.continuous_mode = false;
+                                                return;
+                                            } else if let Some(tasks) = parse_scheduled_prompts(&prompt) {
+                                                for (dur, task_prompt) in &tasks {
+                                                    schedule_prompt_execution(*dur, task_prompt.clone());
+                                                }
+                                                play_earcon(Earcon::Success);
+                                                let (reply_chat, reply_tts) = if tasks.len() == 1 {
+                                                    let friendly = format_duration_friendly(tasks[0].0);
+                                                    let cmd = &tasks[0].1;
+                                                    (format!("Commande planifiée dans {friendly} : « {cmd} »."), format!("Commande planifiée dans {friendly}."))
+                                                } else {
+                                                    let mut chat = format!("{} commandes différées planifiées :", tasks.len());
+                                                    for (dur, cmd) in &tasks {
+                                                        chat.push_str(&format!("\n• Dans {} : « {} »", format_duration_friendly(*dur), cmd));
+                                                    }
+                                                    (chat, format!("{} commandes différées planifiées.", tasks.len()))
+                                                };
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::Agent,
+                                                    text: reply_chat,
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply_tts));
+                                                self.status = AgentStatus::Idle;
+                                                self.continuous_mode = false;
+                                                return;
+                                            }
                                             if is_api_key_command(&prompt) {
                                                 self.show_api_key_modal = true;
                                                 let reply = "Boîte de configuration de la clé API ouverte.".to_string();
@@ -1784,13 +2095,6 @@ impl eframe::App for OverlayApp {
                                             } else {
                                                 self.status = AgentStatus::Thinking;
                                                 let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
-                                            }
-                                        }
-
-                                        let paste_btn = ui.button("📋").on_hover_text("Coller le texte du presse-papiers");
-                                        if paste_btn.clicked() {
-                                            if let Some(clip) = get_clipboard_text() {
-                                                self.input_text.push_str(&clip);
                                             }
                                         }
 
@@ -1824,6 +2128,328 @@ impl eframe::App for OverlayApp {
                             });
                         });
                 });
+
+                // 3. Boîte de discussion adaptative (évaluée après les contrôles pour la navigation Tab)
+                let mut computed_chat_h = current_chat_h;
+                let messages_rect = egui::Rect::from_min_max(
+                    egui::pos2(response_rect.min.x + 8.0, sep_y + 4.0),
+                    egui::pos2(response_rect.max.x - 8.0, response_rect.max.y - 6.0),
+                );
+
+                ui.scope_builder(egui::UiBuilder::new().max_rect(messages_rect), |ui| {
+                    match self.active_tab {
+                        ActiveTab::Assistance => {
+                            let max_scroll_h = (messages_rect.height()).max(20.0);
+                            let scroll_out = egui::ScrollArea::vertical()
+                                .stick_to_bottom(true)
+                                .max_height(max_scroll_h)
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    let last_user_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::User);
+                                    let last_agent_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::Agent);
+                                    let mut clicked_quick_suggestion: Option<String> = None;
+                                    let mut request_stop_speaking = false;
+
+                                    for (idx, entry) in self.chat_history.iter().enumerate() {
+                                        let is_highlighted = Some(idx) == last_user_idx || Some(idx) == last_agent_idx;
+                                        let msg_id = ui.make_persistent_id(format!("chat_entry_item_{idx}"));
+                                        let layer_id = ui.layer_id();
+                                        ui.memory_mut(|m| m.interested_in_focus(msg_id, layer_id));
+                                        let is_msg_focused = ui.memory(|m| m.has_focus(msg_id));
+
+                                        ui.vertical(|ui| {
+                                            ui.horizontal(|ui| {
+                                                let (label_name, label_color) = match entry.role {
+                                                    ChatRole::User => {
+                                                        let name = if let Some(kb) = entry.screen_size_kb {
+                                                            format!("🗣 Vous - {:.1} ko", kb)
+                                                        } else {
+                                                            "🗣 Vous".to_string()
+                                                        };
+                                                        (name, egui::Color32::from_rgb(255, 215, 120))
+                                                    }
+                                                    ChatRole::Agent => ("DeepSeek".to_string(), egui::Color32::from_rgb(0, 195, 255)),
+                                                };
+                                                ui.label(
+                                                    egui::RichText::new(&label_name)
+                                                        .size(if is_highlighted { 11.5 } else { 10.0 })
+                                                        .color(label_color)
+                                                        .strong(),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(&entry.timestamp)
+                                                        .size(if is_highlighted { 10.0 } else { 9.0 })
+                                                        .color(egui::Color32::from_rgba_unmultiplied(170, 185, 205, 140)),
+                                                );
+
+                                                if entry.role == ChatRole::Agent && Some(idx) == last_agent_idx && self.status == AgentStatus::Speaking {
+                                                    ui.add_space(4.0);
+                                                    let stop_btn = ui.add(
+                                                        egui::Button::new(
+                                                            egui::RichText::new("🔇 Couper")
+                                                                .size(9.5)
+                                                                .color(egui::Color32::from_rgb(255, 130, 130)),
+                                                        )
+                                                        .small()
+                                                        .corner_radius(egui::CornerRadius::same(6)),
+                                                    );
+                                                    if stop_btn.on_hover_text("Interrompre la lecture vocale (Échap)").clicked() {
+                                                        request_stop_speaking = true;
+                                                    }
+                                                }
+                                            });
+
+                                            let (text_size, line_height, text_color, is_strong) = match entry.role {
+                                                ChatRole::User => {
+                                                    if is_highlighted {
+                                                        (14.5, 20.0, egui::Color32::from_rgb(255, 230, 150), true)
+                                                    } else {
+                                                        (12.0, 16.5, egui::Color32::from_rgba_unmultiplied(225, 210, 160, 185), false)
+                                                    }
+                                                }
+                                                ChatRole::Agent => {
+                                                    if is_highlighted {
+                                                        (15.5, 22.0, egui::Color32::from_rgb(255, 255, 255), true)
+                                                    } else {
+                                                        (12.5, 17.5, egui::Color32::from_rgba_unmultiplied(200, 210, 225, 180), false)
+                                                    }
+                                                }
+                                            };
+
+                                            let mut rich = egui::RichText::new(&entry.text)
+                                                .size(text_size)
+                                                .line_height(Some(line_height))
+                                                .color(text_color);
+                                            if is_strong {
+                                                rich = rich.strong();
+                                            }
+                                            let label_resp = ui.add(egui::Label::new(rich).wrap());
+                                            let interact_resp = ui.interact(label_resp.rect, msg_id, egui::Sense::click());
+
+                                            if interact_resp.clicked() {
+                                                ui.memory_mut(|m| m.request_focus(msg_id));
+                                            }
+                                            let effective_focused = is_msg_focused || interact_resp.has_focus();
+
+                                            // Copie au clavier Ctrl+C dès que le message a le focus clavier (ou au survol sans focus actif ailleurs)
+                                            let copy_msg_hit = ctx.input(|i| {
+                                                i.events.iter().any(|e| matches!(e, egui::Event::Copy))
+                                                    || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
+                                            });
+                                            let should_copy = effective_focused
+                                                || (interact_resp.hovered() && ui.memory(|m| m.focused().is_none()));
+
+                                            if should_copy && copy_msg_hit {
+                                                set_clipboard_text(&entry.text);
+                                                ctx.copy_text(entry.text.clone());
+                                                play_earcon(Earcon::Success);
+                                            }
+
+                                            if effective_focused {
+                                                label_resp.scroll_to_me(Some(egui::Align::Center));
+                                                ui.painter().rect_stroke(
+                                                    label_resp.rect.expand(4.0),
+                                                    egui::CornerRadius::same(6),
+                                                    egui::Stroke::new(1.8, egui::Color32::from_rgb(0, 200, 255)),
+                                                    egui::StrokeKind::Outside,
+                                                );
+                                            }
+
+                                            interact_resp.context_menu(|ui| {
+                                                if ui.button("📋 Copier le texte (Ctrl+C)").clicked() {
+                                                    set_clipboard_text(&entry.text);
+                                                    ctx.copy_text(entry.text.clone());
+                                                    play_earcon(Earcon::Success);
+                                                    ui.close();
+                                                }
+                                            });
+
+                                            // Boutons-onglets pour les suggestions rapides
+                                            if !entry.quick_suggestions.is_empty() {
+                                                ui.add_space(4.0);
+                                                ui.horizontal_wrapped(|ui| {
+                                                    for sug in &entry.quick_suggestions {
+                                                        if let Some(clean_label) = sug.to_display_string() {
+                                                            let clean_label = clean_label.trim();
+                                                            if clean_label.is_empty() {
+                                                                continue;
+                                                            }
+                                                            let btn_text = egui::RichText::new(format!("💡 {clean_label}"))
+                                                                .size(11.0)
+                                                                .color(egui::Color32::from_rgb(130, 220, 255));
+
+                                                            let btn = egui::Button::new(btn_text)
+                                                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 95)))
+                                                                .corner_radius(egui::CornerRadius::same(10));
+
+                                                            if ui.add(btn).on_hover_text("Cliquer pour choisir cette suggestion").clicked() {
+                                                                clicked_quick_suggestion = Some(clean_label.to_string());
+                                                            }
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        });
+                                        ui.add_space(if is_highlighted { 8.0 } else { 5.0 });
+                                    }
+
+                                    if let Some(prompt) = clicked_quick_suggestion {
+                                        self.stop_speaking();
+                                        if self.is_recording {
+                                            self.stop_recording();
+                                        }
+                                        self.status = AgentStatus::Thinking;
+                                        self.continuous_mode = true;
+                                        self.live_transcript.clear();
+                                        self.chat_history.push(ChatEntry {
+                                            role: ChatRole::User,
+                                            text: prompt.clone(),
+                                            timestamp: current_time_str(),
+                                            quick_suggestions: Vec::new(),
+                                            screen_size_kb: None,
+                                        });
+                                        let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
+                                    }
+
+                                    if request_stop_speaking {
+                                        self.stop_speaking();
+                                    }
+                                });
+                            computed_chat_h = (scroll_out.content_size.y + 44.0).clamp(min_chat_h, max_chat_h);
+                        }
+                        ActiveTab::Chat => {
+                            // Barre de recherche et salon actif
+                            ui.horizontal(|ui| {
+                                if !self.current_twitch_channel.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new("Salon :")
+                                            .size(11.0)
+                                            .color(egui::Color32::from_rgb(170, 185, 205)),
+                                    );
+                                    ui.hyperlink_to(
+                                        egui::RichText::new(format!("#{}", self.current_twitch_channel))
+                                            .size(11.0)
+                                            .color(egui::Color32::from_rgb(0, 195, 255))
+                                            .underline(),
+                                        format!("https://twitch.tv/{}", self.current_twitch_channel),
+                                    );
+                                    ui.separator();
+                                }
+
+                                let search_edit = ui.add_sized(
+                                    [110.0, 18.0],
+                                    egui::TextEdit::singleline(&mut self.twitch_search_query)
+                                        .hint_text("Chaîne..."),
+                                );
+                                let enter_pressed = search_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                if (ui.small_button("🔍").clicked() || enter_pressed) && !self.twitch_search_query.trim().is_empty() {
+                                    let _ = self.command_sender.send(AgentCommand::SearchTwitch(
+                                        self.twitch_search_query.trim().to_string(),
+                                    ));
+                                }
+                            });
+
+                            if !self.twitch_search_results.is_empty() {
+                                ui.add_space(2.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Résultats :")
+                                            .size(10.5)
+                                            .color(egui::Color32::from_rgb(255, 215, 120)),
+                                    );
+                                    let mut selected_channel = None;
+                                    for ch in &self.twitch_search_results {
+                                        if ui.small_button(format!("▶ {}", ch.display_name)).on_hover_text("Rejoindre ce salon irc").clicked() {
+                                            selected_channel = Some(ch.login.clone());
+                                        }
+                                        if ui.small_button("↗").on_hover_text("Ouvrir sur twitch").clicked() {
+                                            ui.ctx().open_url(egui::OpenUrl::new_tab(format!("https://twitch.tv/{}", ch.login)));
+                                        }
+                                    }
+                                    if let Some(ch) = selected_channel {
+                                        self.current_twitch_channel = ch.clone();
+                                        let _ = self.twitch_channel_sender.send(ch);
+                                        self.twitch_messages.clear();
+                                        self.twitch_search_results.clear();
+                                    }
+                                });
+                            }
+                            ui.separator();
+                            let max_chat_scroll_h = (messages_rect.height() - 28.0).max(20.0);
+                            let scroll_out = egui::ScrollArea::vertical()
+                                .stick_to_bottom(true)
+                                .max_height(max_chat_scroll_h)
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    if self.twitch_messages.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new("En attente de messages twitch...")
+                                                .size(12.0)
+                                                .italics()
+                                                .color(egui::Color32::from_rgba_unmultiplied(180, 190, 205, 150)),
+                                        );
+                                    } else {
+                                        for (idx, msg) in self.twitch_messages.iter().enumerate() {
+                                            let t_id = ui.make_persistent_id(format!("twitch_msg_item_{idx}"));
+                                            let layer_id = ui.layer_id();
+                                            ui.memory_mut(|m| m.interested_in_focus(t_id, layer_id));
+                                            let is_t_focused = ui.memory(|m| m.has_focus(t_id));
+                                            let resp = ui.horizontal_wrapped(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(&msg.timestamp)
+                                                        .size(9.0)
+                                                        .color(egui::Color32::from_rgba_unmultiplied(140, 150, 170, 140)),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(format!("{}:", msg.author))
+                                                        .size(12.0)
+                                                        .color(egui::Color32::from_rgb(169, 112, 255))
+                                                        .strong(),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(&msg.text)
+                                                        .size(12.5)
+                                                        .color(egui::Color32::WHITE),
+                                                );
+                                            }).response;
+                                            let resp = ui.interact(resp.rect, t_id, egui::Sense::click());
+
+                                            if resp.clicked() {
+                                                ui.memory_mut(|m| m.request_focus(t_id));
+                                            }
+                                            let effective_t_focused = is_t_focused || resp.has_focus();
+                                            let copy_t_hit = ctx.input(|i| {
+                                                i.events.iter().any(|e| matches!(e, egui::Event::Copy))
+                                                    || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
+                                            });
+                                            if (effective_t_focused || resp.hovered()) && copy_t_hit {
+                                                let text = format!("{}: {}", msg.author, msg.text);
+                                                set_clipboard_text(&text);
+                                                ctx.copy_text(text);
+                                                play_earcon(Earcon::Success);
+                                            }
+                                            if effective_t_focused {
+                                                resp.scroll_to_me(Some(egui::Align::Center));
+                                                ui.painter().rect_stroke(
+                                                    resp.rect.expand(2.0),
+                                                    egui::CornerRadius::same(3),
+                                                    egui::Stroke::new(1.2, egui::Color32::from_rgb(0, 200, 255)),
+                                                    egui::StrokeKind::Outside,
+                                                );
+                                            }
+                                            ui.add_space(3.0);
+                                        }
+                                    }
+                                });
+                            computed_chat_h = (scroll_out.content_size.y + 72.0).clamp(min_chat_h, max_chat_h);
+                        }
+                    }
+                });
+
+                // Hystérésis asymétrique pour self.chat_height
+                if computed_chat_h > self.chat_height + 4.0 || computed_chat_h < self.chat_height - 8.0 {
+                    self.chat_height = computed_chat_h;
+                }
 
                 // Zones de déplacement : en-tête supérieur (en réservant l'espace des boutons à droite) et bandeau inférieur
                 let window_buttons_width = 84.0;
@@ -1918,6 +2544,44 @@ impl eframe::App for OverlayApp {
                 // Poignées visuelles de redimensionnement discrètes aux coins
                 let painter = ui.painter();
 
+                // Tracé des badges de ciblage numéroté (Click by Number)
+                if self.show_numbered_targets {
+                    for target in &self.numbered_targets {
+                        let ppp = ctx.pixels_per_point().max(0.5);
+                        let left = target.rect[0] as f32 / ppp;
+                        let top = target.rect[1] as f32 / ppp;
+                        let badge_rect = egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(22.0, 18.0));
+                        
+                        painter.rect_filled(
+                            badge_rect,
+                            egui::CornerRadius::same(4),
+                            egui::Color32::from_rgb(255, 215, 0),
+                        );
+                        painter.rect_stroke(
+                            badge_rect,
+                            egui::CornerRadius::same(4),
+                            egui::Stroke::new(1.2, egui::Color32::BLACK),
+                            egui::StrokeKind::Outside,
+                        );
+                        painter.text(
+                            badge_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            target.index.to_string(),
+                            egui::FontId::monospace(11.0),
+                            egui::Color32::BLACK,
+                        );
+                    }
+                }
+
+                // Indicateur visuel du mode Switch Access
+                if self.switch_access_mode {
+                    painter.rect_stroke(
+                        control_rect.expand(2.0),
+                        egui::CornerRadius::same(12),
+                        egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 255, 200)),
+                        egui::StrokeKind::Outside,
+                    );
+                }
                 // Tracé de l'outline rect de la zone cible en mode dictée
                 if self.dictation_mode {
                     if let Ok(guard) = LAST_FOCUSED_RECT.lock() {
@@ -1973,6 +2637,7 @@ impl eframe::App for OverlayApp {
 
                             ui.horizontal(|ui| {
                                 let edit = egui::TextEdit::singleline(&mut self.api_key_input)
+                                    .id(egui::Id::new("api_key_input_field"))
                                     .password(!self.show_api_key_plain)
                                     .hint_text("sk-...")
                                     .desired_width(230.0);
@@ -2006,15 +2671,26 @@ impl eframe::App for OverlayApp {
                                     }
                                 });
 
-                                if edit_resp.has_focus() {
-                                    let paste_hit = ctx.input(|i| {
-                                        ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
-                                            || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
-                                    });
-                                    let egui_pasted = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
-                                    if paste_hit && !egui_pasted {
-                                        if let Some(clip) = get_clipboard_text() {
-                                            self.api_key_input = clip.trim().to_string();
+                                let copy_key_hit = ctx.input(|i| {
+                                    i.events.iter().any(|e| matches!(e, egui::Event::Copy))
+                                        || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
+                                });
+                                if edit_resp.has_focus() && copy_key_hit && !self.api_key_input.is_empty() {
+                                    set_clipboard_text(&self.api_key_input);
+                                    ctx.copy_text(self.api_key_input.clone());
+                                    play_earcon(Earcon::Success);
+                                }
+
+                                let paste_key_hit = ctx.input(|i| {
+                                    i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                                        || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
+                                        || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                });
+                                if (edit_resp.has_focus() || edit_resp.hovered()) && paste_key_hit {
+                                    if let Some(clip) = get_clipboard_text() {
+                                        let trimmed = clip.trim().to_string();
+                                        if !trimmed.is_empty() && self.api_key_input != trimmed {
+                                            self.api_key_input = trimmed;
                                         }
                                     }
                                 }
@@ -2044,6 +2720,12 @@ impl eframe::App for OverlayApp {
                             });
                         });
                 }
+
+                // Affichage dynamique des fenêtres volantes (stats, tables, contenus)
+                self.floating_cards.retain_mut(|card| {
+                    card.show(&ctx);
+                    card.open
+                });
             });
     }
 }
@@ -2061,6 +2743,22 @@ fn resolve_deepseek_key() -> String {
     }
 
     String::new()
+}
+
+fn resolve_initial_voice() -> VoiceGender {
+    if let Ok(key) = std::env::var("VOICE_PROFILE") {
+        if let Some(v) = VoiceProfile::from_id_or_name(&key) {
+            return v;
+        }
+    }
+
+    if let Some(val) = read_env_var_from_file(".env", "VOICE_PROFILE") {
+        if let Some(v) = VoiceProfile::from_id_or_name(&val) {
+            return v;
+        }
+    }
+
+    VoiceGender::Denise
 }
 
 fn parse_agent_response(raw: &str) -> AgentResponsePayload {
@@ -2224,12 +2922,13 @@ async fn compact_history_if_needed(
         }
     }
 
+    let (_, system_lang_name) = get_system_locale_language();
     let summary_request = DeepSeekChatRequest {
         model: "deepseek-chat".to_string(),
         messages: vec![
             ChatMessage {
                 role: "system".to_string(),
-                content: "Tu es un synthétiseur de mémoire conversationnelle. Résume fidèlement les points clés, décisions et actions passées en 250 mots maximum en français sous forme de points synthétiques.".to_string(),
+                content: format!("Tu es un synthétiseur de mémoire conversationnelle. Résume fidèlement les points clés, décisions et actions passées en 250 mots maximum dans la langue du système de l'utilisateur ({system_lang_name}) sous forme de points synthétiques."),
             },
             ChatMessage {
                 role: "user".to_string(),
@@ -2281,31 +2980,58 @@ async fn compact_history_if_needed(
     *history = recent;
 }
 
-const STANDARD_SYSTEM_INSTRUCTIONS: &str = r#"Tu es l'agent d'exploration Libertide pour Windows.
-Réponds STRICTEMENT en JSON sans texte hors JSON. "narration" concise en français (max 2 phrases).
+fn build_standard_system_instructions(lang_name: &str) -> String {
+    format!(r#"Tu es l'agent d'exploration Libertide pour Windows.
+Réponds STRICTEMENT en JSON sans texte hors JSON. "narration" concise rédigée impérativement dans la langue du système de l'utilisateur : {lang_name} (max 2 phrases).
 
 Règles principales :
 1. Filtrage requête : Bruit/inintelligible -> "invalid_request": true. Salutations/chit-chat -> "invalid_request": false, "actions": [], narration courtoise.
-2. Budget de raisonnement ("next_passes": 1..15) :
-   - Réponse directe/clic unique : 1-3 passes.
-   - Tâche multi-étapes standard (web, formulaire) : 4-7 passes.
-   - Urgence technique/humaine/départ : 10-15 passes ("next_passes": 15 ou set_reasoning_passes: 15).
-3. PROTOCOLE URGENCE VITALE & SANTÉ :
-   - Malaise/douleur/vertige/appel à l'aide : IMMÉDIATEMENT "next_passes": 15.
-   - SANS CONFIRMATION NI CHAT : Si demande d'alerte/message à un proche (Robin Ruaux, médecin, famille), exécute immédiatement l'envoi sans attendre ("actions": [...]).
-   - Narration : 1 phrase courte confirmant l'envoi + rappelle secours (15 SAMU, 18 Pompiers, 112).
-   - Silence parasite : appelle "mute_audio" (isole bruits tiers, garde voix Libertide audible).
-   - PIVOT OBLIGATOIRE : Tant que l'alerte n'est pas envoyée et qu'il reste des passes, INTERDICTION de renvoyer "actions": []. Si l'app échoue, pivote (open_app, navigate_to_url vers WhatsApp Web/Discord/Teams/Email, ou autre fenêtre).
+2. Budget de raisonnement autonome et passes profondes ("next_passes": 1..15 ou action "set_reasoning_passes") :
+    - ÉVALUATION ET PILOTAGE DU BUDGET PAR LE MODÈLE : Tu gères toi-même le nombre de passes d'exécution nécessaires via le champ racine "next_passes" ou l'action "set_reasoning_passes" :
+      * Basse importance / Réponse directe / Simple clic / Tâche ponctuelle rapide ("vite", "juste un coup d'œil", information simple) : 1 à 3 passes.
+      * Importance normale / Tâche standard multi-étapes (navigation web, formulaire, lecture, interaction applicative standard) : 4 à 7 passes.
+      * Haute importance / Recherche approfondie / Mission de contact / Comparatif de produits ou services / Benchmarks / Enquêtes : Tu DOIS impérativement t'allouer un budget de passes profondes ("next_passes": 8 à 12) dès la première passe et ne JAMAIS clore prématurément.
+      * Importance critique / Urgence vitale explicite / Grand départ précipité : 13 à 15 passes.
+    - MODULATION DYNAMIQUE CONTINUE : À chaque passe, réévalue et ajuste "next_passes" selon l'état d'avancement. Si la tâche exige plus d'étapes d'exploration, augmente le budget via "next_passes" ou "set_reasoning_passes".
+ 3. PROTOCOLE URGENCE VITALE & SANTÉ :
+   - CAS 1 - DEMANDE EXPLICITE D'ALERTE / SECOURS (ex: "alerte Robin je fais un malaise", "appelle le 15", "aide médicale d'urgence") :
+     * IMMÉDIATEMENT "next_passes": 15.
+     * SANS ATTENDRE : exécute immédiatement l'envoi d'alerte ("actions": [...]).
+     * Narration : 1 phrase courte confirmant l'envoi + rappelle secours (15 SAMU, 18 Pompiers, 112).
+     * Silence parasite : appelle "mute_audio" (isole bruits tiers, garde voix Libertide audible).
+     * PIVOT OBLIGATOIRE : Tant que l'alerte n'est pas envoyée et qu'il reste des passes, INTERDICTION de renvoyer "actions": [].
+   - CAS 2 - DIDASCALIES (*gémissements*, *soupir*, *aïe*, [pleurs], etc.), JEU DE RÔLE, CITATION OU SITUATION AMBIGUË SANS DEMANDE FORMELLE :
+     * INTERDICTION STRICTE DE PANIQUER OU D'ENVOYER DES MESSAGES À DES TIERS : conserve impérativement "actions": [].
+     * Reste calme et attentif. Vérifie la situation dans la narration (ex: "J'ai perçu des signes de malaise (*gémissements*). Avez-vous besoin d'une assistance ou d'alerter un proche ?").
+     * Fournis OBLIGATOIREMENT une demande de confirmation dans "quick_suggestions" : ["Oui, alerter mes proches / secours", "Non, tout va bien / fausse alerte"].
    - Départ précipité : autonomie pour sauver fichiers et fermer session / verrouiller écran.
+ 3bis. PROTOCOLE D'ANALYSE APPROFONDIE STRATÉGIQUE (CONTACTS, PRODUITS ET SERVICES) :
+   - Dès que la demande implique de trouver ou contacter une personne, trouver des coordonnées, ou rechercher / comparer des produits et services :
+     * GESTION DU BUDGET : Définis immédiatement "next_passes": 8 à 12 (ou appelle l'action "set_reasoning_passes": 10). INTERDICTION de clore la mission en 1 seule passe ou de poser une question passive avec "actions": [].
+     * VOLET CONTACTS & COMMUNICATION ("contacte...", "écris à...", "trouve le contact", "appelle...") :
+       - Niveau 1 (Local) : Vérifie et sélectionne les messageries ou logiciels mail ouverts (Teams, Outlook, WhatsApp, Discord, Slack) et cherche le contact.
+       - Niveau 2 (Web & Annuaires pros) : Si absent en local ou application fermée, ouvre le navigateur ("navigate_to_url") pour chercher sur le web, LinkedIn, annuaires d'entreprises ou pages professionnelles.
+       - Niveau 3 (Projection fiche contact) : Dès identification des coordonnées (email, téléphone, poste, profil), projette OBLIGATOIREMENT une fiche volante de synthèse via "show_floating_card" (card_type: "stats", id: "fiche_contact", title: "Fiche contact : <Nom>", data: {{"Nom": "...", "Email": "...", "Téléphone": "...", "Poste / Société": "...", "Source": "..."}}), puis prépare le canal de communication (mailto:, message, appel).
+     * VOLET PRODUITS & SERVICES ("compare...", "meilleur...", "prix de...", "trouve une offre/produit") :
+       - Niveau 1 (Exploration web) : Ouvre le navigateur ("navigate_to_url") sur les moteurs, comparateurs ou sites marchands de référence.
+       - Niveau 2 (Extraction métrique) : Relève systématiquement prix, spécifications, disponibilité et notes/avis.
+       - Niveau 3 (Tableau comparatif volant) : Projette OBLIGATOIREMENT un tableau comparatif structuré dans une fenêtre volante via "show_floating_card" (card_type: "table", title: "Comparatif offres", data: {{"headers": ["Modèle / Offre", "Prix", "Caractéristiques", "Avis"], "rows": [["...", "...", "...", "..."]]}}).
+     * POLITIQUE DE PIVOT EN CAS D'ÉCHEC (TOUS VOLETS) :
+       - L'absence de résultat ou le blocage sur un premier canal (ex: contact absent dans Teams, page web non accessible) NE MET PAS FIN À LA MISSION. C'est un ordre de PIVOT IMMÉDIAT vers le canal suivant (local -> web -> annuaires) sans renvoyer "actions": [].
+       - Tant que tous les canaux n'ont pas été explorés et que les résultats ne sont pas projetés dans une fenêtre volante ("show_floating_card"), INTERDICTION de renvoyer "actions": [].
 4. Interface & Ciblage :
    - Hôte navigateur : préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse").
    - Contenu web : libellé direct sans préfixe issu de "[Page web - ...]".
-   - Obstacles (cookies/toasts/popups) : clique le bouton adéquat ("Tout accepter", "Fermer", etc.). Ne JAMAIS envoyer "escape".
+   - ACCEPTATION AUTOMATIQUE DES COOKIES : Dès qu'une bannière de cookies ou consentement RGPD est présent, clique SYSTÉMATIQUEMENT et immédiatement sur le bouton pour tout accepter ("Tout accepter", "Accepter tout", "Autoriser", "J'accepte", "Continuer sans refuser") sans demander de confirmation.
+   - LECTURE DES NOTIFICATIONS SYSTÈME (TOASTS) : Dès qu'une notification Windows ou un toast est présent, lis impérativement son titre et son contenu dans ta "narration" pour informer l'utilisateur, mais LAISSE-LA TRANQUILLE (ne tente pas de la fermer, ne clique pas dessus et laisse le système la gérer).
+   - ALERTES & MESSAGES D'ERREUR (FERMETURE SYSTÉMATIQUE APRÈS LECTURE) : Dès qu'une boîte de dialogue d'alerte, un popup d'avertissement ou un message d'erreur est à l'écran, lis-le clairement ou résume-le dans ta "narration", puis FERME-LA SYSTÉMATIQUEMENT en cliquant sur son bouton de fermeture/validation ("OK", "Fermer", "Annuler", "Continuer", croix) pour débloquer l'écran et poursuivre ton travail. Ne JAMAIS envoyer "escape".
+   - PRIORITÉ ABSOLUE AUX CHANGEMENTS WEB : Si des informations, boutons ou données sont présent sur la page web (signalés sous 'INFORMATIONS WEB MODIFIÉES / NOUVELLES'), ils priment impérativement sur tous les éléments statiques et les autres fenêtres. Base en priorité absolue tes actions ou réponses sur ces changements.
    - "click_element" pour liens/onglets, "click_button" pour boutons. "target": null si saisie sans cible.
-   - Validation : "press_enter": true dans "write_text" ou shortcut "enter". Jamais "run_command" pour simuler une touche.
+   - Raccourcis clavier & touches : utilise OBLIGATOIREMENT "accessibility_shortcut" avec le nom ou la combinaison de touches exacte (ex: "ctrl+shift+b" pour la barre des favoris, "ctrl+t", "enter", "close_tab", "copy", "undo"). Ne JAMAIS envoyer "run_command" pour simuler des touches ou raccourcis !
    - Lecture code/fichier : "read_editor_content" (focalise et extrait Ctrl+A/Ctrl+C).
    - Onglet/page : "accessibility_shortcut": "close_tab" (jamais "close_app" pour un onglet).
 5. Audio & Volume :
+   - "focus_address_bar" pour cibler/sélectionner universellement la barre d'adresse du navigateur.
    - "mute_audio" coupe sons tiers sans altérer la voix Libertide (à utiliser en urgence ou demande mute).
    - "set_volume" ("down"|"up"|"min"|"mute") pour régler le volume.
 6. Navigation & Web :
@@ -2317,40 +3043,51 @@ Règles principales :
    - Démarrage : "enable_autostart", "disable_autostart", "check_autostart", "set_autostart".
    - Sélection : "select_text_between" (from, to).
    - Immersion : "activate_immersion" (Win+Ctrl+D), "deactivate_immersion".
+   - Temporisation & Différé : "schedule_prompt" (delay_seconds: 1..3600, prompt: "...") ou "schedule_prompts" (tasks: [{{"delay_seconds": 10, "prompt": "..."}}]) pour différer des consignes futures (téléchargement en cours, rappel, temporisation).
+   - Fichiers & Documents : "open_file" (path: "chemin/fichier.ext") pour ouvrir directement toute image, vidéo, PDF, tableur ou document dans son application système par défaut (selon extension / MIME type).
+   - Fenêtres volantes d'analyse : "show_floating_card" (id: "...", title: "...", card_type: "table"|"stats"|"markdown", data: {{...}}) pour projeter une fenêtre volante semi-transparente avec un tableau comparatif, des données chiffrées ou une fiche technique.
+   - Fermeture carte : "close_floating_card" (id: "...").
 8. Fin de passes : Dès que "actions" est vide (tâche finie ou choix requis), fournis OBLIGATOIREMENT 2 à 4 suggestions concrètes dans "quick_suggestions".
 
 Format JSON obligatoire :
-{
+{{
   "narration": "Explication vocale concise ou vide.",
   "next_passes": 5,
   "actions": [
-    {"action": "open_app", "name": "nom_executable"},
-    {"action": "close_app", "name": "nom_ou_titre"},
-    {"action": "click_element", "window": null, "target_name": "nom"},
-    {"action": "click_button", "window": null, "button_name": "nom"},
-    {"action": "focus_element", "window": null, "target_name": "nom"},
-    {"action": "scroll", "direction": "down"|"up"|"bottom"|"top", "amount": 1, "window": null},
-    {"action": "focus_window", "title": null, "pid": null},
-    {"action": "read_editor_content", "window": null, "target": null},
-    {"action": "clear_text", "window": null},
-    {"action": "write_text", "text": "...", "target": null, "press_enter": false},
-    {"action": "dictate", "text": "...", "window": null, "target": null, "press_enter": false},
-    {"action": "activate_dictation", "window": null, "target": null},
-    {"action": "deactivate_dictation"},
-    {"action": "toggle_dictation"},
-    {"action": "select_text_between", "from": "...", "to": "...", "window": null, "target": null},
-    {"action": "replace_field_text", "text": "...", "target": null},
-    {"action": "run_command", "command": "..."},
-    {"action": "kill_process", "pid": null, "name": null},
-    {"action": "navigate_to_url", "url": "...", "target": "new_tab"|"current_tab"|"new_window"},
-    {"action": "accessibility_shortcut", "shortcut": "enter"|"close_tab"|"refresh_page"|"copy"|"undo"},
-    {"action": "deactivate_immersion"},
-    {"action": "set_reasoning_passes", "passes": 5, "reason": null},
-    {"action": "mute_audio"},
-    {"action": "set_volume", "command": "mute"|"down"|"up"|"min"}
+    {{"action": "open_app", "name": "nom_executable"}},
+    {{"action": "close_app", "name": "nom_ou_titre"}},
+    {{"action": "click_element", "window": null, "target_name": "nom"}},
+    {{"action": "click_button", "window": null, "button_name": "nom"}},
+    {{"action": "focus_element", "window": null, "target_name": "nom"}},
+    {{"action": "scroll", "direction": "down"|"up"|"bottom"|"top", "amount": 1, "window": null}},
+    {{"action": "focus_window", "title": null, "pid": null}},
+    {{"action": "focus_address_bar", "window": null}},
+    {{"action": "read_editor_content", "window": null, "target": null}},
+    {{"action": "clear_text", "window": null}},
+    {{"action": "write_text", "text": "...", "target": null, "press_enter": false}},
+    {{"action": "dictate", "text": "...", "window": null, "target": null, "press_enter": false}},
+    {{"action": "activate_dictation", "window": null, "target": null}},
+    {{"action": "deactivate_dictation"}},
+    {{"action": "toggle_dictation"}},
+    {{"action": "select_text_between", "from": "...", "to": "...", "window": null, "target": null}},
+    {{"action": "replace_field_text", "text": "...", "target": null}},
+    {{"action": "run_command", "command": "..."}},
+    {{"action": "kill_process", "pid": null, "name": null}},
+    {{"action": "navigate_to_url", "url": "...", "target": "new_tab"|"current_tab"|"new_window"}},
+    {{"action": "accessibility_shortcut", "shortcut": "ctrl+shift+b"|"enter"|"close_tab"|"refresh_page"|"copy"|"undo"|"<combinaison_touches>"}},
+    {{"action": "deactivate_immersion"}},
+    {{"action": "set_reasoning_passes", "passes": 5, "reason": null}},
+    {{"action": "schedule_prompt", "delay_seconds": 10, "prompt": "..."}},
+    {{"action": "schedule_prompts", "tasks": [{{"delay_seconds": 10, "prompt": "..."}}]}},
+    {{"action": "mute_audio"}},
+    {{"action": "set_volume", "command": "mute"|"down"|"up"|"min"}},
+    {{"action": "open_file", "path": "chemin/vers/image_ou_doc.png"}},
+    {{"action": "show_floating_card", "id": "stats_1", "title": "Tableau comparatif", "card_type": "table", "data": {{"headers": ["Modèle", "Prix"], "rows": [["Produit A", "49€"], ["Produit B", "59€"]]}}}},
+    {{"action": "close_floating_card", "id": "stats_1"}}
   ],
   "quick_suggestions": ["Option 1", "Option 2"]
-}"#;
+}}"#)
+}
 
 const DICTATION_SYSTEM_INSTRUCTIONS: &str = r#"Tu es l'assistant de dictée vocale et de saisie textuelle pour Windows.
 Tu ne traites AUCUNE tâche d'exploration, navigation web, clic d'interface ou manipulation de fenêtres.
@@ -2415,11 +3152,12 @@ async fn call_deepseek_prompt(
     }
 
     let client = reqwest::Client::new();
+    let (_, system_lang) = get_system_locale_language();
     let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::SeqCst);
     let system_instructions = if is_dictation {
-        DICTATION_SYSTEM_INSTRUCTIONS
+        DICTATION_SYSTEM_INSTRUCTIONS.to_string()
     } else {
-        STANDARD_SYSTEM_INSTRUCTIONS
+        build_standard_system_instructions(&system_lang)
     };
 
     let safe_user_instruction = truncate_with_notice(&user_instruction, 1000);
@@ -2718,6 +3456,19 @@ async fn call_deepseek_prompt(
         }
 
         let actions_to_run = payload.actions;
+        for act in &actions_to_run {
+            match act {
+                AgentAction::ShowFloatingCard { id, title, card_type, data } => {
+                    let card = FloatingCard::from_action_data(id.clone(), title.clone(), card_type, data);
+                    let _ = event_tx.send(AgentEvent::ShowFloatingCard(card));
+                }
+                AgentAction::CloseFloatingCard { id } => {
+                    let _ = event_tx.send(AgentEvent::CloseFloatingCard(id.clone()));
+                }
+                _ => {}
+            }
+        }
+
         let has_web_action = actions_to_run.iter().any(|a| {
             matches!(
                 a,
@@ -2795,7 +3546,7 @@ async fn call_deepseek_prompt(
                     screen_after.clone()
                 };
                 let max_screen = if screen_after_clean.contains("[Page web") || screen_after_clean.contains("[Navigateur]") {
-                    24000
+                    15360
                 } else {
                     12000
                 };
@@ -2805,8 +3556,11 @@ async fn call_deepseek_prompt(
 
             step_feedback.push_str(&format!(
                 "\n\n[Consigne étape] : Poursuis : \"{}\".\n\
-                - Obstacle (cookie/toast) -> clique le sous-bouton approprié.\n\
-                - Échec/blocage -> pivote immédiatement vers une alternative (app, web, autre fenêtre). Ne renvoie JAMAIS 'actions': [] si l'objectif d'urgence/contact n'est pas achevé.\n\
+                - Bannière cookies -> clique automatiquement 'Tout accepter' / 'Accepter'.\n\
+                - Notification système (toast) -> lis son contenu dans ta narration et laisse-la tranquille (ne la ferme pas).\n\
+                - Alerte / modale d'erreur -> lis le message dans ta narration, puis clique impérativement sur 'OK' / 'Fermer' pour la refermer.\n\
+                - Mission approfondie (contact / produit / service) -> définis 'next_passes' (8 à 12), explore méthodiquement (local -> web -> annuaires) et projette les résultats dans 'show_floating_card'. Ne renvoie pas 'actions': [] tant que les résultats ne sont pas trouvés.\n\
+                - Échec/blocage -> pivote immédiatement vers une alternative (app, web, autre fenêtre). Ne renvoie JAMAIS 'actions': [] si l'objectif n'est pas achevé.\n\
                 - Tâche finie ou choix requis -> 'actions': [] + 2 à 4 'quick_suggestions'.",
                 safe_user_instruction
             ));
@@ -2849,7 +3603,8 @@ async fn call_deepseek_prompt(
 fn main() -> eframe::Result<()> {
     let (event_tx, event_rx) = channel::<AgentEvent>();
     let (cmd_tx, mut cmd_rx) = unbounded_channel::<AgentCommand>();
-    let tts_tx = spawn_tts_worker(event_tx.clone());
+    let initial_voice = resolve_initial_voice();
+    let tts_tx = spawn_tts_worker(event_tx.clone(), initial_voice);
     let (twitch_ch_tx, twitch_ch_rx) = channel::<String>();
     spawn_twitch_worker(event_tx.clone(), twitch_ch_rx);
     let deepseek_key = resolve_deepseek_key();
@@ -2869,8 +3624,10 @@ fn main() -> eframe::Result<()> {
     // Runtime Tokio en arrière-plan pour requêter DeepSeek
     let deepseek_chat_key = deepseek_key.clone();
     let bg_tts_tx = tts_tx.clone();
+    let scheduler_cmd_tx = cmd_tx.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("Échec d'initialisation du runtime Tokio");
+        automation::init_scheduler(scheduler_cmd_tx, rt.handle().clone());
         rt.block_on(async move {
             let history = Arc::new(tokio::sync::Mutex::new(Vec::<ChatMessage>::new()));
             let last_call_time = Arc::new(tokio::sync::Mutex::new(None));
@@ -2885,6 +3642,8 @@ fn main() -> eframe::Result<()> {
                         }
                         let _ = bg_tts_tx.send(TtsCommand::Stop);
                         IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
+                        let initial_passes = 6;
+                        TARGET_REASONING_PASSES.store(initial_passes, Ordering::SeqCst);
 
                         let history = history.clone();
                         let last_call_time = last_call_time.clone();
@@ -2960,7 +3719,7 @@ fn main() -> eframe::Result<()> {
                                         screen_state
                                     };
                                     let max_screen = if screen_state.contains("[Page web") || screen_state.contains("[Navigateur]") {
-                                        24000
+                                        15360
                                     } else {
                                         12000
                                     };
@@ -3001,6 +3760,7 @@ fn main() -> eframe::Result<()> {
                             handle.abort();
                         }
                         let _ = bg_tts_tx.send(TtsCommand::Stop);
+                        cancel_all_scheduled_tasks();
                         IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
                         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
                         TARGET_REASONING_PASSES.store(5, Ordering::SeqCst);
@@ -3162,6 +3922,7 @@ fn main() -> eframe::Result<()> {
                 audio_tx,
                 twitch_ch_tx,
                 initial_twitch_channel,
+                initial_voice,
             )))
         }),
     )
