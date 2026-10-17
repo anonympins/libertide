@@ -6240,9 +6240,9 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 feedback.push(format!("Signal de fermeture envoyé à '{}'.", name));
             }
             AgentAction::OpenBrowser { url } => {
-                let u = format_url_for_navigation(url.as_deref().unwrap_or(""));
-                let _ = std::process::Command::new("xdg-open").arg(u).spawn();
-                feedback.push(format!("Navigateur ouvert sur '{}'.", u));
+                let url_str = format_url_for_navigation(url.as_deref().unwrap_or(""));
+                let _ = std::process::Command::new("xdg-open").arg(&url_str).spawn();
+                feedback.push(format!("Navigateur ouvert sur '{}'.", url_str));
             }
             AgentAction::FocusAddressBar { .. } => {
                 let _ = std::process::Command::new("xdotool").args(["key", "ctrl+l"]).status();
