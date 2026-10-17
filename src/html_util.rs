@@ -75,26 +75,50 @@ pub fn decode_html_entities(input: &str) -> String {
 
 /// Extrait la valeur d'un attribut (ex: href) dans la chaîne d'attributs d'une balise.
 fn extract_attribute<'a>(attrs: &'a str, target: &str) -> Option<&'a str> {
-    let mut idx = 0;
-    let lower = attrs.to_lowercase();
-    while let Some(pos) = lower[idx..].find(target) {
-        let start = idx + pos + target.len();
-        let mut after = attrs[start..].trim_start();
-        if after.starts_with('=') {
-            after = after[1..].trim_start();
-            if let Some(quote) = after.chars().next() {
-                if quote == '"' || quote == '\'' {
-                    let content = &after[1..];
-                    if let Some(end_quote) = content.find(quote) {
-                        return Some(&content[..end_quote]);
+    let target_bytes = target.as_bytes();
+    let attrs_bytes = attrs.as_bytes();
+    let t_len = target_bytes.len();
+    let a_len = attrs_bytes.len();
+
+    if t_len == 0 || a_len < t_len {
+        return None;
+    }
+
+    let mut i = 0;
+    while i + t_len <= a_len {
+        let prev_ok = i == 0 || attrs_bytes[i - 1].is_ascii_whitespace() || attrs_bytes[i - 1] == b'/' || attrs_bytes[i - 1] == b'<';
+        if prev_ok && attrs_bytes[i..i + t_len].eq_ignore_ascii_case(target_bytes) {
+            let mut j = i + t_len;
+            while j < a_len && attrs_bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < a_len && attrs_bytes[j] == b'=' {
+                j += 1;
+                while j < a_len && attrs_bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < a_len {
+                    let quote = attrs_bytes[j];
+                    if quote == b'"' || quote == b'\'' {
+                        let val_start = j + 1;
+                        if let Some(rel_end) = attrs[val_start..].find(quote as char) {
+                            return Some(&attrs[val_start..val_start + rel_end]);
+                        }
+                    } else {
+                        let val_start = j;
+                        let val_end = attrs[val_start..]
+                            .find(|c: char| c.is_whitespace() || c == '>')
+                            .map_or(attrs.len(), |pos| val_start + pos);
+                        return Some(&attrs[val_start..val_end]);
                     }
-                } else {
-                    let end = after.find(|c: char| c.is_whitespace() || c == '>').unwrap_or(after.len());
-                    return Some(&after[..end]);
                 }
             }
         }
-        idx = start;
+        if let Some(ch) = attrs[i..].chars().next() {
+            i += ch.len_utf8();
+        } else {
+            break;
+        }
     }
     None
 }
@@ -371,18 +395,19 @@ pub fn sanitize_html_to_markdown(html: &str) -> String {
             }
         }
 
-        // 3. Collecte du texte utile
+        // 3. Collecte du texte utile (avancement UTF-8 strict)
+        let ch = match html[i..].chars().next() {
+            Some(c) => c,
+            None => break,
+        };
         if skip_stack.is_empty() {
-            let ch = html[i..].chars().next().unwrap();
             if in_cell {
                 current_cell.push(ch);
             } else if !in_table {
                 output.push(ch);
             }
-            i += ch.len_utf8();
-        } else {
-            i += 1;
         }
+        i += ch.len_utf8();
     }
 
     let decoded = decode_html_entities(&output);

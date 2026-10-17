@@ -1556,6 +1556,37 @@ fn extract_inner_text(uia: &IUIAutomation, element: &IUIAutomationElement, max_c
 }
 
 #[cfg(windows)]
+fn extract_web_document_text(element: &IUIAutomationElement, max_chars: usize) -> Option<String> {
+    unsafe {
+        if let Ok(pattern_unk) = element.GetCurrentPattern(UIA_TextPatternId) {
+            if let Ok(text_pattern) = pattern_unk.cast::<IUIAutomationTextPattern>() {
+                if let Ok(range) = text_pattern.DocumentRange() {
+                    if let Ok(bstr) = range.GetText(max_chars as i32) {
+                        let s = bstr.to_string();
+                        let trimmed = s.trim();
+                        if !trimmed.is_empty() {
+                            return Some(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(pattern_unk) = element.GetCurrentPattern(UIA_ValuePatternId) {
+            if let Ok(val_pattern) = pattern_unk.cast::<IUIAutomationValuePattern>() {
+                if let Ok(bstr) = val_pattern.CurrentValue() {
+                    let s = bstr.to_string();
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
 fn extract_scrollable_viewports_content(uia: &IUIAutomation, hwnd: HWND) -> String {
     let mut output = String::new();
     unsafe {
@@ -1681,6 +1712,23 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let raw_name = item.CurrentName().map(|b| b.to_string()).unwrap_or_default();
                     let mut name = raw_name.trim().to_string();
                     let automation_id = item.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default();
+
+                    // Filtrage des éléments techniques générés par les Chrome DevTools (F12)
+                    let is_devtools = class_name.contains("devtools")
+                        || automation_id.to_lowercase().contains("devtools")
+                        || loc_type.contains("devtools")
+                        || name.to_lowercase().starts_with("devtools")
+                        || class_name.contains("inspector")
+                        || automation_id.to_lowercase().contains("inspector")
+                        || class_name.contains("treeview") && (name.contains("<") && name.contains(">"))
+                        || class_name.contains("consoleview")
+                        || class_name.contains("networkpanel")
+                        || class_name.contains("sourcespanel")
+                        || automation_id.to_lowercase().starts_with("elements-tab")
+                        || automation_id.to_lowercase().starts_with("console-tab");
+                    if is_devtools {
+                        continue;
+                    }
 
                     let is_swing_tab_class = class_name.contains("editortabs")
                         || class_name.contains("jbtabs")
@@ -2940,28 +2988,69 @@ fn find_best_input_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> 
     scored.first().map(|(_, elem)| *elem)
 }
 
+fn clean_diff_line(line: &str) -> String {
+    let mut s = line.trim();
+    loop {
+        if let Some(rest) = s.strip_prefix("- ") {
+            s = rest.trim();
+        } else if let Some(rest) = s.strip_prefix("* ") {
+            s = rest.trim();
+        } else if let Some(rest) = s.strip_prefix("• ") {
+            s = rest.trim();
+        } else {
+            break;
+        }
+    }
+    while (s.starts_with("~~") && s.ends_with("~~")) || (s.starts_with("**") && s.ends_with("**")) {
+        if let Some(inside) = s.strip_prefix("~~").and_then(|r| r.strip_suffix("~~")) {
+            s = inside.trim();
+        } else if let Some(inside) = s.strip_prefix("**").and_then(|r| r.strip_suffix("**")) {
+            s = inside.trim();
+        } else {
+            break;
+        }
+    }
+    s.trim().to_string()
+}
+
 pub fn compute_screen_diff(old_summary: &str, new_summary: &str) -> String {
-    let old_lines: Vec<&str> = old_summary.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
-    let new_lines: Vec<&str> = new_summary.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let is_ignored_diff_meta = |l: &str| -> bool {
+        let t = l.trim();
+        t.starts_with("===")
+            || t.starts_with("---")
+            || t.starts_with("####")
+            || t.starts_with("Espace de travail")
+            || t.starts_with("[Consigne prioritaire]")
+            || t.starts_with("[Note d'intention")
+            || t.starts_with("Fenêtre au premier plan")
+    };
+
+    let old_lines: Vec<String> = old_summary
+        .lines()
+        .filter(|l| !is_ignored_diff_meta(l))
+        .map(clean_diff_line)
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let new_lines: Vec<String> = new_summary
+        .lines()
+        .filter(|l| !is_ignored_diff_meta(l))
+        .map(clean_diff_line)
+        .filter(|l| !l.is_empty())
+        .collect();
 
     let mut added = Vec::new();
     let mut removed = Vec::new();
 
-    for &line in &new_lines {
-        if line.starts_with("===") || line.starts_with("Espace de travail") {
-            continue;
-        }
-        if !old_lines.contains(&line) {
-            added.push(line);
+    for line in &new_lines {
+        if !old_lines.contains(line) && !added.contains(line) {
+            added.push(line.clone());
         }
     }
 
-    for &line in &old_lines {
-        if line.starts_with("===") || line.starts_with("Espace de travail") {
-            continue;
-        }
-        if !new_lines.contains(&line) {
-            removed.push(line);
+    for line in &old_lines {
+        if !new_lines.contains(line) && !removed.contains(line) {
+            removed.push(line.clone());
         }
     }
 
@@ -2974,9 +3063,9 @@ pub fn compute_screen_diff(old_summary: &str, new_summary: &str) -> String {
         diff.push_str("#### 🔻 Éléments disparus ou remplacés :\n");
         for r in removed {
             let clean_r = if r.contains('<') && r.contains('>') {
-                crate::html_util::sanitize_html_to_markdown(r)
+                crate::html_util::sanitize_html_to_markdown(&r)
             } else {
-                r.to_string()
+                r
             };
             diff.push_str(&format!("- ~~{}~~\n", clean_r.trim()));
         }
@@ -2985,9 +3074,9 @@ pub fn compute_screen_diff(old_summary: &str, new_summary: &str) -> String {
         diff.push_str("\n#### 🟢 Nouveaux éléments / Données modifiées (Markdown) :\n");
         for a in added {
             let clean_a = if a.contains('<') && a.contains('>') {
-                crate::html_util::sanitize_html_to_markdown(a)
+                crate::html_util::sanitize_html_to_markdown(&a)
             } else {
-                a.to_string()
+                a
             };
             diff.push_str(&format!("- **{}**\n", clean_a.trim()));
         }
@@ -3247,6 +3336,53 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             }
         }
 
+        // Extraction du corps textuel natif du Document / RootWebArea via IUIAutomationTextPattern
+        if is_browser {
+            unsafe {
+                if let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+                    if let Ok(win_elem) = uia.ElementFromHandle(*hwnd) {
+                        if let Ok(cond_doc) = uia.CreatePropertyCondition(
+                            windows::Win32::UI::Accessibility::UIA_ControlTypePropertyId,
+                            &windows::core::VARIANT::from(UIA_DocumentControlTypeId.0),
+                        ) {
+                            let mut best_text = String::new();
+                            if let Ok(doc_elements) = win_elem.FindAll(TreeScope_Descendants, &cond_doc) {
+                                let doc_count = doc_elements.Length().unwrap_or(0).min(6);
+                                for di in 0..doc_count {
+                                    if let Ok(doc_elem) = doc_elements.GetElement(di) {
+                                        if let Some(doc_text) = extract_web_document_text(&doc_elem, 15000) {
+                                            if doc_text.len() > best_text.len() {
+                                                best_text = doc_text;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if !best_text.is_empty() {
+                                let clean_text = if best_text.contains('<') && best_text.contains('>') {
+                                    crate::html_util::sanitize_html_to_markdown(&best_text)
+                                } else {
+                                    best_text
+                                };
+                                let filtered_lines: Vec<&str> = clean_text
+                                    .lines()
+                                    .map(str::trim)
+                                    .filter(|l| !l.is_empty() && l.len() >= 2)
+                                    .take(100)
+                                    .collect();
+                                if !filtered_lines.is_empty() {
+                                    active_window_content.push_str(&format!(
+                                        "  [Page web - Corps textuel et résultats rendus] :\n```\n{}\n```\n",
+                                        filtered_lines.join("\n")
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if is_terminal {
             if let Some(term_text) = read_terminal_window_content(*hwnd, win_title) {
                 let preview = truncate_with_notice(&term_text, 2200);
@@ -3351,19 +3487,22 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             active_window_content.push_str(&format!("{}{}\n", prefix, display_headings.join(" | ")));
         }
 
-        // C. Textes informatifs, encarts météo, prévisions, données et prix
+        // C. Textes informatifs, contacts, e-mails, téléphones, météo, données et prix
         let mut text_items: Vec<String> = elements
             .iter()
             .filter(|e| {
                 (!has_web_doc || e.is_web_content)
                     && !e.is_edit_or_textarea
+                    && !e.is_button
                     && !e.name.is_empty()
                     && e.name.len() >= 2
                     && !e.is_link
                     && !e.aria_role.contains("link")
                     && !e.localized_type.contains("lien")
                     && !e.localized_type.contains("link")
-                    && (e.localized_type.contains("texte")
+                    && (e.name.contains('@')
+                        || e.name.chars().filter(|c| c.is_ascii_digit()).count() >= 5
+                        || e.localized_type.contains("texte")
                         || e.localized_type.contains("text")
                         || e.localized_type.contains("en-tête")
                         || e.localized_type.contains("heading")
@@ -3371,6 +3510,12 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                         || e.name.contains('€')
                         || e.name.contains('$')
                         || e.name.contains('%')
+                        || e.name.to_lowercase().contains("contact")
+                        || e.name.to_lowercase().contains("email")
+                        || e.name.to_lowercase().contains("mail")
+                        || e.name.to_lowercase().contains("tél")
+                        || e.name.to_lowercase().contains("tel")
+                        || e.name.to_lowercase().contains("adresse")
                         || e.name.to_lowercase().contains("météo")
                         || e.name.to_lowercase().contains("meteo")
                         || e.name.to_lowercase().contains("km/h")
