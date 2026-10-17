@@ -818,6 +818,7 @@ impl OverlayApp {
             VoiceProfile::Paul => "Voix de Paul activée.",
             VoiceProfile::Sylvie => "Voix de Sylvie activée.",
             VoiceProfile::Jean => "Voix de Jean activée.",
+            VoiceProfile::Kokoro => "Voix neuronale Kokoro activée.",
         };
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
@@ -1217,6 +1218,14 @@ impl eframe::App for OverlayApp {
                     if norm_prompt.contains("voix de jean") || norm_prompt == "jean" {
                         play_earcon(Earcon::Success);
                         self.set_voice_gender(VoiceProfile::Jean);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("voix de kokoro") || norm_prompt == "kokoro" || norm_prompt.contains("voix neuronale") || norm_prompt.contains("voix ia") {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(VoiceProfile::Kokoro);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx);
                         }
@@ -1893,6 +1902,7 @@ impl eframe::App for OverlayApp {
                                             VoiceProfile::Paul => ("🎩 Paul", egui::Color32::from_rgb(160, 220, 180)),
                                             VoiceProfile::Sylvie => ("🍁 Sylvie", egui::Color32::from_rgb(255, 150, 150)),
                                             VoiceProfile::Jean => ("⚡ Jean", egui::Color32::from_rgb(205, 170, 255)),
+                                            VoiceProfile::Kokoro => ("🧠 Kokoro", egui::Color32::from_rgb(120, 255, 180)),
                                         };
                                         let next_gender = self.voice_gender.next();
                                         let voice_btn = ui.button(egui::RichText::new(voice_icon_text).color(voice_color))

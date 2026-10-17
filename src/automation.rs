@@ -1312,6 +1312,9 @@ struct UiaElementInfo {
     value_text: String,
     name: String,
     class_name: String,
+    primary_class: String,
+    data_attributes: Vec<(String, String)>,
+    json_metadata: Option<serde_json::Value>,
     localized_type: String,
     aria_role: String,
     aria_label: String,
@@ -1356,9 +1359,11 @@ fn parse_aria_property_value(aria_properties: &str, target_key: &str) -> Option<
 
 #[cfg(windows)]
 fn extract_aria_details(aria_properties: &str) -> (Option<String>, Option<String>, Vec<String>) {
-    let label = parse_aria_property_value(aria_properties, "label");
+    let label = parse_aria_property_value(aria_properties, "label")
+        .or_else(|| parse_aria_property_value(aria_properties, "labelledby"));
     let desc = parse_aria_property_value(aria_properties, "description")
-        .or_else(|| parse_aria_property_value(aria_properties, "describedby"));
+        .or_else(|| parse_aria_property_value(aria_properties, "describedby"))
+        .or_else(|| parse_aria_property_value(aria_properties, "details"));
 
     let mut indications = Vec::new();
     if let Some(roledesc) = parse_aria_property_value(aria_properties, "roledescription") {
@@ -1387,8 +1392,73 @@ fn extract_aria_details(aria_properties: &str) -> (Option<String>, Option<String
     if let Some(inv) = parse_aria_property_value(aria_properties, "invalid") {
         if inv == "true" { indications.push("invalide".to_string()); }
     }
+    if let Some(ks) = parse_aria_property_value(aria_properties, "keyshortcuts") {
+        indications.push(format!("raccourci: {ks}"));
+    }
 
     (label, desc, indications)
+}
+
+#[cfg(windows)]
+fn parse_data_attributes_and_json(
+    aria_properties: &str,
+    item_status: &str,
+    help_text: &str,
+) -> (Vec<(String, String)>, Option<serde_json::Value>) {
+    let mut data_attrs = Vec::new();
+    let mut json_val: Option<serde_json::Value> = None;
+
+    // 1. Détection et extraction de blocs JSON dans item_status, help_text ou aria_properties
+    for candidate in [item_status, help_text, aria_properties] {
+        let trimmed = candidate.trim();
+        if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+            || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                json_val = Some(v);
+                break;
+            }
+        }
+    }
+
+    // Aplatir le JSON en paires clé-valeur dans data_attrs
+    if let Some(serde_json::Value::Object(ref map)) = json_val {
+        for (k, v) in map {
+            let str_val = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                _ => v.to_string(),
+            };
+            data_attrs.push((k.to_lowercase(), str_val));
+        }
+    }
+
+    // 2. Extraction des attributs data-*, testid, target, action, etc.
+    for source in [aria_properties, item_status] {
+        for part in source.split(';') {
+            let part = part.trim();
+            if let Some((key, val)) = part.split_once('=') {
+                let k = key.trim().to_ascii_lowercase();
+                let v = val.trim().trim_matches('\'').trim_matches('"').trim();
+                if !v.is_empty() {
+                    let is_target_attr = k.starts_with("data-")
+                        || k.starts_with("data_")
+                        || k == "testid"
+                        || k == "test-id"
+                        || k == "target"
+                        || k == "action"
+                        || k == "tag"
+                        || k == "describedby";
+                    if is_target_attr && !data_attrs.iter().any(|(dk, _)| dk == &k) {
+                        data_attrs.push((k, v.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    (data_attrs, json_val)
 }
 
 #[cfg(windows)]
@@ -1585,7 +1655,14 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let is_edit_type = ctype == UIA_EditControlTypeId || ctype == UIA_DocumentControlTypeId;
                     let help_text = item.CurrentHelpText().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
                     let item_type = item.CurrentItemType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
-                    let item_status = item.CurrentItemStatus().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+                    let item_status_raw = item.CurrentItemStatus().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
+                    let item_status = item_status_raw.to_lowercase();
+
+                    let primary_class = class_name
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
 
                     let (aria_role, aria_properties) = if let Ok(e2) = item.cast::<IUIAutomationElement2>() {
                         let r = e2.CurrentAriaRole().ok()
@@ -1599,6 +1676,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         (String::new(), String::new())
                     };
 
+                    let (data_attrs, json_metadata) = parse_data_attributes_and_json(&aria_properties, &item_status_raw, &help_text);
                     let (aria_label_opt, aria_desc_opt, indications_vec) = extract_aria_details(&aria_properties);
                     let aria_label = aria_label_opt.unwrap_or_default();
                     let aria_description = aria_desc_opt.unwrap_or_default();
@@ -1650,10 +1728,17 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || aria_properties.contains("role='button'")
                         || aria_properties.contains("role=\"button\"");
 
+                    let has_button_data = data_attrs.iter().any(|(k, v)| {
+                        (k.contains("role") && v == "button")
+                            || (k.contains("action") && (v.contains("click") || v.contains("submit") || v.contains("btn")))
+                            || (k.contains("test") && (v.contains("btn") || v.contains("button")))
+                    });
+
                     let is_button = ctype == UIA_ButtonControlTypeId
                         || loc_type.contains("bouton")
                         || loc_type.contains("button")
                         || is_role_button
+                        || has_button_data
                         || class_name.contains("button")
                         || class_name.contains("btn")
                         || automation_id.to_lowercase().contains("button")
@@ -1747,7 +1832,16 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         name = name.chars().take(MAX_INTERACTIVE_TEXT_LEN).collect();
                     }
 
+                    if name.is_empty() {
+                        if let Some((_, val)) = data_attrs.iter().find(|(k, _)| k.contains("test") || k.contains("action") || k.contains("target")) {
+                            name = format!("[data: {val}]");
+                        } else if !primary_class.is_empty() && (is_button || is_link || is_tab || is_edit_or_textarea) {
+                            name = format!(".{primary_class}");
+                        }
+                    }
+
                     if name.is_empty() && aria_label.is_empty() && automation_id.is_empty() && help_text.is_empty() && value_text.is_empty()
+                        && data_attrs.is_empty() && primary_class.is_empty()
                         && !is_edit_or_textarea && !is_button && !is_link && !is_tab && !is_focusable && !is_tabindex {
                         continue;
                     }
@@ -1765,6 +1859,9 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         value_text,
                         name,
                         class_name,
+                        primary_class,
+                        data_attributes: data_attrs,
+                        json_metadata,
                         localized_type: loc_type,
                         aria_role,
                         aria_label,
@@ -2463,6 +2560,16 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
     if matches_pattern(prop, &elem.class_name) {
         regex_score = regex_score.max(90.0);
     }
+    if !elem.primary_class.is_empty() && matches_pattern(prop, &elem.primary_class) {
+        regex_score = regex_score.max(140.0);
+    }
+    for (k, v) in &elem.data_attributes {
+        if matches_pattern(prop, v) {
+            regex_score = regex_score.max(170.0);
+        } else if matches_pattern(prop, k) {
+            regex_score = regex_score.max(120.0);
+        }
+    }
 
     regex_score += ecom_bonus;
 
@@ -2530,6 +2637,15 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
         let s_type = check_attr(&type_lower, &type_words, 1.8);
         let s_class = check_attr(&class_lower, &class_words, 1.2);
         let s_aria = check_attr(&aria_lower, &aria_words, 2.2);
+        let s_primary_class = check_attr(&elem.primary_class, &clean_words(&elem.primary_class), 2.2);
+        let mut s_data = 0.0f32;
+        for (k, v) in &elem.data_attributes {
+            let v_words = clean_words(v);
+            let s_val = check_attr(v, &v_words, 2.6);
+            let k_words = clean_words(k);
+            let s_k = check_attr(k, &k_words, 1.5);
+            s_data = s_data.max(s_val).max(s_k);
+        }
 
         let best_match = s_name
             .max(s_aria_label)
@@ -2540,6 +2656,8 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
             .max(s_val)
             .max(s_type)
             .max(s_class)
+            .max(s_primary_class)
+            .max(s_data)
             .max(s_aria);
         if best_match > 0.0 {
             matched_words_count += 1;
@@ -2875,6 +2993,12 @@ fn score_enriched_link(text: &str) -> f32 {
     if clean.contains("[aria:") {
         score += 25.0;
     }
+    if clean.contains("[desc:") {
+        score += 15.0;
+    }
+    if clean.contains("[data:") || clean.contains("testid:") {
+        score += 20.0;
+    }
 
     const TECH_KEYWORDS: &[&str] = &[
         "go", "gb", "to", "tb", "ram", "pro", "max", "ultra", "plus", "lite",
@@ -2925,6 +3049,12 @@ fn score_enriched_button(text: &str) -> f32 {
 
     if clean.contains("[aria:") {
         score += 15.0;
+    }
+    if clean.contains("[desc:") {
+        score += 15.0;
+    }
+    if clean.contains("[data:") || clean.contains("testid:") || clean.contains("action:") {
+        score += 20.0;
     }
 
     let words = clean.split_whitespace().count();
@@ -3092,12 +3222,26 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             let prefix = if has_web_doc { "  [Page web - champs de saisie / recherche] :\n" } else { "  [Champs de texte / saisie] :\n" };
             out.push_str(prefix);
             for edit in edits.iter().take(8) {
-                let mut label = if !edit.name.is_empty() { edit.name.clone() } else { "Champ".to_string() };
+                let mut label = if !edit.name.is_empty() {
+                    edit.name.clone()
+                } else if !edit.primary_class.is_empty() {
+                    format!(".{}", edit.primary_class)
+                } else {
+                    "Champ".to_string()
+                };
                 if !edit.aria_indications.is_empty() {
                     label.push_str(&format!(" ({})", edit.aria_indications));
                 }
                 if !edit.aria_description.is_empty() && edit.aria_description.len() <= 60 {
                     label.push_str(&format!(" [info: {}]", edit.aria_description));
+                }
+                if !edit.data_attributes.is_empty() {
+                    let data_summary = edit.data_attributes.iter()
+                        .take(2)
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    label.push_str(&format!(" [data: {data_summary}]"));
                 }
                 let val = if !edit.value_text.is_empty() {
                     format!(" = \"{}\"", edit.value_text.chars().take(120).collect::<String>())
@@ -3178,7 +3322,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             .filter(|e| {
                 (!has_web_doc || e.is_web_content)
                     && !e.is_edit_or_textarea
-                    && (!e.name.is_empty() || !e.help_text.is_empty() || !e.automation_id.is_empty())
+                    && (!e.name.is_empty() || !e.help_text.is_empty() || !e.automation_id.is_empty() || !e.primary_class.is_empty() || !e.data_attributes.is_empty())
                     && (e.is_button
                         || e.is_tabindex
                         || e.pattern.is_some()
@@ -3193,19 +3337,27 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                     && !e.name.eq_ignore_ascii_case("system")
             })
             .map(|e| {
-                let base = if !e.name.is_empty() {
+                let mut base = if !e.name.is_empty() {
                     e.name.clone()
                 } else if !e.help_text.is_empty() {
                     e.help_text.clone()
-                } else {
+                } else if !e.automation_id.is_empty() {
                     e.automation_id.clone()
-                };
-                let full_label = if !e.aria_indications.is_empty() {
-                    format!("{base} ({})", e.aria_indications)
+                } else if !e.primary_class.is_empty() {
+                    format!(".{}", e.primary_class)
                 } else {
-                    base
+                    String::new()
                 };
-                (e.is_offscreen, full_label)
+                if !e.aria_indications.is_empty() {
+                    base = format!("{base} ({})", e.aria_indications);
+                }
+                if !e.aria_description.is_empty() && e.aria_description.len() <= 50 {
+                    base.push_str(&format!(" [desc: {}]", e.aria_description));
+                }
+                if let Some((k, v)) = e.data_attributes.iter().find(|(k, _)| k.contains("test") || k.contains("action") || k.contains("target")) {
+                    base.push_str(&format!(" [{k}: {v}]"));
+                }
+                (e.is_offscreen, base)
             })
             .collect();
 
@@ -3229,7 +3381,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             .filter(|e| {
                 (!has_web_doc || e.is_web_content)
                     && !e.is_edit_or_textarea
-                    && !e.name.is_empty()
+                    && (!e.name.is_empty() || !e.primary_class.is_empty() || !e.data_attributes.is_empty())
                     && (e.is_link
                         || e.localized_type.contains("lien")
                         || e.localized_type.contains("link")
@@ -3238,11 +3390,22 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                         || e.aria_role.contains("lien"))
             })
             .map(|e| {
-                let label = if !e.aria_indications.is_empty() {
-                    format!("{} ({})", e.name, e.aria_indications)
-                } else {
+                let mut label = if !e.name.is_empty() {
                     e.name.clone()
+                } else if !e.primary_class.is_empty() {
+                    format!(".{}", e.primary_class)
+                } else {
+                    "Lien".to_string()
                 };
+                if !e.aria_indications.is_empty() {
+                    label = format!("{} ({})", label, e.aria_indications);
+                }
+                if !e.aria_description.is_empty() && e.aria_description.len() <= 50 {
+                    label.push_str(&format!(" [desc: {}]", e.aria_description));
+                }
+                if let Some((k, v)) = e.data_attributes.iter().find(|(k, _)| k.contains("test") || k.contains("target")) {
+                    label.push_str(&format!(" [{k}: {v}]"));
+                }
                 (e.is_offscreen, label)
             })
             .collect();
