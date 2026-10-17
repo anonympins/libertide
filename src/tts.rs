@@ -688,35 +688,57 @@ pub fn ensure_kokoro_voice_file(voice_name: &str) -> Result<String, String> {
         }
     }
 
+    // Répertoire cible 'voices/' (racine du projet en dev, ou à côté de l'exécutable)
+    let manifest_voices = Path::new(env!("CARGO_MANIFEST_DIR")).join("voices");
+    let primary_voices_dir = if manifest_voices.parent().map_or(false, |p| p.exists()) {
+        manifest_voices
+    } else if let Ok(exe) = std::env::current_exe() {
+        exe.parent().map(|p| p.join("voices")).unwrap_or_else(|| PathBuf::from("voices"))
+    } else {
+        PathBuf::from("voices")
+    };
+    let _ = std::fs::create_dir_all(&primary_voices_dir);
+
     if let Some(found_path) = find_existing_voice_file(&voice_filename) {
-        let canonical = std::fs::canonicalize(&found_path).unwrap_or(found_path);
-        let path_str = canonical.to_string_lossy();
+        let canonical = std::fs::canonicalize(&found_path).unwrap_or(found_path.clone());
+
+        // Assurer la présence dans le dossier voices/
+        let target_in_voices = primary_voices_dir.join(&voice_filename);
+        if !target_in_voices.exists() {
+            let _ = std::fs::copy(&canonical, &target_in_voices);
+        }
+
+        // Nettoyage de sécurité si le fichier traînait à la racine
+        let local_root = Path::new(&voice_filename);
+        if local_root.is_file() && target_in_voices.is_file() {
+            let _ = std::fs::remove_file(local_root);
+        }
+
+        // Duplication dans le dossier voices/ de l'exécutable si distinct
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                let exe_voices = exe_dir.join("voices");
+                if exe_voices != primary_voices_dir {
+                    let _ = std::fs::create_dir_all(&exe_voices);
+                    let _ = std::fs::copy(&canonical, exe_voices.join(&voice_filename));
+                }
+                let exe_root_file = exe_dir.join(&voice_filename);
+                if exe_root_file.is_file() && exe_voices.join(&voice_filename).is_file() {
+                    let _ = std::fs::remove_file(exe_root_file);
+                }
+            }
+        }
+
+        let final_path = if target_in_voices.exists() {
+            std::fs::canonicalize(&target_in_voices).unwrap_or(target_in_voices)
+        } else {
+            canonical
+        };
+        let path_str = final_path.to_string_lossy();
         let abs_str = path_str
             .strip_prefix(r"\\?\")
             .unwrap_or(&path_str)
             .replace('\\', "/");
-
-        // Duplication locale de sécurité (dossier courant et voices/)
-        let local_voices = Path::new("voices");
-        let _ = std::fs::create_dir_all(local_voices);
-        let local_target = local_voices.join(&voice_filename);
-        let local_root = Path::new(&voice_filename);
-        if !local_target.exists() {
-            let _ = std::fs::copy(&canonical, &local_target);
-        }
-        if !local_root.exists() {
-            let _ = std::fs::copy(&canonical, local_root);
-        }
-
-        // Duplication dans le dossier de l'exécutable si distinct
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                let exe_voices = exe_dir.join("voices");
-                let _ = std::fs::create_dir_all(&exe_voices);
-                let _ = std::fs::copy(&canonical, exe_voices.join(&voice_filename));
-                let _ = std::fs::copy(&canonical, exe_dir.join(&voice_filename));
-            }
-        }
 
         let without_ext = abs_str.strip_suffix(".pt").unwrap_or(&abs_str).to_string();
         if let Ok(mut guard) = VOICE_PATH_CACHE.lock() {
@@ -727,10 +749,7 @@ pub fn ensure_kokoro_voice_file(voice_name: &str) -> Result<String, String> {
         return Ok(without_ext);
     }
 
-    let voices_dir = Path::new("voices");
-    let target_path = voices_dir.join(&voice_filename);
-    let root_path = Path::new(&voice_filename);
-    let _ = std::fs::create_dir_all(voices_dir);
+    let target_path = primary_voices_dir.join(&voice_filename);
 
     let urls = [
         format!("https://huggingface.co/hexgrad/Kokoro-82M/resolve/main/voices/{voice_filename}"),
@@ -776,8 +795,25 @@ pub fn ensure_kokoro_voice_file(voice_name: &str) -> Result<String, String> {
     })?;
 
     std::fs::write(&target_path, &bytes).map_err(|e| format!("Écriture fichier voix: {e}"))?;
-    let _ = std::fs::write(root_path, &bytes);
     println!("[Kokoro TTS] Voix '{voice_filename}' téléchargée avec succès dans {}", target_path.display());
+
+    // Duplication dans exe_dir/voices si distinct
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let exe_voices = exe_dir.join("voices");
+            if exe_voices != primary_voices_dir {
+                let _ = std::fs::create_dir_all(&exe_voices);
+                let _ = std::fs::write(exe_voices.join(&voice_filename), &bytes);
+            }
+        }
+    }
+
+    // Nettoyage si un fichier résiduel du même nom existait à la racine
+    let local_root = Path::new(&voice_filename);
+    if local_root.is_file() {
+        let _ = std::fs::remove_file(local_root);
+    }
+
     let canonical = std::fs::canonicalize(&target_path).unwrap_or(target_path);
     let path_str = canonical.to_string_lossy();
     let abs_str = path_str
@@ -818,7 +854,7 @@ fn synthesize_kokoro_safe(
         .trim_start_matches("voices\\");
 
     // Seuil temps réel strict : au-delà de 7s, on bascule immédiatement sur SAPI
-    const MAX_SYNTH_LATENCY: Duration = Duration::from_millis(7000);
+    const MAX_SYNTH_LATENCY: Duration = Duration::from_millis(12000);
 
     // 1. Fast-path multi-cache : si cette voix a déjà une configuration validée, l'utiliser directement
     if let Ok(guard) = KOKORO_CONFIG_CACHE.lock() {
