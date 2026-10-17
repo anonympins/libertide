@@ -1367,6 +1367,7 @@ fn open_browser_new_tab(hwnd: HWND, url: &str) {
 #[cfg(windows)]
 #[derive(Clone)]
 struct UiaElementInfo {
+    index: usize,
     element: IUIAutomationElement,
     automation_id: String,
     help_text: String,
@@ -2006,7 +2007,9 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         .ok()
                         .and_then(|p| p.cast::<IUIAutomationInvokePattern>().ok());
                     let area = (width as i64) * (height as i64);
+                    let index = results.len() + 1;
                     results.push(UiaElementInfo {
+                        index,
                         element: item,
                         automation_id,
                         help_text,
@@ -2673,6 +2676,80 @@ fn ecommerce_match_bonus(prop: &str, target_text: &str) -> f32 {
 fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
     let prop_clean = prop.trim();
     let prop_lower = prop_clean.to_lowercase();
+
+    // 1. Détection des sélecteurs d'ID directs (ex: "#submit-btn")
+    if let Some(id_part) = prop_clean.strip_prefix('#') {
+        let id_clean = id_part.trim();
+        if !id_clean.is_empty() {
+            if elem.automation_id.eq_ignore_ascii_case(id_clean) {
+                return Some(500.0);
+            }
+            for (k, v) in &elem.data_attributes {
+                if (k == "id" || k == "testid" || k.ends_with("id")) && v.eq_ignore_ascii_case(id_clean) {
+                    return Some(480.0);
+                }
+            }
+            if elem.name.eq_ignore_ascii_case(id_clean) {
+                return Some(420.0);
+            }
+        }
+    }
+
+    // 2. Détection des sélecteurs macro indexés (ex: "@btn:12", "@link:15", "@input:3", "@12")
+    if prop_clean.starts_with('@') && !prop_clean.starts_with("[@") {
+        let tag = prop_clean.trim_start_matches('@');
+        let num_str = tag
+            .strip_prefix("btn:")
+            .or_else(|| tag.strip_prefix("link:"))
+            .or_else(|| tag.strip_prefix("input:"))
+            .or_else(|| tag.strip_prefix("textarea:"))
+            .or_else(|| tag.strip_prefix("select:"))
+            .unwrap_or(tag);
+
+        if let Ok(target_idx) = num_str.trim().parse::<usize>() {
+            if elem.index == target_idx {
+                return Some(500.0);
+            }
+        }
+    }
+
+    // 3. Détection des macros complètes (ex: [@btn:12 id="submit-btn" text="Valider"])
+    if prop_clean.starts_with("[@") && prop_clean.ends_with(']') {
+        let inner = &prop_clean[2..prop_clean.len() - 1];
+
+        let tag_part = inner.split_whitespace().next().unwrap_or("");
+        if let Some((_, idx_str)) = tag_part.split_once(':') {
+            if let Ok(idx) = idx_str.parse::<usize>() {
+                if elem.index == idx {
+                    return Some(520.0);
+                }
+            }
+        }
+
+        if let Some(id_val) = crate::html_util::extract_attribute(inner, "id") {
+            if !id_val.is_empty() && elem.automation_id.eq_ignore_ascii_case(id_val) {
+                return Some(500.0);
+            }
+        }
+        if let Some(testid_val) = crate::html_util::extract_attribute(inner, "data-testid") {
+            if !testid_val.is_empty() && (elem.automation_id.eq_ignore_ascii_case(testid_val)
+                || elem.data_attributes.iter().any(|(_, v)| v.eq_ignore_ascii_case(testid_val)))
+            {
+                return Some(490.0);
+            }
+        }
+        if let Some(name_val) = crate::html_util::extract_attribute(inner, "name") {
+            if !name_val.is_empty() && (elem.automation_id.eq_ignore_ascii_case(name_val) || elem.name.eq_ignore_ascii_case(name_val)) {
+                return Some(460.0);
+            }
+        }
+        if let Some(text_val) = crate::html_util::extract_attribute(inner, "text") {
+            if !text_val.is_empty() && (elem.name.eq_ignore_ascii_case(text_val) || elem.aria_label.eq_ignore_ascii_case(text_val)) {
+                return Some(450.0);
+            }
+        }
+    }
+
     let name_trim = elem.name.trim();
     let name_lower = name_trim.to_lowercase();
     let aria_label_trim = elem.aria_label.trim();

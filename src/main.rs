@@ -2986,13 +2986,13 @@ Réponds STRICTEMENT en JSON sans texte hors JSON. "narration" concise rédigée
 
 Règles principales :
 1. Filtrage requête : Bruit/inintelligible -> "invalid_request": true. Salutations/chit-chat -> "invalid_request": false, "actions": [], narration courtoise.
-2. Budget de raisonnement et importance de la tâche ("next_passes": 1..15) :
-    - ÉVALUATION DE L'IMPORTANCE & COMPLEXITÉ : Tu détermines toi-même "next_passes" selon l'importance et l'envergure perçues de la consigne utilisateur :
+2. Budget de raisonnement autonome et passes profondes ("next_passes": 1..15 ou action "set_reasoning_passes") :
+    - ÉVALUATION ET PILOTAGE DU BUDGET PAR LE MODÈLE : Tu gères toi-même le nombre de passes d'exécution nécessaires via le champ racine "next_passes" ou l'action "set_reasoning_passes" :
       * Basse importance / Réponse directe / Simple clic / Tâche ponctuelle rapide ("vite", "juste un coup d'œil", information simple) : 1 à 3 passes.
       * Importance normale / Tâche standard multi-étapes (navigation web, formulaire, lecture, interaction applicative standard) : 4 à 7 passes.
-      * Haute importance / Mission prioritaire / Analyse approfondie (tâche formulée comme "très importante", "prioritaire", "cruciale", comparaison minutieuse, recherche exhaustive ou orchestration multi-applications) : 8 à 12 passes.
+      * Haute importance / Recherche approfondie / Mission de contact / Comparatif de produits ou services / Benchmarks / Enquêtes : Tu DOIS impérativement t'allouer un budget de passes profondes ("next_passes": 8 à 12) dès la première passe et ne JAMAIS clore prématurément.
       * Importance critique / Urgence vitale explicite / Grand départ précipité : 13 à 15 passes.
-    - MODULATION DYNAMIQUE CONTINUE : À chaque passe d'exécution, réévalue "next_passes" selon l'état d'avancement réel. Si la tâche est presque achevée, réduis les passes restantes ; si des obstacles imprévus apparaissent sur une tâche de haute importance, augmente le budget via "next_passes" ou l'action "set_reasoning_passes".
+    - MODULATION DYNAMIQUE CONTINUE : À chaque passe, réévalue et ajuste "next_passes" selon l'état d'avancement. Si la tâche exige plus d'étapes d'exploration, augmente le budget via "next_passes" ou "set_reasoning_passes".
  3. PROTOCOLE URGENCE VITALE & SANTÉ :
    - CAS 1 - DEMANDE EXPLICITE D'ALERTE / SECOURS (ex: "alerte Robin je fais un malaise", "appelle le 15", "aide médicale d'urgence") :
      * IMMÉDIATEMENT "next_passes": 15.
@@ -3005,6 +3005,20 @@ Règles principales :
      * Reste calme et attentif. Vérifie la situation dans la narration (ex: "J'ai perçu des signes de malaise (*gémissements*). Avez-vous besoin d'une assistance ou d'alerter un proche ?").
      * Fournis OBLIGATOIREMENT une demande de confirmation dans "quick_suggestions" : ["Oui, alerter mes proches / secours", "Non, tout va bien / fausse alerte"].
    - Départ précipité : autonomie pour sauver fichiers et fermer session / verrouiller écran.
+ 3bis. PROTOCOLE D'ANALYSE APPROFONDIE STRATÉGIQUE (CONTACTS, PRODUITS ET SERVICES) :
+   - Dès que la demande implique de trouver ou contacter une personne, trouver des coordonnées, ou rechercher / comparer des produits et services :
+     * GESTION DU BUDGET : Définis immédiatement "next_passes": 8 à 12 (ou appelle l'action "set_reasoning_passes": 10). INTERDICTION de clore la mission en 1 seule passe ou de poser une question passive avec "actions": [].
+     * VOLET CONTACTS & COMMUNICATION ("contacte...", "écris à...", "trouve le contact", "appelle...") :
+       - Niveau 1 (Local) : Vérifie et sélectionne les messageries ou logiciels mail ouverts (Teams, Outlook, WhatsApp, Discord, Slack) et cherche le contact.
+       - Niveau 2 (Web & Annuaires pros) : Si absent en local ou application fermée, ouvre le navigateur ("navigate_to_url") pour chercher sur le web, LinkedIn, annuaires d'entreprises ou pages professionnelles.
+       - Niveau 3 (Projection fiche contact) : Dès identification des coordonnées (email, téléphone, poste, profil), projette OBLIGATOIREMENT une fiche volante de synthèse via "show_floating_card" (card_type: "stats", id: "fiche_contact", title: "Fiche contact : <Nom>", data: {{"Nom": "...", "Email": "...", "Téléphone": "...", "Poste / Société": "...", "Source": "..."}}), puis prépare le canal de communication (mailto:, message, appel).
+     * VOLET PRODUITS & SERVICES ("compare...", "meilleur...", "prix de...", "trouve une offre/produit") :
+       - Niveau 1 (Exploration web) : Ouvre le navigateur ("navigate_to_url") sur les moteurs, comparateurs ou sites marchands de référence.
+       - Niveau 2 (Extraction métrique) : Relève systématiquement prix, spécifications, disponibilité et notes/avis.
+       - Niveau 3 (Tableau comparatif volant) : Projette OBLIGATOIREMENT un tableau comparatif structuré dans une fenêtre volante via "show_floating_card" (card_type: "table", title: "Comparatif offres", data: {{"headers": ["Modèle / Offre", "Prix", "Caractéristiques", "Avis"], "rows": [["...", "...", "...", "..."]]}}).
+     * POLITIQUE DE PIVOT EN CAS D'ÉCHEC (TOUS VOLETS) :
+       - L'absence de résultat ou le blocage sur un premier canal (ex: contact absent dans Teams, page web non accessible) NE MET PAS FIN À LA MISSION. C'est un ordre de PIVOT IMMÉDIAT vers le canal suivant (local -> web -> annuaires) sans renvoyer "actions": [].
+       - Tant que tous les canaux n'ont pas été explorés et que les résultats ne sont pas projetés dans une fenêtre volante ("show_floating_card"), INTERDICTION de renvoyer "actions": [].
 4. Interface & Ciblage :
    - Hôte navigateur : préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse").
    - Contenu web : libellé direct sans préfixe issu de "[Page web - ...]".
@@ -3545,7 +3559,8 @@ async fn call_deepseek_prompt(
                 - Bannière cookies -> clique automatiquement 'Tout accepter' / 'Accepter'.\n\
                 - Notification système (toast) -> lis son contenu dans ta narration et laisse-la tranquille (ne la ferme pas).\n\
                 - Alerte / modale d'erreur -> lis le message dans ta narration, puis clique impérativement sur 'OK' / 'Fermer' pour la refermer.\n\
-                - Échec/blocage -> pivote immédiatement vers une alternative (app, web, autre fenêtre). Ne renvoie JAMAIS 'actions': [] si l'objectif d'urgence/contact n'est pas achevé.\n\
+                - Mission approfondie (contact / produit / service) -> définis 'next_passes' (8 à 12), explore méthodiquement (local -> web -> annuaires) et projette les résultats dans 'show_floating_card'. Ne renvoie pas 'actions': [] tant que les résultats ne sont pas trouvés.\n\
+                - Échec/blocage -> pivote immédiatement vers une alternative (app, web, autre fenêtre). Ne renvoie JAMAIS 'actions': [] si l'objectif n'est pas achevé.\n\
                 - Tâche finie ou choix requis -> 'actions': [] + 2 à 4 'quick_suggestions'.",
                 safe_user_instruction
             ));
@@ -3627,6 +3642,8 @@ fn main() -> eframe::Result<()> {
                         }
                         let _ = bg_tts_tx.send(TtsCommand::Stop);
                         IS_EMERGENCY_STOPPED.store(false, Ordering::SeqCst);
+                        let initial_passes = 6;
+                        TARGET_REASONING_PASSES.store(initial_passes, Ordering::SeqCst);
 
                         let history = history.clone();
                         let last_call_time = last_call_time.clone();

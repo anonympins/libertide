@@ -74,7 +74,7 @@ pub fn decode_html_entities(input: &str) -> String {
 }
 
 /// Extrait la valeur d'un attribut (ex: href) dans la chaîne d'attributs d'une balise.
-fn extract_attribute<'a>(attrs: &'a str, target: &str) -> Option<&'a str> {
+pub fn extract_attribute<'a>(attrs: &'a str, target: &str) -> Option<&'a str> {
     let target_bytes = target.as_bytes();
     let attrs_bytes = attrs.as_bytes();
     let t_len = target_bytes.len();
@@ -123,6 +123,208 @@ fn extract_attribute<'a>(attrs: &'a str, target: &str) -> Option<&'a str> {
     None
 }
 
+pub fn push_macro_attr(buf: &mut String, key: &str, val: Option<&str>) {
+    if let Some(v) = val {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            buf.push(' ');
+            buf.push_str(key);
+            buf.push_str("=\"");
+            for c in trimmed.chars() {
+                if c == '"' {
+                    buf.push('\'');
+                } else if c == '\n' || c == '\r' {
+                    buf.push(' ');
+                } else {
+                    buf.push(c);
+                }
+            }
+            buf.push('"');
+        }
+    }
+}
+
+fn get_test_id(tag_body: &str) -> Option<String> {
+    extract_attribute(tag_body, "data-testid")
+        .or_else(|| extract_attribute(tag_body, "data-test-id"))
+        .or_else(|| extract_attribute(tag_body, "data-test"))
+        .map(|s| decode_html_entities(s.trim()))
+        .filter(|s| !s.is_empty())
+}
+
+fn get_attr_decoded(tag_body: &str, attr: &str) -> Option<String> {
+    extract_attribute(tag_body, attr)
+        .map(|s| decode_html_entities(s.trim()))
+        .filter(|s| !s.is_empty())
+}
+
+struct ActiveButton {
+    index: usize,
+    id: Option<String>,
+    name: Option<String>,
+    test_id: Option<String>,
+    aria_label: Option<String>,
+    text: String,
+}
+
+struct ActiveLink {
+    index: usize,
+    href: Option<String>,
+    id: Option<String>,
+    test_id: Option<String>,
+    aria_label: Option<String>,
+    text: String,
+}
+
+struct ActiveTextarea {
+    index: usize,
+    id: Option<String>,
+    name: Option<String>,
+    placeholder: Option<String>,
+    test_id: Option<String>,
+    text: String,
+}
+
+struct ActiveSelect {
+    index: usize,
+    id: Option<String>,
+    name: Option<String>,
+    test_id: Option<String>,
+    options: Vec<String>,
+}
+
+fn flush_button(
+    btn_opt: &mut Option<ActiveButton>,
+    in_cell: bool,
+    current_cell: &mut String,
+    output: &mut String,
+) {
+    if let Some(btn) = btn_opt.take() {
+        let mut macro_str = format!("[@btn:{}", btn.index);
+        push_macro_attr(&mut macro_str, "id", btn.id.as_deref());
+        push_macro_attr(&mut macro_str, "name", btn.name.as_deref());
+
+        let clean_text = btn.text.trim();
+        let text_val = if !clean_text.is_empty() {
+            Some(clean_text)
+        } else {
+            btn.aria_label.as_deref().or(btn.name.as_deref()).or(btn.id.as_deref())
+        };
+        push_macro_attr(&mut macro_str, "text", text_val);
+        push_macro_attr(&mut macro_str, "data-testid", btn.test_id.as_deref());
+        if text_val.is_none() || text_val != btn.aria_label.as_deref() {
+            push_macro_attr(&mut macro_str, "aria-label", btn.aria_label.as_deref());
+        }
+        macro_str.push(']');
+
+        let target_out = if in_cell { current_cell } else { output };
+        if !in_cell && !target_out.is_empty() && !target_out.ends_with('\n') {
+            target_out.push(' ');
+        }
+        target_out.push_str(&macro_str);
+        if !in_cell {
+            target_out.push(' ');
+        }
+    }
+}
+
+fn flush_link(
+    link_opt: &mut Option<ActiveLink>,
+    in_cell: bool,
+    current_cell: &mut String,
+    output: &mut String,
+) {
+    if let Some(link) = link_opt.take() {
+        let clean_text = link.text.trim();
+        let href_clean = link.href.as_deref().unwrap_or("").trim();
+        let is_empty_anchor = clean_text.is_empty() && link.aria_label.is_none() && (href_clean.is_empty() || href_clean.starts_with('#'));
+
+        if is_empty_anchor {
+            return;
+        }
+
+        let mut macro_str = format!("[@link:{}", link.index);
+        let text_val = if !clean_text.is_empty() {
+            Some(clean_text)
+        } else {
+            link.aria_label.as_deref().or(link.id.as_deref()).or(Some(href_clean))
+        };
+        push_macro_attr(&mut macro_str, "text", text_val);
+        if !href_clean.is_empty() {
+            push_macro_attr(&mut macro_str, "href", Some(href_clean));
+        }
+        push_macro_attr(&mut macro_str, "id", link.id.as_deref());
+        push_macro_attr(&mut macro_str, "data-testid", link.test_id.as_deref());
+        macro_str.push(']');
+
+        let target_out = if in_cell { current_cell } else { output };
+        if !in_cell && !target_out.is_empty() && !target_out.ends_with('\n') {
+            target_out.push(' ');
+        }
+        target_out.push_str(&macro_str);
+        if !in_cell {
+            target_out.push(' ');
+        }
+    }
+}
+
+fn flush_textarea(
+    ta_opt: &mut Option<ActiveTextarea>,
+    in_cell: bool,
+    current_cell: &mut String,
+    output: &mut String,
+) {
+    if let Some(ta) = ta_opt.take() {
+        let mut macro_str = format!("[@textarea:{}", ta.index);
+        push_macro_attr(&mut macro_str, "name", ta.name.as_deref());
+        push_macro_attr(&mut macro_str, "id", ta.id.as_deref());
+        push_macro_attr(&mut macro_str, "placeholder", ta.placeholder.as_deref());
+        let val_clean = ta.text.trim();
+        if !val_clean.is_empty() {
+            push_macro_attr(&mut macro_str, "value", Some(val_clean));
+        }
+        push_macro_attr(&mut macro_str, "data-testid", ta.test_id.as_deref());
+        macro_str.push(']');
+
+        let target_out = if in_cell { current_cell } else { output };
+        if !in_cell && !target_out.is_empty() && !target_out.ends_with('\n') {
+            target_out.push('\n');
+        }
+        target_out.push_str(&macro_str);
+        if !in_cell {
+            target_out.push('\n');
+        }
+    }
+}
+
+fn flush_select(
+    sel_opt: &mut Option<ActiveSelect>,
+    in_cell: bool,
+    current_cell: &mut String,
+    output: &mut String,
+) {
+    if let Some(sel) = sel_opt.take() {
+        let mut macro_str = format!("[@select:{}", sel.index);
+        push_macro_attr(&mut macro_str, "name", sel.name.as_deref());
+        push_macro_attr(&mut macro_str, "id", sel.id.as_deref());
+        push_macro_attr(&mut macro_str, "data-testid", sel.test_id.as_deref());
+        if !sel.options.is_empty() {
+            let opts = sel.options.join(", ");
+            push_macro_attr(&mut macro_str, "options", Some(&opts));
+        }
+        macro_str.push(']');
+
+        let target_out = if in_cell { current_cell } else { output };
+        if !in_cell && !target_out.is_empty() && !target_out.ends_with('\n') {
+            target_out.push(' ');
+        }
+        target_out.push_str(&macro_str);
+        if !in_cell {
+            target_out.push(' ');
+        }
+    }
+}
+
 /// Indique si une balise est typiquement inline (le texte s'écoule naturellement).
 fn is_inline_tag(tag: &str) -> bool {
     matches!(
@@ -168,7 +370,6 @@ fn is_void_tag(tag: &str) -> bool {
             | "embed"
             | "hr"
             | "img"
-            | "input"
             | "link"
             | "meta"
             | "param"
@@ -182,6 +383,7 @@ fn is_void_tag(tag: &str) -> bool {
 pub fn sanitize_html_to_markdown(html: &str) -> String {
     let mut output = String::with_capacity(html.len() / 2);
     let mut skip_stack: Vec<String> = Vec::new();
+    let mut elem_counter: usize = 0;
 
     // Gestion des tables
     let mut in_table = false;
@@ -190,8 +392,13 @@ pub fn sanitize_html_to_markdown(html: &str) -> String {
     let mut current_cell = String::new();
     let mut in_cell = false;
 
-    // Gestion des liens
-    let mut active_link_url: Option<String> = None;
+    // Gestion des macros d'interaction
+    let mut active_button: Option<ActiveButton> = None;
+    let mut active_link: Option<ActiveLink> = None;
+    let mut active_textarea: Option<ActiveTextarea> = None;
+    let mut active_select: Option<ActiveSelect> = None;
+    let mut in_option = false;
+    let mut current_option = String::new();
 
     let mut i = 0;
     let bytes = html.as_bytes();
@@ -336,42 +543,179 @@ pub fn sanitize_html_to_markdown(html: &str) -> String {
                                 output.push('\n');
                             }
                         }
-                        tag if tag == "button" || tag.contains("-button") || tag.ends_with("-btn") => {
-                            if !is_closing {
-                                output.push_str("[Bouton:]");
+                        "input" => {
+                            let input_type = extract_attribute(tag_body, "type")
+                                .map(|s| s.trim().to_lowercase())
+                                .unwrap_or_else(|| "text".to_string());
+
+                            if input_type != "hidden" {
+                                elem_counter += 1;
+                                let id = get_attr_decoded(tag_body, "id");
+                                let name = get_attr_decoded(tag_body, "name");
+                                let placeholder = get_attr_decoded(tag_body, "placeholder");
+                                let value_attr = extract_attribute(tag_body, "value").map(|s| decode_html_entities(s.trim()));
+                                let test_id = get_test_id(tag_body);
+                                let aria_label = get_attr_decoded(tag_body, "aria-label");
+
+                                let mut macro_str = String::with_capacity(64);
+                                if input_type == "submit" || input_type == "button" || input_type == "reset" {
+                                    macro_str.push_str(&format!("[@btn:{elem_counter}"));
+                                    push_macro_attr(&mut macro_str, "id", id.as_deref());
+                                    push_macro_attr(&mut macro_str, "name", name.as_deref());
+                                    let btn_text = value_attr.as_deref()
+                                        .or(aria_label.as_deref())
+                                        .unwrap_or("Submit");
+                                    push_macro_attr(&mut macro_str, "text", Some(btn_text));
+                                    push_macro_attr(&mut macro_str, "data-testid", test_id.as_deref());
+                                    macro_str.push(']');
+                                } else {
+                                    macro_str.push_str(&format!("[@input:{elem_counter}"));
+                                    if input_type != "text" {
+                                        push_macro_attr(&mut macro_str, "type", Some(&input_type));
+                                    }
+                                    push_macro_attr(&mut macro_str, "name", name.as_deref());
+                                    push_macro_attr(&mut macro_str, "id", id.as_deref());
+                                    push_macro_attr(&mut macro_str, "placeholder", placeholder.as_deref());
+
+                                    let val_str = value_attr.as_deref().unwrap_or("");
+                                    push_macro_attr(&mut macro_str, "value", Some(val_str));
+
+                                    if input_type == "checkbox" || input_type == "radio" {
+                                        let is_checked = extract_attribute(tag_body, "checked").is_some()
+                                            || tag_body.split_whitespace().any(|w| w == "checked" || w == "checked/>" || w == "checked>");
+                                        if is_checked {
+                                            push_macro_attr(&mut macro_str, "checked", Some("true"));
+                                        }
+                                    }
+
+                                    push_macro_attr(&mut macro_str, "data-testid", test_id.as_deref());
+                                    push_macro_attr(&mut macro_str, "aria-label", aria_label.as_deref());
+                                    macro_str.push(']');
+                                }
+
+                                let target_out = if in_cell { &mut current_cell } else { &mut output };
+                                if !in_cell && !target_out.is_empty() && !target_out.ends_with('\n') {
+                                    target_out.push(' ');
+                                }
+                                target_out.push_str(&macro_str);
+                                if !in_cell {
+                                    target_out.push(' ');
+                                }
+                            }
+                        }
+                        "textarea" => {
+                            if is_closing {
+                                flush_textarea(&mut active_textarea, in_cell, &mut current_cell, &mut output);
                             } else {
-                                output.push_str("] ");
+                                flush_textarea(&mut active_textarea, in_cell, &mut current_cell, &mut output);
+                                elem_counter += 1;
+                                active_textarea = Some(ActiveTextarea {
+                                    index: elem_counter,
+                                    id: get_attr_decoded(tag_body, "id"),
+                                    name: get_attr_decoded(tag_body, "name"),
+                                    placeholder: get_attr_decoded(tag_body, "placeholder"),
+                                    test_id: get_test_id(tag_body),
+                                    text: String::new(),
+                                });
+                            }
+                        }
+                        "select" => {
+                            if is_closing {
+                                flush_select(&mut active_select, in_cell, &mut current_cell, &mut output);
+                            } else {
+                                flush_select(&mut active_select, in_cell, &mut current_cell, &mut output);
+                                elem_counter += 1;
+                                active_select = Some(ActiveSelect {
+                                    index: elem_counter,
+                                    id: get_attr_decoded(tag_body, "id"),
+                                    name: get_attr_decoded(tag_body, "name"),
+                                    test_id: get_test_id(tag_body),
+                                    options: Vec::new(),
+                                });
+                            }
+                        }
+                        "option" => {
+                            if is_closing {
+                                if let Some(ref mut sel) = active_select {
+                                    let opt_text = current_option.trim().to_string();
+                                    if !opt_text.is_empty() {
+                                        sel.options.push(opt_text);
+                                    }
+                                }
+                                current_option.clear();
+                                in_option = false;
+                            } else {
+                                in_option = true;
+                                current_option.clear();
+                            }
+                        }
+                        tag if tag == "button" || tag.contains("-button") || tag.ends_with("-btn") => {
+                            if is_closing {
+                                flush_button(&mut active_button, in_cell, &mut current_cell, &mut output);
+                            } else {
+                                flush_button(&mut active_button, in_cell, &mut current_cell, &mut output);
+                                elem_counter += 1;
+                                active_button = Some(ActiveButton {
+                                    index: elem_counter,
+                                    id: get_attr_decoded(tag_body, "id"),
+                                    name: get_attr_decoded(tag_body, "name"),
+                                    test_id: get_test_id(tag_body),
+                                    aria_label: get_attr_decoded(tag_body, "aria-label"),
+                                    text: String::new(),
+                                });
                             }
                         }
                         "br" | "hr" => {
                             output.push('\n');
                         }
                         "strong" | "b" => {
-                            output.push_str("**");
+                            if active_button.is_none() && active_link.is_none() && active_textarea.is_none() {
+                                output.push_str("**");
+                            }
                         }
                         "em" | "i" => {
-                            output.push('*');
+                            if active_button.is_none() && active_link.is_none() && active_textarea.is_none() {
+                                output.push('*');
+                            }
                         }
                         "code" => {
-                            output.push('`');
+                            if active_button.is_none() && active_link.is_none() && active_textarea.is_none() {
+                                output.push('`');
+                            }
                         }
                         "a" => {
                             if is_closing {
-                                if let Some(href) = active_link_url.take() {
-                                    output.push_str(&format!("]({href})"));
-                                }
-                            } else if let Some(href) = extract_attribute(tag_body, "href") {
-                                if !href.starts_with('#') && !href.starts_with("javascript:") {
-                                    output.push('[');
-                                    active_link_url = Some(href.to_string());
-                                }
+                                flush_link(&mut active_link, in_cell, &mut current_cell, &mut output);
+                            } else {
+                                flush_link(&mut active_link, in_cell, &mut current_cell, &mut output);
+                                elem_counter += 1;
+                                active_link = Some(ActiveLink {
+                                    index: elem_counter,
+                                    href: get_attr_decoded(tag_body, "href"),
+                                    id: get_attr_decoded(tag_body, "id"),
+                                    test_id: get_test_id(tag_body),
+                                    aria_label: get_attr_decoded(tag_body, "aria-label"),
+                                    text: String::new(),
+                                });
                             }
                         }
                         "img" => {
                             if let Some(alt) = extract_attribute(tag_body, "alt") {
                                 let trimmed = alt.trim();
                                 if !trimmed.is_empty() {
-                                    output.push_str(&format!(" [Image: {trimmed}] "));
+                                    if let Some(ref mut btn) = active_button {
+                                        if !btn.text.is_empty() {
+                                            btn.text.push(' ');
+                                        }
+                                        btn.text.push_str(trimmed);
+                                    } else if let Some(ref mut link) = active_link {
+                                        if !link.text.is_empty() {
+                                            link.text.push(' ');
+                                        }
+                                        link.text.push_str(trimmed);
+                                    } else {
+                                        output.push_str(&format!(" [Image: {trimmed}] "));
+                                    }
                                 }
                             }
                         }
@@ -401,7 +745,17 @@ pub fn sanitize_html_to_markdown(html: &str) -> String {
             None => break,
         };
         if skip_stack.is_empty() {
-            if in_cell {
+            if let Some(ref mut ta) = active_textarea {
+                ta.text.push(ch);
+            } else if let Some(ref mut _sel) = active_select {
+                if in_option {
+                    current_option.push(ch);
+                }
+            } else if let Some(ref mut btn) = active_button {
+                btn.text.push(ch);
+            } else if let Some(ref mut link) = active_link {
+                link.text.push(ch);
+            } else if in_cell {
                 current_cell.push(ch);
             } else if !in_table {
                 output.push(ch);
@@ -409,6 +763,11 @@ pub fn sanitize_html_to_markdown(html: &str) -> String {
         }
         i += ch.len_utf8();
     }
+
+    flush_button(&mut active_button, in_cell, &mut current_cell, &mut output);
+    flush_link(&mut active_link, in_cell, &mut current_cell, &mut output);
+    flush_textarea(&mut active_textarea, in_cell, &mut current_cell, &mut output);
+    flush_select(&mut active_select, in_cell, &mut current_cell, &mut output);
 
     let decoded = decode_html_entities(&output);
     let mut cleaned_lines = Vec::new();
