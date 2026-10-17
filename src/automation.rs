@@ -3048,11 +3048,7 @@ fn is_poor_or_redundant_link(text: &str) -> bool {
         return true;
     }
     const BLACKLIST: &[&str] = &[
-        "précédent", "suivant", "next", "previous", "en savoir plus", "lire la suite",
-        "plus", "voir plus", "connexion", "se connecter", "s'inscrire", "sign in",
-        "login", "accueil", "home", "menu", "conditions d'utilisation", "confidentialité",
-        "cookies", "aide", "help", "contact", "retour", "partager", "haut de page", "top",
-        "fermer", "close", "annuler", "cancel", "ok", "oui", "non",
+
     ];
     BLACKLIST.iter().any(|&b| lower == b)
 }
@@ -3612,8 +3608,8 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
     out.push_str(&active_window_content);
     out.push_str(&other_windows_content);
 
-    // 3. Augmentation du quota interne à 24 000 caractères
-    let summary = truncate_with_notice(&out, 24000);
+    // 3. Quota interne limité strictement à 15 Ko (15 360 caractères)
+    let summary = truncate_with_notice(&out, 15360);
     println!("\n=================== [Analyse d'écran UIA] ===================");
     println!("{}", summary.trim());
     println!("============================================================\n");

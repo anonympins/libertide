@@ -400,5 +400,12 @@ pub fn sanitize_html_to_markdown(html: &str) -> String {
             cleaned_lines.push(trimmed);
         }
     }
-    cleaned_lines.join("\n").trim().to_string()
+    let result = cleaned_lines.join("\n").trim().to_string();
+    const MAX_MARKDOWN_BYTES: usize = 15 * 1024; // 15 Ko
+    if result.len() > MAX_MARKDOWN_BYTES {
+        let truncated: String = result.chars().take(MAX_MARKDOWN_BYTES).collect();
+        format!("{truncated}\n[...contenu Markdown tronqué à 15 Ko...]")
+    } else {
+        result
+    }
 }

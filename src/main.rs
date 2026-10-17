@@ -3493,7 +3493,7 @@ async fn call_deepseek_prompt(
                     screen_after.clone()
                 };
                 let max_screen = if screen_after_clean.contains("[Page web") || screen_after_clean.contains("[Navigateur]") {
-                    24000
+                    15360
                 } else {
                     12000
                 };
@@ -3663,7 +3663,7 @@ fn main() -> eframe::Result<()> {
                                         screen_state
                                     };
                                     let max_screen = if screen_state.contains("[Page web") || screen_state.contains("[Navigateur]") {
-                                        24000
+                                        15360
                                     } else {
                                         12000
                                     };
