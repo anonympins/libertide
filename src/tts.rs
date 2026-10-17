@@ -53,7 +53,8 @@ pub fn sanitize_for_tts(text: &str) -> String {
         }
         // Détection et suppression des URLs brutes
         if (c == 'h' || c == 'H') && i + 6 < chars.len() {
-            let slice: String = chars[i..i + 8.min(chars.len())].iter().collect();
+            let end = (i + 8).min(chars.len());
+            let slice: String = chars[i..end].iter().collect();
             if slice.eq_ignore_ascii_case("https://") || slice.to_lowercase().starts_with("http://") {
                 while i < chars.len() && !chars[i].is_whitespace() && chars[i] != ')' && chars[i] != ']' && chars[i] != '>' {
                     i += 1;

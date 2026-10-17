@@ -1,5 +1,3 @@
-#![cfg_attr(windows, windows_subsystem = "windows")]
-
 mod audio;
 mod automation;
 mod fs_util;
@@ -2955,10 +2953,11 @@ Règles principales :
    - Contenu web : libellé direct sans préfixe issu de "[Page web - ...]".
    - Obstacles (cookies/toasts/popups) : clique le bouton adéquat ("Tout accepter", "Fermer", etc.). Ne JAMAIS envoyer "escape".
    - "click_element" pour liens/onglets, "click_button" pour boutons. "target": null si saisie sans cible.
-   - Validation : "press_enter": true dans "write_text" ou shortcut "enter". Jamais "run_command" pour simuler une touche.
+   - Raccourcis clavier & touches : utilise OBLIGATOIREMENT "accessibility_shortcut" avec le nom ou la combinaison de touches exacte (ex: "ctrl+shift+b" pour la barre des favoris, "ctrl+t", "enter", "close_tab", "copy", "undo"). Ne JAMAIS envoyer "run_command" pour simuler des touches ou raccourcis !
    - Lecture code/fichier : "read_editor_content" (focalise et extrait Ctrl+A/Ctrl+C).
    - Onglet/page : "accessibility_shortcut": "close_tab" (jamais "close_app" pour un onglet).
 5. Audio & Volume :
+   - "focus_address_bar" pour cibler/sélectionner universellement la barre d'adresse du navigateur.
    - "mute_audio" coupe sons tiers sans altérer la voix Libertide (à utiliser en urgence ou demande mute).
    - "set_volume" ("down"|"up"|"min"|"mute") pour régler le volume.
 6. Navigation & Web :
@@ -2985,6 +2984,7 @@ Format JSON obligatoire :
     {{"action": "focus_element", "window": null, "target_name": "nom"}},
     {{"action": "scroll", "direction": "down"|"up"|"bottom"|"top", "amount": 1, "window": null}},
     {{"action": "focus_window", "title": null, "pid": null}},
+    {{"action": "focus_address_bar", "window": null}},
     {{"action": "read_editor_content", "window": null, "target": null}},
     {{"action": "clear_text", "window": null}},
     {{"action": "write_text", "text": "...", "target": null, "press_enter": false}},
@@ -2997,7 +2997,7 @@ Format JSON obligatoire :
     {{"action": "run_command", "command": "..."}},
     {{"action": "kill_process", "pid": null, "name": null}},
     {{"action": "navigate_to_url", "url": "...", "target": "new_tab"|"current_tab"|"new_window"}},
-    {{"action": "accessibility_shortcut", "shortcut": "enter"|"close_tab"|"refresh_page"|"copy"|"undo"}},
+    {{"action": "accessibility_shortcut", "shortcut": "ctrl+shift+b"|"enter"|"close_tab"|"refresh_page"|"copy"|"undo"|"<combinaison_touches>"}},
     {{"action": "deactivate_immersion"}},
     {{"action": "set_reasoning_passes", "passes": 5, "reason": null}},
     {{"action": "schedule_prompt", "delay_seconds": 10, "prompt": "..."}},

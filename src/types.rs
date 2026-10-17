@@ -181,6 +181,11 @@ pub enum AgentAction {
     OpenBrowser {
         url: Option<String>,
     },
+    #[serde(alias = "address_bar", alias = "select_address_bar", alias = "barre_adresse")]
+    FocusAddressBar {
+        #[serde(default)]
+        window: Option<String>,
+    },
     NavigateToUrl {
         url: String,
         #[serde(default)]
@@ -367,6 +372,7 @@ impl QuickSuggestionItem {
             QuickSuggestionItem::Action(act) => match act {
                 AgentAction::OpenApp { name } => Some(format!("Ouvrir {name}")),
                 AgentAction::NavigateToUrl { url, .. } => Some(format!("Naviguer vers {url}")),
+                AgentAction::FocusAddressBar { .. } => Some("Sélectionner la barre d'adresse".to_string()),
                 AgentAction::ClickElement { target_name, .. } => Some(format!("Cliquer {target_name}")),
                 AgentAction::ClickButton { button_name, .. } => Some(format!("Cliquer {button_name}")),
                 AgentAction::CloseApp { name } => Some(format!("Fermer {name}")),

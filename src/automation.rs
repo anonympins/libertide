@@ -1039,6 +1039,85 @@ pub fn send_hotkey(modifiers: &[VIRTUAL_KEY], key: VIRTUAL_KEY) {
     }
 }
 
+#[cfg(windows)]
+pub fn try_send_key_combination(combo: &str) -> bool {
+    let clean = combo.trim().to_lowercase();
+    if clean.is_empty() {
+        return false;
+    }
+
+    let parts: Vec<&str> = clean
+        .split(|c| c == '+' || c == '-')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if parts.is_empty() {
+        return false;
+    }
+
+    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+    const VK_SHIFT: VIRTUAL_KEY = VIRTUAL_KEY(0x10);
+    const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
+    const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
+
+    let mut modifiers = Vec::new();
+    let mut key: Option<VIRTUAL_KEY> = None;
+
+    for part in parts {
+        match part {
+            "ctrl" | "control" => modifiers.push(VK_CONTROL),
+            "shift" | "sift" | "shif" | "maj" => modifiers.push(VK_SHIFT),
+            "alt" | "menu" => modifiers.push(VK_MENU),
+            "win" | "windows" | "super" | "meta" => modifiers.push(VK_LWIN),
+            "enter" | "return" | "entree" | "entrée" => key = Some(VIRTUAL_KEY(0x0D)),
+            "esc" | "escape" | "echap" | "échap" => key = Some(VIRTUAL_KEY(0x1B)),
+            "tab" => key = Some(VIRTUAL_KEY(0x09)),
+            "space" | "espace" => key = Some(VIRTUAL_KEY(0x20)),
+            "backspace" | "back" | "retour" => key = Some(VIRTUAL_KEY(0x08)),
+            "del" | "delete" | "suppr" => key = Some(VIRTUAL_KEY(0x2E)),
+            "ins" | "insert" => key = Some(VIRTUAL_KEY(0x2D)),
+            "home" | "debut" | "début" => key = Some(VIRTUAL_KEY(0x24)),
+            "end" | "fin" => key = Some(VIRTUAL_KEY(0x23)),
+            "pageup" | "prior" | "pgup" => key = Some(VIRTUAL_KEY(0x21)),
+            "pagedown" | "next" | "pgdown" => key = Some(VIRTUAL_KEY(0x22)),
+            "left" | "gauche" => key = Some(VIRTUAL_KEY(0x25)),
+            "up" | "haut" => key = Some(VIRTUAL_KEY(0x26)),
+            "right" | "droite" => key = Some(VIRTUAL_KEY(0x27)),
+            "down" | "bas" => key = Some(VIRTUAL_KEY(0x28)),
+            single if single.len() == 1 => {
+                let c = single.chars().next().unwrap();
+                if c.is_ascii_alphabetic() {
+                    key = Some(VIRTUAL_KEY(0x41 + (c.to_ascii_uppercase() as u16 - b'A' as u16)));
+                } else if c.is_ascii_digit() {
+                    key = Some(VIRTUAL_KEY(0x30 + (c as u16 - b'0' as u16)));
+                } else {
+                    return false;
+                }
+            }
+            f_key if f_key.starts_with('f') && f_key.len() <= 3 => {
+                if let Ok(num) = f_key[1..].parse::<u16>() {
+                    if (1..=24).contains(&num) {
+                        key = Some(VIRTUAL_KEY(0x70 + num - 1));
+                    } else {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+
+    if let Some(k) = key {
+        send_hotkey(&modifiers, k);
+        true
+    } else {
+        false
+    }
+}
+
 pub fn urlencoding_simple(query: &str) -> String {
     query
         .chars()
@@ -1057,21 +1136,17 @@ pub fn truncate_with_notice(text: &str, max_chars: usize) -> String {
 
 pub fn is_address_bar_target(target: &str) -> bool {
     let t = target.trim().to_lowercase();
-    t == "url"
-        || t == "l'url"
-        || t == "adresse"
-        || t == "l'adresse"
-        || t == "barre d'adresse"
-        || t == "barre d adresse"
-        || t == "barre dadresse"
-        || t == "barre d'url"
-        || t == "barre url"
-        || t == "omnibox"
-        || t == "address"
-        || t == "address bar"
-        || t.contains("barre d'adresse")
-        || t.contains("barre d adresse")
-        || t.contains("adresse web")
+    let clean = t
+        .strip_prefix("[navigateur]").unwrap_or(&t)
+        .strip_prefix("navigateur:").unwrap_or(&t)
+        .strip_prefix("[browser]").unwrap_or(&t)
+        .strip_prefix("browser:").unwrap_or(&t)
+        .trim();
+    clean == "url"
+        || clean.contains("url")
+        || clean.contains("adresse")
+        || clean.contains("address")
+        || clean.contains("omnibox")
 }
 
 pub fn is_browser_chrome_target(target: &str) -> bool {
@@ -1080,6 +1155,7 @@ pub fn is_browser_chrome_target(target: &str) -> bool {
         || t.starts_with("navigateur:")
         || t.starts_with("[browser]")
         || t.starts_with("browser:")
+        || is_address_bar_target(target)
 }
 
 pub fn is_generic_textarea_target(target: &str) -> bool {
@@ -1100,57 +1176,94 @@ pub fn is_generic_textarea_target(target: &str) -> bool {
 
 pub fn format_url_for_navigation(raw_url: &str) -> String {
     let trimmed = raw_url.trim();
-    if trimmed.is_empty() || trimmed.starts_with("about:") {
+    if trimmed.is_empty() {
         return "https://www.google.com".to_string();
     }
-    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
-        if trimmed.contains('.') && !trimmed.contains(' ') {
-            format!("https://{trimmed}")
-        } else {
-            format!("https://www.google.com/search?q={}", urlencoding_simple(trimmed))
+
+    // 1. Détection de tous les schémas complets comportant :// (chrome://, edge://, file://, ftp://, http://, etc.)
+    if let Some(pos) = trimmed.find("://") {
+        let scheme = &trimmed[..pos];
+        if !scheme.is_empty()
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+        {
+            return trimmed.to_string();
         }
+    }
+
+    // 2. Détection des pseudo-protocoles sans double barre oblique (about:, data:, view-source:, file:, blob:, etc.)
+    const PSEUDO_SCHEMES: &[&str] = &[
+        "about:",
+        "data:",
+        "view-source:",
+        "file:",
+        "blob:",
+        "javascript:",
+        "mailto:",
+        "tel:",
+    ];
+
+    let lower = trimmed.to_lowercase();
+    for &pseudo in PSEUDO_SCHEMES {
+        if lower.starts_with(pseudo) {
+            return trimmed.to_string();
+        }
+    }
+
+    // 3. Support de localhost (ex: localhost, localhost:8080, localhost/path)
+    if lower == "localhost" || lower.starts_with("localhost:") || lower.starts_with("localhost/") {
+        return format!("http://{trimmed}");
+    }
+
+    // 4. Domaines et adresses valides sans protocole explicite -> préfixage https://
+    if !trimmed.contains(' ') && trimmed.contains('.') {
+        format!("https://{trimmed}")
     } else {
-        trimmed.to_string()
+        // 5. Repli : terme de recherche vers Google
+        format!("https://www.google.com/search?q={}", urlencoding_simple(trimmed))
     }
 }
 
 #[cfg(windows)]
-fn navigate_browser_address_bar(hwnd: HWND, url: &str) {
-    let formatted_url = format_url_for_navigation(url);
+pub fn focus_browser_address_bar(hwnd: HWND) {
     force_foreground_window(hwnd);
     unsafe {
         let _ = ShowWindow(hwnd, SW_MAXIMIZE);
     }
-    std::thread::sleep(Duration::from_millis(150));
+    std::thread::sleep(Duration::from_millis(80));
 
     const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
     const VK_L: VIRTUAL_KEY = VIRTUAL_KEY(0x4C);
     const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
     const VK_D: VIRTUAL_KEY = VIRTUAL_KEY(0x44);
-    const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
 
     // 1. Clic direct sur la barre d'adresse si elle est repérée dans l'arbre UIA
     let elements = list_interactive_elements(hwnd);
     let address_elem = elements.iter().find(|e| {
         e.is_browser_chrome
-            && (e.class_name.contains("omnibox")
-                || e.automation_id.to_lowercase().contains("omnibox")
-                || e.localized_type.contains("omnibox")
-                || e.name.to_lowercase().contains("adresse")
-                || e.name.to_lowercase().contains("address"))
+            && (e.is_edit_or_textarea || e.is_input || e.class_name.contains("omnibox") || e.automation_id.to_lowercase().contains("omnibox"))
     });
 
     if let Some(elem) = address_elem {
         unsafe { let _ = elem.element.SetFocus(); }
         click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
-        std::thread::sleep(Duration::from_millis(80));
+        std::thread::sleep(Duration::from_millis(50));
     }
 
     // 2. Raccourcis universels de sélection de la barre d'adresse (Alt+D puis Ctrl+L)
     send_hotkey(&[VK_MENU], VK_D);
-    std::thread::sleep(Duration::from_millis(80));
+    std::thread::sleep(Duration::from_millis(60));
     send_hotkey(&[VK_CONTROL], VK_L);
-    std::thread::sleep(Duration::from_millis(100));
+    std::thread::sleep(Duration::from_millis(80));
+}
+
+#[cfg(windows)]
+fn navigate_browser_address_bar(hwnd: HWND, url: &str) {
+    let formatted_url = format_url_for_navigation(url);
+    focus_browser_address_bar(hwnd);
+
+    const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
 
     // 3. Écriture de l'URL via le presse-papiers
     clipboard::set_text(&formatted_url);
@@ -2483,12 +2596,16 @@ fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option
     let mut scored: Vec<(f32, &'a UiaElementInfo)> = elements
         .iter()
         .filter_map(|elem| {
+            let mut chrome_bias = 0.0f32;
             if has_web_content {
-                if is_chrome_target && !elem.is_browser_chrome {
-                    return None;
-                }
-                if !is_chrome_target && elem.is_browser_chrome {
-                    return None;
+                if is_chrome_target {
+                    if elem.is_browser_chrome {
+                        chrome_bias += 50.0;
+                    } else {
+                        chrome_bias -= 40.0;
+                    }
+                } else if elem.is_browser_chrome {
+                    chrome_bias -= 45.0;
                 }
             }
 
@@ -2498,7 +2615,7 @@ fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option
             }
 
             score_element(elem, target).map(|score| {
-                let mut final_score = score;
+                let mut final_score = score + chrome_bias;
                 if elem.is_tab {
                     final_score += 80.0;
                 } else if elem.is_link {
@@ -2542,17 +2659,21 @@ fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) ->
             if word_count > 15 || elem.name.len() > 120 {
                 return None;
             }
+            let mut chrome_bias = 0.0f32;
             if has_web_content {
-                if is_chrome_target && !elem.is_browser_chrome {
-                    return None;
-                }
-                if !is_chrome_target && elem.is_browser_chrome {
-                    return None;
+                if is_chrome_target {
+                    if elem.is_browser_chrome {
+                        chrome_bias += 50.0;
+                    } else {
+                        chrome_bias -= 40.0;
+                    }
+                } else if elem.is_browser_chrome {
+                    chrome_bias -= 45.0;
                 }
             }
 
             score_element(elem, target).map(|score| {
-                let mut final_score = score;
+                let mut final_score = score + chrome_bias;
                 if elem.is_button || elem.is_tabindex {
                     final_score += 100.0;
                 } else if elem.pattern.is_some() {
@@ -2589,17 +2710,21 @@ fn find_best_input_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> 
     let mut scored: Vec<(f32, &'a UiaElementInfo)> = elements
         .iter()
         .filter_map(|elem| {
+            let mut chrome_bias = 0.0f32;
             if has_web_content {
-                if is_chrome_target && !elem.is_browser_chrome {
-                    return None;
-                }
-                if !is_chrome_target && elem.is_browser_chrome {
-                    return None;
+                if is_chrome_target {
+                    if elem.is_browser_chrome {
+                        chrome_bias += 50.0;
+                    } else {
+                        chrome_bias -= 40.0;
+                    }
+                } else if elem.is_browser_chrome {
+                    chrome_bias -= 45.0;
                 }
             }
 
             score_element(elem, target).map(|score| {
-                let mut final_score = score;
+                let mut final_score = score + chrome_bias;
                 if elem.is_edit_or_textarea || elem.is_input {
                     final_score += 40.0;
                 } else if elem.is_focusable {
@@ -3381,18 +3506,8 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
             return "Actions interrompues par une nouvelle consigne.".to_string();
         }
         if let AgentAction::OpenBrowser { url } = action {
-            let raw_url = url.as_deref().unwrap_or("").trim();
-            let target = if raw_url.is_empty() || raw_url.starts_with("about:") {
-                "https://www.google.com".to_string()
-            } else if !raw_url.starts_with("http://") && !raw_url.starts_with("https://") {
-                if raw_url.contains('.') {
-                    format!("https://{raw_url}")
-                } else {
-                    format!("https://www.google.com/search?q={}", urlencoding_simple(raw_url))
-                }
-            } else {
-                raw_url.to_string()
-            };
+            let raw_url = url.as_deref().unwrap_or("");
+            let target = format_url_for_navigation(raw_url);
 
             let spawned = launch_browser_new_window(&target);
             if spawned.is_some() {
@@ -3491,6 +3606,40 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     feedback.push("Fenêtre introuvable pour focus.".to_string());
                 }
             }
+            AgentAction::FocusAddressBar { window } => {
+                let target_hwnd = match window.as_deref() {
+                    Some(w) if !w.trim().is_empty() => {
+                        find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
+                    }
+                    _ => find_best_browser_window(&user_windows, active_user_hwnd),
+                };
+
+                if let Some(hwnd) = target_hwnd {
+                    if is_window_hung(hwnd) {
+                        feedback.push(format!("Navigateur [HWND {:?}] non réactif. Focus barre d'adresse ignoré.", hwnd.0));
+                        continue;
+                    }
+                    force_foreground_window(hwnd);
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+                    }
+                    std::thread::sleep(Duration::from_millis(60));
+                    focus_browser_address_bar(hwnd);
+                    active_user_hwnd = Some(hwnd);
+                    preferred_target_hwnd = Some(hwnd);
+                    feedback.push("Barre d'adresse sélectionnée via focus_address_bar (Alt+D / Ctrl+L).".to_string());
+                } else {
+                    println!("[Actions] Aucun navigateur trouvé pour focus_address_bar, ouverture d'un navigateur.");
+                    let spawned = launch_browser_new_window("https://www.google.com");
+                    if let Some(h) = spawned {
+                        newly_spawned_hwnd = Some(h);
+                        active_user_hwnd = Some(h);
+                        preferred_target_hwnd = Some(h);
+                        user_windows = list_user_windows();
+                    }
+                    feedback.push("Navigateur ouvert pour sélection de la barre d'adresse.".to_string());
+                }
+            }
             AgentAction::ClickElement { window, target_name } => {
                 let is_browser_target = is_address_bar_target(target_name) || is_browser_chrome_target(target_name);
                 let target_hwnd = match window.as_deref() {
@@ -3511,8 +3660,17 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         feedback.push(format!("Fenêtre cible [HWND {:?}] non réactive (sablier). Clic ignoré.", hwnd.0));
                         continue;
                     }
-                    println!("[Actions] Clic sur l'élément [HWND {:?}] pour '{}'", hwnd.0, target_name);
                     let is_browser = user_windows.iter().find(|(h, _)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
+
+                    // Dérivation immédiate vers le raccourci universel Alt+D / Ctrl+L si la barre d'adresse est ciblée
+                    if is_browser && is_address_bar_target(target_name) {
+                        println!("[Actions] Activation directe barre d'adresse (Alt+D / Ctrl+L) sur [HWND {:?}]", hwnd.0);
+                        focus_browser_address_bar(hwnd);
+                        feedback.push("Barre d'adresse sélectionnée via raccourci universel (Alt+D / Ctrl+L).".to_string());
+                        continue;
+                    }
+
+                    println!("[Actions] Clic sur l'élément [HWND {:?}] pour '{}'", hwnd.0, target_name);
                     let show_mode = if is_browser { SW_MAXIMIZE } else { SW_RESTORE };
                     force_foreground_window(hwnd);
                     unsafe {
@@ -3527,6 +3685,13 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     }
 
                     if let Some(elem) = find_best_element(&elements, target_name) {
+                        // Détection structurelle : zone de saisie située dans le chrome navigateur -> barre d'adresse
+                        if is_browser && elem.is_browser_chrome && (elem.is_edit_or_textarea || elem.is_input) {
+                            println!("[Actions] Détection structurelle : zone de saisie dans le chrome navigateur résolue -> focus_browser_address_bar");
+                            focus_browser_address_bar(hwnd);
+                            feedback.push("Barre d'adresse sélectionnée via détection structurelle UIA (Alt+D / Ctrl+L).".to_string());
+                            continue;
+                        }
                         println!("[Actions] Élément/lien trouvé : name='{}', id='{}', type='{}', clic en ({}, {})", elem.name, elem.automation_id, elem.localized_type, elem.click_x, elem.click_y);
                         unsafe { let _ = elem.element.SetFocus(); }
                         click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
@@ -3754,8 +3919,17 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         feedback.push(format!("Fenêtre cible [HWND {:?}] non réactive (sablier). Focus ignoré.", hwnd.0));
                         continue;
                     }
-                    println!("[Actions] Focus sur l'élément [HWND {:?}] pour '{}'", hwnd.0, target_name);
                     let is_browser = user_windows.iter().find(|(h, _)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
+
+                    // Focus direct et infaillible de la barre d'adresse
+                    if is_browser && is_address_bar_target(target_name) {
+                        println!("[Actions] Focus direct barre d'adresse (Alt+D / Ctrl+L) sur [HWND {:?}]", hwnd.0);
+                        focus_browser_address_bar(hwnd);
+                        feedback.push("Barre d'adresse sélectionnée via raccourci universel (Alt+D / Ctrl+L).".to_string());
+                        continue;
+                    }
+
+                    println!("[Actions] Focus sur l'élément [HWND {:?}] pour '{}'", hwnd.0, target_name);
                     let show_mode = if is_browser { SW_MAXIMIZE } else { SW_RESTORE };
                     force_foreground_window(hwnd);
                     unsafe {
@@ -3777,6 +3951,14 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         if elements.is_empty() {
                             std::thread::sleep(Duration::from_millis(150));
                             elements = list_interactive_elements(hwnd);
+                        }
+                        if let Some(elem) = find_best_element(&elements, target_name) {
+                            if is_browser && elem.is_browser_chrome && (elem.is_edit_or_textarea || elem.is_input) {
+                                println!("[Actions] Détection structurelle : zone de saisie dans le chrome navigateur résolue -> focus_browser_address_bar");
+                                focus_browser_address_bar(hwnd);
+                                feedback.push("Barre d'adresse sélectionnée via détection structurelle UIA (Alt+D / Ctrl+L).".to_string());
+                                continue;
+                            }
                         }
 
                         if let Some(elem) = find_best_element(&elements, target_name) {
@@ -3843,6 +4025,12 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     const VK_ESCAPE: VIRTUAL_KEY = VIRTUAL_KEY(0x1B);
                     send_hotkey(&[], VK_ESCAPE);
                     feedback.push("Touche Échap envoyée.".to_string());
+                    continue;
+                }
+                // Interception préventive : évite de lancer un shell cmd.exe pour une combinaison de touches
+                if try_send_key_combination(&cmd_clean) {
+                    println!("[Actions] Combinaison de touches détectée dans run_command et simulée : {}", command);
+                    feedback.push(format!("Combinaison de touches '{}' simulée avec succès.", command));
                     continue;
                 }
 
@@ -4519,6 +4707,8 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 const VK_RIGHT: VIRTUAL_KEY = VIRTUAL_KEY(0x27);
                 const VK_F4: VIRTUAL_KEY = VIRTUAL_KEY(0x73);
                 const VK_F5: VIRTUAL_KEY = VIRTUAL_KEY(0x74);
+                const VK_D: VIRTUAL_KEY = VIRTUAL_KEY(0x44);
+                const VK_L: VIRTUAL_KEY = VIRTUAL_KEY(0x4C);
 
                 match shortcut.as_str() {
                     "magnifier_zoom_in" => send_hotkey(&[VK_LWIN], VK_OEM_PLUS),
@@ -4571,6 +4761,15 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     "close_tab" => send_hotkey(&[VK_CONTROL], VIRTUAL_KEY(0x57)),
                     "reopen_tab" => send_hotkey(&[VK_CONTROL, VK_SHIFT], VIRTUAL_KEY(0x54)),
                     "refresh_page" => send_hotkey(&[], VK_F5),
+                    "bookmarks_bar" | "toggle_bookmarks" | "favoris" => {
+                        // Ctrl + Shift + B (affiche/masque la barre de favoris)
+                        send_hotkey(&[VK_CONTROL, VK_SHIFT], VIRTUAL_KEY(0x42));
+                    }
+                    "focus_address_bar" | "address_bar" | "select_address_bar" => {
+                        send_hotkey(&[VK_MENU], VK_D);
+                        std::thread::sleep(Duration::from_millis(40));
+                        send_hotkey(&[VK_CONTROL], VK_L);
+                    }
                     "mute_volume" | "volume_mute" | "mute_sound" | "mute_audio" => {
                         send_hotkey(&[], VIRTUAL_KEY(0xAD));
                     }
@@ -4590,7 +4789,12 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     "previous_field" => send_hotkey(&[VK_SHIFT], VK_TAB),
                     "escape" => send_hotkey(&[], VK_ESCAPE),
                     "enter" | "press_enter" | "return" => send_hotkey(&[], VK_RETURN),
-                    _ => {}
+                    other => {
+                        if !try_send_key_combination(other) {
+                            feedback.push(format!("Raccourci système '{}' non reconnu.", other));
+                            continue;
+                        }
+                    }
                 }
                 feedback.push(format!("Raccourci système '{}' envoyé.", shortcut));
             }
@@ -5538,13 +5742,18 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 feedback.push(format!("Signal de fermeture envoyé à '{}'.", name));
             }
             AgentAction::OpenBrowser { url } => {
-                let u = url.as_deref().unwrap_or("https://www.google.com");
+                let u = format_url_for_navigation(url.as_deref().unwrap_or(""));
                 let _ = std::process::Command::new("xdg-open").arg(u).spawn();
                 feedback.push(format!("Navigateur ouvert sur '{}'.", u));
             }
+            AgentAction::FocusAddressBar { .. } => {
+                let _ = std::process::Command::new("xdotool").args(["key", "ctrl+l"]).status();
+                feedback.push("Barre d'adresse sélectionnée (Ctrl+L).".to_string());
+            }
             AgentAction::NavigateToUrl { url, .. } => {
-                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-                feedback.push(format!("Navigation vers '{}'.", url));
+                let formatted = format_url_for_navigation(url);
+                let _ = std::process::Command::new("xdg-open").arg(&formatted).spawn();
+                feedback.push(format!("Navigation vers '{}'.", formatted));
             }
             AgentAction::WriteText { text, press_enter, .. } | AgentAction::Dictate { text, press_enter, .. } => {
                 let _ = std::process::Command::new("xdotool").args(["type", "--delay", "12", text]).status();
@@ -5554,6 +5763,12 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 feedback.push(format!("Texte saisi sous X11 ({} caractères).", text.len()));
             }
             AgentAction::RunCommand { command } => {
+                let cmd_clean = command.trim().to_lowercase();
+                if cmd_clean.contains('+') || cmd_clean.starts_with("ctrl") || cmd_clean.starts_with("alt") {
+                    let _ = std::process::Command::new("xdotool").args(["key", &cmd_clean]).status();
+                    feedback.push(format!("Combinaison de touches '{}' envoyée via xdotool.", command));
+                    continue;
+                }
                 let ok = std::process::Command::new("sh").arg("-c").arg(command).spawn().is_ok();
                 feedback.push(format!("Commande shell '{}' ({})", command, if ok { "succès" } else { "échec" }));
             }
@@ -5564,7 +5779,12 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                     "copy" => { let _ = std::process::Command::new("xdotool").args(["key", "ctrl+c"]).status(); }
                     "close_tab" => { let _ = std::process::Command::new("xdotool").args(["key", "ctrl+w"]).status(); }
                     "refresh_page" => { let _ = std::process::Command::new("xdotool").args(["key", "F5"]).status(); }
-                    _ => {}
+                    "bookmarks_bar" | "toggle_bookmarks" | "favoris" => {
+                        let _ = std::process::Command::new("xdotool").args(["key", "ctrl+shift+b"]).status();
+                    }
+                    other => {
+                        let _ = std::process::Command::new("xdotool").args(["key", other]).status();
+                    }
                 }
                 feedback.push(format!("Raccourci '{}' envoyé via xdotool.", shortcut));
             }
