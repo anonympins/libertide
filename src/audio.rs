@@ -406,9 +406,7 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                             Ok(_) => {
                                 speech_detected = false;
                                 audio_16k_buffer.clear();
-                                let _ = event_tx.send(AgentEvent::TranscriptionPartial(
-                                    "Écoute Whisper active...".into(),
-                                ));
+                                let _ = event_tx.send(AgentEvent::TranscriptionPartial(String::new()));
                             }
                             Err(err) => {
                                 eprintln!("[Whisper] Erreur de transcription : {err}");

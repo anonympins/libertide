@@ -926,11 +926,7 @@ impl OverlayApp {
         self.is_recording = true;
         self.status = AgentStatus::Listening;
         play_earcon(Earcon::MicOpen);
-        if !self.is_hidden {
-            self.live_transcript = "Écoute Whisper active... parlez à votre micro.".to_string();
-        } else {
-            self.live_transcript.clear();
-        }
+        self.live_transcript.clear();
         if self.dictation_mode {
             restore_external_focus();
         }
@@ -1920,7 +1916,7 @@ impl eframe::App for OverlayApp {
                                             }
                                         });
 
-                                        let edit_width = (ui.available_width() - 156.0).max(60.0);
+                                        let edit_width = (ui.available_width() - 128.0).max(60.0);
                                         let input_id = egui::Id::new("prompt_input_text");
                                         let response = ui.add_sized(
                                             [edit_width, 24.0],
@@ -2074,13 +2070,6 @@ impl eframe::App for OverlayApp {
                                             } else {
                                                 self.status = AgentStatus::Thinking;
                                                 let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
-                                            }
-                                        }
-
-                                        let paste_btn = ui.button("📋").on_hover_text("Coller le texte du presse-papiers");
-                                        if paste_btn.clicked() {
-                                            if let Some(clip) = get_clipboard_text() {
-                                                self.input_text.push_str(&clip);
                                             }
                                         }
 
@@ -2277,54 +2266,6 @@ impl eframe::App for OverlayApp {
                                             }
                                         });
                                         ui.add_space(if is_highlighted { 8.0 } else { 5.0 });
-                                    }
-
-                                    // Retour visuel en direct de l'écoute micro
-                                    if self.is_recording && !self.live_transcript.is_empty() {
-                                        let live_id = ui.make_persistent_id("live_transcript_box");
-                                        let layer_id = ui.layer_id();
-                                        ui.memory_mut(|m| m.interested_in_focus(live_id, layer_id));
-                                        let is_live_focused = ui.memory(|m| m.has_focus(live_id));
-                                        let copy_live_hit = ctx.input(|i| {
-                                            i.events.iter().any(|e| matches!(e, egui::Event::Copy))
-                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
-                                        });
-                                        if is_live_focused && copy_live_hit {
-                                            set_clipboard_text(&self.live_transcript);
-                                            ctx.copy_text(self.live_transcript.clone());
-                                            play_earcon(Earcon::Success);
-                                        }
-                                        ui.vertical(|ui| {
-                                            ui.label(
-                                                egui::RichText::new("🗣 Vous (en direct...)")
-                                                    .size(10.5)
-                                                    .color(egui::Color32::from_rgb(255, 215, 120))
-                                                    .italics(),
-                                            );
-                                            let live_resp = ui.add(
-                                                egui::Label::new(
-                                                    egui::RichText::new(&self.live_transcript)
-                                                        .size(13.5)
-                                                        .line_height(Some(18.0))
-                                                        .color(egui::Color32::from_rgb(255, 230, 160))
-                                                        .italics(),
-                                                )
-                                                .wrap(),
-                                            );
-                                            let interact_live = ui.interact(live_resp.rect, live_id, egui::Sense::click());
-                                            if interact_live.clicked() {
-                                                ui.memory_mut(|m| m.request_focus(live_id));
-                                            }
-                                            if is_live_focused || interact_live.has_focus() {
-                                                ui.painter().rect_stroke(
-                                                    live_resp.rect.expand(2.5),
-                                                    egui::CornerRadius::same(4),
-                                                    egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 205, 70)),
-                                                    egui::StrokeKind::Outside,
-                                                );
-                                            }
-                                        });
-                                        ui.add_space(6.0);
                                     }
 
                                     if let Some(prompt) = clicked_quick_suggestion {
