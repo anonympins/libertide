@@ -639,6 +639,7 @@ impl OverlayApp {
         audio_sender: StdSender<AudioCommand>,
         twitch_channel_sender: StdSender<String>,
         initial_twitch_channel: String,
+        initial_voice: VoiceGender,
     ) -> Self {
         setup_custom_fonts(&cc.egui_ctx);
 
@@ -669,7 +670,7 @@ impl OverlayApp {
             continuous_mode: true,
             dictation_mode: false,
             zoom_factor: 1.0,
-            voice_gender: VoiceGender::Denise,
+            voice_gender: initial_voice,
 
             numbered_targets: Vec::new(),
             show_numbered_targets: false,
@@ -811,6 +812,8 @@ impl OverlayApp {
     pub fn set_voice_gender(&mut self, gender: VoiceGender) {
         self.voice_gender = gender;
         let _ = self.tts_sender.send(TtsCommand::SetGender(gender));
+        std::env::set_var("VOICE_PROFILE", gender.to_key_str());
+        let _ = write_env_var_to_file(".env", "VOICE_PROFILE", gender.to_key_str());
         let confirmation = match gender {
             VoiceProfile::Denise => "Voix de Denise activée.",
             VoiceProfile::Henri => "Voix d'Henri activée.",
@@ -2722,6 +2725,22 @@ fn resolve_deepseek_key() -> String {
     String::new()
 }
 
+fn resolve_initial_voice() -> VoiceGender {
+    if let Ok(key) = std::env::var("VOICE_PROFILE") {
+        if let Some(v) = VoiceProfile::from_id_or_name(&key) {
+            return v;
+        }
+    }
+
+    if let Some(val) = read_env_var_from_file(".env", "VOICE_PROFILE") {
+        if let Some(v) = VoiceProfile::from_id_or_name(&val) {
+            return v;
+        }
+    }
+
+    VoiceGender::Denise
+}
+
 fn parse_agent_response(raw: &str) -> AgentResponsePayload {
     let clean = raw.trim();
 
@@ -2947,16 +2966,24 @@ Réponds STRICTEMENT en JSON sans texte hors JSON. "narration" concise rédigée
 
 Règles principales :
 1. Filtrage requête : Bruit/inintelligible -> "invalid_request": true. Salutations/chit-chat -> "invalid_request": false, "actions": [], narration courtoise.
-2. Budget de raisonnement ("next_passes": 1..15) :
-   - Réponse directe/clic unique : 1-3 passes.
-   - Tâche multi-étapes standard (web, formulaire) : 4-7 passes.
-   - Urgence technique/humaine/départ : 10-15 passes ("next_passes": 15 ou set_reasoning_passes: 15).
-3. PROTOCOLE URGENCE VITALE & SANTÉ :
-   - Malaise/douleur/vertige/appel à l'aide : IMMÉDIATEMENT "next_passes": 15.
-   - SANS CONFIRMATION NI CHAT : Si demande d'alerte/message à un proche (Robin Ruaux, médecin, famille), exécute immédiatement l'envoi sans attendre ("actions": [...]).
-   - Narration : 1 phrase courte confirmant l'envoi + rappelle secours (15 SAMU, 18 Pompiers, 112).
-   - Silence parasite : appelle "mute_audio" (isole bruits tiers, garde voix Libertide audible).
-   - PIVOT OBLIGATOIRE : Tant que l'alerte n'est pas envoyée et qu'il reste des passes, INTERDICTION de renvoyer "actions": []. Si l'app échoue, pivote (open_app, navigate_to_url vers WhatsApp Web/Discord/Teams/Email, ou autre fenêtre).
+2. Budget de raisonnement et importance de la tâche ("next_passes": 1..15) :
+    - ÉVALUATION DE L'IMPORTANCE & COMPLEXITÉ : Tu détermines toi-même "next_passes" selon l'importance et l'envergure perçues de la consigne utilisateur :
+      * Basse importance / Réponse directe / Simple clic / Tâche ponctuelle rapide ("vite", "juste un coup d'œil", information simple) : 1 à 3 passes.
+      * Importance normale / Tâche standard multi-étapes (navigation web, formulaire, lecture, interaction applicative standard) : 4 à 7 passes.
+      * Haute importance / Mission prioritaire / Analyse approfondie (tâche formulée comme "très importante", "prioritaire", "cruciale", comparaison minutieuse, recherche exhaustive ou orchestration multi-applications) : 8 à 12 passes.
+      * Importance critique / Urgence vitale explicite / Grand départ précipité : 13 à 15 passes.
+    - MODULATION DYNAMIQUE CONTINUE : À chaque passe d'exécution, réévalue "next_passes" selon l'état d'avancement réel. Si la tâche est presque achevée, réduis les passes restantes ; si des obstacles imprévus apparaissent sur une tâche de haute importance, augmente le budget via "next_passes" ou l'action "set_reasoning_passes".
+ 3. PROTOCOLE URGENCE VITALE & SANTÉ :
+   - CAS 1 - DEMANDE EXPLICITE D'ALERTE / SECOURS (ex: "alerte Robin je fais un malaise", "appelle le 15", "aide médicale d'urgence") :
+     * IMMÉDIATEMENT "next_passes": 15.
+     * SANS ATTENDRE : exécute immédiatement l'envoi d'alerte ("actions": [...]).
+     * Narration : 1 phrase courte confirmant l'envoi + rappelle secours (15 SAMU, 18 Pompiers, 112).
+     * Silence parasite : appelle "mute_audio" (isole bruits tiers, garde voix Libertide audible).
+     * PIVOT OBLIGATOIRE : Tant que l'alerte n'est pas envoyée et qu'il reste des passes, INTERDICTION de renvoyer "actions": [].
+   - CAS 2 - DIDASCALIES (*gémissements*, *soupir*, *aïe*, [pleurs], etc.), JEU DE RÔLE, CITATION OU SITUATION AMBIGUË SANS DEMANDE FORMELLE :
+     * INTERDICTION STRICTE DE PANIQUER OU D'ENVOYER DES MESSAGES À DES TIERS : conserve impérativement "actions": [].
+     * Reste calme et attentif. Vérifie la situation dans la narration (ex: "J'ai perçu des signes de malaise (*gémissements*). Avez-vous besoin d'une assistance ou d'alerter un proche ?").
+     * Fournis OBLIGATOIREMENT une demande de confirmation dans "quick_suggestions" : ["Oui, alerter mes proches / secours", "Non, tout va bien / fausse alerte"].
    - Départ précipité : autonomie pour sauver fichiers et fermer session / verrouiller écran.
 4. Interface & Ciblage :
    - Hôte navigateur : préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse").
@@ -3517,7 +3544,8 @@ async fn call_deepseek_prompt(
 fn main() -> eframe::Result<()> {
     let (event_tx, event_rx) = channel::<AgentEvent>();
     let (cmd_tx, mut cmd_rx) = unbounded_channel::<AgentCommand>();
-    let tts_tx = spawn_tts_worker(event_tx.clone());
+    let initial_voice = resolve_initial_voice();
+    let tts_tx = spawn_tts_worker(event_tx.clone(), initial_voice);
     let (twitch_ch_tx, twitch_ch_rx) = channel::<String>();
     spawn_twitch_worker(event_tx.clone(), twitch_ch_rx);
     let deepseek_key = resolve_deepseek_key();
@@ -3833,6 +3861,7 @@ fn main() -> eframe::Result<()> {
                 audio_tx,
                 twitch_ch_tx,
                 initial_twitch_channel,
+                initial_voice,
             )))
         }),
     )

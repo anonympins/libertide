@@ -60,6 +60,31 @@ impl VoiceProfile {
         }
     }
 
+    pub fn to_key_str(&self) -> &'static str {
+        match self {
+            Self::Denise => "denise",
+            Self::Henri => "henri",
+            Self::Hortense => "hortense",
+            Self::Paul => "paul",
+            Self::Sylvie => "sylvie",
+            Self::Jean => "jean",
+            Self::Kokoro => "kokoro",
+        }
+    }
+
+    pub fn from_id_or_name(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "denise" => Some(Self::Denise),
+            "henri" => Some(Self::Henri),
+            "hortense" => Some(Self::Hortense),
+            "paul" => Some(Self::Paul),
+            "sylvie" => Some(Self::Sylvie),
+            "jean" => Some(Self::Jean),
+            "kokoro" => Some(Self::Kokoro),
+            _ => None,
+        }
+    }
+
     pub fn edge_voice_id(&self) -> &'static str {
         match self {
             Self::Denise => "fr-FR-DeniseNeural",

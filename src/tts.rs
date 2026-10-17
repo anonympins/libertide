@@ -976,10 +976,10 @@ fn synthesize_kokoro_safe(
 }
 
 /// Lance le worker de synthèse vocale réactif
-pub fn spawn_tts_worker(event_tx: StdSender<AgentEvent>) -> StdSender<TtsCommand> {
+pub fn spawn_tts_worker(event_tx: StdSender<AgentEvent>, initial_voice: VoiceGender) -> StdSender<TtsCommand> {
     let (tx, rx) = channel::<TtsCommand>();
     std::thread::spawn(move || {
-        let mut current_gender = VoiceGender::Kokoro; // Denise par défaut
+        let mut current_gender = initial_voice;
         let kokoro_engine: Arc<Mutex<Option<Box<dyn TtsModel>>>> = Arc::new(Mutex::new(None));
         let kokoro_ready = Arc::new(AtomicBool::new(false));
 
