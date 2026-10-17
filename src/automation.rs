@@ -183,6 +183,44 @@ pub fn set_autostart(enable: bool) -> Result<String, String> {
 }
 
 #[cfg(windows)]
+pub fn open_path_with_default_app(path: &str) -> Result<(), String> {
+    let p = std::path::Path::new(path);
+    let resolved = if p.exists() {
+        p.to_path_buf()
+    } else if let Some((found, _)) = find_file_in_workspace(path) {
+        std::path::PathBuf::from(found)
+    } else {
+        std::path::PathBuf::from(path)
+    };
+
+    let target_str = resolved.to_string_lossy().to_string();
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &target_str])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(|e| format!("Erreur lors de l'ouverture du fichier : {e}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Code de retour non nul lors de l'ouverture de '{target_str}'"))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn open_path_with_default_app(path: &str) -> Result<(), String> {
+    let status = std::process::Command::new("xdg-open")
+        .arg(path)
+        .status()
+        .map_err(|e| format!("Erreur lors de l'ouverture du fichier : {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Code de retour non nul pour xdg-open '{path}'"))
+    }
+}
+
+#[cfg(windows)]
 static LAST_TXT_HWND: Mutex<Option<isize>> = Mutex::new(None);
 pub static LAST_EXTERNAL_HWND: Mutex<Option<isize>> = Mutex::new(None);
 pub static LAST_FOCUSED_CHILD_HWND: Mutex<Option<isize>> = Mutex::new(None);
@@ -4330,8 +4368,8 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                             click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                             feedback.push(format!("Clic effectué sur le bouton '{}' de la notification.", button_name));
                         } else {
-                        println!("[Actions] Aucun bouton correspondant trouvé pour '{}'", button_name);
-                        feedback.push(format!("Bouton '{}' introuvable à l'écran.", button_name));
+                            println!("[Actions] Aucun bouton correspondant trouvé pour '{}'", button_name);
+                            feedback.push(format!("Bouton '{}' introuvable à l'écran.", button_name));
                         }
                     }
                 }
@@ -6023,6 +6061,18 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         feedback.push(format!("Commande de volume '{command}' appliquée."));
                     }
                 }
+            }
+            AgentAction::OpenFile { path } => {
+                match open_path_with_default_app(path) {
+                    Ok(_) => feedback.push(format!("Fichier '{path}' ouvert dans son application par défaut.")),
+                    Err(err) => feedback.push(format!("Impossible d'ouvrir le fichier '{path}' : {err}")),
+                }
+            }
+            AgentAction::ShowFloatingCard { title, .. } => {
+                feedback.push(format!("Fenêtre volante '{title}' affichée à l'écran."));
+            }
+            AgentAction::CloseFloatingCard { id } => {
+                feedback.push(format!("Fenêtre volante '{id}' fermée."));
             }
         }
     }

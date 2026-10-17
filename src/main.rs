@@ -1,5 +1,6 @@
 mod audio;
 mod automation;
+mod floating_window;
 mod fs_util;
 mod html_util;
 mod pattern;
@@ -9,6 +10,7 @@ mod types;
 mod window_util;
 
 use audio::spawn_audio_worker;
+use floating_window::FloatingCard;
 use automation::*;
 use fs_util::*;
 use pattern::clean_words;
@@ -118,6 +120,7 @@ pub struct OverlayApp {
     twitch_search_query: String,
     twitch_search_results: Vec<TwitchChannelItem>,
     position_initialized: bool,
+    floating_cards: Vec<FloatingCard>,
     window_pos: Option<egui::Pos2>,
     window_bottom_y: Option<f32>,
     drag_offset: Option<egui::Vec2>,
@@ -687,6 +690,7 @@ impl OverlayApp {
             twitch_search_query: String::new(),
             twitch_search_results: Vec::new(),
             position_initialized: false,
+            floating_cards: Vec::new(),
             window_pos: None,
             window_bottom_y: None,
             drag_offset: None,
@@ -1587,6 +1591,16 @@ impl eframe::App for OverlayApp {
                 AgentEvent::RequestApiKey => {
                     self.show_api_key_modal = true;
                     self.is_hidden = false;
+                }
+                AgentEvent::ShowFloatingCard(card) => {
+                    if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == card.id) {
+                        *existing = card;
+                    } else {
+                        self.floating_cards.push(card);
+                    }
+                }
+                AgentEvent::CloseFloatingCard(id) => {
+                    self.floating_cards.retain(|c| c.id != id);
                 }
             }
         }
@@ -2706,6 +2720,12 @@ impl eframe::App for OverlayApp {
                             });
                         });
                 }
+
+                // Affichage dynamique des fenêtres volantes (stats, tables, contenus)
+                self.floating_cards.retain_mut(|card| {
+                    card.show(&ctx);
+                    card.open
+                });
             });
     }
 }
@@ -3010,6 +3030,9 @@ Règles principales :
    - Sélection : "select_text_between" (from, to).
    - Immersion : "activate_immersion" (Win+Ctrl+D), "deactivate_immersion".
    - Temporisation & Différé : "schedule_prompt" (delay_seconds: 1..3600, prompt: "...") ou "schedule_prompts" (tasks: [{{"delay_seconds": 10, "prompt": "..."}}]) pour différer des consignes futures (téléchargement en cours, rappel, temporisation).
+   - Fichiers & Documents : "open_file" (path: "chemin/fichier.ext") pour ouvrir directement toute image, vidéo, PDF, tableur ou document dans son application système par défaut (selon extension / MIME type).
+   - Fenêtres volantes d'analyse : "show_floating_card" (id: "...", title: "...", card_type: "table"|"stats"|"markdown", data: {{...}}) pour projeter une fenêtre volante semi-transparente avec un tableau comparatif, des données chiffrées ou une fiche technique.
+   - Fermeture carte : "close_floating_card" (id: "...").
 8. Fin de passes : Dès que "actions" est vide (tâche finie ou choix requis), fournis OBLIGATOIREMENT 2 à 4 suggestions concrètes dans "quick_suggestions".
 
 Format JSON obligatoire :
@@ -3043,7 +3066,10 @@ Format JSON obligatoire :
     {{"action": "schedule_prompt", "delay_seconds": 10, "prompt": "..."}},
     {{"action": "schedule_prompts", "tasks": [{{"delay_seconds": 10, "prompt": "..."}}]}},
     {{"action": "mute_audio"}},
-    {{"action": "set_volume", "command": "mute"|"down"|"up"|"min"}}
+    {{"action": "set_volume", "command": "mute"|"down"|"up"|"min"}},
+    {{"action": "open_file", "path": "chemin/vers/image_ou_doc.png"}},
+    {{"action": "show_floating_card", "id": "stats_1", "title": "Tableau comparatif", "card_type": "table", "data": {{"headers": ["Modèle", "Prix"], "rows": [["Produit A", "49€"], ["Produit B", "59€"]]}}}},
+    {{"action": "close_floating_card", "id": "stats_1"}}
   ],
   "quick_suggestions": ["Option 1", "Option 2"]
 }}"#)
@@ -3416,6 +3442,19 @@ async fn call_deepseek_prompt(
         }
 
         let actions_to_run = payload.actions;
+        for act in &actions_to_run {
+            match act {
+                AgentAction::ShowFloatingCard { id, title, card_type, data } => {
+                    let card = FloatingCard::from_action_data(id.clone(), title.clone(), card_type, data);
+                    let _ = event_tx.send(AgentEvent::ShowFloatingCard(card));
+                }
+                AgentAction::CloseFloatingCard { id } => {
+                    let _ = event_tx.send(AgentEvent::CloseFloatingCard(id.clone()));
+                }
+                _ => {}
+            }
+        }
+
         let has_web_action = actions_to_run.iter().any(|a| {
             matches!(
                 a,

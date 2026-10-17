@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+pub use crate::floating_window::FloatingCard;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStatus {
@@ -150,6 +151,8 @@ pub enum AgentEvent {
     TwitchSearchResults(Vec<TwitchChannelItem>),
     RequestIgnored,
     RequestApiKey,
+    ShowFloatingCard(FloatingCard),
+    CloseFloatingCard(String),
 }
 
 #[derive(Debug, Clone)]
@@ -369,6 +372,22 @@ pub enum AgentAction {
     SetVolume {
         #[serde(default, alias = "level", alias = "value", alias = "type", alias = "mode")]
         command: String,
+    },
+    #[serde(alias = "open_document", alias = "launch_file", alias = "open_media")]
+    OpenFile {
+        path: String,
+    },
+    #[serde(alias = "show_floating_window", alias = "floating_card", alias = "display_card")]
+    ShowFloatingCard {
+        id: Option<String>,
+        title: String,
+        #[serde(default)]
+        card_type: String,
+        #[serde(default)]
+        data: serde_json::Value,
+    },
+    CloseFloatingCard {
+        id: String,
     },
 }
 
