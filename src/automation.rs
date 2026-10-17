@@ -19,10 +19,11 @@ use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPRO
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationElement2, IUIAutomationInvokePattern,
-    IUIAutomationScrollItemPattern, IUIAutomationTextPattern, IUIAutomationValuePattern,
+    IUIAutomationScrollItemPattern, IUIAutomationScrollPattern, IUIAutomationTextPattern, IUIAutomationValuePattern,
     TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
     UIA_TabControlTypeId, UIA_TabItemControlTypeId,
-    UIA_HyperlinkControlTypeId, UIA_InvokePatternId, UIA_ScrollItemPatternId, UIA_TextPatternId, UIA_ValuePatternId,
+    UIA_HyperlinkControlTypeId, UIA_InvokePatternId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
+    UIA_TextPatternId, UIA_ValuePatternId,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -541,6 +542,14 @@ pub fn restore_external_focus_target(target: Option<HWND>) -> bool {
 
     if let Some(hwnd) = target_hwnd {
         if !hwnd.0.is_null() && !is_window_hung(hwnd) {
+            let (_pid, exe_name) = get_window_process_info(hwnd);
+            let is_browser = is_browser_executable(&exe_name);
+
+            if is_browser {
+                focus_browser_address_bar(hwnd);
+                return true;
+            }
+
             // Contournement universel de l'inhibition de focus Windows via simulation de la touche Alt
             const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
             send_key_event(VK_MENU, KEYBD_EVENT_FLAGS(0));
@@ -876,6 +885,9 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
             0
         };
 
+        let (_pid, exe_name) = get_window_process_info(hwnd);
+        let is_browser = is_browser_executable(&exe_name);
+
         const ASFW_ANY: u32 = 0xFFFFFFFF;
         let _ = AllowSetForegroundWindow(ASFW_ANY);
 
@@ -887,10 +899,13 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
             let _ = BringWindowToTop(hwnd);
             let _ = SetForegroundWindow(hwnd);
 
-            let mut gti = GUITHREADINFO::default();
-            gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
-            if GetGUIThreadInfo(target_thread_id, &mut gti).is_ok() && !gti.hwndFocus.0.is_null() {
-                let _ = SetFocus(gti.hwndFocus);
+            // Pour les navigateurs, ne pas forcer le focus sur le widget de rendu interne de la page web
+            if !is_browser {
+                let mut gti = GUITHREADINFO::default();
+                gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+                if GetGUIThreadInfo(target_thread_id, &mut gti).is_ok() && !gti.hwndFocus.0.is_null() {
+                    let _ = SetFocus(gti.hwndFocus);
+                }
             }
 
             if fg_thread_id != 0 && fg_thread_id != target_thread_id {
@@ -1147,6 +1162,14 @@ pub fn is_address_bar_target(target: &str) -> bool {
         || clean.contains("adresse")
         || clean.contains("address")
         || clean.contains("omnibox")
+        || clean.contains("omnibar")
+        || clean.contains("omniboxview")
+        || clean == "navigateur"
+        || clean == "browser"
+        || clean == "chrome"
+        || clean == "edge"
+        || clean == "firefox"
+        || clean == "brave"
 }
 
 pub fn is_browser_chrome_target(target: &str) -> bool {
@@ -1231,14 +1254,22 @@ pub fn focus_browser_address_bar(hwnd: HWND) {
     unsafe {
         let _ = ShowWindow(hwnd, SW_MAXIMIZE);
     }
-    std::thread::sleep(Duration::from_millis(80));
+    std::thread::sleep(Duration::from_millis(50));
+
+    release_modifier_keys();
 
     const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
     const VK_L: VIRTUAL_KEY = VIRTUAL_KEY(0x4C);
     const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
     const VK_D: VIRTUAL_KEY = VIRTUAL_KEY(0x44);
 
-    // 1. Clic direct sur la barre d'adresse si elle est repérée dans l'arbre UIA
+    // 1. Sélection universelle directe de l'omnibar (Alt+D puis Ctrl+L) sans clic souris parasite
+    send_hotkey(&[VK_MENU], VK_D);
+    std::thread::sleep(Duration::from_millis(40));
+    send_hotkey(&[VK_CONTROL], VK_L);
+    std::thread::sleep(Duration::from_millis(50));
+
+    // 2. Renforcement du focus UIA sur l'omnibar si accessible
     let elements = list_interactive_elements(hwnd);
     let address_elem = elements.iter().find(|e| {
         e.is_browser_chrome
@@ -1247,15 +1278,7 @@ pub fn focus_browser_address_bar(hwnd: HWND) {
 
     if let Some(elem) = address_elem {
         unsafe { let _ = elem.element.SetFocus(); }
-        click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
-        std::thread::sleep(Duration::from_millis(50));
     }
-
-    // 2. Raccourcis universels de sélection de la barre d'adresse (Alt+D puis Ctrl+L)
-    send_hotkey(&[VK_MENU], VK_D);
-    std::thread::sleep(Duration::from_millis(60));
-    send_hotkey(&[VK_CONTROL], VK_L);
-    std::thread::sleep(Duration::from_millis(80));
 }
 
 #[cfg(windows)]
@@ -1530,6 +1553,51 @@ fn extract_inner_text(uia: &IUIAutomation, element: &IUIAutomationElement, max_c
         }
     }
     None
+}
+
+#[cfg(windows)]
+fn extract_scrollable_viewports_content(uia: &IUIAutomation, hwnd: HWND) -> String {
+    let mut output = String::new();
+    unsafe {
+        let Ok(window_element) = uia.ElementFromHandle(hwnd) else {
+            return output;
+        };
+        let Ok(cond) = uia.ControlViewCondition() else {
+            return output;
+        };
+        let Ok(elements) = window_element.FindAll(TreeScope_Descendants, &cond) else {
+            return output;
+        };
+
+        let count = elements.Length().unwrap_or(0).clamp(0, 100);
+        for i in 0..count {
+            if let Ok(item) = elements.GetElement(i) {
+                if let Ok(p_unk) = item.GetCurrentPattern(UIA_ScrollPatternId) {
+                    if let Ok(scroll_pattern) = p_unk.cast::<IUIAutomationScrollPattern>() {
+                        let is_v_scrollable = scroll_pattern.CurrentVerticallyScrollable().map(|b| b.as_bool()).unwrap_or(false);
+                        if is_v_scrollable {
+                            let v_percent = scroll_pattern.CurrentVerticalScrollPercent().unwrap_or(0.0);
+                            let is_at_max = v_percent >= 99.0 || v_percent == 100.0;
+                            let name = item.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+                            let loc_type = item.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default();
+                            let label = if !name.trim().is_empty() { name.trim().to_string() } else { loc_type };
+
+                            if let Some(content) = extract_inner_text(uia, &item, 1800) {
+                                let clean_md = if content.contains('<') && content.contains('>') {
+                                    crate::html_util::sanitize_html_to_markdown(&content)
+                                } else {
+                                    content
+                                };
+                                let status = if is_at_max { "Scrollbar au MAXIMUM (100% - fin de liste/chat)" } else { "Viewport défilable actif" };
+                                output.push_str(&format!("\n> ### Viewport : {} [{}]\n> Défilement : {:.0}%\n```\n{}\n```\n", label, status, v_percent, clean_md.trim()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    output
 }
 
 #[cfg(windows)]
@@ -2172,6 +2240,11 @@ pub fn write_to_browser_or_txt(text: &str) -> String {
             ensure_window_textarea_focus(target_hwnd);
         }
         std::thread::sleep(Duration::from_millis(50));
+
+        const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+        const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
+        send_hotkey(&[VK_CONTROL], VK_A);
+        std::thread::sleep(Duration::from_millis(30));
 
         clipboard::set_text(text);
         std::thread::sleep(Duration::from_millis(40));
@@ -2898,15 +2971,25 @@ pub fn compute_screen_diff(old_summary: &str, new_summary: &str) -> String {
 
     let mut diff = String::new();
     if !removed.is_empty() {
-        diff.push_str("[Éléments disparus ou modifiés] :\n");
+        diff.push_str("#### 🔻 Éléments disparus ou remplacés :\n");
         for r in removed {
-            diff.push_str(&format!("- {}\n", r));
+            let clean_r = if r.contains('<') && r.contains('>') {
+                crate::html_util::sanitize_html_to_markdown(r)
+            } else {
+                r.to_string()
+            };
+            diff.push_str(&format!("- ~~{}~~\n", clean_r.trim()));
         }
     }
     if !added.is_empty() {
-        diff.push_str("[Nouveaux éléments ou nouveaux états] :\n");
+        diff.push_str("\n#### 🟢 Nouveaux éléments / Données modifiées (Markdown) :\n");
         for a in added {
-            diff.push_str(&format!("+ {}\n", a));
+            let clean_a = if a.contains('<') && a.contains('>') {
+                crate::html_util::sanitize_html_to_markdown(a)
+            } else {
+                a.to_string()
+            };
+            diff.push_str(&format!("- **{}**\n", clean_a.trim()));
         }
     }
     diff
@@ -3076,12 +3159,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
     let wa_h = work_area.bottom - work_area.top;
 
     let user_windows = list_user_windows();
-    let raw_fg = unsafe { GetForegroundWindow() };
-    let current_pid = std::process::id();
-    let (raw_fg_pid, _) = get_window_process_info(raw_fg);
-
-    // 1. Bypass de l'overlay : si au premier plan c'est Libertide ou inconnu, cibler l'application externe réelle
-    let is_libertide_or_unknown = raw_fg.0.is_null()
+    let raw_fg = unsafe { GetForegroundWindow() };    let current_pid = std::process::id();    let (raw_fg_pid, _) = get_window_process_info(raw_fg);    let is_libertide_or_unknown = raw_fg.0.is_null()
         || raw_fg_pid == current_pid
         || !user_windows.iter().any(|(h, _)| *h == raw_fg);
 
@@ -3100,21 +3178,13 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             .unwrap_or(raw_fg)
     };
 
-    let mut out = String::new();
-    out.push_str(&format!(
-        "=== Rapport d'analyse de l'écran ===\nEspace de travail : {}x{}\n",
-        wa_w, wa_h
-    ));
+    let prev_screen_snapshot = LAST_SCREEN_SUMMARY.lock().ok().and_then(|g| g.clone());
 
     let fg_title = user_windows
         .iter()
         .find(|(h, _)| *h == active_hwnd)
         .map(|(_, t)| t.as_str())
         .unwrap_or("Application active");
-    out.push_str(&format!(
-        "Fenêtre au premier plan (contexte actif) : \"{}\"\n[Note d'intention contextuelle] : Cette fenêtre est le contexte direct de l'utilisateur. Toute instruction relative à une question, recherche, météo, achat ou formulaire doit être résolue prioritairement dans cette fenêtre active.\n\n",
-        fg_title
-    ));
 
     let mut inspect_hwnds = Vec::new();
 
@@ -3144,8 +3214,9 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
     }
 
     // 2. Priorisation : l'arbre UIA de la fenêtre active est généré en premier
-    out.push_str("=== Contenu détaillé de la fenêtre active ===\n");
-    for (win_idx, hwnd) in inspect_hwnds.iter().enumerate() {
+    let mut active_window_content = String::new();
+    active_window_content.push_str("=== Contenu détaillé de la fenêtre active ===\n");
+    for hwnd in &inspect_hwnds {
         let win_title = user_windows
             .iter()
             .find(|(h, _)| *h == *hwnd)
@@ -3154,12 +3225,12 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
 
         let is_active = *hwnd == active_hwnd;
         if is_active {
-            out.push_str(&format!("\n--- Fenêtre : \"{}\" [AU PREMIER PLAN - CONTEXTE ACTIF PRIORITAIRE] ---\n", win_title));
+            active_window_content.push_str(&format!("\n--- Fenêtre : \"{}\" [AU PREMIER PLAN - CONTEXTE ACTIF PRIORITAIRE] ---\n", win_title));
         } else {
-            out.push_str(&format!("\n--- Fenêtre secondaire : \"{}\" ---\n", win_title));
+            active_window_content.push_str(&format!("\n--- Fenêtre secondaire : \"{}\" ---\n", win_title));
         }
         if is_window_hung(*hwnd) {
-            out.push_str("  (Application figée / ne répond pas - UIA ignoré)\n");
+            active_window_content.push_str("  (Application figée / ne répond pas - UIA ignoré)\n");
             continue;
         }
 
@@ -3170,10 +3241,20 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         let detected_file = extract_filename_from_title(win_title);
         let is_terminal = is_terminal_window(*hwnd, win_title);
 
+        // Extraction des viewports défilables et des conteneurs dont la scrollbar est à son maximum
+        unsafe {
+            if let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+                let viewports_text = extract_scrollable_viewports_content(&uia, *hwnd);
+                if !viewports_text.trim().is_empty() {
+                    active_window_content.push_str(&format!("\n=== Viewports et zones défilables (Scrollbar max / conteneurs actifs) ===\n{}", viewports_text));
+                }
+            }
+        }
+
         if is_terminal {
             if let Some(term_text) = read_terminal_window_content(*hwnd, win_title) {
                 let preview = truncate_with_notice(&term_text, 2200);
-                out.push_str(&format!("  [Terminal '{}' - Sortie console active] :\n```\n{}\n```\n", win_title, preview.trim()));
+                active_window_content.push_str(&format!("  [Terminal '{}' - Sortie console active] :\n```\n{}\n```\n", win_title, preview.trim()));
             }
         }
         let has_scrollbar = initial_elements.iter().any(|e| {
@@ -3187,17 +3268,17 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             if !is_browser && (is_editor || detected_file.is_some()) {
                 if let Some(ref fname) = detected_file {
                     if let Some((fpath, _)) = find_file_in_workspace(fname) {
-                        out.push_str(&format!("  [Fichier actif dans l'éditeur] : \"{}\" (chemin: {})\n", fname, fpath));
+                        active_window_content.push_str(&format!("  [Fichier actif dans l'éditeur] : \"{}\" (chemin: {})\n", fname, fpath));
                     } else {
-                        out.push_str(&format!("  [Fichier actif détecté d'après le titre] : \"{}\"\n", fname));
+                        active_window_content.push_str(&format!("  [Fichier actif détecté d'après le titre] : \"{}\"\n", fname));
                     }
                 } else {
-                    out.push_str(&format!("  [Éditeur de code actif] : \"{}\"\n", win_title));
+                    active_window_content.push_str(&format!("  [Éditeur de code actif] : \"{}\"\n", win_title));
                 }
             } else if is_terminal {
                 // Déjà renseigné plus haut via read_terminal_window_content
             } else {
-            out.push_str("  (Aucun élément UI interactif accessible)\n");
+                active_window_content.push_str("  (Aucun élément UI interactif accessible)\n");
             }
             continue;
         }
@@ -3207,9 +3288,9 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         if !is_browser && (is_editor || detected_file.is_some()) {
             if let Some(ref fname) = detected_file {
                 if let Some((fpath, _)) = find_file_in_workspace(fname) {
-                    out.push_str(&format!("  [Fichier actif dans l'éditeur] : \"{}\" (chemin: {})\n", fname, fpath));
+                    active_window_content.push_str(&format!("  [Fichier actif dans l'éditeur] : \"{}\" (chemin: {})\n", fname, fpath));
                 } else {
-                    out.push_str(&format!("  [Fichier actif détecté d'après le titre] : \"{}\"\n", fname));
+                    active_window_content.push_str(&format!("  [Fichier actif détecté d'après le titre] : \"{}\"\n", fname));
                 }
             }
         }
@@ -3220,7 +3301,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             .collect();
         if !edits.is_empty() {
             let prefix = if has_web_doc { "  [Page web - champs de saisie / recherche] :\n" } else { "  [Champs de texte / saisie] :\n" };
-            out.push_str(prefix);
+            active_window_content.push_str(prefix);
             for edit in edits.iter().take(8) {
                 let mut label = if !edit.name.is_empty() {
                     edit.name.clone()
@@ -3248,7 +3329,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                 } else {
                     String::new()
                 };
-                out.push_str(&format!("  • {}{}\n", label, val));
+                active_window_content.push_str(&format!("  • {}{}\n", label, val));
             }
         }
 
@@ -3271,7 +3352,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         if !headings.is_empty() {
             let display_headings: Vec<String> = headings.into_iter().take(15).collect();
             let prefix = if has_web_doc { "  [Page web - titres / en-têtes] : " } else { "  [Titres / en-têtes] : " };
-            out.push_str(&format!("{}{}\n", prefix, display_headings.join(" | ")));
+            active_window_content.push_str(&format!("{}{}\n", prefix, display_headings.join(" | ")));
         }
 
         // C. Textes informatifs, encarts météo, prévisions, données et prix
@@ -3313,7 +3394,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         if !text_items.is_empty() {
             let display_texts: Vec<String> = text_items.into_iter().take(80).collect();
             let prefix = if has_web_doc { "  [Page web - encarts météo / données / prix observés] : " } else { "  [Textes / données / prix observés] : " };
-            out.push_str(&format!("{}{}\n", prefix, display_texts.join(" | ")));
+            active_window_content.push_str(&format!("{}{}\n", prefix, display_texts.join(" | ")));
         }
 
         // 2. PRIMAUTÉ DU CONTENU HTML / WEB : Boutons cliquables d'action
@@ -3372,7 +3453,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         if !display_btns.is_empty() {
             display_btns.truncate(40);
             let prefix = if has_web_doc { "  [Page web - boutons cliquables] : " } else { "  [Boutons / contrôles cliquables] : " };
-            out.push_str(&format!("{}{}\n", prefix, display_btns.join(", ")));
+            active_window_content.push_str(&format!("{}{}\n", prefix, display_btns.join(", ")));
         }
 
         // 3. PRIMAUTÉ DU CONTENU HTML / WEB : Liens et résultats
@@ -3435,7 +3516,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
 
         if !display_links.is_empty() {
             let prefix = if has_web_doc { "  [Page web - liens cliquables] : " } else { "  [Liens / résultats cliquables] : " };
-            out.push_str(&format!("{}{}\n", prefix, display_links.join(" | ")));
+            active_window_content.push_str(&format!("{}{}\n", prefix, display_links.join(" | ")));
         }
 
         // 5. Informations secondaires de la fenêtre hôte (Onglets et contrôles navigateur)
@@ -3447,7 +3528,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         tabs.dedup();
         if !tabs.is_empty() {
             let display_tabs: Vec<String> = tabs.into_iter().take(10).collect();
-            out.push_str(&format!("  [Onglets / pages ouvertes] : {}\n", display_tabs.join(" | ")));
+            active_window_content.push_str(&format!("  [Onglets / pages ouvertes] : {}\n", display_tabs.join(" | ")));
         }
 
         if has_web_doc {
@@ -3464,20 +3545,20 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                 .take(4)
                 .collect();
             if !chrome_controls.is_empty() {
-                out.push_str(&format!("  [Interface navigateur] : {}\n", chrome_controls.join(" | ")));
+                active_window_content.push_str(&format!("  [Interface navigateur] : {}\n", chrome_controls.join(" | ")));
             }
         }
 
         if has_scrollbar {
-            out.push_str("  [Défilement possible] : Une barre de défilement est présente. Utilise l'action 'scroll' ('down'/'up') pour révéler la suite de la page.\n");
+            active_window_content.push_str("  [Défilement possible] : Une barre de défilement est présente. Utilise l'action 'scroll' ('down'/'up') pour révéler la suite de la page.\n");
         }
     }
 
-    // 2. Relégation et compactage de la liste des autres fenêtres ouvertes en fin de rapport
-    out.push_str("\n=== Autres fenêtres ouvertes ===\n");
+    // 3. Relégation et compactage strict des autres fenêtres (8 fenêtres max pour préserver les tokens)
     let other_windows: Vec<String> = user_windows
         .iter()
         .filter(|(h, _)| !inspect_hwnds.contains(h))
+        .take(8)
         .map(|(hwnd, title)| {
             let (pid, exe_name) = get_window_process_info(*hwnd);
             let is_hung = is_window_hung(*hwnd);
@@ -3493,12 +3574,43 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         })
         .collect();
 
+    let mut other_windows_content = String::new();
+    other_windows_content.push_str("\n=== Autres fenêtres ouvertes ===\n");
     if other_windows.is_empty() {
-        out.push_str("(Aucune autre fenêtre ouverte)\n");
+        other_windows_content.push_str("(Aucune autre fenêtre ouverte)\n");
     } else {
-        out.push_str(&other_windows.join("\n"));
-        out.push('\n');
+        other_windows_content.push_str(&other_windows.join("\n"));
+        other_windows_content.push('\n');
     }
+
+    // 4. Détection et extraction prioritaire du différentiel des changements sur la page web
+    let mut web_changes_section = String::new();
+    if let Some(ref prev_summary) = prev_screen_snapshot {
+        let diff = compute_screen_diff(prev_summary, &active_window_content);
+        if !diff.trim().is_empty() {
+            web_changes_section.push_str("=== INFORMATIONS WEB MODIFIÉES / NOUVELLES (PRIORITÉ ABSOLUE) ===\n");
+            web_changes_section.push_str("[Consigne prioritaire] : Les éléments et données ci-dessous viennent d'apparaître ou d'être modifiés sur la page web active suite à la dernière action. Ils priment sur le reste de la page et sur les autres fenêtres :\n");
+            web_changes_section.push_str(diff.trim());
+            web_changes_section.push_str("\n\n");
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "=== Rapport d'analyse de l'écran ===\nEspace de travail : {}x{}\n",
+        wa_w, wa_h
+    ));
+    out.push_str(&format!(
+        "Fenêtre au premier plan (contexte actif) : \"{}\"\n[Note d'intention contextuelle] : Cette fenêtre est le contexte direct de l'utilisateur. Toute instruction relative à une question, recherche, météo, achat ou formulaire doit être résolue prioritairement dans cette fenêtre active.\n\n",
+        fg_title
+    ));
+
+    // Injection au tout début pour garantir la primauté de tokens
+    if !web_changes_section.is_empty() {
+        out.push_str(&web_changes_section);
+    }
+    out.push_str(&active_window_content);
+    out.push_str(&other_windows_content);
 
     // 3. Augmentation du quota interne à 24 000 caractères
     let summary = truncate_with_notice(&out, 24000);
@@ -3512,6 +3624,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
 pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) -> String {
     let user_windows = list_user_windows();
     let active_id = get_active_x11_window();
+    let prev_screen_snapshot = LAST_SCREEN_SUMMARY.lock().ok().and_then(|g| g.clone());
 
     let mut out = String::new();
     out.push_str("=== Rapport d'analyse de l'écran (Serveur X11 Unix) ===\n");
@@ -3524,6 +3637,8 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             .unwrap_or("Fenêtre active");
         out.push_str(&format!("Fenêtre au premier plan : \"{}\" [ID: {}]\n\n", active_title, act));
     }
+
+    let mut x11_active_text = String::new();
 
     out.push_str("=== Fenêtres X11 détectées ===\n");
     for (win_id, title) in &user_windows {
@@ -3555,6 +3670,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             {
                 let sel = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !sel.is_empty() {
+                    x11_active_text.push_str(&sel);
                     out.push_str(&format!(
                         "  [Sélection texte active (X11 Primary)] :\n\"\"\"\n{}\n\"\"\"\n",
                         truncate_with_notice(&sel, 800)
@@ -3568,6 +3684,14 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         let clip_trim = clip.trim();
         if !clip_trim.is_empty() {
             out.push_str(&format!("\n[Contenu presse-papiers X11 (Clipboard)] :\n\"\"\"\n{}\n\"\"\"\n", truncate_with_notice(clip_trim, 600)));
+        }
+    }
+
+    if let Some(ref prev) = prev_screen_snapshot {
+        let diff = compute_screen_diff(prev, &out);
+        if !diff.trim().is_empty() {
+            let changes_hdr = format!("=== CHANGEMENTS RÉCENTS (PRIORITÉ ABSOLUE) ===\n{}\n\n", diff.trim());
+            out = format!("{}{}", changes_hdr, out);
         }
     }
 
@@ -3757,9 +3881,18 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     if is_window_hung(hwnd) {
                         feedback.push(format!("La fenêtre [HWND {:?}] ne répond pas (sablier / bloquée). Focus annulé.", hwnd.0));
                     } else {
+                        let win_title = user_windows
+                            .iter()
+                            .find(|(h, _)| *h == hwnd)
+                            .map(|(_, t)| t.as_str())
+                            .unwrap_or("");
+                        let is_browser = is_browser_hwnd(hwnd, win_title);
                         force_foreground_window(hwnd);
                         unsafe {
-                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                            let _ = ShowWindow(hwnd, if is_browser { SW_MAXIMIZE } else { SW_RESTORE });
+                        }
+                        if is_browser {
+                            focus_browser_address_bar(hwnd);
                         }
                         active_user_hwnd = Some(hwnd);
                         preferred_target_hwnd = Some(hwnd);
@@ -4084,11 +4217,13 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     }
                     let is_browser = user_windows.iter().find(|(h, _)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
 
-                    // Focus direct et infaillible de la barre d'adresse
-                    if is_browser && is_address_bar_target(target_name) {
-                        println!("[Actions] Focus direct barre d'adresse (Alt+D / Ctrl+L) sur [HWND {:?}]", hwnd.0);
+                    // Focus direct et infaillible de la barre d'adresse / omnibar
+                    if is_browser && (is_address_bar_target(target_name) || target_name.trim().is_empty()) {
+                        println!("[Actions] Focus direct omnibar (Alt+D / Ctrl+L) sur [HWND {:?}]", hwnd.0);
                         focus_browser_address_bar(hwnd);
-                        feedback.push("Barre d'adresse sélectionnée via raccourci universel (Alt+D / Ctrl+L).".to_string());
+                        active_user_hwnd = Some(hwnd);
+                        preferred_target_hwnd = Some(hwnd);
+                        feedback.push("Omnibar du navigateur sélectionnée avec succès.".to_string());
                         continue;
                     }
 
@@ -4224,6 +4359,8 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
             }
             AgentAction::WriteText { text, target, window, press_enter } => {
                 const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
+                const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+                const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
                 let should_enter = press_enter.unwrap_or(false) || text.ends_with('\n');
                 let target_desc_opt = target.as_deref().filter(|s| !s.trim().is_empty());
                 let is_address_bar = target_desc_opt.map_or(false, is_address_bar_target);
@@ -4333,6 +4470,8 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         unsafe { let _ = elem.element.SetFocus(); }
                         click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                         std::thread::sleep(Duration::from_millis(50));
+                        send_hotkey(&[VK_CONTROL], VK_A);
+                        std::thread::sleep(Duration::from_millis(30));
                         clipboard::set_text(text);
                         std::thread::sleep(Duration::from_millis(30));
                         send_paste();
@@ -4361,6 +4500,9 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                         std::thread::sleep(Duration::from_millis(50));
 
+                        send_hotkey(&[VK_CONTROL], VK_A);
+                        std::thread::sleep(Duration::from_millis(30));
+
                         clipboard::set_text(text);
                         std::thread::sleep(Duration::from_millis(30));
                         send_paste();
@@ -4383,6 +4525,8 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                             unsafe { let _ = elem.element.SetFocus(); }
                             click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
                             std::thread::sleep(Duration::from_millis(50));
+                            send_hotkey(&[VK_CONTROL], VK_A);
+                            std::thread::sleep(Duration::from_millis(30));
                             clipboard::set_text(text);
                             std::thread::sleep(Duration::from_millis(30));
                             send_paste();
@@ -5918,7 +6062,16 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 let _ = std::process::Command::new("xdg-open").arg(&formatted).spawn();
                 feedback.push(format!("Navigation vers '{}'.", formatted));
             }
-            AgentAction::WriteText { text, press_enter, .. } | AgentAction::Dictate { text, press_enter, .. } => {
+            AgentAction::WriteText { text, press_enter, .. } => {
+                let _ = std::process::Command::new("xdotool").args(["key", "ctrl+a"]).status();
+                std::thread::sleep(Duration::from_millis(30));
+                let _ = std::process::Command::new("xdotool").args(["type", "--delay", "12", text]).status();
+                if press_enter.unwrap_or(false) {
+                    let _ = std::process::Command::new("xdotool").args(["key", "Return"]).status();
+                }
+                feedback.push(format!("Texte saisi sous X11 ({} caractères).", text.len()));
+            }
+            AgentAction::Dictate { text, press_enter, .. } => {
                 let _ = std::process::Command::new("xdotool").args(["type", "--delay", "12", text]).status();
                 if press_enter.unwrap_or(false) {
                     let _ = std::process::Command::new("xdotool").args(["key", "Return"]).status();

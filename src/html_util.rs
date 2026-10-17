@@ -99,6 +99,61 @@ fn extract_attribute<'a>(attrs: &'a str, target: &str) -> Option<&'a str> {
     None
 }
 
+/// Indique si une balise est typiquement inline (le texte s'écoule naturellement).
+fn is_inline_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "span"
+            | "a"
+            | "strong"
+            | "b"
+            | "em"
+            | "i"
+            | "u"
+            | "s"
+            | "strike"
+            | "code"
+            | "small"
+            | "sub"
+            | "sup"
+            | "mark"
+            | "abbr"
+            | "cite"
+            | "q"
+            | "time"
+            | "label"
+            | "del"
+            | "ins"
+            | "kbd"
+            | "var"
+            | "samp"
+            | "bdi"
+            | "bdo"
+            | "font"
+    )
+}
+
+/// Indique si une balise est une balise void auto-fermante sans contenu textuel propre.
+fn is_void_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
+}
+
 /// Transforme un code HTML brut en texte Markdown épuré et exploitable par un LLM.
 pub fn sanitize_html_to_markdown(html: &str) -> String {
     let mut output = String::with_capacity(html.len() / 2);
@@ -151,7 +206,7 @@ pub fn sanitize_html_to_markdown(html: &str) -> String {
                 let is_ignored_container = matches!(
                     tag_name,
                     "head" | "script" | "style" | "iframe" | "svg" | "noscript" | "template"
-                        | "canvas" | "object" | "embed" | "meta" | "link"
+                        | "canvas" | "object" | "embed"
                 );
 
                 if is_ignored_container {
@@ -227,12 +282,41 @@ pub fn sanitize_html_to_markdown(html: &str) -> String {
                         }
                         "li" => {
                             if !is_closing {
-                                output.push_str("\n- ");
+                                if !output.is_empty() && !output.ends_with('\n') {
+                                    output.push('\n');
+                                }
+                                output.push_str("- ");
+                            } else if !output.ends_with('\n') {
+                                output.push('\n');
                             }
                         }
-                        "p" | "div" | "article" | "section" | "blockquote" => {
+                        "ul" | "ol" => {
+                            if is_closing && !output.ends_with('\n') {
+                                output.push('\n');
+                            }
+                        }
+                        "pre" => {
+                            if is_closing {
+                                if !output.ends_with("\n```\n") {
+                                    output.push_str("\n```\n");
+                                }
+                            } else {
+                                if !output.is_empty() && !output.ends_with('\n') {
+                                    output.push('\n');
+                                }
+                                output.push_str("```\n");
+                            }
+                        }
+                        "p" | "blockquote" => {
                             if is_closing && !output.ends_with("\n\n") {
                                 output.push('\n');
+                            }
+                        }
+                        tag if tag == "button" || tag.contains("-button") || tag.ends_with("-btn") => {
+                            if !is_closing {
+                                output.push_str("[Bouton:]");
+                            } else {
+                                output.push_str("] ");
                             }
                         }
                         "br" | "hr" => {
@@ -259,7 +343,26 @@ pub fn sanitize_html_to_markdown(html: &str) -> String {
                                 }
                             }
                         }
-                        _ => {}
+                        "img" => {
+                            if let Some(alt) = extract_attribute(tag_body, "alt") {
+                                let trimmed = alt.trim();
+                                if !trimmed.is_empty() {
+                                    output.push_str(&format!(" [Image: {trimmed}] "));
+                                }
+                            }
+                        }
+                        tag if is_inline_tag(tag) => {
+                            // Balise inline (ex: span, small, label, etc.) : continue naturellement
+                        }
+                        tag if is_void_tag(tag) => {
+                            // Balise void sans contenu (ex: meta, link, input) : rien à injecter
+                        }
+                        _ => {
+                            // Tout autre élément (div, header, footer, main, nav, aside, tags customs / composants)
+                            if !output.is_empty() && !output.ends_with('\n') {
+                                output.push('\n');
+                            }
+                        }
                     }
                 }
 
@@ -283,5 +386,19 @@ pub fn sanitize_html_to_markdown(html: &str) -> String {
     }
 
     let decoded = decode_html_entities(&output);
-    decoded.lines().map(|l| l.trim_end()).collect::<Vec<&str>>().join("\n").trim().to_string()
+    let mut cleaned_lines = Vec::new();
+    let mut consecutive_empty = 0;
+    for line in decoded.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            consecutive_empty += 1;
+            if consecutive_empty <= 1 {
+                cleaned_lines.push("");
+            }
+        } else {
+            consecutive_empty = 0;
+            cleaned_lines.push(trimmed);
+        }
+    }
+    cleaned_lines.join("\n").trim().to_string()
 }

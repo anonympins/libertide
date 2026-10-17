@@ -2988,7 +2988,10 @@ Règles principales :
 4. Interface & Ciblage :
    - Hôte navigateur : préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse").
    - Contenu web : libellé direct sans préfixe issu de "[Page web - ...]".
-   - Obstacles (cookies/toasts/popups) : clique le bouton adéquat ("Tout accepter", "Fermer", etc.). Ne JAMAIS envoyer "escape".
+   - ACCEPTATION AUTOMATIQUE DES COOKIES : Dès qu'une bannière de cookies ou consentement RGPD est présent, clique SYSTÉMATIQUEMENT et immédiatement sur le bouton pour tout accepter ("Tout accepter", "Accepter tout", "Autoriser", "J'accepte", "Continuer sans refuser") sans demander de confirmation.
+   - LECTURE DES NOTIFICATIONS SYSTÈME (TOASTS) : Dès qu'une notification Windows ou un toast est présent, lis impérativement son titre et son contenu dans ta "narration" pour informer l'utilisateur, mais LAISSE-LA TRANQUILLE (ne tente pas de la fermer, ne clique pas dessus et laisse le système la gérer).
+   - ALERTES & MESSAGES D'ERREUR (FERMETURE SYSTÉMATIQUE APRÈS LECTURE) : Dès qu'une boîte de dialogue d'alerte, un popup d'avertissement ou un message d'erreur est à l'écran, lis-le clairement ou résume-le dans ta "narration", puis FERME-LA SYSTÉMATIQUEMENT en cliquant sur son bouton de fermeture/validation ("OK", "Fermer", "Annuler", "Continuer", croix) pour débloquer l'écran et poursuivre ton travail. Ne JAMAIS envoyer "escape".
+   - PRIORITÉ ABSOLUE AUX CHANGEMENTS WEB : Si des informations, boutons ou données sont présent sur la page web (signalés sous 'INFORMATIONS WEB MODIFIÉES / NOUVELLES'), ils priment impérativement sur tous les éléments statiques et les autres fenêtres. Base en priorité absolue tes actions ou réponses sur ces changements.
    - "click_element" pour liens/onglets, "click_button" pour boutons. "target": null si saisie sans cible.
    - Raccourcis clavier & touches : utilise OBLIGATOIREMENT "accessibility_shortcut" avec le nom ou la combinaison de touches exacte (ex: "ctrl+shift+b" pour la barre des favoris, "ctrl+t", "enter", "close_tab", "copy", "undo"). Ne JAMAIS envoyer "run_command" pour simuler des touches ou raccourcis !
    - Lecture code/fichier : "read_editor_content" (focalise et extrait Ctrl+A/Ctrl+C).
@@ -3500,7 +3503,9 @@ async fn call_deepseek_prompt(
 
             step_feedback.push_str(&format!(
                 "\n\n[Consigne étape] : Poursuis : \"{}\".\n\
-                - Obstacle (cookie/toast) -> clique le sous-bouton approprié.\n\
+                - Bannière cookies -> clique automatiquement 'Tout accepter' / 'Accepter'.\n\
+                - Notification système (toast) -> lis son contenu dans ta narration et laisse-la tranquille (ne la ferme pas).\n\
+                - Alerte / modale d'erreur -> lis le message dans ta narration, puis clique impérativement sur 'OK' / 'Fermer' pour la refermer.\n\
                 - Échec/blocage -> pivote immédiatement vers une alternative (app, web, autre fenêtre). Ne renvoie JAMAIS 'actions': [] si l'objectif d'urgence/contact n'est pas achevé.\n\
                 - Tâche finie ou choix requis -> 'actions': [] + 2 à 4 'quick_suggestions'.",
                 safe_user_instruction
