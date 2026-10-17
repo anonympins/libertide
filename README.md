@@ -11,7 +11,7 @@ Windows : [![https://github.com/anonympins/fingerprint/actions/workflows/rust.ym
   <img src="public/screenshot-1.png" alt="Libertide Overlay Interface">
 </p>
 
-Libertide is a voice and visual assistant for autonomous exploration on Windows and Unix / Linux (X11). It combines a discreet transparent overlay interface (developed with [egui](https://github.com/emilk/egui)), continuous local voice recognition with **Whisper**, reasoning from the **DeepSeek-Chat** model, as well as graphical interface automation (Windows UI Automation & X11 EWMH tools, window tiling, web navigation, and input).
+Libertide is an inclusive voice and visual assistant for autonomous exploration on Windows and Unix / Linux (X11). It combines a discreet transparent overlay interface (developed with [egui](https://github.com/emilk/egui)), continuous local voice recognition with **Whisper**, reasoning from the **DeepSeek-Chat** model, advanced accessibility tools (Switch Access, Click by Number, earcons, high-contrast HUD), and graphical interface automation (Windows UI Automation & X11 EWMH tools, window tiling, web navigation, and input).
 
 ---
 
@@ -40,8 +40,11 @@ On the first launch of voice listening:
 | Shortcut / Action | Description |
 | :--- | :--- |
 | **`R` key** | Starts or stops instant Whisper voice capture. |
+| **`Space` key** | Validates the highlighted action/suggestion in **Switch Access** mode (contacteur unique). |
 | **`Escape` key** | **Emergency stop**: exits dictation mode or halts any ongoing action, mutes TTS, and immediately gives control back to the user. |
 | **Enter** | Sends the instruction entered in the text field. |
+| **`Ctrl + C`** | Direct copy of the selected message or terminal block without extra mouse clicks. |
+| **Voice Zoom** | Dynamically scale GUI size with voice commands (*"grossis"*, *"zoom plus"*, *"taille normale"*). |
 | **Dragging** | Click and drag the top banner or the bottom bar to anchor the overlay wherever you want. |
 | **Borders & Corners** | Resize the overlay by stretching the edges and corners. |
 | **Assistance tab** | Tracks the dialogue with DeepSeek, automated actions, and clickable quick suggestions. |
@@ -49,14 +52,46 @@ On the first launch of voice listening:
 
 ---
 
+## ♿ Inclusive Accessibility Features & Ergonomics
+
+Libertide natively incorporates tools designed to foster independence for users with motor, visual, cognitive, or temporary impairments:
+
+### 1. 🎯 Click by Number Navigation
+- **Activation**: Say *"Numbers"*, *"Badges"*, or *"Click by number"*.
+- **How it works**: The active window is inspected via the UI Automation tree, overlaying high-contrast gold numbered badges on all interactive elements (buttons, links, tabs, input fields).
+- **Selection**: Simply say the number (e.g., *"1"*, *"two"*, *"seven"*) to immediately move the pointer and trigger a click without requiring manual mouse coordination.
+
+### 2. 🔘 Single-Switch Access Mode
+- **Activation**: Say *"Switch access mode"* or *"Switch access"*.
+- **How it works**: An automatic sequential scanning loop periodically highlights available actions and suggestions at regular intervals.
+- **Validation**: Pressing the `Space` key (or an external switch device mapped to space) activates the highlighted option or toggles voice recording.
+
+### 3. 🔍 Adaptive Voice Zoom
+- Dynamically adjust the interface scale by voice without touching the keyboard or mouse:
+  - *"Zoom in"* / *"Make it bigger"* / *"Grossis"* (increases GUI scale by 15% steps).
+  - *"Zoom out"* / *"Make it smaller"* / *"Zoom moins"* (decreases GUI scale down to 70%).
+  - *"Normal zoom"* / *"Reset zoom"* / *"Taille normale"* (resets GUI scale back to 100%).
+
+### 4. 🔔 Dedicated Auditory Feedback (*Earcons*)
+- Distinct system audio cues guide users without requiring continuous visual gaze on the screen:
+  - **Microphone opened**: Rising dual beep (600 Hz ➔ 900 Hz).
+  - **Microphone closed**: Falling dual beep (750 Hz ➔ 500 Hz).
+  - **Action confirmed**: High-pitch confirmation chime (1000 Hz).
+  - **Emergency stop**: Rapid alternating alert bursts (1200 Hz / 800 Hz).
+
+### 5. 📊 Floating Analytical HUDs
+- Project statistics tables, metric comparisons, or summary cards into independent OS multi-viewport floating windows (*dark glass* with high contrast), easily readable without obscuring underlying work applications.
+
+---
+
 ## 🗣️ Commands Understood by the AI (Human-Friendly Guide)
 
-Libertide understands natural language instructions spoken aloud (via Whisper) or typed into the prompt bar. Below are the primary categories of commands you can give the assistant:
+Libertide understands natural language instructions spoken aloud (via Whisper) or typed into the prompt bar. Below are the primary categories of commands you can give the assistant (multilingual: English, French, Spanish, German, etc.):
 
 ### 1. Overlay Control & Emergency Stop
-- **Hide overlay**: *"Hide yourself"* / *"Cache-toi"*, *"Close overlay"* / *"Ferme l'overlay"*, *"Disappear"*
-- **Restore overlay**: *"DeepSeek open up"* / *"DeepSeek ouvre-toi"*, *"Show yourself"* / *"Montre-toi"*
-- **Immediate emergency stop**: Press **`Escape`** or say *"Stop everything"*, *"Stop"*
+- **Hide overlay**: *"Hide yourself"* / *"Cache-toi"*, *"Close overlay"* / *"Ferme l'overlay"*, *"Disappear"*.
+- **Restore overlay**: *"DeepSeek open up"* / *"DeepSeek ouvre-toi"*, *"Show yourself"* / *"Montre-toi"*.
+- **Immediate emergency stop**: Press **`Escape`** or say *"Stop everything"*, *"Arrêt d'urgence"*, *"Stop"*.
 
 ### 2. ✍️ Direct Voice Dictation Mode
 Switches directly to text input inside whatever window currently has focus (text editor, IDE, form) without triggering exploratory web or system actions:
@@ -80,30 +115,38 @@ Switches directly to text input inside whatever window currently has focus (text
 - **Assisted Shopping**:
   - *"Add the item to the cart and proceed to checkout"* (Libertide will automatically stop before payment and ask for spoken confirmation).
 
-### 4. 🪟 Window Management & Layouts
+### 4. ♿ Accessibility & System Voice Commands
+- **Targeting & Switch**: *"Show numbers"*, *"Badges"*, *"Badge 4"*, *"Activate switch access"*.
+- **Scale & Zoom**: *"Zoom in"*, *"Zoom out"*, *"Normal size"*, *"Reset zoom"*.
+- **Voice Profiles & Engines**: *"Denise voice"*, *"Henri voice"*, *"Hortense voice"*, *"Paul voice"*, *"Canadian French voice"*, *"Kokoro neural voice"*, *"Next voice"*.
+- **Audio & Isolation**: *"Mute audio"* / *"Coupe le son"* (pauses third-party media players while preserving Libertide's voice feedback), *"Volume down"*, *"Volume up"*.
+- **Native Windows Accessibility Tools**: *"Magnifier"* (Win + `+`/`-`), *"Color filters"*, *"Accessibility settings"*, *"Clipboard history"*.
+
+### 5. 🪟 Window Management & Layouts
 - **Snap & Tiling Layouts**:
   - *"Put Chrome on the left and VS Code on the right"*
   - *"Tile my windows"* / *"Arrange in a 2x2 grid"*
   - *"Fullscreen"* / *"Maximize this window"*, *"Minimize window"*
   - *"Close the tab"* (closes only the current active tab without terminating the whole application)
 
-### 5. 💻 Code, File & Terminal Inspection
+### 6. 💻 Code, File & Terminal Inspection
 - **Inspect & Summarize code or documents**:
   - *"Read the file opened in VS Code and explain what the main function does"*
   - *"Analyze what is inside my terminal"*
-  - *"Select between 'Hello' and 'Best regards'"* (bounded text selection)
+  - *"Select between 'Hello' and 'Best regards'"* (bounded text selection via UIA/clavier)
+  - *"Open document / image"* (`open_file`) to open any media, image, PDF, spreadsheet, or file directly in its OS default application (based on file extension / MIME type).
 
-### 6. 🧘 Immersion Mode (Virtual Desktop)
+### 7. 🧘 Immersion Mode (Virtual Desktop)
 Creates a clean, dedicated Windows virtual desktop configured for focused deep work:
 - **Start**: *"Activate immersion mode to code"* (spawns a new virtual desktop, opens required applications such as VS Code, a terminal, and docs tiled together)
 - **Exit**: *"Exit immersion mode"* / *"Close the virtual desktop"*
 
-### 7. ⚙️ Windows Startup (Autostart)
+### 8. ⚙️ Windows Startup (Autostart)
 - **Enable auto-launch**: *"Start when Windows boots"*, *"Enable autostart"*
 - **Disable auto-launch**: *"Do not start on boot"*, *"Disable autostart"*
 - **Check status**: *"Are you configured to start on boot?"*
 
-### 8. ⚡ Direct CLI Execution
+### 9. ⚡ Direct CLI Execution
 Prefix your prompt with `>` or `$` to instantly run a system command without invoking the LLM:
 ```bash
 > code .
