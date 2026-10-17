@@ -1585,7 +1585,10 @@ impl eframe::App for OverlayApp {
             }
         }
 
-        let is_typing = ctx.memory(|m| m.focused().is_some());
+        let is_typing = ctx.memory(|m| {
+            m.has_focus(egui::Id::new("prompt_input_text"))
+                || m.has_focus(egui::Id::new("api_key_input_field"))
+        });
 
         // Gestion du Switch Access : défilement séquentiel périodique et validation sur Espace
         if self.switch_access_mode && !is_typing {
@@ -1656,367 +1659,95 @@ impl eframe::App for OverlayApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT).inner_margin(egui::Margin::ZERO))
             .show(ui, |ui| {
+                // Fond et cadre stylisé de la boîte de discussion
+                ui.painter().rect(
+                    response_rect,
+                    egui::CornerRadius::same(12),
+                    egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 55)),
+                    egui::StrokeKind::Inside,
+                );
+
+                // 1. Barre d'onglets supérieure et boutons système de la fenêtre
                 let mut tab_bar_max_x = response_rect.min.x + 210.0;
 
-                // 1. Boîte de discussion adaptative (s'étend du bas vers le haut)
-                let mut computed_chat_h = current_chat_h;
+                let header_rect = egui::Rect::from_min_max(
+                    egui::pos2(response_rect.min.x + 10.0, response_rect.min.y + 6.0),
+                    egui::pos2(response_rect.max.x - 10.0, response_rect.min.y + 32.0),
+                );
 
-                ui.scope_builder(egui::UiBuilder::new().max_rect(response_rect), |ui| {
-                    egui::Frame::new()
-                        .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 55)))
-                        .corner_radius(egui::CornerRadius::same(12))
-                        .inner_margin(egui::Margin::symmetric(10, 6))
-                        .show(ui, |ui| {
-                            // Barre d'onglets
-                            ui.horizontal(|ui| {
-                                let tab_assist = ui.selectable_label(self.active_tab == ActiveTab::Assistance, "🤖 Assistance");
-                                if tab_assist.clicked() {
-                                    self.active_tab = ActiveTab::Assistance;
-                                }
-                                let chat_title = if self.twitch_messages.is_empty() {
-                                    "💬 Chat twitch".to_string()
-                                } else {
-                                    format!("💬 Chat ({})", self.twitch_messages.len())
-                                };
-                                let tab_chat = ui.selectable_label(self.active_tab == ActiveTab::Chat, chat_title);
-                                if tab_chat.clicked() {
-                                    self.active_tab = ActiveTab::Chat;
-                                }
-                                tab_bar_max_x = tab_assist.rect.max.x.max(tab_chat.rect.max.x);
+                ui.scope_builder(egui::UiBuilder::new().max_rect(header_rect), |ui| {
+                    ui.horizontal(|ui| {
+                        let tab_assist = ui.selectable_label(self.active_tab == ActiveTab::Assistance, "🤖 Assistance");
+                        if tab_assist.clicked() {
+                            self.active_tab = ActiveTab::Assistance;
+                        }
+                        let chat_title = if self.twitch_messages.is_empty() {
+                            "💬 Chat twitch".to_string()
+                        } else {
+                            format!("💬 Chat ({})", self.twitch_messages.len())
+                        };
+                        let tab_chat = ui.selectable_label(self.active_tab == ActiveTab::Chat, chat_title);
+                        if tab_chat.clicked() {
+                            self.active_tab = ActiveTab::Chat;
+                        }
+                        tab_bar_max_x = tab_assist.rect.max.x.max(tab_chat.rect.max.x);
 
-                                // Boutons système en haut à droite : Réduire, Agrandir/Restaurer, Fermer
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.spacing_mut().item_spacing.x = 4.0;
+                        // Boutons système en haut à droite : Réduire, Agrandir/Restaurer, Fermer
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
 
-                                    let close_btn = ui.add(
-                                        egui::Button::new(
-                                            egui::RichText::new("×")
-                                                .size(13.0)
-                                                .color(egui::Color32::from_rgb(235, 235, 245)),
-                                        )
-                                        .min_size(egui::vec2(20.0, 18.0))
-                                        .corner_radius(egui::CornerRadius::same(4)),
-                                    );
-                                    if close_btn.on_hover_text("Fermer").clicked() {
-                                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                                    }
+                            let close_btn = ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new("×")
+                                        .size(13.0)
+                                        .color(egui::Color32::from_rgb(235, 235, 245)),
+                                )
+                                .min_size(egui::vec2(20.0, 18.0))
+                                .corner_radius(egui::CornerRadius::same(4)),
+                            );
+                            if close_btn.on_hover_text("Fermer").clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
 
-                                    let max_icon = if is_maximized { "⧉" } else { "□" };
-                                    let max_btn = ui.add(
-                                        egui::Button::new(
-                                            egui::RichText::new(max_icon)
-                                                .size(10.5)
-                                                .color(egui::Color32::from_rgb(200, 215, 230)),
-                                        )
-                                        .min_size(egui::vec2(20.0, 18.0))
-                                        .corner_radius(egui::CornerRadius::same(4)),
-                                    );
-                                    if max_btn.on_hover_text(if is_maximized { "Restaurer" } else { "Agrandir" }).clicked() {
-                                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
-                                    }
+                            let max_icon = if is_maximized { "⧉" } else { "□" };
+                            let max_btn = ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new(max_icon)
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(200, 215, 230)),
+                                )
+                                .min_size(egui::vec2(20.0, 18.0))
+                                .corner_radius(egui::CornerRadius::same(4)),
+                            );
+                            if max_btn.on_hover_text(if is_maximized { "Restaurer" } else { "Agrandir" }).clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
+                            }
 
-                                    let min_btn = ui.add(
-                                        egui::Button::new(
-                                            egui::RichText::new("—")
-                                                .size(10.5)
-                                                .color(egui::Color32::from_rgb(200, 215, 230)),
-                                        )
-                                        .min_size(egui::vec2(20.0, 18.0))
-                                        .corner_radius(egui::CornerRadius::same(4)),
-                                    );
-                                    if min_btn.on_hover_text("Réduire").clicked() {
-                                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                                    }
-                                });
-                            });
-                            ui.separator();
-
-                            match self.active_tab {
-                                ActiveTab::Assistance => {
-                            let max_scroll_h = (response_rect.height() - 40.0).max(20.0);
-                            let scroll_out = egui::ScrollArea::vertical()
-                                .stick_to_bottom(true)
-                                .max_height(max_scroll_h)
-                                .auto_shrink([false, true])
-                                .show(ui, |ui| {
-                                    let last_user_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::User);
-                                    let last_agent_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::Agent);
-                                    let mut clicked_quick_suggestion: Option<String> = None;
-                                    let mut request_stop_speaking = false;
-
-                                    for (idx, entry) in self.chat_history.iter().enumerate() {
-                                        let is_highlighted = Some(idx) == last_user_idx || Some(idx) == last_agent_idx;
-
-                                        ui.vertical(|ui| {
-                                            ui.horizontal(|ui| {
-                                                let (label_name, label_color) = match entry.role {
-                                                    ChatRole::User => {
-                                                        let name = if let Some(kb) = entry.screen_size_kb {
-                                                            format!("🗣 Vous - {:.1} ko", kb)
-                                                        } else {
-                                                            "🗣 Vous".to_string()
-                                                        };
-                                                        (name, egui::Color32::from_rgb(255, 215, 120))
-                                                    }
-                                                    ChatRole::Agent => ("DeepSeek".to_string(), egui::Color32::from_rgb(0, 195, 255)),
-                                                };
-                                                ui.label(
-                                                    egui::RichText::new(&label_name)
-                                                        .size(if is_highlighted { 11.5 } else { 10.0 })
-                                                        .color(label_color)
-                                                        .strong(),
-                                                );
-                                                ui.label(
-                                                    egui::RichText::new(&entry.timestamp)
-                                                        .size(if is_highlighted { 10.0 } else { 9.0 })
-                                                        .color(egui::Color32::from_rgba_unmultiplied(170, 185, 205, 140)),
-                                                );
-
-                                                ui.add_space(2.0);
-                                                let copy_msg_btn = ui.add(
-                                                    egui::Button::new(
-                                                        egui::RichText::new("📋")
-                                                            .size(9.0)
-                                                            .color(egui::Color32::from_rgb(180, 205, 230)),
-                                                    )
-                                                    .small()
-                                                    .corner_radius(egui::CornerRadius::same(4)),
-                                                );
-                                                if copy_msg_btn.on_hover_text("Copier ce message dans le presse-papiers").clicked() {
-                                                    set_clipboard_text(&entry.text);
-                                                }
-
-                                                if entry.role == ChatRole::Agent && Some(idx) == last_agent_idx && self.status == AgentStatus::Speaking {
-                                                    ui.add_space(4.0);
-                                                    let stop_btn = ui.add(
-                                                        egui::Button::new(
-                                                            egui::RichText::new("🔇 Couper")
-                                                                .size(9.5)
-                                                                .color(egui::Color32::from_rgb(255, 130, 130)),
-                                                        )
-                                                        .small()
-                                                        .corner_radius(egui::CornerRadius::same(6)),
-                                                    );
-                                                    if stop_btn.on_hover_text("Interrompre la lecture vocale (Échap)").clicked() {
-                                                        request_stop_speaking = true;
-                                                    }
-                                                }
-                                            });
-
-                                            let (text_size, line_height, text_color, is_strong) = match entry.role {
-                                                ChatRole::User => {
-                                                    if is_highlighted {
-                                                        (14.5, 20.0, egui::Color32::from_rgb(255, 230, 150), true)
-                                                    } else {
-                                                        (12.0, 16.5, egui::Color32::from_rgba_unmultiplied(225, 210, 160, 185), false)
-                                                    }
-                                                }
-                                                ChatRole::Agent => {
-                                                    if is_highlighted {
-                                                        (15.5, 22.0, egui::Color32::from_rgb(255, 255, 255), true)
-                                                    } else {
-                                                        (12.5, 17.5, egui::Color32::from_rgba_unmultiplied(200, 210, 225, 180), false)
-                                                    }
-                                                }
-                                            };
-
-                                            let mut rich = egui::RichText::new(&entry.text)
-                                                .size(text_size)
-                                                .line_height(Some(line_height))
-                                                .color(text_color);
-                                            if is_strong {
-                                                rich = rich.strong();
-                                            }
-                                            let label_resp = ui.add(egui::Label::new(rich).wrap().selectable(true));
-                                            label_resp.context_menu(|ui| {
-                                                if ui.button("📋 Copier le texte").clicked() {
-                                                    set_clipboard_text(&entry.text);
-                                                    ui.close();
-                                                }
-                                            });
-
-                                            // Boutons-onglets pour les suggestions rapides
-                                            if !entry.quick_suggestions.is_empty() {
-                                                ui.add_space(4.0);
-                                                ui.horizontal_wrapped(|ui| {
-                                                    for sug in &entry.quick_suggestions {
-                                                        if let Some(clean_label) = sug.to_display_string() {
-                                                            let clean_label = clean_label.trim();
-                                                            if clean_label.is_empty() {
-                                                                continue;
-                                                            }
-                                                            let btn_text = egui::RichText::new(format!("💡 {clean_label}"))
-                                                                .size(11.0)
-                                                                .color(egui::Color32::from_rgb(130, 220, 255));
-
-                                                            let btn = egui::Button::new(btn_text)
-                                                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 95)))
-                                                                .corner_radius(egui::CornerRadius::same(10));
-
-                                                            if ui.add(btn).on_hover_text("Cliquer pour choisir cette suggestion").clicked() {
-                                                                clicked_quick_suggestion = Some(clean_label.to_string());
-                                                            }
-                                                        }
-                                                    }
-                                                });
-                                            }
-                                        });
-                                        ui.add_space(if is_highlighted { 8.0 } else { 5.0 });
-                                    }
-
-                                    // Retour visuel en direct de l'écoute micro
-                                    if self.is_recording && !self.live_transcript.is_empty() {
-                                        ui.vertical(|ui| {
-                                            ui.label(
-                                                egui::RichText::new("🗣 Vous (en direct...)")
-                                                    .size(10.5)
-                                                    .color(egui::Color32::from_rgb(255, 215, 120))
-                                                    .italics(),
-                                            );
-                                            ui.label(
-                                                egui::RichText::new(&self.live_transcript)
-                                                    .size(13.5)
-                                                    .line_height(Some(18.0))
-                                                    .color(egui::Color32::from_rgb(255, 230, 160))
-                                                    .italics(),
-                                            );
-                                        });
-                                        ui.add_space(6.0);
-                                    }
-
-                                    if let Some(prompt) = clicked_quick_suggestion {
-                                        self.stop_speaking();
-                                        if self.is_recording {
-                                            self.stop_recording();
-                                        }
-                                        self.status = AgentStatus::Thinking;
-                                        self.continuous_mode = true;
-                                        self.live_transcript.clear();
-                                        self.chat_history.push(ChatEntry {
-                                            role: ChatRole::User,
-                                            text: prompt.clone(),
-                                            timestamp: current_time_str(),
-                                            quick_suggestions: Vec::new(),
-                                            screen_size_kb: None,
-                                        });
-                                        let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
-                                    }
-
-                                    if request_stop_speaking {
-                                        self.stop_speaking();
-                                    }
-                                });
-                            computed_chat_h = (scroll_out.content_size.y + 44.0).clamp(min_chat_h, max_chat_h);
-                                }
-                                ActiveTab::Chat => {
-                                    // Barre de recherche et salon actif
-                                    ui.horizontal(|ui| {
-                                        if !self.current_twitch_channel.is_empty() {
-                                            ui.label(
-                                                egui::RichText::new("Salon :")
-                                                    .size(11.0)
-                                                    .color(egui::Color32::from_rgb(170, 185, 205)),
-                                            );
-                                            ui.hyperlink_to(
-                                                egui::RichText::new(format!("#{}", self.current_twitch_channel))
-                                                    .size(11.0)
-                                                    .color(egui::Color32::from_rgb(0, 195, 255))
-                                                    .underline(),
-                                                format!("https://twitch.tv/{}", self.current_twitch_channel),
-                                            );
-                                            ui.separator();
-                                        }
-
-                                        let search_edit = ui.add_sized(
-                                            [110.0, 18.0],
-                                            egui::TextEdit::singleline(&mut self.twitch_search_query)
-                                                .hint_text("Chaîne..."),
-                                        );
-                                        let enter_pressed = search_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                        if (ui.small_button("🔍").clicked() || enter_pressed) && !self.twitch_search_query.trim().is_empty() {
-                                            let _ = self.command_sender.send(AgentCommand::SearchTwitch(
-                                                self.twitch_search_query.trim().to_string(),
-                                            ));
-                                        }
-                                    });
-
-                                    if !self.twitch_search_results.is_empty() {
-                                        ui.add_space(2.0);
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.label(
-                                                egui::RichText::new("Résultats :")
-                                                    .size(10.5)
-                                                    .color(egui::Color32::from_rgb(255, 215, 120)),
-                                            );
-                                            let mut selected_channel = None;
-                                            for ch in &self.twitch_search_results {
-                                                if ui.small_button(format!("▶ {}", ch.display_name)).on_hover_text("Rejoindre ce salon irc").clicked() {
-                                                    selected_channel = Some(ch.login.clone());
-                                                }
-                                                if ui.small_button("↗").on_hover_text("Ouvrir sur twitch").clicked() {
-                                                    ui.ctx().open_url(egui::OpenUrl::new_tab(format!("https://twitch.tv/{}", ch.login)));
-                                                }
-                                            }
-                                            if let Some(ch) = selected_channel {
-                                                self.current_twitch_channel = ch.clone();
-                                                let _ = self.twitch_channel_sender.send(ch);
-                                                self.twitch_messages.clear();
-                                                self.twitch_search_results.clear();
-                                            }
-                                        });
-                                    }
-                                    ui.separator();
-                                    let max_chat_scroll_h = (response_rect.height() - 68.0).max(20.0);
-                                    let scroll_out = egui::ScrollArea::vertical()
-                                        .stick_to_bottom(true)
-                                        .max_height(max_chat_scroll_h)
-                                        .auto_shrink([false, true])
-                                        .show(ui, |ui| {
-                                            if self.twitch_messages.is_empty() {
-                                                ui.label(
-                                                    egui::RichText::new("En attente de messages twitch...")
-                                                        .size(12.0)
-                                                        .italics()
-                                                        .color(egui::Color32::from_rgba_unmultiplied(180, 190, 205, 150)),
-                                                );
-                                            } else {
-                                                for msg in &self.twitch_messages {
-                                                    ui.horizontal_wrapped(|ui| {
-                                                        ui.label(
-                                                            egui::RichText::new(&msg.timestamp)
-                                                                .size(9.0)
-                                                                .color(egui::Color32::from_rgba_unmultiplied(140, 150, 170, 140)),
-                                                        );
-                                                        ui.label(
-                                                            egui::RichText::new(format!("{}:", msg.author))
-                                                                .size(12.0)
-                                                                .color(egui::Color32::from_rgb(169, 112, 255))
-                                                                .strong(),
-                                                        );
-                                                        ui.label(
-                                                            egui::RichText::new(&msg.text)
-                                                                .size(12.5)
-                                                                .color(egui::Color32::WHITE),
-                                                        );
-                                                    });
-                                                    ui.add_space(3.0);
-                                                }
-                                            }
-                                    });
-                                    computed_chat_h = (scroll_out.content_size.y + 72.0).clamp(min_chat_h, max_chat_h);
-                                }
+                            let min_btn = ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new("—")
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(200, 215, 230)),
+                                )
+                                .min_size(egui::vec2(20.0, 18.0))
+                                .corner_radius(egui::CornerRadius::same(4)),
+                            );
+                            if min_btn.on_hover_text("Réduire").clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                             }
                         });
+                    });
                 });
 
-                // Hystérésis asymétrique pour self.chat_height :
-                // Empêche le clignotement / rebond continu à la frontière de saut de ligne de scrollbar
-                if computed_chat_h > self.chat_height + 4.0 || computed_chat_h < self.chat_height - 8.0 {
-                    self.chat_height = computed_chat_h;
-                }
+                let sep_y = response_rect.min.y + 35.0;
+                ui.painter().hline(
+                    (response_rect.min.x + 8.0)..=(response_rect.max.x - 8.0),
+                    sep_y,
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 45)),
+                );
 
-                // 2. Zone inférieure (30 %) : contrôles, avatar et saisie
+                // 2. Zone inférieure évaluée en deuxième (contrôles, avatar et saisie) pour précéder les messages au focus Tab
                 ui.scope_builder(egui::UiBuilder::new().max_rect(control_rect), |ui| {
                     egui::Frame::new()
                         .fill(egui::Color32::from_rgb(18, 20, 26))
@@ -2209,7 +1940,7 @@ impl eframe::App for OverlayApp {
                                                 }
                                                 ui.close();
                                             }
-                                            if ui.button("📄 Copier tout").clicked() {
+                                            if ui.button("📄 Copier tout (Ctrl+C)").clicked() {
                                                 set_clipboard_text(&self.input_text);
                                                 ui.close();
                                             }
@@ -2224,14 +1955,24 @@ impl eframe::App for OverlayApp {
                                             }
                                         });
 
-                                        if response.has_focus() {
-                                            let paste_hit = ctx.input(|i| {
-                                                ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
-                                                    || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
-                                            });
-                                            let egui_pasted = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
-                                            if paste_hit && !egui_pasted {
-                                                if let Some(clip) = get_clipboard_text() {
+                                        let copy_hit = ctx.input(|i| {
+                                            i.events.iter().any(|e| matches!(e, egui::Event::Copy))
+                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
+                                        });
+                                        if response.has_focus() && copy_hit && !self.input_text.is_empty() {
+                                            set_clipboard_text(&self.input_text);
+                                            ctx.copy_text(self.input_text.clone());
+                                            play_earcon(Earcon::Success);
+                                        }
+
+                                        let paste_hit = ctx.input(|i| {
+                                            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
+                                                || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                        });
+                                        if (response.has_focus() || response.hovered()) && paste_hit {
+                                            if let Some(clip) = get_clipboard_text() {
+                                                if !clip.is_empty() && !self.input_text.ends_with(&clip) {
                                                     self.input_text.push_str(&clip);
                                                 }
                                             }
@@ -2373,6 +2114,376 @@ impl eframe::App for OverlayApp {
                             });
                         });
                 });
+
+                // 3. Boîte de discussion adaptative (évaluée après les contrôles pour la navigation Tab)
+                let mut computed_chat_h = current_chat_h;
+                let messages_rect = egui::Rect::from_min_max(
+                    egui::pos2(response_rect.min.x + 8.0, sep_y + 4.0),
+                    egui::pos2(response_rect.max.x - 8.0, response_rect.max.y - 6.0),
+                );
+
+                ui.scope_builder(egui::UiBuilder::new().max_rect(messages_rect), |ui| {
+                    match self.active_tab {
+                        ActiveTab::Assistance => {
+                            let max_scroll_h = (messages_rect.height()).max(20.0);
+                            let scroll_out = egui::ScrollArea::vertical()
+                                .stick_to_bottom(true)
+                                .max_height(max_scroll_h)
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    let last_user_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::User);
+                                    let last_agent_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::Agent);
+                                    let mut clicked_quick_suggestion: Option<String> = None;
+                                    let mut request_stop_speaking = false;
+
+                                    for (idx, entry) in self.chat_history.iter().enumerate() {
+                                        let is_highlighted = Some(idx) == last_user_idx || Some(idx) == last_agent_idx;
+                                        let msg_id = ui.make_persistent_id(format!("chat_entry_item_{idx}"));
+                                        let layer_id = ui.layer_id();
+                                        ui.memory_mut(|m| m.interested_in_focus(msg_id, layer_id));
+                                        let is_msg_focused = ui.memory(|m| m.has_focus(msg_id));
+
+                                        ui.vertical(|ui| {
+                                            ui.horizontal(|ui| {
+                                                let (label_name, label_color) = match entry.role {
+                                                    ChatRole::User => {
+                                                        let name = if let Some(kb) = entry.screen_size_kb {
+                                                            format!("🗣 Vous - {:.1} ko", kb)
+                                                        } else {
+                                                            "🗣 Vous".to_string()
+                                                        };
+                                                        (name, egui::Color32::from_rgb(255, 215, 120))
+                                                    }
+                                                    ChatRole::Agent => ("DeepSeek".to_string(), egui::Color32::from_rgb(0, 195, 255)),
+                                                };
+                                                ui.label(
+                                                    egui::RichText::new(&label_name)
+                                                        .size(if is_highlighted { 11.5 } else { 10.0 })
+                                                        .color(label_color)
+                                                        .strong(),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(&entry.timestamp)
+                                                        .size(if is_highlighted { 10.0 } else { 9.0 })
+                                                        .color(egui::Color32::from_rgba_unmultiplied(170, 185, 205, 140)),
+                                                );
+
+                                                if entry.role == ChatRole::Agent && Some(idx) == last_agent_idx && self.status == AgentStatus::Speaking {
+                                                    ui.add_space(4.0);
+                                                    let stop_btn = ui.add(
+                                                        egui::Button::new(
+                                                            egui::RichText::new("🔇 Couper")
+                                                                .size(9.5)
+                                                                .color(egui::Color32::from_rgb(255, 130, 130)),
+                                                        )
+                                                        .small()
+                                                        .corner_radius(egui::CornerRadius::same(6)),
+                                                    );
+                                                    if stop_btn.on_hover_text("Interrompre la lecture vocale (Échap)").clicked() {
+                                                        request_stop_speaking = true;
+                                                    }
+                                                }
+                                            });
+
+                                            let (text_size, line_height, text_color, is_strong) = match entry.role {
+                                                ChatRole::User => {
+                                                    if is_highlighted {
+                                                        (14.5, 20.0, egui::Color32::from_rgb(255, 230, 150), true)
+                                                    } else {
+                                                        (12.0, 16.5, egui::Color32::from_rgba_unmultiplied(225, 210, 160, 185), false)
+                                                    }
+                                                }
+                                                ChatRole::Agent => {
+                                                    if is_highlighted {
+                                                        (15.5, 22.0, egui::Color32::from_rgb(255, 255, 255), true)
+                                                    } else {
+                                                        (12.5, 17.5, egui::Color32::from_rgba_unmultiplied(200, 210, 225, 180), false)
+                                                    }
+                                                }
+                                            };
+
+                                            let mut rich = egui::RichText::new(&entry.text)
+                                                .size(text_size)
+                                                .line_height(Some(line_height))
+                                                .color(text_color);
+                                            if is_strong {
+                                                rich = rich.strong();
+                                            }
+                                            let label_resp = ui.add(egui::Label::new(rich).wrap());
+                                            let interact_resp = ui.interact(label_resp.rect, msg_id, egui::Sense::click());
+
+                                            if interact_resp.clicked() {
+                                                ui.memory_mut(|m| m.request_focus(msg_id));
+                                            }
+                                            let effective_focused = is_msg_focused || interact_resp.has_focus();
+
+                                            // Copie au clavier Ctrl+C dès que le message a le focus clavier (ou au survol sans focus actif ailleurs)
+                                            let copy_msg_hit = ctx.input(|i| {
+                                                i.events.iter().any(|e| matches!(e, egui::Event::Copy))
+                                                    || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
+                                            });
+                                            let should_copy = effective_focused
+                                                || (interact_resp.hovered() && ui.memory(|m| m.focused().is_none()));
+
+                                            if should_copy && copy_msg_hit {
+                                                set_clipboard_text(&entry.text);
+                                                ctx.copy_text(entry.text.clone());
+                                                play_earcon(Earcon::Success);
+                                            }
+
+                                            if effective_focused {
+                                                label_resp.scroll_to_me(Some(egui::Align::Center));
+                                                ui.painter().rect_stroke(
+                                                    label_resp.rect.expand(4.0),
+                                                    egui::CornerRadius::same(6),
+                                                    egui::Stroke::new(1.8, egui::Color32::from_rgb(0, 200, 255)),
+                                                    egui::StrokeKind::Outside,
+                                                );
+                                            }
+
+                                            interact_resp.context_menu(|ui| {
+                                                if ui.button("📋 Copier le texte (Ctrl+C)").clicked() {
+                                                    set_clipboard_text(&entry.text);
+                                                    ctx.copy_text(entry.text.clone());
+                                                    play_earcon(Earcon::Success);
+                                                    ui.close();
+                                                }
+                                            });
+
+                                            // Boutons-onglets pour les suggestions rapides
+                                            if !entry.quick_suggestions.is_empty() {
+                                                ui.add_space(4.0);
+                                                ui.horizontal_wrapped(|ui| {
+                                                    for sug in &entry.quick_suggestions {
+                                                        if let Some(clean_label) = sug.to_display_string() {
+                                                            let clean_label = clean_label.trim();
+                                                            if clean_label.is_empty() {
+                                                                continue;
+                                                            }
+                                                            let btn_text = egui::RichText::new(format!("💡 {clean_label}"))
+                                                                .size(11.0)
+                                                                .color(egui::Color32::from_rgb(130, 220, 255));
+
+                                                            let btn = egui::Button::new(btn_text)
+                                                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 95)))
+                                                                .corner_radius(egui::CornerRadius::same(10));
+
+                                                            if ui.add(btn).on_hover_text("Cliquer pour choisir cette suggestion").clicked() {
+                                                                clicked_quick_suggestion = Some(clean_label.to_string());
+                                                            }
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        });
+                                        ui.add_space(if is_highlighted { 8.0 } else { 5.0 });
+                                    }
+
+                                    // Retour visuel en direct de l'écoute micro
+                                    if self.is_recording && !self.live_transcript.is_empty() {
+                                        let live_id = ui.make_persistent_id("live_transcript_box");
+                                        let layer_id = ui.layer_id();
+                                        ui.memory_mut(|m| m.interested_in_focus(live_id, layer_id));
+                                        let is_live_focused = ui.memory(|m| m.has_focus(live_id));
+                                        let copy_live_hit = ctx.input(|i| {
+                                            i.events.iter().any(|e| matches!(e, egui::Event::Copy))
+                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
+                                        });
+                                        if is_live_focused && copy_live_hit {
+                                            set_clipboard_text(&self.live_transcript);
+                                            ctx.copy_text(self.live_transcript.clone());
+                                            play_earcon(Earcon::Success);
+                                        }
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("🗣 Vous (en direct...)")
+                                                    .size(10.5)
+                                                    .color(egui::Color32::from_rgb(255, 215, 120))
+                                                    .italics(),
+                                            );
+                                            let live_resp = ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(&self.live_transcript)
+                                                        .size(13.5)
+                                                        .line_height(Some(18.0))
+                                                        .color(egui::Color32::from_rgb(255, 230, 160))
+                                                        .italics(),
+                                                )
+                                                .wrap(),
+                                            );
+                                            let interact_live = ui.interact(live_resp.rect, live_id, egui::Sense::click());
+                                            if interact_live.clicked() {
+                                                ui.memory_mut(|m| m.request_focus(live_id));
+                                            }
+                                            if is_live_focused || interact_live.has_focus() {
+                                                ui.painter().rect_stroke(
+                                                    live_resp.rect.expand(2.5),
+                                                    egui::CornerRadius::same(4),
+                                                    egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 205, 70)),
+                                                    egui::StrokeKind::Outside,
+                                                );
+                                            }
+                                        });
+                                        ui.add_space(6.0);
+                                    }
+
+                                    if let Some(prompt) = clicked_quick_suggestion {
+                                        self.stop_speaking();
+                                        if self.is_recording {
+                                            self.stop_recording();
+                                        }
+                                        self.status = AgentStatus::Thinking;
+                                        self.continuous_mode = true;
+                                        self.live_transcript.clear();
+                                        self.chat_history.push(ChatEntry {
+                                            role: ChatRole::User,
+                                            text: prompt.clone(),
+                                            timestamp: current_time_str(),
+                                            quick_suggestions: Vec::new(),
+                                            screen_size_kb: None,
+                                        });
+                                        let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
+                                    }
+
+                                    if request_stop_speaking {
+                                        self.stop_speaking();
+                                    }
+                                });
+                            computed_chat_h = (scroll_out.content_size.y + 44.0).clamp(min_chat_h, max_chat_h);
+                        }
+                        ActiveTab::Chat => {
+                            // Barre de recherche et salon actif
+                            ui.horizontal(|ui| {
+                                if !self.current_twitch_channel.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new("Salon :")
+                                            .size(11.0)
+                                            .color(egui::Color32::from_rgb(170, 185, 205)),
+                                    );
+                                    ui.hyperlink_to(
+                                        egui::RichText::new(format!("#{}", self.current_twitch_channel))
+                                            .size(11.0)
+                                            .color(egui::Color32::from_rgb(0, 195, 255))
+                                            .underline(),
+                                        format!("https://twitch.tv/{}", self.current_twitch_channel),
+                                    );
+                                    ui.separator();
+                                }
+
+                                let search_edit = ui.add_sized(
+                                    [110.0, 18.0],
+                                    egui::TextEdit::singleline(&mut self.twitch_search_query)
+                                        .hint_text("Chaîne..."),
+                                );
+                                let enter_pressed = search_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                if (ui.small_button("🔍").clicked() || enter_pressed) && !self.twitch_search_query.trim().is_empty() {
+                                    let _ = self.command_sender.send(AgentCommand::SearchTwitch(
+                                        self.twitch_search_query.trim().to_string(),
+                                    ));
+                                }
+                            });
+
+                            if !self.twitch_search_results.is_empty() {
+                                ui.add_space(2.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Résultats :")
+                                            .size(10.5)
+                                            .color(egui::Color32::from_rgb(255, 215, 120)),
+                                    );
+                                    let mut selected_channel = None;
+                                    for ch in &self.twitch_search_results {
+                                        if ui.small_button(format!("▶ {}", ch.display_name)).on_hover_text("Rejoindre ce salon irc").clicked() {
+                                            selected_channel = Some(ch.login.clone());
+                                        }
+                                        if ui.small_button("↗").on_hover_text("Ouvrir sur twitch").clicked() {
+                                            ui.ctx().open_url(egui::OpenUrl::new_tab(format!("https://twitch.tv/{}", ch.login)));
+                                        }
+                                    }
+                                    if let Some(ch) = selected_channel {
+                                        self.current_twitch_channel = ch.clone();
+                                        let _ = self.twitch_channel_sender.send(ch);
+                                        self.twitch_messages.clear();
+                                        self.twitch_search_results.clear();
+                                    }
+                                });
+                            }
+                            ui.separator();
+                            let max_chat_scroll_h = (messages_rect.height() - 28.0).max(20.0);
+                            let scroll_out = egui::ScrollArea::vertical()
+                                .stick_to_bottom(true)
+                                .max_height(max_chat_scroll_h)
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    if self.twitch_messages.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new("En attente de messages twitch...")
+                                                .size(12.0)
+                                                .italics()
+                                                .color(egui::Color32::from_rgba_unmultiplied(180, 190, 205, 150)),
+                                        );
+                                    } else {
+                                        for (idx, msg) in self.twitch_messages.iter().enumerate() {
+                                            let t_id = ui.make_persistent_id(format!("twitch_msg_item_{idx}"));
+                                            let layer_id = ui.layer_id();
+                                            ui.memory_mut(|m| m.interested_in_focus(t_id, layer_id));
+                                            let is_t_focused = ui.memory(|m| m.has_focus(t_id));
+                                            let resp = ui.horizontal_wrapped(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(&msg.timestamp)
+                                                        .size(9.0)
+                                                        .color(egui::Color32::from_rgba_unmultiplied(140, 150, 170, 140)),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(format!("{}:", msg.author))
+                                                        .size(12.0)
+                                                        .color(egui::Color32::from_rgb(169, 112, 255))
+                                                        .strong(),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(&msg.text)
+                                                        .size(12.5)
+                                                        .color(egui::Color32::WHITE),
+                                                );
+                                            }).response;
+                                            let resp = ui.interact(resp.rect, t_id, egui::Sense::click());
+
+                                            if resp.clicked() {
+                                                ui.memory_mut(|m| m.request_focus(t_id));
+                                            }
+                                            let effective_t_focused = is_t_focused || resp.has_focus();
+                                            let copy_t_hit = ctx.input(|i| {
+                                                i.events.iter().any(|e| matches!(e, egui::Event::Copy))
+                                                    || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
+                                            });
+                                            if (effective_t_focused || resp.hovered()) && copy_t_hit {
+                                                let text = format!("{}: {}", msg.author, msg.text);
+                                                set_clipboard_text(&text);
+                                                ctx.copy_text(text);
+                                                play_earcon(Earcon::Success);
+                                            }
+                                            if effective_t_focused {
+                                                resp.scroll_to_me(Some(egui::Align::Center));
+                                                ui.painter().rect_stroke(
+                                                    resp.rect.expand(2.0),
+                                                    egui::CornerRadius::same(3),
+                                                    egui::Stroke::new(1.2, egui::Color32::from_rgb(0, 200, 255)),
+                                                    egui::StrokeKind::Outside,
+                                                );
+                                            }
+                                            ui.add_space(3.0);
+                                        }
+                                    }
+                                });
+                            computed_chat_h = (scroll_out.content_size.y + 72.0).clamp(min_chat_h, max_chat_h);
+                        }
+                    }
+                });
+
+                // Hystérésis asymétrique pour self.chat_height
+                if computed_chat_h > self.chat_height + 4.0 || computed_chat_h < self.chat_height - 8.0 {
+                    self.chat_height = computed_chat_h;
+                }
 
                 // Zones de déplacement : en-tête supérieur (en réservant l'espace des boutons à droite) et bandeau inférieur
                 let window_buttons_width = 84.0;
@@ -2560,6 +2671,7 @@ impl eframe::App for OverlayApp {
 
                             ui.horizontal(|ui| {
                                 let edit = egui::TextEdit::singleline(&mut self.api_key_input)
+                                    .id(egui::Id::new("api_key_input_field"))
                                     .password(!self.show_api_key_plain)
                                     .hint_text("sk-...")
                                     .desired_width(230.0);
@@ -2593,15 +2705,26 @@ impl eframe::App for OverlayApp {
                                     }
                                 });
 
-                                if edit_resp.has_focus() {
-                                    let paste_hit = ctx.input(|i| {
-                                        ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
-                                            || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
-                                    });
-                                    let egui_pasted = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
-                                    if paste_hit && !egui_pasted {
-                                        if let Some(clip) = get_clipboard_text() {
-                                            self.api_key_input = clip.trim().to_string();
+                                let copy_key_hit = ctx.input(|i| {
+                                    i.events.iter().any(|e| matches!(e, egui::Event::Copy))
+                                        || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
+                                });
+                                if edit_resp.has_focus() && copy_key_hit && !self.api_key_input.is_empty() {
+                                    set_clipboard_text(&self.api_key_input);
+                                    ctx.copy_text(self.api_key_input.clone());
+                                    play_earcon(Earcon::Success);
+                                }
+
+                                let paste_key_hit = ctx.input(|i| {
+                                    i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                                        || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
+                                        || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                });
+                                if (edit_resp.has_focus() || edit_resp.hovered()) && paste_key_hit {
+                                    if let Some(clip) = get_clipboard_text() {
+                                        let trimmed = clip.trim().to_string();
+                                        if !trimmed.is_empty() && self.api_key_input != trimmed {
+                                            self.api_key_input = trimmed;
                                         }
                                     }
                                 }
