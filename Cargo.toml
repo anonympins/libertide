@@ -13,6 +13,8 @@ serde_json = "1.0"
 reqwest = { version = "0.13.5", features = ["json", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 any-tts = { version = "0.2", default-features = false, features = ["kokoro", "download"] }
+# Force une version corrigée de ring sur Apple Silicon (évite le panic const assert en 0.17.14)
+ring = ">= 0.17.15"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58.0", features = [
@@ -34,3 +36,4 @@ opt-level = 3
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+strip = true
