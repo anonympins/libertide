@@ -121,21 +121,89 @@ pub fn find_whisper_model_file() -> Option<PathBuf> {
         }
     }
 
-    let candidates = [
-        "models/ggml-base.bin",
-        "models/ggml-tiny.bin",
-        "ggml-base.bin",
-        "ggml-tiny.bin",
-    ];
+    let model_names = ["ggml-base.bin", "ggml-tiny.bin"];
 
-    for candidate in &candidates {
-        let p = PathBuf::from(candidate);
-        if p.is_file() {
-            return Some(p);
+    // 1. Racine du dépôt via CARGO_MANIFEST_DIR (infaillible lors du dev / cargo run)
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for name in &model_names {
+        let p1 = manifest_dir.join("models").join(name);
+        if p1.is_file() {
+            return Some(p1);
+        }
+        let p2 = manifest_dir.join(name);
+        if p2.is_file() {
+            return Some(p2);
+        }
+    }
+
+    // 2. Dossier de l'exécutable et ses parents (remonte depuis target/debug ou racine d'installation)
+    if let Ok(exe) = std::env::current_exe() {
+        let mut curr = exe.parent();
+        for _ in 0..6 {
+            if let Some(dir) = curr {
+                for name in &model_names {
+                    let p1 = dir.join("models").join(name);
+                    if p1.is_file() {
+                        return Some(p1);
+                    }
+                    let p2 = dir.join(name);
+                    if p2.is_file() {
+                        return Some(p2);
+                    }
+                }
+                curr = dir.parent();
+            } else {
+                break;
+            }
+        }
+    }
+
+    // 3. Répertoire de travail courant et ses parents
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut curr = Some(cwd.as_path());
+        for _ in 0..5 {
+            if let Some(dir) = curr {
+                for name in &model_names {
+                    let p1 = dir.join("models").join(name);
+                    if p1.is_file() {
+                        return Some(p1);
+                    }
+                    let p2 = dir.join(name);
+                    if p2.is_file() {
+                        return Some(p2);
+                    }
+                }
+                curr = dir.parent();
+            } else {
+                break;
+            }
         }
     }
 
     None
+}
+
+fn get_primary_models_dir() -> PathBuf {
+    let manifest_models = Path::new(env!("CARGO_MANIFEST_DIR")).join("models");
+    if manifest_models.parent().map_or(false, |p| p.exists()) {
+        manifest_models
+    } else if let Ok(exe) = std::env::current_exe() {
+        let mut curr = exe.parent();
+        for _ in 0..6 {
+            if let Some(dir) = curr {
+                let candidate = dir.join("models");
+                if candidate.is_dir() {
+                    return candidate;
+                }
+                curr = dir.parent();
+            } else {
+                break;
+            }
+        }
+        exe.parent().map(|p| p.join("models")).unwrap_or_else(|| PathBuf::from("models"))
+    } else {
+        PathBuf::from("models")
+    }
 }
 
 fn ensure_model_downloaded(event_tx: &Sender<AgentEvent>) -> Result<PathBuf, String> {
@@ -143,7 +211,7 @@ fn ensure_model_downloaded(event_tx: &Sender<AgentEvent>) -> Result<PathBuf, Str
         return Ok(existing);
     }
 
-    let target_dir = PathBuf::from("models");
+    let target_dir = get_primary_models_dir();
     let _ = std::fs::create_dir_all(&target_dir);
     let model_path = target_dir.join("ggml-base.bin");
 

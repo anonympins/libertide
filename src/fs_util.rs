@@ -1,8 +1,46 @@
 use std::path::{Path, PathBuf};
 
+/// Résout l'emplacement réel du fichier .env sur le disque
+pub fn find_env_file() -> PathBuf {
+    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
+    if manifest_path.is_file() {
+        return manifest_path;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut curr = exe.parent();
+        for _ in 0..6 {
+            if let Some(dir) = curr {
+                let p = dir.join(".env");
+                if p.is_file() {
+                    return p;
+                }
+                curr = dir.parent();
+            } else {
+                break;
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut curr = Some(cwd.as_path());
+        for _ in 0..5 {
+            if let Some(dir) = curr {
+                let p = dir.join(".env");
+                if p.is_file() {
+                    return p;
+                }
+                curr = dir.parent();
+            } else {
+                break;
+            }
+        }
+    }
+    PathBuf::from(".env")
+}
+
 /// Lit une variable d'environnement définie dans un fichier texte (par exemple `.env`).
 pub fn read_env_var_from_file(file_path: &str, key: &str) -> Option<String> {
-    let content = std::fs::read_to_string(file_path).ok()?;
+    let resolved_path = if file_path == ".env" { find_env_file() } else { PathBuf::from(file_path) };
+    let content = std::fs::read_to_string(&resolved_path).ok()?;
     let prefix = format!("{key}=");
     for line in content.lines() {
         let line = line.trim();
@@ -21,8 +59,9 @@ pub fn read_env_var_from_file(file_path: &str, key: &str) -> Option<String> {
 
 /// Met à jour ou ajoute une variable d'environnement dans un fichier texte (ex: `.env`).
 pub fn write_env_var_to_file(file_path: &str, key: &str, value: &str) -> std::io::Result<()> {
+    let resolved_path = if file_path == ".env" { find_env_file() } else { PathBuf::from(file_path) };
     let prefix = format!("{key}=");
-    let content = std::fs::read_to_string(file_path).unwrap_or_default();
+    let content = std::fs::read_to_string(&resolved_path).unwrap_or_default();
     let mut replaced = false;
     let mut new_lines = Vec::new();
 
@@ -47,7 +86,7 @@ pub fn write_env_var_to_file(file_path: &str, key: &str, value: &str) -> std::io
     if !out.ends_with('\n') {
         out.push('\n');
     }
-    std::fs::write(file_path, out)
+    std::fs::write(&resolved_path, out)
 }
 
 /// Crée un fichier texte temporaire contenant le texte fourni.

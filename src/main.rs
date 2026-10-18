@@ -3601,6 +3601,21 @@ async fn call_deepseek_prompt(
 }
 
 fn main() -> eframe::Result<()> {
+    // Si l'application est lancée au démarrage de Windows (CWD = System32),
+    // repositionner le répertoire courant sur le dossier du projet ou de l'exécutable.
+    if let Ok(cwd) = std::env::current_dir() {
+        let cwd_str = cwd.to_string_lossy().to_lowercase();
+        if cwd_str.contains("system32") || cwd_str.contains("syswow64") {
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(parent) = exe.parent() {
+                    let project_dir = parent.parent().and_then(|p| p.parent()).filter(|p| p.join("Cargo.toml").exists());
+                    let target_dir = project_dir.unwrap_or(parent);
+                    let _ = std::env::set_current_dir(target_dir);
+                }
+            }
+        }
+    }
+
     let (event_tx, event_rx) = channel::<AgentEvent>();
     let (cmd_tx, mut cmd_rx) = unbounded_channel::<AgentCommand>();
     let initial_voice = resolve_initial_voice();
