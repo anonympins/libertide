@@ -1,9 +1,40 @@
+use std::sync::Mutex;
 use eframe::egui;
 use eframe::egui::text::LayoutJob;
 use eframe::egui::TextFormat;
 use serde::{Deserialize, Serialize};
 use crate::automation::set_clipboard_text;
 use crate::{play_earcon, Earcon};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenCardSummary {
+    pub id: String,
+    pub title: String,
+    pub card_type: String,
+}
+
+/// Registre global en temps réel des fenêtres volantes ouvertes
+pub static OPEN_FLOATING_CARDS: Mutex<Vec<OpenCardSummary>> = Mutex::new(Vec::new());
+
+/// Met à jour le registre global des fenêtres volantes ouvertes
+pub fn update_open_floating_cards(cards: &[FloatingCard]) {
+    if let Ok(mut lock) = OPEN_FLOATING_CARDS.lock() {
+        *lock = cards
+            .iter()
+            .filter(|c| c.open)
+            .map(|c| OpenCardSummary {
+                id: c.id.clone(),
+                title: c.title.clone(),
+                card_type: match &c.content {
+                    FloatingContentType::Table { .. } => "table".to_string(),
+                    FloatingContentType::Stats { .. } => "stats".to_string(),
+                    FloatingContentType::Markdown { .. } => "markdown".to_string(),
+                    FloatingContentType::Form { .. } => "form".to_string(),
+                },
+            })
+            .collect();
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -308,9 +339,12 @@ impl FloatingCard {
         let mut submitted_prompt = None;
 
         ctx.show_viewport_immediate(viewport_id, builder, |vp_ctx, _class| {
+            vp_ctx.request_repaint();
             if vp_ctx.input(|i| i.viewport().close_requested()) {
                 self.open = false;
             }
+
+            let is_maximized = vp_ctx.input(|i| i.viewport().maximized.unwrap_or(false));
 
             egui::CentralPanel::default()
                 .frame(
@@ -379,6 +413,15 @@ impl FloatingCard {
                             ).on_hover_text("Fermer cette fenêtre volante").clicked() {
                                 self.open = false;
                             }
+
+                            let max_icon = if is_maximized { "⧉" } else { "□" };
+                            if ui.button(
+                                egui::RichText::new(max_icon)
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(200, 215, 230)),
+                            ).on_hover_text(if is_maximized { "Restaurer" } else { "Agrandir" }).clicked() {
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
+                            }
                         });
                     });
 
@@ -403,21 +446,69 @@ impl FloatingCard {
                                         ui.label(egui::RichText::new("Tableau vide").italics().color(egui::Color32::GRAY));
                                         return;
                                     }
-                                    egui::Grid::new(format!("grid_{card_id}"))
-                                        .striped(true)
-                                        .spacing([14.0, 6.0])
-                                        .show(ui, |ui| {
-                                            for h in headers.iter() {
-                                                ui.label(egui::RichText::new(h).strong().color(egui::Color32::from_rgb(0, 210, 255)));
-                                            }
-                                            ui.end_row();
 
-                                            for row in rows.iter() {
-                                                for cell in row.iter() {
-                                                    ui.label(egui::RichText::new(cell).color(egui::Color32::from_rgb(230, 235, 245)));
-                                                }
-                                                ui.end_row();
+                                    let mut full_table_md = String::new();
+                                    if !headers.is_empty() {
+                                        full_table_md.push_str(&format!("| {} |\n", headers.join(" | ")));
+                                        let sep: Vec<String> = headers.iter().map(|h| "-".repeat(h.len().max(3))).collect();
+                                        full_table_md.push_str(&format!("| {} |\n", sep.join(" | ")));
+                                    }
+                                    for r in rows.iter() {
+                                        full_table_md.push_str(&format!("| {} |\n", r.join(" | ")));
+                                    }
+
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new("📊 Données").size(11.0).color(egui::Color32::from_rgb(0, 200, 255)).strong());
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            let copy_tbl = ui.add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("📋 Copier le tableau")
+                                                        .size(10.5)
+                                                        .color(egui::Color32::from_rgb(180, 220, 255)),
+                                                )
+                                                .small()
+                                                .corner_radius(egui::CornerRadius::same(4)),
+                                            );
+                                            if copy_tbl.on_hover_text("Copier tout le tableau au format Markdown").clicked() {
+                                                set_clipboard_text(&full_table_md);
+                                                ui.ctx().copy_text(full_table_md.clone());
+                                                play_earcon(Earcon::Success);
                                             }
+                                        });
+                                    });
+                                    ui.add_space(2.0);
+
+                                    let num_cols = headers.len().max(1);
+                                    let avail_w = ui.available_width();
+                                    let min_col_width = (avail_w / num_cols as f32).max(85.0);
+
+                                    egui::ScrollArea::horizontal()
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            egui::Grid::new(format!("grid_{card_id}"))
+                                                .striped(true)
+                                                .spacing([14.0, 6.0])
+                                                .min_col_width(min_col_width)
+                                                .show(ui, |ui| {
+                                                    for h in headers.iter() {
+                                                        render_table_cell(ui, h, egui::Color32::from_rgb(0, 210, 255), headers, &full_table_md, true);
+                                                    }
+                                                    ui.end_row();
+
+                                                    for row in rows.iter() {
+                                                        for (c_idx, cell) in row.iter().enumerate() {
+                                                            let text_color = if c_idx == 0 {
+                                                                egui::Color32::from_rgb(240, 245, 255)
+                                                            } else {
+                                                                egui::Color32::from_rgb(205, 220, 235)
+                                                            };
+                                                            if let Some(act) = render_table_cell(ui, cell, text_color, row, &full_table_md, false) {
+                                                                submitted_prompt = Some(act);
+                                                            }
+                                                        }
+                                                        ui.end_row();
+                                                    }
+                                                });
                                         });
                                 }
                                 FloatingContentType::Stats { items } => {
@@ -630,11 +721,58 @@ impl FloatingCard {
                             }
                         });
 
+                    // Zones de redimensionnement interactif sur le pourtour et poignée visuelle aux coins
+                    if !is_maximized {
+                        let screen_rect = ui.ctx().input(|i| i.content_rect());
+                        let total_w = screen_rect.width();
+                        let total_h = screen_rect.height();
+                        let min = screen_rect.min;
+                        let border_thickness = 6.0;
+
+                        let resize_zones = [
+                            // Bord haut et coins hauts
+                            (egui::Rect::from_min_size(min, egui::vec2(border_thickness, border_thickness)), egui::viewport::ResizeDirection::NorthWest, egui::CursorIcon::ResizeNorthWest),
+                            (egui::Rect::from_min_size(egui::pos2(min.x + total_w - border_thickness, min.y), egui::vec2(border_thickness, border_thickness)), egui::viewport::ResizeDirection::NorthEast, egui::CursorIcon::ResizeNorthEast),
+                            (egui::Rect::from_min_size(egui::pos2(min.x + border_thickness, min.y), egui::vec2((total_w - 2.0 * border_thickness).max(0.0), border_thickness)), egui::viewport::ResizeDirection::North, egui::CursorIcon::ResizeNorth),
+
+                            // Côtés gauche et droite
+                            (egui::Rect::from_min_size(egui::pos2(min.x, min.y + border_thickness), egui::vec2(border_thickness, (total_h - 2.0 * border_thickness).max(0.0))), egui::viewport::ResizeDirection::West, egui::CursorIcon::ResizeWest),
+                            (egui::Rect::from_min_size(egui::pos2(min.x + total_w - border_thickness, min.y + border_thickness), egui::vec2(border_thickness, (total_h - 2.0 * border_thickness).max(0.0))), egui::viewport::ResizeDirection::East, egui::CursorIcon::ResizeEast),
+
+                            // Bord bas et coins bas
+                            (egui::Rect::from_min_size(egui::pos2(min.x, min.y + total_h - border_thickness), egui::vec2(border_thickness, border_thickness)), egui::viewport::ResizeDirection::SouthWest, egui::CursorIcon::ResizeSouthWest),
+                            (egui::Rect::from_min_size(egui::pos2(min.x + total_w - border_thickness, min.y + total_h - border_thickness), egui::vec2(border_thickness, border_thickness)), egui::viewport::ResizeDirection::SouthEast, egui::CursorIcon::ResizeSouthEast),
+                            (egui::Rect::from_min_size(egui::pos2(min.x + border_thickness, min.y + total_h - border_thickness), egui::vec2((total_w - 2.0 * border_thickness).max(0.0), border_thickness)), egui::viewport::ResizeDirection::South, egui::CursorIcon::ResizeSouth),
+                        ];
+
+                        for (rect, direction, cursor_icon) in resize_zones {
+                            let resp = ui.interact(rect, egui::Id::new(format!("card_resize_{:?}_{card_id}", direction)), egui::Sense::drag());
+                            if resp.hovered() {
+                                ui.ctx().set_cursor_icon(cursor_icon);
+                            }
+                            if resp.drag_started() {
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+                            }
+                        }
+
+                        let painter = ui.painter();
+                        let grip_se = egui::Rect::from_min_size(egui::pos2(min.x + total_w - 12.0, min.y + total_h - 12.0), egui::vec2(10.0, 10.0));
+                        painter.line_segment(
+                            [egui::pos2(grip_se.min.x, grip_se.max.y), egui::pos2(grip_se.max.x, grip_se.min.y)],
+                            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 90)),
+                        );
+                        painter.line_segment(
+                            [egui::pos2(grip_se.min.x + 3.0, grip_se.max.y), egui::pos2(grip_se.max.x, grip_se.min.y + 3.0)],
+                            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 50)),
+                        );
+                    }
+
                     if close_window {
                         self.open = false;
                     }
                 });
         });
+        ctx.request_repaint_of(viewport_id);
 
         submitted_prompt
     }
@@ -780,12 +918,13 @@ fn parse_inline_markdown(line: &str) -> Vec<InlineSpan<'_>> {
             plain_start = i;
             continue;
         } else if bytes[i] == b'[' {
-            // Détection et parsing de la macro [link="url"]label[/link]
+            // Détection et parsing de la macro [link="url"]label[/link] ou auto-fermante [link="..." /]
             let remaining = &line[i..];
             let rem_lower = remaining.to_ascii_lowercase();
             if rem_lower.starts_with("[link=") || rem_lower.starts_with("[link ") {
                 if let Some(open_tag_end) = remaining.find(']') {
                     let open_tag_content = &remaining[..open_tag_end];
+                    let is_self_closing = open_tag_content.trim_end().ends_with('/');
                     let target_val = if let Some(eq_pos) = open_tag_content.find('=') {
                         let after_eq = open_tag_content[eq_pos + 1..].trim();
                         if let Some(quote) = after_eq.chars().next().filter(|&c| c == '"' || c == '\'') {
@@ -797,13 +936,37 @@ fn parse_inline_markdown(line: &str) -> Vec<InlineSpan<'_>> {
                             }
                         } else {
                             let end_val = after_eq
-                                .find(|c: char| c.is_whitespace() || c == ']')
+                                .find(|c: char| c.is_whitespace() || c == ']' || c == '/')
                                 .unwrap_or(after_eq.len());
                             Some(&after_eq[..end_val])
                         }
                     } else {
                         None
                     };
+
+                    if is_self_closing {
+                        let label_val = crate::html_util::extract_attribute(open_tag_content, "label")
+                            .or_else(|| crate::html_util::extract_attribute(open_tag_content, "text"))
+                            .or_else(|| crate::html_util::extract_attribute(open_tag_content, "title"))
+                            .or(target_val)
+                            .unwrap_or("Lien");
+
+                        if i > plain_start {
+                            spans.push(InlineSpan {
+                                text: &line[plain_start..i],
+                                style: InlineStyle::Normal,
+                                target: None,
+                            });
+                        }
+                        spans.push(InlineSpan {
+                            text: label_val,
+                            style: InlineStyle::Link,
+                            target: target_val,
+                        });
+                        i += open_tag_end + 1;
+                        plain_start = i;
+                        continue;
+                    }
 
                     let after_open = i + open_tag_end + 1;
                     if let Some(close_pos) = line[after_open..].to_ascii_lowercase().find("[/link]") {
@@ -872,6 +1035,41 @@ fn parse_inline_markdown(line: &str) -> Vec<InlineSpan<'_>> {
     }
 
     spans
+}
+
+pub fn render_markdown_line_to_html(line: &str) -> String {
+    let spans = parse_inline_markdown(line);
+    let mut out = String::with_capacity(line.len() * 2);
+    for span in spans {
+        let escaped = span.text
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
+
+        if span.style == InlineStyle::Link {
+            if let Some(target) = span.target {
+                let target_esc = target
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+                    .replace('"', "&quot;");
+                out.push_str(&format!("<a href=\"{target_esc}\">{escaped}</a>"));
+            } else {
+                out.push_str(&escaped);
+            }
+        } else {
+            match span.style {
+                InlineStyle::Bold => out.push_str(&format!("<b>{escaped}</b>")),
+                InlineStyle::Italic => out.push_str(&format!("<i>{escaped}</i>")),
+                InlineStyle::BoldItalic => out.push_str(&format!("<b><i>{escaped}</i></b>")),
+                InlineStyle::Code => out.push_str(&format!("<code>{escaped}</code>")),
+                InlineStyle::Strike => out.push_str(&format!("<s>{escaped}</s>")),
+                _ => out.push_str(&escaped),
+            }
+        }
+    }
+    out
 }
 
 fn create_layout_job(
@@ -1046,13 +1244,21 @@ fn render_line_spans(
     if !has_links {
         let avail = ui.available_width().max(40.0);
         let job = create_layout_job(line, base_size, avail, force_italic, base_color);
-        ui.add(egui::Label::new(job).wrap());
+        let resp = ui.add(egui::Label::new(job).wrap().selectable(true));
+        resp.context_menu(|ui| {
+            if ui.button("📋 Copier le texte").clicked() {
+                set_clipboard_text(line);
+                ui.ctx().copy_text(line.to_string());
+                play_earcon(Earcon::Success);
+                ui.close();
+            }
+        });
         return None;
     }
 
     let mut action_to_run: Option<String> = None;
 
-    ui.horizontal_wrapped(|ui| {
+    let row_resp = ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(3.5, 3.5);
 
         for span in spans {
@@ -1115,13 +1321,139 @@ fn render_line_spans(
                     continue;
                 }
                 for word in words {
-                    ui.add(egui::Label::new(egui::RichText::new(word).size(base_size).color(base_color)).wrap());
+                    ui.add(egui::Label::new(egui::RichText::new(word).size(base_size).color(base_color)).selectable(true).wrap());
                 }
             }
         }
     });
 
+    row_resp.response.context_menu(|ui| {
+        if ui.button("📋 Copier le texte").clicked() {
+            set_clipboard_text(line);
+            ui.ctx().copy_text(line.to_string());
+            play_earcon(Earcon::Success);
+            ui.close();
+        }
+    });
+
     action_to_run
+}
+
+/// Découpe une ligne de tableau Markdown en respectant les barres obliques échappées (\|), les crochets et les guillemets
+fn split_table_row(line: &str) -> Vec<String> {
+    let trimmed = line.trim();
+    let content = if trimmed.starts_with('|') {
+        let without_start = &trimmed[1..];
+        if without_start.ends_with('|') {
+            &without_start[..without_start.len() - 1]
+        } else {
+            without_start
+        }
+    } else if trimmed.ends_with('|') {
+        &trimmed[..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+
+    let mut cells = Vec::new();
+    let mut cur = String::new();
+    let chars: Vec<char> = content.chars().collect();
+    let mut in_bracket = false;
+    let mut in_quotes = false;
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            if chars[i + 1] == '|' {
+                cur.push('|');
+                i += 2;
+                continue;
+            }
+            cur.push(c);
+            cur.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+
+        if c == '"' {
+            in_quotes = !in_quotes;
+        } else if c == '[' {
+            in_bracket = true;
+        } else if c == ']' {
+            in_bracket = false;
+        }
+
+        if c == '|' && !in_bracket && !in_quotes {
+            cells.push(cur.trim().to_string());
+            cur.clear();
+        } else {
+            cur.push(c);
+        }
+        i += 1;
+    }
+    cells.push(cur.trim().to_string());
+    cells
+}
+
+fn render_table_cell(
+    ui: &mut egui::Ui,
+    cell: &str,
+    text_color: egui::Color32,
+    row: &[String],
+    table_markdown: &str,
+    is_header: bool,
+) -> Option<String> {
+    let mut clicked_action = None;
+    let resp = ui.scope(|ui| {
+        if is_header {
+            let avail = ui.available_width().max(40.0);
+            let job = create_layout_job(cell, 12.0, avail, false, text_color);
+            let l_resp = ui.add(egui::Label::new(job).selectable(true).wrap());
+            l_resp.context_menu(|ui| {
+                if ui.button("📋 Copier l'en-tête").clicked() {
+                    set_clipboard_text(cell);
+                    ui.ctx().copy_text(cell.to_string());
+                    play_earcon(Earcon::Success);
+                    ui.close();
+                }
+                if ui.button("📋 Copier tout le tableau").clicked() {
+                    set_clipboard_text(table_markdown);
+                    ui.ctx().copy_text(table_markdown.to_string());
+                    play_earcon(Earcon::Success);
+                    ui.close();
+                }
+            });
+        } else {
+            clicked_action = render_line_spans(ui, cell, 11.5, false, text_color);
+        }
+    });
+
+    resp.response.context_menu(|ui| {
+        if ui.button("📋 Copier la cellule").clicked() {
+            set_clipboard_text(cell);
+            ui.ctx().copy_text(cell.to_string());
+            play_earcon(Earcon::Success);
+            ui.close();
+        }
+        if !is_header && !row.is_empty() {
+            if ui.button("📋 Copier la ligne").clicked() {
+                let row_str = row.join(" | ");
+                set_clipboard_text(&row_str);
+                ui.ctx().copy_text(row_str);
+                play_earcon(Earcon::Success);
+                ui.close();
+            }
+        }
+        if ui.button("📋 Copier tout le tableau").clicked() {
+            set_clipboard_text(table_markdown);
+            ui.ctx().copy_text(table_markdown.to_string());
+            play_earcon(Earcon::Success);
+            ui.close();
+        }
+    });
+
+    clicked_action
 }
 
 pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<String> {
@@ -1269,12 +1601,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
             let mut headers = Vec::new();
             let mut rows = Vec::new();
             for (idx, t_line) in table_lines.iter().enumerate() {
-                let cells: Vec<String> = t_line
-                    .trim()
-                    .trim_matches('|')
-                    .split('|')
-                    .map(|c| c.trim().to_string())
-                    .collect();
+                let cells = split_table_row(t_line);
                 if idx == 0 {
                     headers = cells;
                 } else if cells.iter().all(|c| c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')) {
@@ -1285,6 +1612,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
             }
 
             if !headers.is_empty() || !rows.is_empty() {
+                let raw_table_md = table_lines.join("\n");
                 ui.add_space(3.0);
                 egui::Frame::new()
                     .fill(egui::Color32::from_rgba_unmultiplied(10, 14, 20, 180))
@@ -1292,14 +1620,35 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                     .corner_radius(egui::CornerRadius::same(6))
                     .inner_margin(egui::Margin::symmetric(8, 6))
                     .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("📊 Tableau").size(10.5).color(egui::Color32::from_rgb(0, 200, 255)).strong());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let copy_tbl_btn = ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new("📋 Copier le tableau")
+                                            .size(10.0)
+                                            .color(egui::Color32::from_rgb(180, 220, 255)),
+                                    )
+                                    .small()
+                                    .corner_radius(egui::CornerRadius::same(4)),
+                                );
+                                if copy_tbl_btn.on_hover_text("Copier tout le tableau au format Markdown").clicked() {
+                                    set_clipboard_text(&raw_table_md);
+                                    ui.ctx().copy_text(raw_table_md.clone());
+                                    play_earcon(Earcon::Success);
+                                }
+                            });
+                        });
+                        ui.add_space(2.0);
+                        ui.separator();
+                        ui.add_space(2.0);
+
                         egui::Grid::new(table_id)
                             .striped(true)
                             .spacing([12.0, 5.0])
                             .show(ui, |ui| {
                                 for h in &headers {
-                                    let avail = ui.available_width().max(40.0);
-                                    let job = create_layout_job(h, 12.0, avail, false, egui::Color32::from_rgb(0, 215, 255));
-                                    ui.label(job);
+                                    render_table_cell(ui, h, egui::Color32::from_rgb(0, 215, 255), &headers, &raw_table_md, true);
                                 }
                                 ui.end_row();
 
@@ -1310,7 +1659,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                                         } else {
                                             egui::Color32::from_rgb(205, 220, 235)
                                         };
-                                        if let Some(act) = render_line_spans(ui, cell, 11.5, false, text_color) {
+                                        if let Some(act) = render_table_cell(ui, cell, text_color, row, &raw_table_md, false) {
                                             clicked_action = Some(act);
                                         }
                                     }

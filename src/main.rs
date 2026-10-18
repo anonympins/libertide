@@ -12,7 +12,7 @@ mod types;
 mod window_util;
 
 use audio::spawn_audio_worker;
-use floating_window::FloatingCard;
+use floating_window::{update_open_floating_cards, FloatingCard, OPEN_FLOATING_CARDS};
 use automation::*;
 use fs_util::*;
 use pattern::clean_words;
@@ -708,7 +708,7 @@ impl OverlayApp {
             drag_offset: None,
             current_win_w: 560.0,
             chat_height: 70.0,
-            current_win_h: 154.0,
+            current_win_h: 178.0,
             is_hidden: false,
             mouse_passthrough: false,
             show_api_key_modal: has_no_key,
@@ -719,6 +719,7 @@ impl OverlayApp {
             api_key_error: None,
         };
         app.sync_modal_inputs_for_provider(llm_config.provider);
+        update_open_floating_cards(&app.floating_cards);
         app
     }
 
@@ -1050,7 +1051,7 @@ impl eframe::App for OverlayApp {
         };
 
         let min_win_w: f32 = 380.0;
-        let min_win_h: f32 = 134.0;
+        let min_win_h: f32 = 158.0;
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(min_win_w, min_win_h)));
 
         let inner_rect_opt = ctx.input(|i| i.viewport().inner_rect);
@@ -1058,7 +1059,7 @@ impl eframe::App for OverlayApp {
         self.current_win_w = win_w;
 
         let padding: f32 = 2.0;
-        let control_h: f32 = 78.0;
+        let control_h: f32 = 102.0;
 
         let max_chat_h = (work_h - control_h - 60.0).clamp(180.0, 560.0);
         let min_chat_h: f32 = 50.0;
@@ -1594,14 +1595,22 @@ impl eframe::App for OverlayApp {
                     self.is_hidden = false;
                 }
                 AgentEvent::ShowFloatingCard(card) => {
+                    let vp_id = egui::ViewportId::from_hash_of(&card.id);
                     if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == card.id) {
                         *existing = card;
                     } else {
                         self.floating_cards.push(card);
                     }
+                    update_open_floating_cards(&self.floating_cards);
+                    ctx.request_repaint();
+                    ctx.request_repaint_of(vp_id);
                 }
                 AgentEvent::CloseFloatingCard(id) => {
+                    let vp_id = egui::ViewportId::from_hash_of(&id);
                     self.floating_cards.retain(|c| c.id != id);
+                    update_open_floating_cards(&self.floating_cards);
+                    ctx.request_repaint();
+                    ctx.request_repaint_of(vp_id);
                 }
             }
         }
@@ -1778,7 +1787,7 @@ impl eframe::App for OverlayApp {
                         .inner_margin(egui::Margin::symmetric(10, 8))
                         .show(ui, |ui| {
                             let inner_rect = ui.available_rect_before_wrap();
-                            let avatar_pos = egui::pos2(inner_rect.max.x - 20.0, inner_rect.min.y + 22.0);
+                            let avatar_pos = egui::pos2(inner_rect.max.x - 20.0, inner_rect.center().y);
                             self.draw_avatar(ui, avatar_pos, 14.0, time);
 
                             let avatar_rect = egui::Rect::from_center_size(avatar_pos, egui::vec2(32.0, 32.0));
@@ -1872,6 +1881,157 @@ impl eframe::App for OverlayApp {
 
                                     ui.add_space(4.0);
 
+                                    // 1ère rangée : Champ de saisie occupant tout l'espace disponible + bouton Envoyer
+                                    ui.horizontal(|ui| {
+                                        let send_btn_w = 64.0;
+                                        let edit_width = (ui.available_width() - send_btn_w - ui.spacing().item_spacing.x).max(60.0);
+                                        let input_id = egui::Id::new("prompt_input_text");
+                                        let response = ui.add_sized(
+                                            [edit_width, 24.0],
+                                            egui::TextEdit::singleline(&mut self.input_text)
+                                                .id(input_id)
+                                                .hint_text(if self.is_recording {
+                                                    "Écoute Whisper active... parlez ou tapez"
+                                                } else {
+                                                    "Consigne d'exploration... (entrée)"
+                                                }),
+                                        );
+
+                                        response.context_menu(|ui| {
+                                            if ui.button("📋 Coller").clicked() {
+                                                if let Some(clip) = get_clipboard_text() {
+                                                    let clean_clip = clip.replace(['\r', '\n'], " ");
+                                                    self.input_text = clean_clip.trim().to_string();
+                                                    self.stop_speaking();
+                                                }
+                                                ui.close();
+                                            }
+                                            if ui.button("📄 Copier tout (Ctrl+C)").clicked() {
+                                                set_clipboard_text(&self.input_text);
+                                                ui.close();
+                                            }
+                                            if ui.button("✂ Couper tout").clicked() {
+                                                set_clipboard_text(&self.input_text);
+                                                self.input_text.clear();
+                                                ui.close();
+                                            }
+                                            if ui.button("🗑 Effacer").clicked() {
+                                                self.input_text.clear();
+                                                ui.close();
+                                            }
+                                        });
+
+                                        let copy_hit = ctx.input(|i| {
+                                            i.events.iter().any(|e| matches!(e, egui::Event::Copy))
+                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
+                                        });
+                                        if response.has_focus() && copy_hit && !self.input_text.is_empty() {
+                                            set_clipboard_text(&self.input_text);
+                                            ctx.copy_text(self.input_text.clone());
+                                            play_earcon(Earcon::Success);
+                                        }
+
+                                        let paste_hit = ctx.input(|i| {
+                                            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
+                                                || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                        });
+                                        if (response.has_focus() || response.hovered()) && paste_hit {
+                                            if let Some(clip) = get_clipboard_text() {
+                                                let clean_clip = clip.replace(['\r', '\n'], " ");
+                                                let trimmed_clean = clean_clip.trim().to_string();
+                                                if !trimmed_clean.is_empty() {
+                                                    self.input_text = trimmed_clean;
+                                                    self.stop_speaking();
+                                                }
+                                            }
+                                        }
+
+                                        if response.changed() {
+                                            self.stop_speaking();
+                                        }
+
+                                        let enter_hit = (response.lost_focus() || response.has_focus())
+                                            && ctx.input(|i| i.key_pressed(egui::Key::Enter));
+                                        let send_btn = ui.add_sized(
+                                            [send_btn_w, 24.0],
+                                            egui::Button::new(
+                                                egui::RichText::new("Envoyer")
+                                                    .size(11.5)
+                                                    .color(egui::Color32::from_rgb(220, 240, 255)),
+                                            ),
+                                        );
+                                        if (send_btn.clicked() || enter_hit) && !self.input_text.trim().is_empty() {
+                                            self.stop_speaking();
+                                            if self.is_recording {
+                                                self.stop_recording();
+                                            }
+                                            self.continuous_mode = true;
+                                            let prompt = std::mem::take(&mut self.input_text).trim().to_string();
+                                            self.live_transcript.clear();
+                                            self.chat_history.push(ChatEntry {
+                                                role: ChatRole::User,
+                                                text: prompt.clone(),
+                                                timestamp: current_time_str(),
+                                                quick_suggestions: Vec::new(),
+                                                screen_size_kb: None,
+                                            });
+                                            if is_cancel_scheduled_command(&prompt) {
+                                                let cancelled = cancel_all_scheduled_tasks();
+                                                play_earcon(Earcon::Success);
+                                                let reply = if cancelled > 0 {
+                                                    format!("Toutes les commandes différées ont été annulées ({cancelled} annulée{}).", if cancelled > 1 { "s" } else { "" })
+                                                } else {
+                                                    "Toutes les commandes différées ont été annulées.".to_string()
+                                                };
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::Agent,
+                                                    text: reply.clone(),
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                                                self.status = AgentStatus::Idle;
+                                                self.continuous_mode = false;
+                                                return;
+                                            }
+                                            if is_api_key_command(&prompt) {
+                                                self.sync_modal_inputs_for_provider(self.llm_config.provider);
+                                                self.show_api_key_modal = true;
+                                                let reply = "Boîte de configuration de la clé API ouverte.".to_string();
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::Agent,
+                                                    text: reply.clone(),
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                                                self.status = AgentStatus::Idle;
+                                                self.continuous_mode = false;
+                                            } else if is_hide_command(&prompt) {
+                                                self.is_hidden = true;
+                                                self.status = AgentStatus::Idle;
+                                                let reply = "Overlay masqué. Je reste à l'écoute pour « deepseek ouvre toi ».".to_string();
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::Agent,
+                                                    text: reply.clone(),
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                                            } else {
+                                                self.status = AgentStatus::Thinking;
+                                                let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
+                                            }
+                                        }
+                                    });
+
+                                    ui.add_space(3.0);
+
+                                    // 2e rangée : Boutons d'action, dictée, profil vocal, clé API et corbeille
                                     ui.horizontal(|ui| {
                                         let mic_text = if self.is_recording {
                                             egui::RichText::new("🔴 Stop (r)")
@@ -1942,137 +2102,6 @@ impl eframe::App for OverlayApp {
                                                 }
                                             }
                                         });
-
-                                        let edit_width = (ui.available_width() - 128.0).max(60.0);
-                                        let input_id = egui::Id::new("prompt_input_text");
-                                        let response = ui.add_sized(
-                                            [edit_width, 24.0],
-                                            egui::TextEdit::singleline(&mut self.input_text)
-                                                .id(input_id)
-                                                .hint_text(if self.is_recording {
-                                                    "Écoute Whisper active... parlez ou tapez"
-                                                } else {
-                                                    "Consigne d'exploration... (entrée)"
-                                                }),
-                                        );
-
-                                        response.context_menu(|ui| {
-                                            if ui.button("📋 Coller").clicked() {
-                                                if let Some(clip) = get_clipboard_text() {
-                                                    self.input_text.push_str(&clip);
-                                                }
-                                                ui.close();
-                                            }
-                                            if ui.button("📄 Copier tout (Ctrl+C)").clicked() {
-                                                set_clipboard_text(&self.input_text);
-                                                ui.close();
-                                            }
-                                            if ui.button("✂ Couper tout").clicked() {
-                                                set_clipboard_text(&self.input_text);
-                                                self.input_text.clear();
-                                                ui.close();
-                                            }
-                                            if ui.button("🗑 Effacer").clicked() {
-                                                self.input_text.clear();
-                                                ui.close();
-                                            }
-                                        });
-
-                                        let copy_hit = ctx.input(|i| {
-                                            i.events.iter().any(|e| matches!(e, egui::Event::Copy))
-                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
-                                        });
-                                        if response.has_focus() && copy_hit && !self.input_text.is_empty() {
-                                            set_clipboard_text(&self.input_text);
-                                            ctx.copy_text(self.input_text.clone());
-                                            play_earcon(Earcon::Success);
-                                        }
-
-                                        let paste_hit = ctx.input(|i| {
-                                            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
-                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
-                                                || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
-                                        });
-                                        if (response.has_focus() || response.hovered()) && paste_hit {
-                                            if let Some(clip) = get_clipboard_text() {
-                                                if !clip.is_empty() && !self.input_text.ends_with(&clip) {
-                                                    self.input_text.push_str(&clip);
-                                                }
-                                            }
-                                        }
-
-                                        if response.changed() {
-                                            self.stop_speaking();
-                                        }
-
-                                        let enter_hit = (response.lost_focus() || response.has_focus())
-                                            && ctx.input(|i| i.key_pressed(egui::Key::Enter));
-                                        if (ui.button("Envoyer").clicked() || enter_hit) && !self.input_text.trim().is_empty() {
-                                            self.stop_speaking();
-                                            if self.is_recording {
-                                                self.stop_recording();
-                                            }
-                                            self.continuous_mode = true;
-                                            let prompt = std::mem::take(&mut self.input_text).trim().to_string();
-                                            self.live_transcript.clear();
-                                            self.chat_history.push(ChatEntry {
-                                                role: ChatRole::User,
-                                                text: prompt.clone(),
-                                                timestamp: current_time_str(),
-                                                quick_suggestions: Vec::new(),
-                                                screen_size_kb: None,
-                                            });
-                                            if is_cancel_scheduled_command(&prompt) {
-                                                let cancelled = cancel_all_scheduled_tasks();
-                                                play_earcon(Earcon::Success);
-                                                let reply = if cancelled > 0 {
-                                                    format!("Toutes les commandes différées ont été annulées ({cancelled} annulée{}).", if cancelled > 1 { "s" } else { "" })
-                                                } else {
-                                                    "Toutes les commandes différées ont été annulées.".to_string()
-                                                };
-                                                self.chat_history.push(ChatEntry {
-                                                    role: ChatRole::Agent,
-                                                    text: reply.clone(),
-                                                    timestamp: current_time_str(),
-                                                    quick_suggestions: Vec::new(),
-                                                    screen_size_kb: None,
-                                                });
-                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply));
-                                                self.status = AgentStatus::Idle;
-                                                self.continuous_mode = false;
-                                                return;
-                                            }
-                                            if is_api_key_command(&prompt) {
-                                                self.sync_modal_inputs_for_provider(self.llm_config.provider);
-                                                self.show_api_key_modal = true;
-                                                let reply = "Boîte de configuration de la clé API ouverte.".to_string();
-                                                self.chat_history.push(ChatEntry {
-                                                    role: ChatRole::Agent,
-                                                    text: reply.clone(),
-                                                    timestamp: current_time_str(),
-                                                    quick_suggestions: Vec::new(),
-                                                    screen_size_kb: None,
-                                                });
-                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply));
-                                                self.status = AgentStatus::Idle;
-                                                self.continuous_mode = false;
-                                            } else if is_hide_command(&prompt) {
-                                                self.is_hidden = true;
-                                                self.status = AgentStatus::Idle;
-                                                let reply = "Overlay masqué. Je reste à l'écoute pour « deepseek ouvre toi ».".to_string();
-                                                self.chat_history.push(ChatEntry {
-                                                    role: ChatRole::Agent,
-                                                    text: reply.clone(),
-                                                    timestamp: current_time_str(),
-                                                    quick_suggestions: Vec::new(),
-                                                    screen_size_kb: None,
-                                                });
-                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply));
-                                            } else {
-                                                self.status = AgentStatus::Thinking;
-                                                let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
-                                            }
-                                        }
 
                                         let key_btn = ui
                                             .button("🔑")
@@ -2201,7 +2230,8 @@ impl eframe::App for OverlayApp {
                                                 || entry.text.contains("🎬 ")
                                                 || entry.text.contains("🎵 ")
                                                 || entry.text.contains("📄 ")
-                                                || entry.text.contains("🖼");
+                                                || entry.text.contains("🖼")
+                                                || (entry.text.contains('|') && entry.text.contains('\n'));
 
                                             if entry.role == ChatRole::Agent && has_interactive_md {
                                                 if let Some(prompt) = floating_window::render_markdown(ui, &entry.text, &format!("chat_entry_{idx}")) {
@@ -2841,12 +2871,17 @@ impl eframe::App for OverlayApp {
 
                 // Affichage dynamique des fenêtres volantes (stats, tables, contenus, formulaires de requête)
                 let mut submitted_card_prompts = Vec::new();
+                let prev_card_count = self.floating_cards.len();
                 self.floating_cards.retain_mut(|card| {
                     if let Some(prompt) = card.show(&ctx) {
                         submitted_card_prompts.push(prompt);
                     }
                     card.open
                 });
+                if self.floating_cards.len() != prev_card_count {
+                    update_open_floating_cards(&self.floating_cards);
+                    ctx.request_repaint();
+                }
                 for prompt in submitted_card_prompts {
                     self.stop_speaking();
                     if self.is_recording {
@@ -3371,6 +3406,7 @@ Règles principales :
    - Onglet/page : "accessibility_shortcut": "close_tab" (jamais "close_app" pour un onglet).
 4bis. RÈGLES DE LIENS INTERACTIFS & MACRO [link="cible"]label[/link] (CHAT & FENÊTRES VOLANTES) :
    - RÈGLE D'OR : Tout élément multimédia, ressource, fichier, page web, action ou suggestion mentionné dans "narration" ou dans une fenêtre volante ("show_floating_card") DOIT IMPÉRATIVEMENT être formaté sous forme de lien cliquable, prioritairement avec la macro robuste `[link="cible"]Icône Libellé[/link]` (ou en Markdown `Icône Libellé`).
+   - LIENS DANS LES TABLEAUX MARKDOWN : Tu PEUX et DOIS insérer des liens `[link="..."]...[/link]` à l'intérieur des cellules de tableaux Markdown ou de fenêtres volantes (ex: `| Produit | Action | Prix |\n| --- | --- | --- |\n| Drone Pro | [link="action:Commander Drone Pro"]⚡ Commander[/link] | 299€ |`).
    - AVANTAGE MAJEUR DE LA MACRO `[link="..."]...[/link]` : Elle évite tout conflit de parenthèses imbriquées dans les requêtes et les URLs complexes.
    - RÉACTIVITÉ DANS LE CHAT LIBERTIDE : Un clic sur un lien dans le chat ou dans une carte volante insère et envoie automatiquement la consigne dans le chat et déclenche l'exécution par l'agent. La synthèse vocale (TTS) prononce uniquement le libellé sans lire la cible technique ni les balises.
    - TYPOLOGIE DES MACROS OBLIGATOIRES :
@@ -3434,7 +3470,7 @@ Format JSON obligatoire :
     {{"action": "mute_audio"}},
     {{"action": "set_volume", "command": "mute"|"down"|"up"|"min"}},
     {{"action": "open_file", "path": "chemin/vers/image_ou_doc.png"}},
-    {{"action": "show_floating_card", "id": "stats_1", "title": "Tableau comparatif", "card_type": "table", "data": {{"headers": ["Modèle", "Prix"], "rows": [["Produit A", "49€"], ["Produit B", "59€"]]}}}},
+    {{"action": "show_floating_card", "id": "stats_1", "title": "Tableau comparatif", "card_type": "markdown", "data": {{"text": "| Modèle | Lien / Action | Prix |\n| --- | --- | --- |\n| Produit A | [link=\"action:Commander Produit A\"]⚡ Commander[/link] | 49€ |\n| Produit B | [link=\"action:Commander Produit B\"]⚡ Commander[/link] | 59€ |"}}}},
     {{"action": "show_floating_card", "id": "vol_search", "title": "Filtres Billet d'Avion", "card_type": "form", "data": {{"submit_label": "Rechercher les vols", "prompt_prefix": "Recherche de vol avec les critères suivants :", "fields": [{{"id": "depart", "label": "Ville de départ", "type": "text", "value": "Paris"}}, {{"id": "destination", "label": "Destination", "type": "text", "value": "Tokyo"}}, {{"id": "prix_max", "label": "Budget maximum", "type": "number_slider", "min": 200, "max": 3000, "step": 50, "value": 900, "unit": "€"}}, {{"id": "classe", "label": "Classe", "type": "select", "options": ["Économique", "Premium", "Affaires"], "selected": "Économique"}}, {{"id": "direct", "label": "Vols directs seulement", "type": "checkbox", "checked": true}}, {{"id": "bagage", "label": "Bagages", "type": "radio", "options": ["Cabine seul", "1 bagage en soute", "2 bagages en soute"], "selected": "1 bagage en soute"}}]}}}},
     {{"action": "show_floating_card", "id": "resume_page", "title": "Résumé de la page", "card_type": "markdown", "data": {{"text": "# SLICE Docus — Synthèse\n## Vidéos populaires\n- [link=\"action:Lancer la vidéo : La guerre des satellites\"]▶ La guerre des satellites (2,7 k vues)[/link]\n- [link=\"action:Lancer la vidéo : Bio-invasion\"]▶ Bio-invasion (95 k vues)[/link]\n\n> Cliquez sur une vidéo pour la lancer."}}}},
      {{"action": "close_floating_card", "id": "stats_1"}}
@@ -3725,6 +3761,51 @@ async fn call_llm_prompt(
             return;
         }
 
+        // 2. Dispatch immédiat dès réception du message pour les fenêtres volantes
+        for act in &payload.actions {
+            match act {
+                AgentAction::ShowFloatingCard { id, title, card_type, data } => {
+                    let card = FloatingCard::from_action_data(id.clone(), title.clone(), card_type, data);
+                    let _ = event_tx.send(AgentEvent::ShowFloatingCard(card));
+                }
+                AgentAction::CloseFloatingCard { id } => {
+                    let _ = event_tx.send(AgentEvent::CloseFloatingCard(id.clone()));
+                }
+                _ => {}
+            }
+        }
+
+        // 3. Mise à jour automatique de repli : Si une fenêtre volante Markdown est affichée et que le LLM produit
+        // une synthèse/narration structurée sans ré-émettre formellement l'action JSON, le contenu de la fenêtre
+        // affichée est synchronisé automatiquement.
+        if let Ok(guard) = OPEN_FLOATING_CARDS.lock() {
+            let has_explicit_card = payload.actions.iter().any(|a| matches!(a, AgentAction::ShowFloatingCard { .. }));
+            if !has_explicit_card {
+                if let Some(open_md) = guard.iter().find(|c| c.card_type == "markdown") {
+                    let text_trim = payload.narration.trim();
+                    let is_structured = text_trim.contains('#')
+                        || text_trim.contains('|')
+                        || text_trim.contains("- ")
+                        || text_trim.contains("* ")
+                        || text_trim.contains("▶ ")
+                        || text_trim.contains("[link")
+                        || text_trim.lines().count() >= 3
+                        || text_trim.len() > 140;
+
+                    if is_structured {
+                        println!("[Agent] Mise à jour automatique de repli de la fenêtre volante Markdown '{}'", open_md.id);
+                        let fallback_card = FloatingCard::from_action_data(
+                            Some(open_md.id.clone()),
+                            open_md.title.clone(),
+                            "markdown",
+                            &serde_json::json!({ "text": text_trim }),
+                        );
+                        let _ = event_tx.send(AgentEvent::ShowFloatingCard(fallback_card));
+                    }
+                }
+            }
+        }
+
         // En mode immersion, si l'écran n'a pas bougé et qu'aucune action ni suggestion rapide n'est formulée, préserver le silence
         if let PromptTrigger::Immersion { screen_changed } = trigger {
             let no_actions_or_suggestions = payload.actions.is_empty() && payload.quick_suggestions.is_empty();
@@ -3795,18 +3876,6 @@ async fn call_llm_prompt(
         }
 
         let actions_to_run = payload.actions;
-        for act in &actions_to_run {
-            match act {
-                AgentAction::ShowFloatingCard { id, title, card_type, data } => {
-                    let card = FloatingCard::from_action_data(id.clone(), title.clone(), card_type, data);
-                    let _ = event_tx.send(AgentEvent::ShowFloatingCard(card));
-                }
-                AgentAction::CloseFloatingCard { id } => {
-                    let _ = event_tx.send(AgentEvent::CloseFloatingCard(id.clone()));
-                }
-                _ => {}
-            }
-        }
 
         let has_web_action = actions_to_run.iter().any(|a| {
             matches!(
@@ -3893,6 +3962,17 @@ async fn call_llm_prompt(
                 step_feedback.push_str(&format!("\n\n[État de l'écran suite aux actions] :\n{safe_screen}"));
             }
 
+            // Injection de l'état des fenêtres volantes ouvertes dans les étapes multi-passes
+            if let Ok(guard) = OPEN_FLOATING_CARDS.lock() {
+                if !guard.is_empty() {
+                    step_feedback.push_str("\n\n[Fenêtres volantes ouvertes à l'écran] :\n");
+                    for c in guard.iter() {
+                        step_feedback.push_str(&format!("- ID: \"{}\" | Titre: \"{}\" | Type: \"{}\"\n", c.id, c.title, c.card_type));
+                    }
+                    step_feedback.push_str("Actualise impérativement leur contenu via \"show_floating_card\" dès que de nouvelles informations sont obtenues.");
+                }
+            }
+
             step_feedback.push_str(&format!(
                 "\n\n[Consigne étape] : Poursuis : \"{}\".\n\
                 - RÈGLE D'OR : Réponds STRICTEMENT et UNIQUEMENT avec un objet JSON valide (contenant \"narration\", \"next_passes\", \"actions\", \"quick_suggestions\"). Aucun texte libre ou markdown en dehors du JSON.\n\
@@ -3902,7 +3982,7 @@ async fn call_llm_prompt(
                 - Notification système (toast) -> lis son contenu dans ta narration et laisse-la tranquille (ne la ferme pas).\n\
                 - Alerte / modale d'erreur -> lis le message dans ta narration, puis clique impérativement sur 'OK' / 'Fermer' pour la refermer.\n\
                 - Fenêtre volante Markdown -> insère des liens cliquables [link=\"action:...\"]Texte[/link] pour permettre à l'utilisateur de déclencher des suites ou choix en un clic.\n\
-                - Liens interactifs -> Formate SYSTÉMATIQUEMENT vidéos, audios, images, PDF/fichiers et actions en liens cliquables via la macro [link=\"action:...\"]Icône Libellé[/link] ou [link=\"https://...\"]🌐 Web[/link]. Le clic envoie directement la commande dans le chat de Libertide.\n\
+                - Liens interactifs -> Formate SYSTÉMATIQUEMENT vidéos, audios, images, PDF/fichiers et actions en liens cliquables via la macro [link=\"action:...\"]Icône Libellé[/link] ou [link=\"https://...\"]🌐 Web[/link] (y compris dans les cellules de tableaux Markdown). Le clic envoie directement la commande dans le chat de Libertide.\n\
                  - Mission approfondie (contact / produit / service) -> définis 'next_passes' (8 à 12), explore méthodiquement (local -> web -> annuaires) et projette les résultats dans 'show_floating_card'. Ne renvoie pas 'actions': [] tant que les résultats ne sont pas trouvés.\n\
                 - Échec/blocage -> pivote immédiatement vers une alternative (app, web, autre fenêtre). Ne renvoie JAMAIS 'actions': [] si l'objectif n'est pas achevé.\n\
                 - Tâche finie ou choix requis -> 'actions': [] + 2 à 4 'quick_suggestions'.",
@@ -4097,6 +4177,18 @@ fn main() -> eframe::Result<()> {
                                     }
                                 }
 
+                            // 1. Injection automatique de l'état des fenêtres volantes ouvertes au LLM
+                            if let Ok(guard) = OPEN_FLOATING_CARDS.lock() {
+                                if !guard.is_empty() {
+                                    let mut card_section = String::from("[Fenêtres volantes actuellement ouvertes à l'écran] :\n");
+                                    for c in guard.iter() {
+                                        card_section.push_str(&format!("- ID: \"{}\" | Titre: \"{}\" | Type: \"{}\"\n", c.id, c.title, c.card_type));
+                                    }
+                                    card_section.push_str("Instruction : Ces fenêtres volantes sont déjà affichées à l'écran. Si ta réponse apporte de nouvelles données, une synthèse ou une mise à jour, réémets impérativement l'action \"show_floating_card\" avec le même ID pour synchroniser leur contenu.");
+                                    prompt_sections.push(card_section);
+                                }
+                            }
+
                                 prompt_sections.push(format!("[Demande utilisateur]\n{prompt}"));
                                 let final_prompt = prompt_sections.join("\n\n");
 
@@ -4256,8 +4348,8 @@ fn main() -> eframe::Result<()> {
         .with_transparent(true)
         .with_always_on_top()
         .with_resizable(true)
-        .with_min_inner_size([380.0, 134.0])
-        .with_inner_size([560.0, 154.0]);
+        .with_min_inner_size([380.0, 158.0])
+        .with_inner_size([560.0, 178.0]);
 
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../public/favicon-256x256.png")) {
         viewport = viewport.with_icon(Arc::new(icon));

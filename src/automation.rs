@@ -272,10 +272,13 @@ mod clipboard {
 #[cfg(all(not(windows), not(target_os = "macos")))]
 mod clipboard {
     use std::io::Write;
+    use super::html_to_advanced_markdown;
 
     pub fn set_text(text: &str) -> bool {
+        let html_payload = super::convert_markdown_and_links_to_html(text);
+        let has_links = text.contains("[link") || text.contains("](");
         let mut child = match std::process::Command::new("xclip")
-            .args(["-selection", "clipboard"])
+            .args(["-selection", "clipboard", "-t", "text/plain;charset=utf-8"])
             .stdin(std::process::Stdio::piped())
             .spawn()
         {
@@ -285,7 +288,64 @@ mod clipboard {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(text.as_bytes());
         }
-        child.wait().map(|s| s.success()).unwrap_or(false)
+        let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+
+        if has_links {
+            if let Ok(mut h_child) = std::process::Command::new("xclip")
+                .args(["-selection", "clipboard", "-t", "text/html"])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                if let Some(mut stdin) = h_child.stdin.take() {
+                    let _ = stdin.write_all(html_payload.as_bytes());
+                }
+                let _ = h_child.wait();
+            }
+        }
+        ok
+    }
+
+    pub fn get_advanced_text() -> Option<String> {
+        // 1. Détection des fichiers (text/uri-list)
+        if let Ok(output) = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", "text/uri-list", "-o"])
+            .output()
+        {
+            let uris = String::from_utf8_lossy(&output.stdout);
+            let mut spans = Vec::new();
+            for line in uris.lines() {
+                let trimmed = line.trim();
+                if let Some(path) = trimmed.strip_prefix("file://") {
+                    let p = std::path::Path::new(path);
+                    let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or(path);
+                    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                    let is_img = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg");
+                    let tag = if is_img {
+                        format!("[link=\"action:Ouvrir l'image : {path}\"]🖼️ {fname}[/link]")
+                    } else {
+                        format!("[link=\"action:Ouvrir le fichier : {path}\"]📄 {fname}[/link]")
+                    };
+                    spans.push(tag);
+                }
+            }
+            if !spans.is_empty() {
+                return Some(spans.join(" "));
+            }
+        }
+
+        // 2. Détection du format HTML avec liens
+        if let Ok(output) = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", "text/html", "-o"])
+            .output()
+        {
+            let html = String::from_utf8_lossy(&output.stdout);
+            let md = html_to_advanced_markdown(&html);
+            if !md.trim().is_empty() {
+                return Some(md);
+            }
+        }
+
+        get_plain_text()
     }
 
     pub fn get_text() -> Option<String> {
@@ -295,10 +355,22 @@ mod clipboard {
             .ok()?;
         Some(String::from_utf8_lossy(&output.stdout).to_string())
     }
+
+    pub fn get_plain_text() -> Option<String> {
+        get_text()
+    }
+}
+
+pub fn get_advanced_clipboard_text() -> Option<String> {
+    clipboard::get_advanced_text()
 }
 
 pub fn get_clipboard_text() -> Option<String> {
-    clipboard::get_text()
+    clipboard::get_advanced_text().or_else(clipboard::get_plain_text)
+}
+
+pub fn get_plain_clipboard_text() -> Option<String> {
+    clipboard::get_plain_text()
 }
 
 pub fn set_clipboard_text(text: &str) -> bool {
@@ -320,12 +392,25 @@ mod clipboard {
         fn GetClipboardData(uformat: u32) -> *mut c_void;
         fn IsClipboardFormatAvailable(uformat: u32) -> i32;
         fn GlobalAlloc(uflags: u32, dwbytes: usize) -> *mut c_void;
+        fn GlobalSize(hmem: *mut c_void) -> usize;
         fn GlobalLock(hmem: *mut c_void) -> *mut c_void;
         fn GlobalUnlock(hmem: *mut c_void) -> i32;
+        fn RegisterClipboardFormatW(lpszformat: *const u16) -> u32;
+    }
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn DragQueryFileW(hdrop: *mut c_void, ifile: u32, lpfile: *mut u16, cch: u32) -> u32;
     }
 
     const CF_UNICODETEXT: u32 = 13;
+    const CF_HDROP: u32 = 15;
     const GMEM_MOVEABLE: u32 = 0x0002;
+
+    fn cf_html_format_id() -> u32 {
+        let format_name: Vec<u16> = "HTML Format\0".encode_utf16().collect();
+        unsafe { RegisterClipboardFormatW(format_name.as_ptr()) }
+    }
 
     pub fn set_text(text: &str) -> bool {
         let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
@@ -353,12 +438,165 @@ mod clipboard {
                     SetClipboardData(CF_UNICODETEXT, h_mem);
                 }
             }
+
+            // Si le texte contient des liens, générer également le format MIME HTML (CF_HTML)
+            if text.contains("[link") || text.contains("](") {
+                let cf_html = cf_html_format_id();
+                if cf_html != 0 {
+                    let html_body = super::convert_markdown_and_links_to_html(text);
+                    let cf_html_payload = build_cf_html_buffer(&html_body);
+                    let h_mem_html = GlobalAlloc(GMEM_MOVEABLE, cf_html_payload.len());
+                    if !h_mem_html.is_null() {
+                        let p_html = GlobalLock(h_mem_html) as *mut u8;
+                        if !p_html.is_null() {
+                            std::ptr::copy_nonoverlapping(cf_html_payload.as_ptr(), p_html, cf_html_payload.len());
+                            GlobalUnlock(h_mem_html);
+                            SetClipboardData(cf_html, h_mem_html);
+                        }
+                    }
+                }
+            }
             CloseClipboard();
         }
         true
     }
 
-    pub fn get_text() -> Option<String> {
+    fn build_cf_html_buffer(fragment: &str) -> Vec<u8> {
+        let start_html = 105;
+        let start_fragment = 139;
+        let end_fragment = start_fragment + fragment.as_bytes().len();
+        let footer = "<!--EndFragment-->\r\n</body></html>\0";
+        let total_len = end_fragment + footer.len() - 1;
+
+        let header = format!(
+            "Version:0.9\r\nStartHTML:{:010}\r\nEndHTML:{:010}\r\nStartFragment:{:010}\r\nEndFragment:{:010}\r\n<html><body>\r\n<!--StartFragment-->",
+            start_html,
+            total_len,
+            start_fragment,
+            end_fragment
+        );
+
+        let mut buf = Vec::with_capacity(header.len() + fragment.len() + footer.len());
+        buf.extend_from_slice(header.as_bytes());
+        buf.extend_from_slice(fragment.as_bytes());
+        buf.extend_from_slice(footer.as_bytes());
+        buf
+    }
+
+    pub fn get_advanced_text() -> Option<String> {
+        unsafe {
+            let mut opened = false;
+            for _ in 0..10 {
+                if OpenClipboard(std::ptr::null_mut()) != 0 {
+                    opened = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            if !opened {
+                return None;
+            }
+
+            // 1. Détection de fichiers copiés depuis l'Explorateur Windows (CF_HDROP)
+            if IsClipboardFormatAvailable(CF_HDROP) != 0 {
+                let h_drop = GetClipboardData(CF_HDROP);
+                if !h_drop.is_null() {
+                    let count = DragQueryFileW(h_drop, 0xFFFFFFFF, std::ptr::null_mut(), 0);
+                    if count > 0 {
+                        let mut file_spans = Vec::new();
+                        for i in 0..count {
+                            let len = DragQueryFileW(h_drop, i, std::ptr::null_mut(), 0);
+                            if len > 0 {
+                                let mut buf = vec![0u16; (len + 1) as usize];
+                                let copied = DragQueryFileW(h_drop, i, buf.as_mut_ptr(), len + 1);
+                                if copied > 0 {
+                                    let path = String::from_utf16_lossy(&buf[..copied as usize]);
+                                    let p = std::path::Path::new(&path);
+                                    let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or(&path);
+                                    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+
+                                    let is_img = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg");
+                                    let is_audio = matches!(ext.as_str(), "mp3" | "wav" | "ogg" | "flac" | "m4a" | "aac");
+                                    let is_video = matches!(ext.as_str(), "mp4" | "mkv" | "avi" | "mov" | "webm" | "wmv");
+
+                                    let tag = if is_img {
+                                        format!("[link=\"action:Ouvrir l'image : {path}\"]🖼️ {fname}[/link]")
+                                    } else if is_audio {
+                                        format!("[link=\"action:Lancer l'audio : {path}\"]🎵 {fname}[/link]")
+                                    } else if is_video {
+                                        format!("[link=\"action:Lancer la vidéo : {path}\"]▶ {fname}[/link]")
+                                    } else {
+                                        format!("[link=\"action:Ouvrir le fichier : {path}\"]📄 {fname}[/link]")
+                                    };
+                                    file_spans.push(tag);
+                                }
+                            }
+                        }
+                        let _ = CloseClipboard();
+                        if !file_spans.is_empty() {
+                            return Some(file_spans.join(" "));
+                        }
+                        return None;
+                    }
+                }
+            }
+
+            // 2. Détection du format HTML enrichi avec liens (CF_HTML)
+            let cf_html = cf_html_format_id();
+            if cf_html != 0 && IsClipboardFormatAvailable(cf_html) != 0 {
+                let h_mem = GetClipboardData(cf_html);
+                if !h_mem.is_null() {
+                    let p_data = GlobalLock(h_mem) as *const u8;
+                    if !p_data.is_null() {
+                        let size = GlobalSize(h_mem);
+                        let mut len = 0;
+                        while len < size && *p_data.add(len) != 0 {
+                            len += 1;
+                        }
+                        let slice = std::slice::from_raw_parts(p_data, len);
+                        let raw_html = String::from_utf8_lossy(slice);
+                        GlobalUnlock(h_mem);
+
+                        let md = super::parse_cf_html_to_markdown(&raw_html);
+                        if !md.trim().is_empty() {
+                            let _ = CloseClipboard();
+                            return Some(md);
+                        }
+                    }
+                }
+            }
+
+            // 3. Repli standard sur CF_UNICODETEXT
+            if IsClipboardFormatAvailable(CF_UNICODETEXT) == 0 {
+                let _ = CloseClipboard();
+                return None;
+            }
+
+            let h_mem = GetClipboardData(CF_UNICODETEXT);
+            if h_mem.is_null() {
+                let _ = CloseClipboard();
+                return None;
+            }
+
+            let p_data = GlobalLock(h_mem) as *const u16;
+            if p_data.is_null() {
+                let _ = CloseClipboard();
+                return None;
+            }
+
+            let mut len = 0;
+            while *p_data.add(len) != 0 {
+                len += 1;
+            }
+            let slice = std::slice::from_raw_parts(p_data, len);
+            let s = String::from_utf16_lossy(slice);
+            let _ = GlobalUnlock(h_mem);
+            let _ = CloseClipboard();
+            Some(s)
+        }
+    }
+
+    pub fn get_plain_text() -> Option<String> {
         unsafe {
             let mut opened = false;
             for _ in 0..10 {
@@ -400,6 +638,114 @@ mod clipboard {
             Some(s)
         }
     }
+
+    pub fn get_text() -> Option<String> {
+        get_plain_text()
+    }
+}
+
+pub fn html_to_advanced_markdown(html: &str) -> String {
+    let mut result = String::with_capacity(html.len());
+    let mut i = 0;
+    let bytes = html.as_bytes();
+    let len = bytes.len();
+
+    let mut current_link_href: Option<String> = None;
+    let mut current_link_text = String::new();
+    let mut has_links = false;
+
+    while i < len {
+        if bytes[i] == b'<' {
+            if let Some(tag_end) = html[i..].find('>') {
+                let tag_content = html[i + 1..i + tag_end].trim();
+                let is_closing = tag_content.starts_with('/');
+                let tag_body = if is_closing { tag_content[1..].trim() } else { tag_content };
+                let tag_name = tag_body.split_whitespace().next().unwrap_or("").to_lowercase();
+                let tag_name = tag_name.trim_end_matches('/');
+
+                if tag_name == "a" {
+                    if is_closing {
+                        if let Some(href) = current_link_href.take() {
+                            let label = current_link_text.trim();
+                            if !label.is_empty() {
+                                result.push_str(&format!("[link=\"{href}\"]{label}[/link]"));
+                                has_links = true;
+                            } else if !href.is_empty() {
+                                result.push_str(&format!("[link=\"{href}\"]{href}[/link]"));
+                                has_links = true;
+                            }
+                            current_link_text.clear();
+                        }
+                    } else if let Some(href) = crate::html_util::extract_attribute(tag_body, "href") {
+                        let clean_href = crate::html_util::decode_html_entities(href.trim());
+                        current_link_href = Some(clean_href);
+                        current_link_text.clear();
+                    }
+                } else if tag_name == "br" || tag_name == "p" || tag_name == "div" || tag_name == "tr" || tag_name == "li" {
+                    result.push(' ');
+                } else if tag_name == "b" || tag_name == "strong" {
+                    result.push_str("**");
+                } else if tag_name == "code" {
+                    result.push('`');
+                }
+
+                i += tag_end + 1;
+                continue;
+            }
+        }
+
+        if let Some(ch) = html[i..].chars().next() {
+            if current_link_href.is_some() {
+                current_link_text.push(ch);
+            } else {
+                result.push(ch);
+            }
+            i += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    if let Some(href) = current_link_href.take() {
+        let label = current_link_text.trim();
+        if !label.is_empty() {
+            result.push_str(&format!("[link=\"{href}\"]{label}[/link]"));
+            has_links = true;
+        }
+    }
+
+    if has_links {
+        let decoded = crate::html_util::decode_html_entities(&result);
+        decoded.split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        String::new()
+    }
+}
+
+pub fn parse_cf_html_to_markdown(raw_html: &str) -> String {
+    let fragment = if let (Some(s), Some(e)) = (raw_html.find("<!--StartFragment-->"), raw_html.find("<!--EndFragment-->")) {
+        if s < e {
+            &raw_html[s + "<!--StartFragment-->".len()..e]
+        } else {
+            raw_html
+        }
+    } else {
+        raw_html
+    };
+
+    html_to_advanced_markdown(fragment)
+}
+
+pub fn convert_markdown_and_links_to_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 2);
+    out.push_str("<div style=\"font-family:sans-serif;\">\r\n");
+    for line in text.lines() {
+        let clean = crate::floating_window::render_markdown_line_to_html(line);
+        out.push_str(&clean);
+        out.push_str("<br/>\r\n");
+    }
+    out.push_str("</div>");
+    out
 }
 
 #[cfg(windows)]
@@ -489,13 +835,13 @@ pub fn read_putty_terminal_content(hwnd: HWND) -> Option<String> {
     const WM_SYSCOMMAND: u32 = 0x0112;
     const IDM_COPYALL: usize = 0x0170;
 
-    let old_clip = clipboard::get_text();
+    let old_clip = clipboard::get_plain_text();
     unsafe {
         SendMessageW(hwnd, WM_SYSCOMMAND, WPARAM(IDM_COPYALL), LPARAM(0));
     }
     std::thread::sleep(Duration::from_millis(60));
 
-    let new_clip = clipboard::get_text();
+    let new_clip = clipboard::get_plain_text();
     if let Some(text) = new_clip {
         let trimmed = text.trim();
         if !trimmed.is_empty() && (old_clip.as_deref() != Some(&text) || !trimmed.is_empty()) {
@@ -5336,7 +5682,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     let local_file_content = effective_target.as_deref().and_then(find_file_in_workspace);
 
                     let mut content_captured = false;
-                    if let Some(content) = clipboard::get_text() {
+                    if let Some(content) = clipboard::get_plain_text() {
                         let trimmed = content.trim();
                         if !trimmed.is_empty() {
                             let char_count = content.chars().count();
