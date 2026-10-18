@@ -1,6 +1,135 @@
 use serde::{Deserialize, Serialize};
 pub use crate::floating_window::FloatingCard;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LlmProvider {
+    DeepSeek,
+    OpenAI,
+    Anthropic,
+    Mistral,
+    Glm,
+    Groq,
+}
+
+impl LlmProvider {
+    pub const ALL: &'static [Self] = &[
+        Self::DeepSeek,
+        Self::OpenAI,
+        Self::Anthropic,
+        Self::Mistral,
+        Self::Glm,
+        Self::Groq,
+    ];
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::DeepSeek => "DeepSeek",
+            Self::OpenAI => "OpenAI",
+            Self::Anthropic => "Anthropic",
+            Self::Mistral => "Mistral AI",
+            Self::Glm => "Zhipu GLM",
+            Self::Groq => "Groq",
+        }
+    }
+
+    pub fn env_key_name(&self) -> &'static str {
+        match self {
+            Self::DeepSeek => "DEEPSEEK_API_KEY",
+            Self::OpenAI => "OPENAI_API_KEY",
+            Self::Anthropic => "ANTHROPIC_API_KEY",
+            Self::Mistral => "MISTRAL_API_KEY",
+            Self::Glm => "GLM_API_KEY",
+            Self::Groq => "GROQ_API_KEY",
+        }
+    }
+
+    pub fn env_model_name(&self) -> &'static str {
+        match self {
+            Self::DeepSeek => "DEEPSEEK_MODEL",
+            Self::OpenAI => "OPENAI_MODEL",
+            Self::Anthropic => "ANTHROPIC_MODEL",
+            Self::Mistral => "MISTRAL_MODEL",
+            Self::Glm => "GLM_MODEL",
+            Self::Groq => "GROQ_MODEL",
+        }
+    }
+
+    pub fn default_model(&self) -> &'static str {
+        match self {
+            Self::DeepSeek => "deepseek-chat",
+            Self::OpenAI => "gpt-4o",
+            Self::Anthropic => "claude-3-5-sonnet-20241022",
+            Self::Mistral => "mistral-small-latest",
+            Self::Glm => "glm-4-flash",
+            Self::Groq => "llama-3.3-70b-versatile",
+        }
+    }
+
+    pub fn default_endpoint(&self) -> &'static str {
+        match self {
+            Self::DeepSeek => "https://api.deepseek.com/chat/completions",
+            Self::OpenAI => "https://api.openai.com/v1/chat/completions",
+            Self::Anthropic => "https://api.anthropic.com/v1/messages",
+            Self::Mistral => "https://api.mistral.ai/v1/chat/completions",
+            Self::Glm => "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            Self::Groq => "https://api.groq.com/openai/v1/chat/completions",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "deepseek" => Some(Self::DeepSeek),
+            "openai" => Some(Self::OpenAI),
+            "anthropic" | "claude" => Some(Self::Anthropic),
+            "mistral" | "mistralai" => Some(Self::Mistral),
+            "glm" | "zhipu" | "zhipuai" => Some(Self::Glm),
+            "groq" => Some(Self::Groq),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmConfig {
+    pub provider: LlmProvider,
+    pub api_key: String,
+    pub model: String,
+    pub endpoint: String,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            provider: LlmProvider::DeepSeek,
+            api_key: String::new(),
+            model: LlmProvider::DeepSeek.default_model().to_string(),
+            endpoint: LlmProvider::DeepSeek.default_endpoint().to_string(),
+        }
+    }
+}
+
+#[derive(Serialize, Debug)]
+pub struct AnthropicMessagesRequest {
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub max_tokens: u32,
+    pub temperature: f32,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct AnthropicContentBlock {
+    #[serde(rename = "type")]
+    pub block_type: String,
+    pub text: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct AnthropicMessagesResponse {
+    pub content: Vec<AnthropicContentBlock>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStatus {
     Idle,

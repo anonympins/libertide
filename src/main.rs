@@ -104,6 +104,7 @@ pub struct OverlayApp {
     dictation_mode: bool,
     zoom_factor: f32,
     voice_gender: VoiceGender,
+    llm_config: LlmConfig,
 
     // Accessibilité : Ciblage par numéros & Mode contacteur unique (Switch Access)
     numbered_targets: Vec<NumberedElementTarget>,
@@ -135,7 +136,9 @@ pub struct OverlayApp {
     // Boîte modale de configuration de la clé API
     show_api_key_modal: bool,
     api_key_input: String,
+    model_input: String,
     show_api_key_plain: bool,
+    selected_provider_modal: LlmProvider,
     api_key_error: Option<String>,
 }
 
@@ -654,16 +657,16 @@ impl OverlayApp {
     ) -> Self {
         setup_custom_fonts(&cc.egui_ctx);
 
-        let initial_key = resolve_deepseek_key();
-        let has_no_key = initial_key.is_empty();
+        let llm_config = resolve_llm_config();
+        let has_no_key = llm_config.api_key.is_empty();
         let initial_subtitle = if has_no_key {
-            "Veuillez renseigner votre clé API DeepSeek pour activer l'assistant.".to_string()
+            "Veuillez renseigner votre clé API LLM pour activer l'assistant.".to_string()
         } else {
             "En attente d'instructions d'exploration...".to_string()
         };
         let _ = tts_sender.send(TtsCommand::Speak(initial_subtitle.clone()));
 
-        Self {
+        let mut app = Self {
             status: AgentStatus::Idle,
             chat_history: vec![ChatEntry {
                 role: ChatRole::Agent,
@@ -682,6 +685,7 @@ impl OverlayApp {
             dictation_mode: false,
             zoom_factor: 1.0,
             voice_gender: initial_voice,
+            llm_config: llm_config.clone(),
 
             numbered_targets: Vec::new(),
             show_numbered_targets: false,
@@ -708,10 +712,33 @@ impl OverlayApp {
             is_hidden: false,
             mouse_passthrough: false,
             show_api_key_modal: has_no_key,
-            api_key_input: initial_key,
+            api_key_input: llm_config.api_key.clone(),
+            model_input: llm_config.model.clone(),
+            selected_provider_modal: llm_config.provider,
             show_api_key_plain: false,
             api_key_error: None,
-        }
+        };
+        app.sync_modal_inputs_for_provider(llm_config.provider);
+        app
+    }
+
+    pub fn sync_modal_inputs_for_provider(&mut self, provider: LlmProvider) {
+        self.selected_provider_modal = provider;
+        let key_name = provider.env_key_name();
+        self.api_key_input = std::env::var(key_name)
+            .or_else(|_| read_env_var_from_file(".env", key_name).ok_or(()))
+            .unwrap_or_default();
+
+        let model_var = provider.env_model_name();
+        self.model_input = std::env::var(model_var)
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", model_var))
+            .or_else(|| std::env::var("LLM_MODEL").ok())
+            .or_else(|| read_env_var_from_file(".env", "LLM_MODEL"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| provider.default_model().to_string());
+        self.api_key_error = None;
     }
 
     fn draw_avatar(&self, ui: &mut egui::Ui, center: egui::Pos2, base_radius: f32, time: f64) {
@@ -1038,7 +1065,8 @@ impl eframe::App for OverlayApp {
         let current_chat_h = self.chat_height.clamp(min_chat_h, max_chat_h);
 
         // Arrondi pour éviter les oscillations de conversion DPI sub-pixel
-        let target_win_h = (padding + current_chat_h + padding + control_h + padding).max(min_win_h).round();
+        let modal_min_h = if self.show_api_key_modal { 268.0 } else { min_win_h };
+        let target_win_h = (padding + current_chat_h + padding + control_h + padding).max(modal_min_h).round();
         let active_win_h = inner_rect_opt.map_or(self.current_win_h, |r| r.height().max(min_win_h));
 
         // Ancrage automatique de la fenêtre ferrée à la barre des tâches en bas à droite
@@ -1387,6 +1415,7 @@ impl eframe::App for OverlayApp {
 
                     // 3. Configuration de la clé API
                     if is_api_key_command(&prompt) {
+                        self.sync_modal_inputs_for_provider(self.llm_config.provider);
                         self.show_api_key_modal = true;
                         self.is_hidden = false;
                         let reply = localized_speech(
@@ -1550,6 +1579,7 @@ impl eframe::App for OverlayApp {
                     }
                 }
                 AgentEvent::RequestApiKey => {
+                    self.sync_modal_inputs_for_provider(self.llm_config.provider);
                     self.show_api_key_modal = true;
                     self.is_hidden = false;
                 }
@@ -1569,6 +1599,7 @@ impl eframe::App for OverlayApp {
         let is_typing = ctx.memory(|m| {
             m.has_focus(egui::Id::new("prompt_input_text"))
                 || m.has_focus(egui::Id::new("api_key_input_field"))
+                || m.has_focus(egui::Id::new("model_input_field"))
         });
 
         // Gestion du Switch Access : défilement séquentiel périodique et validation sur Espace
@@ -1758,15 +1789,16 @@ impl eframe::App for OverlayApp {
 
                             ui.scope_builder(egui::UiBuilder::new().max_rect(content_area), |ui| {
                                 ui.vertical(|ui| {
+                                    let prov_name = self.llm_config.provider.display_name();
                                     let status_badge = if self.dictation_mode {
-                                        "DeepSeek · ✍ Mode dictée actif (Échap pour quitter)"
+                                        format!("{prov_name} · ✍ Mode dictée actif (Échap pour quitter)")
                                     } else {
                                         match self.status {
-                                            AgentStatus::Idle => "DeepSeek · en veille",
-                                            AgentStatus::Thinking => "DeepSeek · réflexion...",
-                                            AgentStatus::Speaking => "DeepSeek · en direct",
-                                            AgentStatus::Listening => "DeepSeek · écoute active (r)...",
-                                            AgentStatus::EmergencyStopped => "Système verrouillé",
+                                            AgentStatus::Idle => format!("{prov_name} · en veille"),
+                                            AgentStatus::Thinking => format!("{prov_name} · réflexion..."),
+                                            AgentStatus::Speaking => format!("{prov_name} · en direct"),
+                                            AgentStatus::Listening => format!("{prov_name} · écoute active (r)..."),
+                                            AgentStatus::EmergencyStopped => "Système verrouillé".to_string(),
                                         }
                                     };
 
@@ -1781,7 +1813,7 @@ impl eframe::App for OverlayApp {
                                     ui.horizontal(|ui| {
                                         let badge_resp = ui.add(
                                             egui::Label::new(
-                                                egui::RichText::new(status_badge)
+                                                egui::RichText::new(&status_badge)
                                                     .size(11.0)
                                                     .color(badge_color),
                                             )
@@ -2001,6 +2033,7 @@ impl eframe::App for OverlayApp {
                                                 return;
                                             }
                                             if is_api_key_command(&prompt) {
+                                                self.sync_modal_inputs_for_provider(self.llm_config.provider);
                                                 self.show_api_key_modal = true;
                                                 let reply = "Boîte de configuration de la clé API ouverte.".to_string();
                                                 self.chat_history.push(ChatEntry {
@@ -2033,9 +2066,10 @@ impl eframe::App for OverlayApp {
 
                                         let key_btn = ui
                                             .button("🔑")
-                                            .on_hover_text("Configurer la clé API DeepSeek");
+                                            .on_hover_text("Configurer le fournisseur LLM et sa clé API");
                                         if key_btn.clicked() {
                                             self.show_api_key_modal = true;
+                                            self.sync_modal_inputs_for_provider(self.llm_config.provider);
                                             self.api_key_error = None;
                                             self.stop_speaking();
                                         }
@@ -2101,7 +2135,7 @@ impl eframe::App for OverlayApp {
                                                         };
                                                         (name, egui::Color32::from_rgb(255, 215, 120))
                                                     }
-                                                    ChatRole::Agent => ("DeepSeek".to_string(), egui::Color32::from_rgb(0, 195, 255)),
+                                            ChatRole::Agent => (self.llm_config.provider.display_name().to_string(), egui::Color32::from_rgb(0, 195, 255)),
                                                 };
                                                 ui.label(
                                                     egui::RichText::new(&label_name)
@@ -2554,19 +2588,69 @@ impl eframe::App for OverlayApp {
                     egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 50)),
                 );
 
-                // Boîte modale de saisie de la clé API DeepSeek
+                // Boîte modale de saisie multi-fournisseurs LLM
                 if self.show_api_key_modal {
-                    egui::Window::new("🔑 Configuration de la clé API DeepSeek")
+                    egui::Window::new("api_key_modal")
+                        .title_bar(false)
                         .collapsible(false)
                         .resizable(false)
                         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                        .frame(
+                            egui::Frame::new()
+                                .fill(egui::Color32::from_rgb(12, 15, 20))
+                                .stroke(egui::Stroke::new(1.2, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 150)))
+                                .corner_radius(egui::CornerRadius::same(10))
+                                .inner_margin(egui::Margin::symmetric(12, 10)),
+                        )
                         .show(&ctx, |ui| {
+                            // En-tête compact intégré sans barre de titre egui
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("🔑 Configuration du Fournisseur LLM")
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgb(0, 215, 255))
+                                        .strong(),
+                                );
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.add(
+                                        egui::Button::new(
+                                            egui::RichText::new("✕")
+                                                .size(11.0)
+                                                .color(egui::Color32::from_rgb(255, 130, 130)),
+                                        )
+                                        .min_size(egui::vec2(18.0, 16.0))
+                                        .corner_radius(egui::CornerRadius::same(4)),
+                                    ).on_hover_text("Fermer").clicked() {
+                                        self.show_api_key_modal = false;
+                                        self.api_key_error = None;
+                                    }
+                                });
+                            });
+                            ui.add_space(4.0);
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
+                                for &provider in LlmProvider::ALL {
+                                    let is_sel = self.selected_provider_modal == provider;
+                                    if ui.selectable_label(is_sel, provider.display_name()).clicked() {
+                                        self.sync_modal_inputs_for_provider(provider);
+                                    }
+                                }
+                            });
+
+                            ui.add_space(4.0);
+                            let env_var_target = self.selected_provider_modal.env_key_name();
+                            let env_model_target = self.selected_provider_modal.env_model_name();
+                            let default_model_name = self.selected_provider_modal.default_model();
+
+                            // --- Section Clé API ---
                             ui.label(
-                                egui::RichText::new("Renseignez votre DEEPSEEK_API_KEY :")
+                                egui::RichText::new(format!("Clé d'API ({env_var_target}) :"))
+                                    .size(11.0)
                                     .color(egui::Color32::WHITE)
                                     .strong(),
                             );
-                            ui.add_space(4.0);
+                            ui.add_space(2.0);
 
                             ui.horizontal(|ui| {
                                 let edit = egui::TextEdit::singleline(&mut self.api_key_input)
@@ -2629,21 +2713,96 @@ impl eframe::App for OverlayApp {
                                 }
                             });
 
+                            ui.add_space(5.0);
+
+                            // --- Section Modèle de raisonnement ---
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!("Modèle LLM ({env_model_target}) :"))
+                                        .size(11.0)
+                                        .color(egui::Color32::WHITE)
+                                        .strong(),
+                                );
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.small_button("↺ Recommandé")
+                                        .on_hover_text(format!("Rétablir le modèle par défaut ({default_model_name})"))
+                                        .clicked()
+                                    {
+                                        self.model_input = default_model_name.to_string();
+                                    }
+                                });
+                            });
+                            ui.add_space(2.0);
+
+                            ui.horizontal(|ui| {
+                                let model_edit = egui::TextEdit::singleline(&mut self.model_input)
+                                    .id(egui::Id::new("model_input_field"))
+                                    .hint_text(default_model_name)
+                                    .desired_width(240.0);
+                                let model_resp = ui.add(model_edit);
+
+                                model_resp.context_menu(|ui| {
+                                    if ui.button("📋 Coller").clicked() {
+                                        if let Some(clip) = get_clipboard_text() {
+                                            self.model_input = clip.trim().to_string();
+                                        }
+                                        ui.close();
+                                    }
+                                    if ui.button("📄 Copier").clicked() {
+                                        set_clipboard_text(&self.model_input);
+                                        ui.close();
+                                    }
+                                    if ui.button(format!("↺ Rétablir {default_model_name}")).clicked() {
+                                        self.model_input = default_model_name.to_string();
+                                        ui.close();
+                                    }
+                                    if ui.button("🗑 Effacer").clicked() {
+                                        self.model_input.clear();
+                                        ui.close();
+                                    }
+                                });
+
+                                let paste_model_hit = ctx.input(|i| {
+                                    i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                                        || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
+                                        || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                });
+                                if (model_resp.has_focus() || model_resp.hovered()) && paste_model_hit {
+                                    if let Some(clip) = get_clipboard_text() {
+                                        let trimmed = clip.trim().to_string();
+                                        if !trimmed.is_empty() && self.model_input != trimmed {
+                                            self.model_input = trimmed;
+                                        }
+                                    }
+                                }
+                            });
+
                             if let Some(ref err) = self.api_key_error {
                                 ui.add_space(2.0);
                                 ui.label(egui::RichText::new(err).color(egui::Color32::from_rgb(255, 110, 110)).size(11.0));
                             }
 
-                            ui.add_space(6.0);
+                            ui.add_space(5.0);
                             ui.horizontal(|ui| {
-                                if ui.button("💾 Enregistrer & Relancer").clicked() {
+                                if ui.button("💾 Enregistrer & Appliquer").clicked() {
                                     let key = self.api_key_input.trim();
+                                    let model = if self.model_input.trim().is_empty() {
+                                        default_model_name
+                                    } else {
+                                        self.model_input.trim()
+                                    };
+
                                     if key.is_empty() {
                                         self.api_key_error = Some("La clé API ne peut pas être vide.".to_string());
-                                    } else if let Err(e) = write_env_var_to_file(".env", "DEEPSEEK_API_KEY", key) {
-                                        self.api_key_error = Some(format!("Erreur d'écriture : {e}"));
+                                    } else if let Err(e) = write_env_var_to_file(".env", env_var_target, key) {
+                                        self.api_key_error = Some(format!("Erreur d'écriture clé : {e}"));
+                                    } else if let Err(e) = write_env_var_to_file(".env", env_model_target, model) {
+                                        self.api_key_error = Some(format!("Erreur d'écriture modèle : {e}"));
                                     } else {
+                                        let _ = write_env_var_to_file(".env", "LLM_PROVIDER", self.selected_provider_modal.display_name());
+                                        #[cfg(windows)]
                                         restart_application();
+                                        self.show_api_key_modal = false;
                                     }
                                 }
                                 if ui.button("Annuler").clicked() {
@@ -2663,19 +2822,104 @@ impl eframe::App for OverlayApp {
     }
 }
 
-fn resolve_deepseek_key() -> String {
-    if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
-        let trimmed = key.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
+fn resolve_llm_config() -> LlmConfig {
+    // Ordre de priorité en cascade
+    let providers_cascade = [
+        (LlmProvider::DeepSeek, &["DEEPSEEK_API_KEY"][..]),
+        (LlmProvider::OpenAI, &["OPENAI_API_KEY"][..]),
+        (LlmProvider::Anthropic, &["ANTHROPIC_API_KEY"][..]),
+        (LlmProvider::Mistral, &["MISTRAL_API_KEY"][..]),
+        (LlmProvider::Glm, &["GLM_API_KEY", "ZHIPU_API_KEY"][..]),
+        (LlmProvider::Groq, &["GROQ_API_KEY"][..]),
+    ];
+
+    // Fournisseur forcé via LLM_PROVIDER
+    let forced_provider = std::env::var("LLM_PROVIDER")
+        .ok()
+        .or_else(|| read_env_var_from_file(".env", "LLM_PROVIDER"))
+        .and_then(|s| LlmProvider::from_name(&s));
+
+    let mut chosen_provider = LlmProvider::DeepSeek;
+    let mut found_key = String::new();
+
+    if let Some(forced) = forced_provider {
+        for (prov, keys) in &providers_cascade {
+            if *prov == forced {
+                for &k in *keys {
+                    if let Ok(val) = std::env::var(k) {
+                        let t = val.trim();
+                        if !t.is_empty() {
+                            found_key = t.to_string();
+                            chosen_provider = *prov;
+                            break;
+                        }
+                    }
+                    if let Some(val) = read_env_var_from_file(".env", k) {
+                        let t = val.trim();
+                        if !t.is_empty() {
+                            found_key = t.to_string();
+                            chosen_provider = *prov;
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
         }
     }
 
-    if let Some(val) = read_env_var_from_file(".env", "DEEPSEEK_API_KEY") {
-        return val;
+    if found_key.is_empty() {
+        for (prov, keys) in &providers_cascade {
+            for &k in *keys {
+                if let Ok(val) = std::env::var(k) {
+                    let t = val.trim();
+                    if !t.is_empty() {
+                        found_key = t.to_string();
+                        chosen_provider = *prov;
+                        break;
+                    }
+                }
+                if let Some(val) = read_env_var_from_file(".env", k) {
+                    let t = val.trim();
+                    if !t.is_empty() {
+                        found_key = t.to_string();
+                        chosen_provider = *prov;
+                        break;
+                    }
+                }
+            }
+            if !found_key.is_empty() {
+                break;
+            }
+        }
     }
 
-    String::new()
+    let specific_model_key = chosen_provider.env_model_name();
+    let model_override = std::env::var(specific_model_key)
+        .ok()
+        .or_else(|| read_env_var_from_file(".env", specific_model_key))
+        .or_else(|| std::env::var("LLM_MODEL").ok())
+        .or_else(|| read_env_var_from_file(".env", "LLM_MODEL"))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let endpoint_override = std::env::var("LLM_BASE_URL")
+        .or_else(|_| std::env::var("LLM_ENDPOINT"))
+        .ok()
+        .or_else(|| read_env_var_from_file(".env", "LLM_BASE_URL"))
+        .or_else(|| read_env_var_from_file(".env", "LLM_ENDPOINT"))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let model = model_override.unwrap_or_else(|| chosen_provider.default_model().to_string());
+    let endpoint = endpoint_override.unwrap_or_else(|| chosen_provider.default_endpoint().to_string());
+
+    LlmConfig {
+        provider: chosen_provider,
+        api_key: found_key,
+        model,
+        endpoint,
+    }
 }
 
 fn resolve_initial_voice() -> VoiceGender {
@@ -2818,8 +3062,113 @@ impl Drop for BusyGuard {
     }
 }
 
+/// Envoi unifié d'une requête de complétion selon le fournisseur configuré
+async fn send_llm_chat_completion(
+    client: &reqwest::Client,
+    config: &LlmConfig,
+    system_prompt: &str,
+    messages_history: &[ChatMessage],
+    temperature: f32,
+    max_tokens: u32,
+) -> Result<reqwest::Response, reqwest::Error> {
+    if config.provider == LlmProvider::Anthropic {
+        let mut anthropic_messages: Vec<ChatMessage> = Vec::new();
+        for msg in messages_history {
+            if msg.role == "system" {
+                continue;
+            }
+            let role = if msg.role == "assistant" { "assistant" } else { "user" };
+            if let Some(last) = anthropic_messages.last_mut() {
+                if last.role == role {
+                    last.content.push_str("\n\n");
+                    last.content.push_str(&msg.content);
+                    continue;
+                }
+            }
+            anthropic_messages.push(ChatMessage {
+                role: role.to_string(),
+                content: msg.content.clone(),
+            });
+        }
+        if anthropic_messages.first().map_or(false, |m| m.role != "user") {
+            anthropic_messages.insert(0, ChatMessage {
+                role: "user".to_string(),
+                content: "Bonjour".to_string(),
+            });
+        }
+
+        let req_payload = AnthropicMessagesRequest {
+            model: config.model.clone(),
+            system: if system_prompt.trim().is_empty() { None } else { Some(system_prompt.to_string()) },
+            messages: anthropic_messages,
+            max_tokens,
+            temperature,
+        };
+
+        client
+            .post(&config.endpoint)
+            .header("x-api-key", &config.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&req_payload)
+            .send()
+            .await
+    } else {
+        let mut messages = Vec::new();
+        if !system_prompt.trim().is_empty() {
+            messages.push(ChatMessage {
+                role: "system".to_string(),
+                content: system_prompt.to_string(),
+            });
+        }
+        messages.extend_from_slice(messages_history);
+
+        let req_payload = DeepSeekChatRequest {
+            model: config.model.clone(),
+            messages,
+            temperature,
+            max_tokens,
+            top_p: 1.0,
+            stream: false,
+        };
+
+        client
+            .post(&config.endpoint)
+            .bearer_auth(&config.api_key)
+            .json(&req_payload)
+            .send()
+            .await
+    }
+}
+
+async fn parse_llm_response_text(res: reqwest::Response, provider: LlmProvider) -> Result<String, String> {
+    if provider == LlmProvider::Anthropic {
+        let body = res.json::<AnthropicMessagesResponse>().await
+            .map_err(|e| format!("Erreur décodage JSON Anthropic: {e}"))?;
+        let content = body.content
+            .into_iter()
+            .filter(|b| b.block_type == "text")
+            .filter_map(|b| b.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if content.is_empty() {
+            Err("Réponse Anthropic vide".to_string())
+        } else {
+            Ok(content)
+        }
+    } else {
+        let body = res.json::<DeepSeekChatResponse>().await
+            .map_err(|e| format!("Erreur décodage JSON OpenAI/DeepSeek: {e}"))?;
+        if let Some(choice) = body.choices.first() {
+            Ok(choice.message.content.clone())
+        } else {
+            Err("Aucun choix retourné dans la réponse".to_string())
+        }
+    }
+}
+
 async fn compact_history_if_needed(
-    api_key: &str,
+    llm_config: &LlmConfig,
     history: &mut Vec<ChatMessage>,
     client: &reqwest::Client,
     last_call_time: &mut Option<Instant>,
@@ -2856,53 +3205,43 @@ async fn compact_history_if_needed(
     }
 
     let (_, system_lang_name) = get_system_locale_language();
-    let summary_request = DeepSeekChatRequest {
-        model: "deepseek-chat".to_string(),
-        messages: vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: format!("Tu es un synthétiseur de mémoire conversationnelle. Résume fidèlement les points clés, décisions et actions passées en 250 mots maximum dans la langue du système de l'utilisateur ({system_lang_name}) sous forme de points synthétiques."),
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: format!("Voici les échanges passés à condenser :\n\n{}", safe_conversation_text),
-            },
-        ],
-        temperature: 0.2,
-        max_tokens: 400,
-        top_p: 1.0,
-        stream: false,
-    };
+    let sys_prompt = format!("Tu es un synthétiseur de mémoire conversationnelle. Résume fidèlement les points clés, décisions et actions passées en 250 mots maximum dans la langue du système de l'utilisateur ({system_lang_name}) sous forme de points synthétiques.");
+    let messages_to_condense = vec![
+        ChatMessage {
+            role: "user".to_string(),
+            content: format!("Voici les échanges passés à condenser :\n\n{}", safe_conversation_text),
+        },
+    ];
 
-    let response = client
-        .post("https://api.deepseek.com/chat/completions")
-        .bearer_auth(api_key)
-        .json(&summary_request)
-        .send()
-        .await;
+    let response = send_llm_chat_completion(
+        client,
+        llm_config,
+        &sys_prompt,
+        &messages_to_condense,
+        0.2,
+        400,
+    ).await;
 
     *last_call_time = Some(Instant::now());
 
     if let Ok(res) = response {
         if res.status().is_success() {
-            if let Ok(body) = res.json::<DeepSeekChatResponse>().await {
-                if let Some(choice) = body.choices.first() {
-                    let summary = choice.message.content.trim();
-                    if !summary.is_empty() {
-                        println!("[Mémoire] Compaction contextuelle réussie ({} messages condensés).", to_summarize.len());
-                        let mut new_history = Vec::with_capacity(recent.len() + 2);
-                        new_history.push(ChatMessage {
-                            role: "user".to_string(),
-                            content: format!("[Note contextuelle - résumé des échanges antérieurs] :\n{}", summary),
-                        });
-                        new_history.push(ChatMessage {
-                            role: "assistant".to_string(),
-                            content: "Contexte précédent bien assimilé.".to_string(),
-                        });
-                        new_history.extend(recent);
-                        *history = new_history;
-                        return;
-                    }
+            if let Ok(summary_text) = parse_llm_response_text(res, llm_config.provider).await {
+                let summary = summary_text.trim();
+                if !summary.is_empty() {
+                    println!("[Mémoire] Compaction contextuelle réussie ({} messages condensés).", to_summarize.len());
+                    let mut new_history = Vec::with_capacity(recent.len() + 2);
+                    new_history.push(ChatMessage {
+                        role: "user".to_string(),
+                        content: format!("[Note contextuelle - résumé des échanges antérieurs] :\n{}", summary),
+                    });
+                    new_history.push(ChatMessage {
+                        role: "assistant".to_string(),
+                        content: "Contexte précédent bien assimilé.".to_string(),
+                    });
+                    new_history.extend(recent);
+                    *history = new_history;
+                    return;
                 }
             }
         }
@@ -3057,8 +3396,8 @@ enum PromptTrigger {
     Immersion { screen_changed: bool },
 }
 
-async fn call_deepseek_prompt(
-    api_key: String,
+async fn call_llm_prompt(
+    llm_config: LlmConfig,
     user_instruction: String,
     full_prompt: String,
     history: Arc<tokio::sync::Mutex<Vec<ChatMessage>>>,
@@ -3075,9 +3414,9 @@ async fn call_deepseek_prompt(
     let _busy_guard = BusyGuard;
     let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
 
-    if api_key.is_empty() {
+    if llm_config.api_key.is_empty() {
         let _ = event_tx.send(AgentEvent::ReplaceNarration {
-            text: "Veuillez renseigner DEEPSEEK_API_KEY dans le fichier .env.".into(),
+            text: format!("Veuillez renseigner {} dans le fichier .env.", llm_config.provider.env_key_name()),
             quick_suggestions: Vec::new(),
         });
         let _ = event_tx.send(AgentEvent::RequestApiKey);
@@ -3118,7 +3457,7 @@ async fn call_deepseek_prompt(
         {
             let mut hist_guard = history.lock().await;
             let mut time_guard = last_call_time.lock().await;
-            compact_history_if_needed(&api_key, &mut hist_guard, &client, &mut time_guard).await;
+            compact_history_if_needed(&llm_config, &mut hist_guard, &client, &mut time_guard).await;
         }
 
         if is_request_cancelled(request_id) {
@@ -3145,26 +3484,12 @@ async fn call_deepseek_prompt(
             return;
         }
 
-        let mut messages = Vec::new();
-        messages.push(ChatMessage {
-            role: "system".to_string(),
-            content: system_instructions.to_string(),
-        });
-        messages.extend(history.lock().await.iter().cloned());
+        let hist_snapshot = history.lock().await.clone();
 
         let (temperature, max_tokens) = if is_dictation {
             (0.3, 300)
         } else {
             (1.0, 600)
-        };
-
-        let request = DeepSeekChatRequest {
-            model: "deepseek-chat".to_string(),
-            messages,
-            temperature,
-            max_tokens,
-            top_p: 1.0,
-            stream: false,
         };
 
         let mut attempts = 0;
@@ -3178,12 +3503,14 @@ async fn call_deepseek_prompt(
             }
             attempts += 1;
 
-            let response = client
-                .post("https://api.deepseek.com/chat/completions")
-                .bearer_auth(&api_key)
-                .json(&request)
-                .send()
-                .await;
+            let response = send_llm_chat_completion(
+                &client,
+                &llm_config,
+                &system_instructions,
+                &hist_snapshot,
+                temperature,
+                max_tokens,
+            ).await;
 
             match response {
                 Ok(res) if res.status().is_success() => {
@@ -3191,22 +3518,19 @@ async fn call_deepseek_prompt(
                         let mut time_guard = last_call_time.lock().await;
                         *time_guard = Some(Instant::now());
                     }
-                    if let Ok(body) = res.json::<DeepSeekChatResponse>().await {
-                        if let Some(choice) = body.choices.first() {
-                            let raw_content = &choice.message.content;
-                            println!("\n=================== [Réponse deepseek brute (passe {}/{})] ===================", pass, max_agent_passes);
-                            println!("{}", raw_content.trim());
-                            println!("============================================================");
+                    if let Ok(raw_content) = parse_llm_response_text(res, llm_config.provider).await {
+                        println!("\n=================== [Réponse {} brute (passe {}/{})] ===================", llm_config.provider.display_name(), pass, max_agent_passes);
+                        println!("{}", raw_content.trim());
+                        println!("============================================================");
 
-                            history.lock().await.push(ChatMessage {
-                                role: "assistant".to_string(),
-                                content: raw_content.clone(),
-                            });
+                        history.lock().await.push(ChatMessage {
+                            role: "assistant".to_string(),
+                            content: raw_content.clone(),
+                        });
 
-                            let payload = parse_agent_response(raw_content);
-                            success_payload = Some(payload);
-                            break;
-                        }
+                        let payload = parse_agent_response(&raw_content);
+                        success_payload = Some(payload);
+                        break;
                     }
                     history.lock().await.pop();
                     if !is_request_cancelled(request_id) {
@@ -3229,7 +3553,7 @@ async fn call_deepseek_prompt(
                     // Si le délai dépasse 12 secondes, il s'agit d'une saturation de jetons : ne pas bloquer l'agent
                     if wait_secs > 12 {
                         let err_body = res.text().await.unwrap_or_default();
-                        println!("[DeepSeek 429] Détails renvoyés par l'API : {}", err_body);
+                        println!("[LLM 429] Détails renvoyés par l'API : {}", err_body);
                         history.lock().await.pop();
                         let mins = (wait_secs + 59) / 60;
                         if !is_request_cancelled(request_id) {
@@ -3262,7 +3586,7 @@ async fn call_deepseek_prompt(
                     let status = res.status();
                     if !is_request_cancelled(request_id) {
                         let _ = event_tx.send(AgentEvent::ReplaceNarration {
-                            text: format!("Erreur api deepseek : {status}"),
+                            text: format!("Erreur API {} : {status}", llm_config.provider.display_name()),
                             quick_suggestions: Vec::new(),
                         });
                     }
@@ -3556,8 +3880,8 @@ fn main() -> eframe::Result<()> {
     let tts_tx = spawn_tts_worker(event_tx.clone(), initial_voice);
     let (twitch_ch_tx, twitch_ch_rx) = channel::<String>();
     spawn_twitch_worker(event_tx.clone(), twitch_ch_rx);
-    let deepseek_key = resolve_deepseek_key();
-    let audio_tx = spawn_audio_worker(event_tx.clone(), deepseek_key.clone());
+    let llm_config = resolve_llm_config();
+    let audio_tx = spawn_audio_worker(event_tx.clone(), llm_config.api_key.clone());
 
     let initial_twitch_channel = std::env::var("TWITCH_CHANNEL").unwrap_or_default();
 
@@ -3570,8 +3894,8 @@ fn main() -> eframe::Result<()> {
         }
     });
 
-    // Runtime Tokio en arrière-plan pour requêter DeepSeek
-    let deepseek_chat_key = deepseek_key.clone();
+    // Runtime Tokio en arrière-plan pour requêter le fournisseur LLM
+    let bg_llm_config = llm_config.clone();
     let bg_tts_tx = tts_tx.clone();
     let scheduler_cmd_tx = cmd_tx.clone();
     std::thread::spawn(move || {
@@ -3597,7 +3921,7 @@ fn main() -> eframe::Result<()> {
                         let history = history.clone();
                         let last_call_time = last_call_time.clone();
                         let event_tx = event_tx.clone();
-                        let deepseek_chat_key = deepseek_chat_key.clone();
+                        let current_llm_config = bg_llm_config.clone();
 
                         current_task = Some(tokio::spawn(async move {
                             if is_request_cancelled(request_id) {
@@ -3630,8 +3954,8 @@ fn main() -> eframe::Result<()> {
                                 let final_prompt = format!(
                                     "[MODE DICTÉE ACTIF] : L'utilisateur est en mode dictée vocale. Analyse sa voix : s'il s'agit d'une consigne pour arrêter/quitter la dictée, appelle 'deactivate_dictation'. S'il s'agit de texte à insérer, retranscris-le avec ponctuation soignée via 'dictate' (target: null) et garde narration: \"\".\n\n[Demande utilisateur]\n{prompt}"
                                 );
-                                call_deepseek_prompt(
-                                    deepseek_chat_key,
+                                call_llm_prompt(
+                                    current_llm_config,
                                     prompt.clone(),
                                     final_prompt,
                                     history,
@@ -3690,8 +4014,8 @@ fn main() -> eframe::Result<()> {
                                 prompt_sections.push(format!("[Demande utilisateur]\n{prompt}"));
                                 let final_prompt = prompt_sections.join("\n\n");
 
-                                call_deepseek_prompt(
-                                    deepseek_chat_key,
+                                call_llm_prompt(
+                                    current_llm_config,
                                     prompt.clone(),
                                     final_prompt,
                                     history,
@@ -3743,7 +4067,7 @@ fn main() -> eframe::Result<()> {
                         let history = history.clone();
                         let last_call_time = last_call_time.clone();
                         let event_tx = event_tx.clone();
-                        let deepseek_chat_key = deepseek_chat_key.clone();
+                        let current_llm_config = bg_llm_config.clone();
 
                         current_task = Some(tokio::spawn(async move {
                         #[cfg(windows)]
@@ -3798,7 +4122,7 @@ fn main() -> eframe::Result<()> {
                                 };
 
                                 println!("[Immersion] Changement détecté (diff: {} octets), transmission du diff au LLM...", screen_diff.len());
-                                call_deepseek_prompt(deepseek_chat_key, "Suivi immersion".to_string(), immersion_prompt, history, event_tx, last_call_time, PromptTrigger::Immersion { screen_changed: true }, request_id).await;
+                                call_llm_prompt(current_llm_config, "Suivi immersion".to_string(), immersion_prompt, history, event_tx, last_call_time, PromptTrigger::Immersion { screen_changed: true }, request_id).await;
                                 return;
                             }
 
@@ -3828,7 +4152,7 @@ fn main() -> eframe::Result<()> {
                                     truncate_with_notice(&current_summary, 1500)
                                 );
 
-                                call_deepseek_prompt(deepseek_chat_key, "Surveillance écran".to_string(), diff_prompt, history, event_tx, last_call_time, PromptTrigger::Surveillance, request_id).await;
+                                call_llm_prompt(current_llm_config, "Surveillance écran".to_string(), diff_prompt, history, event_tx, last_call_time, PromptTrigger::Surveillance, request_id).await;
                             } else {
                                 println!("[Surveillance] Premier instantané d'écran enregistré.");
                             }
