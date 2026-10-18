@@ -1,6 +1,6 @@
 [package]
 name = "libertide"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 
 [dependencies]
@@ -12,7 +12,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 reqwest = { version = "0.13.5", features = ["json", "multipart"] }
 tokio = { version = "1", features = ["full"] }
-any-tts = { version = "0.2", default-features = false, features = ["kokoro", "download"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58.0", features = [
@@ -34,3 +33,4 @@ opt-level = 3
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+strip = true

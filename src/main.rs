@@ -1,16 +1,18 @@
+mod autostart;
 mod audio;
 mod automation;
 mod floating_window;
 mod fs_util;
 mod html_util;
 mod pattern;
+mod scheduler;
 mod tts;
 mod twitch;
 mod types;
 mod window_util;
 
 use audio::spawn_audio_worker;
-use floating_window::FloatingCard;
+use floating_window::{update_open_floating_cards, FloatingCard, OPEN_FLOATING_CARDS};
 use automation::*;
 use fs_util::*;
 use pattern::clean_words;
@@ -102,6 +104,7 @@ pub struct OverlayApp {
     dictation_mode: bool,
     zoom_factor: f32,
     voice_gender: VoiceGender,
+    llm_config: LlmConfig,
 
     // Accessibilité : Ciblage par numéros & Mode contacteur unique (Switch Access)
     numbered_targets: Vec<NumberedElementTarget>,
@@ -133,7 +136,9 @@ pub struct OverlayApp {
     // Boîte modale de configuration de la clé API
     show_api_key_modal: bool,
     api_key_input: String,
+    model_input: String,
     show_api_key_plain: bool,
+    selected_provider_modal: LlmProvider,
     api_key_error: Option<String>,
 }
 
@@ -584,6 +589,12 @@ fn setup_custom_fonts(ctx: &egui::Context) {
     #[cfg(not(windows))]
     {
         let font_candidates = [
+            // Chemins macOS
+            "/System/Library/Fonts/Apple Color Emoji.ttc",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/SFNS.ttf",
+            // Chemins Linux
             "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
             "/usr/share/fonts/noto/NotoColorEmoji.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -646,16 +657,16 @@ impl OverlayApp {
     ) -> Self {
         setup_custom_fonts(&cc.egui_ctx);
 
-        let initial_key = resolve_deepseek_key();
-        let has_no_key = initial_key.is_empty();
+        let llm_config = resolve_llm_config();
+        let has_no_key = llm_config.api_key.is_empty();
         let initial_subtitle = if has_no_key {
-            "Veuillez renseigner votre clé API DeepSeek pour activer l'assistant.".to_string()
+            "Veuillez renseigner votre clé API LLM pour activer l'assistant.".to_string()
         } else {
             "En attente d'instructions d'exploration...".to_string()
         };
         let _ = tts_sender.send(TtsCommand::Speak(initial_subtitle.clone()));
 
-        Self {
+        let mut app = Self {
             status: AgentStatus::Idle,
             chat_history: vec![ChatEntry {
                 role: ChatRole::Agent,
@@ -674,6 +685,7 @@ impl OverlayApp {
             dictation_mode: false,
             zoom_factor: 1.0,
             voice_gender: initial_voice,
+            llm_config: llm_config.clone(),
 
             numbered_targets: Vec::new(),
             show_numbered_targets: false,
@@ -696,14 +708,38 @@ impl OverlayApp {
             drag_offset: None,
             current_win_w: 560.0,
             chat_height: 70.0,
-            current_win_h: 154.0,
+            current_win_h: 178.0,
             is_hidden: false,
             mouse_passthrough: false,
             show_api_key_modal: has_no_key,
-            api_key_input: initial_key,
+            api_key_input: llm_config.api_key.clone(),
+            model_input: llm_config.model.clone(),
+            selected_provider_modal: llm_config.provider,
             show_api_key_plain: false,
             api_key_error: None,
-        }
+        };
+        app.sync_modal_inputs_for_provider(llm_config.provider);
+        update_open_floating_cards(&app.floating_cards);
+        app
+    }
+
+    pub fn sync_modal_inputs_for_provider(&mut self, provider: LlmProvider) {
+        self.selected_provider_modal = provider;
+        let key_name = provider.env_key_name();
+        self.api_key_input = std::env::var(key_name)
+            .or_else(|_| read_env_var_from_file(".env", key_name).ok_or(()))
+            .unwrap_or_default();
+
+        let model_var = provider.env_model_name();
+        self.model_input = std::env::var(model_var)
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", model_var))
+            .or_else(|| std::env::var("LLM_MODEL").ok())
+            .or_else(|| read_env_var_from_file(".env", "LLM_MODEL"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| provider.default_model().to_string());
+        self.api_key_error = None;
     }
 
     fn draw_avatar(&self, ui: &mut egui::Ui, center: egui::Pos2, base_radius: f32, time: f64) {
@@ -825,7 +861,6 @@ impl OverlayApp {
             VoiceProfile::Paul => "Voix de Paul activée.",
             VoiceProfile::Sylvie => "Voix de Sylvie activée.",
             VoiceProfile::Jean => "Voix de Jean activée.",
-            VoiceProfile::Kokoro => "Voix neuronale Kokoro activée.",
         };
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
@@ -1016,7 +1051,7 @@ impl eframe::App for OverlayApp {
         };
 
         let min_win_w: f32 = 380.0;
-        let min_win_h: f32 = 134.0;
+        let min_win_h: f32 = 158.0;
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(min_win_w, min_win_h)));
 
         let inner_rect_opt = ctx.input(|i| i.viewport().inner_rect);
@@ -1024,14 +1059,15 @@ impl eframe::App for OverlayApp {
         self.current_win_w = win_w;
 
         let padding: f32 = 2.0;
-        let control_h: f32 = 78.0;
+        let control_h: f32 = 102.0;
 
         let max_chat_h = (work_h - control_h - 60.0).clamp(180.0, 560.0);
         let min_chat_h: f32 = 50.0;
         let current_chat_h = self.chat_height.clamp(min_chat_h, max_chat_h);
 
         // Arrondi pour éviter les oscillations de conversion DPI sub-pixel
-        let target_win_h = (padding + current_chat_h + padding + control_h + padding).max(min_win_h).round();
+        let modal_min_h = if self.show_api_key_modal { 268.0 } else { min_win_h };
+        let target_win_h = (padding + current_chat_h + padding + control_h + padding).max(modal_min_h).round();
         let active_win_h = inner_rect_opt.map_or(self.current_win_h, |r| r.height().max(min_win_h));
 
         // Ancrage automatique de la fenêtre ferrée à la barre des tâches en bas à droite
@@ -1230,14 +1266,6 @@ impl eframe::App for OverlayApp {
                         }
                         return;
                     }
-                    if norm_prompt.contains("voix de kokoro") || norm_prompt == "kokoro" || norm_prompt.contains("voix neuronale") || norm_prompt.contains("voix ia") {
-                        play_earcon(Earcon::Success);
-                        self.set_voice_gender(VoiceProfile::Kokoro);
-                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
-                        }
-                        return;
-                    }
 
                     // Traitement du zoom adaptatif vocal
                     if norm_prompt.contains("grossis") || norm_prompt.contains("zoom plus") || norm_prompt.contains("agrandis") || norm_prompt.contains("zoom in") {
@@ -1364,44 +1392,6 @@ impl eframe::App for OverlayApp {
                         return;
                     }
 
-                    // Détection et planification locale immédiate des commandes différées (<10 ms, 0 token LLM)
-                    if let Some(tasks) = parse_scheduled_prompts(&prompt) {
-                        for (dur, task_prompt) in &tasks {
-                            schedule_prompt_execution(*dur, task_prompt.clone());
-                        }
-                        play_earcon(Earcon::Success);
-                        let (reply_chat, reply_tts) = if tasks.len() == 1 {
-                            let friendly = format_duration_friendly(tasks[0].0);
-                            let cmd = &tasks[0].1;
-                            (format!("Commande planifiée dans {friendly} : « {cmd} »."), format!("Commande planifiée dans {friendly}."))
-                        } else {
-                            let mut chat = format!("{} commandes différées planifiées :", tasks.len());
-                            for (dur, cmd) in &tasks {
-                                chat.push_str(&format!("\n• Dans {} : « {} »", format_duration_friendly(*dur), cmd));
-                            }
-                            (chat, format!("{} commandes différées planifiées.", tasks.len()))
-                        };
-                        self.chat_history.push(ChatEntry {
-                            role: ChatRole::User,
-                            text: prompt,
-                            timestamp: current_time_str(),
-                            quick_suggestions: Vec::new(),
-                            screen_size_kb: None,
-                        });
-                        self.chat_history.push(ChatEntry {
-                            role: ChatRole::Agent,
-                            text: reply_chat,
-                            timestamp: current_time_str(),
-                            quick_suggestions: Vec::new(),
-                            screen_size_kb: None,
-                        });
-                        let _ = self.tts_sender.send(TtsCommand::Speak(reply_tts));
-                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
-                        }
-                        return;
-                    }
-
                     // 2. Sortie déterministe immédiate du mode dictée
                     if self.dictation_mode && is_stop_dictation_command(&prompt) {
                         self.exit_dictation_mode();
@@ -1426,6 +1416,7 @@ impl eframe::App for OverlayApp {
 
                     // 3. Configuration de la clé API
                     if is_api_key_command(&prompt) {
+                        self.sync_modal_inputs_for_provider(self.llm_config.provider);
                         self.show_api_key_modal = true;
                         self.is_hidden = false;
                         let reply = localized_speech(
@@ -1568,6 +1559,16 @@ impl eframe::App for OverlayApp {
                         self.start_recording(&ctx);
                     }
                 }
+                AgentEvent::WhisperReady => {
+                    println!("[Whisper] Notification WhisperReady reçue.");
+                    if self.continuous_mode
+                        && self.status != AgentStatus::EmergencyStopped
+                        && !AGENT_BUSY.load(Ordering::SeqCst)
+                        && !self.is_recording
+                    {
+                        self.start_recording(&ctx);
+                    }
+                }
                 AgentEvent::TwitchChatReceived(twitch_msg) => {
                     self.twitch_messages.push(twitch_msg);
                     if self.twitch_messages.len() > 300 {
@@ -1589,18 +1590,27 @@ impl eframe::App for OverlayApp {
                     }
                 }
                 AgentEvent::RequestApiKey => {
+                    self.sync_modal_inputs_for_provider(self.llm_config.provider);
                     self.show_api_key_modal = true;
                     self.is_hidden = false;
                 }
                 AgentEvent::ShowFloatingCard(card) => {
+                    let vp_id = egui::ViewportId::from_hash_of(&card.id);
                     if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == card.id) {
                         *existing = card;
                     } else {
                         self.floating_cards.push(card);
                     }
+                    update_open_floating_cards(&self.floating_cards);
+                    ctx.request_repaint();
+                    ctx.request_repaint_of(vp_id);
                 }
                 AgentEvent::CloseFloatingCard(id) => {
+                    let vp_id = egui::ViewportId::from_hash_of(&id);
                     self.floating_cards.retain(|c| c.id != id);
+                    update_open_floating_cards(&self.floating_cards);
+                    ctx.request_repaint();
+                    ctx.request_repaint_of(vp_id);
                 }
             }
         }
@@ -1608,6 +1618,7 @@ impl eframe::App for OverlayApp {
         let is_typing = ctx.memory(|m| {
             m.has_focus(egui::Id::new("prompt_input_text"))
                 || m.has_focus(egui::Id::new("api_key_input_field"))
+                || m.has_focus(egui::Id::new("model_input_field"))
         });
 
         // Gestion du Switch Access : défilement séquentiel périodique et validation sur Espace
@@ -1776,7 +1787,7 @@ impl eframe::App for OverlayApp {
                         .inner_margin(egui::Margin::symmetric(10, 8))
                         .show(ui, |ui| {
                             let inner_rect = ui.available_rect_before_wrap();
-                            let avatar_pos = egui::pos2(inner_rect.max.x - 20.0, inner_rect.min.y + 22.0);
+                            let avatar_pos = egui::pos2(inner_rect.max.x - 20.0, inner_rect.center().y);
                             self.draw_avatar(ui, avatar_pos, 14.0, time);
 
                             let avatar_rect = egui::Rect::from_center_size(avatar_pos, egui::vec2(32.0, 32.0));
@@ -1797,15 +1808,16 @@ impl eframe::App for OverlayApp {
 
                             ui.scope_builder(egui::UiBuilder::new().max_rect(content_area), |ui| {
                                 ui.vertical(|ui| {
+                                    let prov_name = self.llm_config.provider.display_name();
                                     let status_badge = if self.dictation_mode {
-                                        "DeepSeek · ✍ Mode dictée actif (Échap pour quitter)"
+                                        format!("{prov_name} · ✍ Mode dictée actif (Échap pour quitter)")
                                     } else {
                                         match self.status {
-                                            AgentStatus::Idle => "DeepSeek · en veille",
-                                            AgentStatus::Thinking => "DeepSeek · réflexion...",
-                                            AgentStatus::Speaking => "DeepSeek · en direct",
-                                            AgentStatus::Listening => "DeepSeek · écoute active (r)...",
-                                            AgentStatus::EmergencyStopped => "Système verrouillé",
+                                            AgentStatus::Idle => format!("{prov_name} · en veille"),
+                                            AgentStatus::Thinking => format!("{prov_name} · réflexion..."),
+                                            AgentStatus::Speaking => format!("{prov_name} · en direct"),
+                                            AgentStatus::Listening => format!("{prov_name} · écoute active (r)..."),
+                                            AgentStatus::EmergencyStopped => "Système verrouillé".to_string(),
                                         }
                                     };
 
@@ -1820,7 +1832,7 @@ impl eframe::App for OverlayApp {
                                     ui.horizontal(|ui| {
                                         let badge_resp = ui.add(
                                             egui::Label::new(
-                                                egui::RichText::new(status_badge)
+                                                egui::RichText::new(&status_badge)
                                                     .size(11.0)
                                                     .color(badge_color),
                                             )
@@ -1869,6 +1881,157 @@ impl eframe::App for OverlayApp {
 
                                     ui.add_space(4.0);
 
+                                    // 1ère rangée : Champ de saisie occupant tout l'espace disponible + bouton Envoyer
+                                    ui.horizontal(|ui| {
+                                        let send_btn_w = 64.0;
+                                        let edit_width = (ui.available_width() - send_btn_w - ui.spacing().item_spacing.x).max(60.0);
+                                        let input_id = egui::Id::new("prompt_input_text");
+                                        let response = ui.add_sized(
+                                            [edit_width, 24.0],
+                                            egui::TextEdit::singleline(&mut self.input_text)
+                                                .id(input_id)
+                                                .hint_text(if self.is_recording {
+                                                    "Écoute Whisper active... parlez ou tapez"
+                                                } else {
+                                                    "Consigne d'exploration... (entrée)"
+                                                }),
+                                        );
+
+                                        response.context_menu(|ui| {
+                                            if ui.button("📋 Coller").clicked() {
+                                                if let Some(clip) = get_clipboard_text() {
+                                                    let clean_clip = clip.replace(['\r', '\n'], " ");
+                                                    self.input_text = clean_clip.trim().to_string();
+                                                    self.stop_speaking();
+                                                }
+                                                ui.close();
+                                            }
+                                            if ui.button("📄 Copier tout (Ctrl+C)").clicked() {
+                                                set_clipboard_text(&self.input_text);
+                                                ui.close();
+                                            }
+                                            if ui.button("✂ Couper tout").clicked() {
+                                                set_clipboard_text(&self.input_text);
+                                                self.input_text.clear();
+                                                ui.close();
+                                            }
+                                            if ui.button("🗑 Effacer").clicked() {
+                                                self.input_text.clear();
+                                                ui.close();
+                                            }
+                                        });
+
+                                        let copy_hit = ctx.input(|i| {
+                                            i.events.iter().any(|e| matches!(e, egui::Event::Copy))
+                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
+                                        });
+                                        if response.has_focus() && copy_hit && !self.input_text.is_empty() {
+                                            set_clipboard_text(&self.input_text);
+                                            ctx.copy_text(self.input_text.clone());
+                                            play_earcon(Earcon::Success);
+                                        }
+
+                                        let paste_hit = ctx.input(|i| {
+                                            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
+                                                || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                        });
+                                        if (response.has_focus() || response.hovered()) && paste_hit {
+                                            if let Some(clip) = get_clipboard_text() {
+                                                let clean_clip = clip.replace(['\r', '\n'], " ");
+                                                let trimmed_clean = clean_clip.trim().to_string();
+                                                if !trimmed_clean.is_empty() {
+                                                    self.input_text = trimmed_clean;
+                                                    self.stop_speaking();
+                                                }
+                                            }
+                                        }
+
+                                        if response.changed() {
+                                            self.stop_speaking();
+                                        }
+
+                                        let enter_hit = (response.lost_focus() || response.has_focus())
+                                            && ctx.input(|i| i.key_pressed(egui::Key::Enter));
+                                        let send_btn = ui.add_sized(
+                                            [send_btn_w, 24.0],
+                                            egui::Button::new(
+                                                egui::RichText::new("Envoyer")
+                                                    .size(11.5)
+                                                    .color(egui::Color32::from_rgb(220, 240, 255)),
+                                            ),
+                                        );
+                                        if (send_btn.clicked() || enter_hit) && !self.input_text.trim().is_empty() {
+                                            self.stop_speaking();
+                                            if self.is_recording {
+                                                self.stop_recording();
+                                            }
+                                            self.continuous_mode = true;
+                                            let prompt = std::mem::take(&mut self.input_text).trim().to_string();
+                                            self.live_transcript.clear();
+                                            self.chat_history.push(ChatEntry {
+                                                role: ChatRole::User,
+                                                text: prompt.clone(),
+                                                timestamp: current_time_str(),
+                                                quick_suggestions: Vec::new(),
+                                                screen_size_kb: None,
+                                            });
+                                            if is_cancel_scheduled_command(&prompt) {
+                                                let cancelled = cancel_all_scheduled_tasks();
+                                                play_earcon(Earcon::Success);
+                                                let reply = if cancelled > 0 {
+                                                    format!("Toutes les commandes différées ont été annulées ({cancelled} annulée{}).", if cancelled > 1 { "s" } else { "" })
+                                                } else {
+                                                    "Toutes les commandes différées ont été annulées.".to_string()
+                                                };
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::Agent,
+                                                    text: reply.clone(),
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                                                self.status = AgentStatus::Idle;
+                                                self.continuous_mode = false;
+                                                return;
+                                            }
+                                            if is_api_key_command(&prompt) {
+                                                self.sync_modal_inputs_for_provider(self.llm_config.provider);
+                                                self.show_api_key_modal = true;
+                                                let reply = "Boîte de configuration de la clé API ouverte.".to_string();
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::Agent,
+                                                    text: reply.clone(),
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                                                self.status = AgentStatus::Idle;
+                                                self.continuous_mode = false;
+                                            } else if is_hide_command(&prompt) {
+                                                self.is_hidden = true;
+                                                self.status = AgentStatus::Idle;
+                                                let reply = "Overlay masqué. Je reste à l'écoute pour « deepseek ouvre toi ».".to_string();
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::Agent,
+                                                    text: reply.clone(),
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                                            } else {
+                                                self.status = AgentStatus::Thinking;
+                                                let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
+                                            }
+                                        }
+                                    });
+
+                                    ui.add_space(3.0);
+
+                                    // 2e rangée : Boutons d'action, dictée, profil vocal, clé API et corbeille
                                     ui.horizontal(|ui| {
                                         let mic_text = if self.is_recording {
                                             egui::RichText::new("🔴 Stop (r)")
@@ -1919,7 +2082,6 @@ impl eframe::App for OverlayApp {
                                             VoiceProfile::Paul => ("🎩 Paul", egui::Color32::from_rgb(160, 220, 180)),
                                             VoiceProfile::Sylvie => ("🍁 Sylvie", egui::Color32::from_rgb(255, 150, 150)),
                                             VoiceProfile::Jean => ("⚡ Jean", egui::Color32::from_rgb(205, 170, 255)),
-                                            VoiceProfile::Kokoro => ("🧠 Kokoro", egui::Color32::from_rgb(120, 255, 180)),
                                         };
                                         let next_gender = self.voice_gender.next();
                                         let voice_btn = ui.button(egui::RichText::new(voice_icon_text).color(voice_color))
@@ -1941,168 +2103,12 @@ impl eframe::App for OverlayApp {
                                             }
                                         });
 
-                                        let edit_width = (ui.available_width() - 128.0).max(60.0);
-                                        let input_id = egui::Id::new("prompt_input_text");
-                                        let response = ui.add_sized(
-                                            [edit_width, 24.0],
-                                            egui::TextEdit::singleline(&mut self.input_text)
-                                                .id(input_id)
-                                                .hint_text(if self.is_recording {
-                                                    "Écoute Whisper active... parlez ou tapez"
-                                                } else {
-                                                    "Consigne d'exploration... (entrée)"
-                                                }),
-                                        );
-
-                                        response.context_menu(|ui| {
-                                            if ui.button("📋 Coller").clicked() {
-                                                if let Some(clip) = get_clipboard_text() {
-                                                    self.input_text.push_str(&clip);
-                                                }
-                                                ui.close();
-                                            }
-                                            if ui.button("📄 Copier tout (Ctrl+C)").clicked() {
-                                                set_clipboard_text(&self.input_text);
-                                                ui.close();
-                                            }
-                                            if ui.button("✂ Couper tout").clicked() {
-                                                set_clipboard_text(&self.input_text);
-                                                self.input_text.clear();
-                                                ui.close();
-                                            }
-                                            if ui.button("🗑 Effacer").clicked() {
-                                                self.input_text.clear();
-                                                ui.close();
-                                            }
-                                        });
-
-                                        let copy_hit = ctx.input(|i| {
-                                            i.events.iter().any(|e| matches!(e, egui::Event::Copy))
-                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
-                                        });
-                                        if response.has_focus() && copy_hit && !self.input_text.is_empty() {
-                                            set_clipboard_text(&self.input_text);
-                                            ctx.copy_text(self.input_text.clone());
-                                            play_earcon(Earcon::Success);
-                                        }
-
-                                        let paste_hit = ctx.input(|i| {
-                                            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
-                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
-                                                || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
-                                        });
-                                        if (response.has_focus() || response.hovered()) && paste_hit {
-                                            if let Some(clip) = get_clipboard_text() {
-                                                if !clip.is_empty() && !self.input_text.ends_with(&clip) {
-                                                    self.input_text.push_str(&clip);
-                                                }
-                                            }
-                                        }
-
-                                        if response.changed() {
-                                            self.stop_speaking();
-                                        }
-
-                                        let enter_hit = (response.lost_focus() || response.has_focus())
-                                            && ctx.input(|i| i.key_pressed(egui::Key::Enter));
-                                        if (ui.button("Envoyer").clicked() || enter_hit) && !self.input_text.trim().is_empty() {
-                                            self.stop_speaking();
-                                            if self.is_recording {
-                                                self.stop_recording();
-                                            }
-                                            self.continuous_mode = true;
-                                            let prompt = std::mem::take(&mut self.input_text).trim().to_string();
-                                            self.live_transcript.clear();
-                                            self.chat_history.push(ChatEntry {
-                                                role: ChatRole::User,
-                                                text: prompt.clone(),
-                                                timestamp: current_time_str(),
-                                                quick_suggestions: Vec::new(),
-                                                screen_size_kb: None,
-                                            });
-                                            if is_cancel_scheduled_command(&prompt) {
-                                                let cancelled = cancel_all_scheduled_tasks();
-                                                play_earcon(Earcon::Success);
-                                                let reply = if cancelled > 0 {
-                                                    format!("Toutes les commandes différées ont été annulées ({cancelled} annulée{}).", if cancelled > 1 { "s" } else { "" })
-                                                } else {
-                                                    "Toutes les commandes différées ont été annulées.".to_string()
-                                                };
-                                                self.chat_history.push(ChatEntry {
-                                                    role: ChatRole::Agent,
-                                                    text: reply.clone(),
-                                                    timestamp: current_time_str(),
-                                                    quick_suggestions: Vec::new(),
-                                                    screen_size_kb: None,
-                                                });
-                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply));
-                                                self.status = AgentStatus::Idle;
-                                                self.continuous_mode = false;
-                                                return;
-                                            } else if let Some(tasks) = parse_scheduled_prompts(&prompt) {
-                                                for (dur, task_prompt) in &tasks {
-                                                    schedule_prompt_execution(*dur, task_prompt.clone());
-                                                }
-                                                play_earcon(Earcon::Success);
-                                                let (reply_chat, reply_tts) = if tasks.len() == 1 {
-                                                    let friendly = format_duration_friendly(tasks[0].0);
-                                                    let cmd = &tasks[0].1;
-                                                    (format!("Commande planifiée dans {friendly} : « {cmd} »."), format!("Commande planifiée dans {friendly}."))
-                                                } else {
-                                                    let mut chat = format!("{} commandes différées planifiées :", tasks.len());
-                                                    for (dur, cmd) in &tasks {
-                                                        chat.push_str(&format!("\n• Dans {} : « {} »", format_duration_friendly(*dur), cmd));
-                                                    }
-                                                    (chat, format!("{} commandes différées planifiées.", tasks.len()))
-                                                };
-                                                self.chat_history.push(ChatEntry {
-                                                    role: ChatRole::Agent,
-                                                    text: reply_chat,
-                                                    timestamp: current_time_str(),
-                                                    quick_suggestions: Vec::new(),
-                                                    screen_size_kb: None,
-                                                });
-                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply_tts));
-                                                self.status = AgentStatus::Idle;
-                                                self.continuous_mode = false;
-                                                return;
-                                            }
-                                            if is_api_key_command(&prompt) {
-                                                self.show_api_key_modal = true;
-                                                let reply = "Boîte de configuration de la clé API ouverte.".to_string();
-                                                self.chat_history.push(ChatEntry {
-                                                    role: ChatRole::Agent,
-                                                    text: reply.clone(),
-                                                    timestamp: current_time_str(),
-                                                    quick_suggestions: Vec::new(),
-                                                    screen_size_kb: None,
-                                                });
-                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply));
-                                                self.status = AgentStatus::Idle;
-                                                self.continuous_mode = false;
-                                            } else if is_hide_command(&prompt) {
-                                                self.is_hidden = true;
-                                                self.status = AgentStatus::Idle;
-                                                let reply = "Overlay masqué. Je reste à l'écoute pour « deepseek ouvre toi ».".to_string();
-                                                self.chat_history.push(ChatEntry {
-                                                    role: ChatRole::Agent,
-                                                    text: reply.clone(),
-                                                    timestamp: current_time_str(),
-                                                    quick_suggestions: Vec::new(),
-                                                    screen_size_kb: None,
-                                                });
-                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply));
-                                            } else {
-                                                self.status = AgentStatus::Thinking;
-                                                let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
-                                            }
-                                        }
-
                                         let key_btn = ui
                                             .button("🔑")
-                                            .on_hover_text("Configurer la clé API DeepSeek");
+                                            .on_hover_text("Configurer le fournisseur LLM et sa clé API");
                                         if key_btn.clicked() {
                                             self.show_api_key_modal = true;
+                                            self.sync_modal_inputs_for_provider(self.llm_config.provider);
                                             self.api_key_error = None;
                                             self.stop_speaking();
                                         }
@@ -2168,7 +2174,7 @@ impl eframe::App for OverlayApp {
                                                         };
                                                         (name, egui::Color32::from_rgb(255, 215, 120))
                                                     }
-                                                    ChatRole::Agent => ("DeepSeek".to_string(), egui::Color32::from_rgb(0, 195, 255)),
+                                            ChatRole::Agent => (self.llm_config.provider.display_name().to_string(), egui::Color32::from_rgb(0, 195, 255)),
                                                 };
                                                 ui.label(
                                                     egui::RichText::new(&label_name)
@@ -2216,6 +2222,22 @@ impl eframe::App for OverlayApp {
                                                 }
                                             };
 
+                                            let has_interactive_md = (entry.text.contains('[') && entry.text.contains("]("))
+                                                || entry.text.contains("[link")
+                                                || entry.text.contains("[/link]")
+                                                || entry.text.contains("```")
+                                                || entry.text.contains("▶ ")
+                                                || entry.text.contains("🎬 ")
+                                                || entry.text.contains("🎵 ")
+                                                || entry.text.contains("📄 ")
+                                                || entry.text.contains("🖼")
+                                                || (entry.text.contains('|') && entry.text.contains('\n'));
+
+                                            if entry.role == ChatRole::Agent && has_interactive_md {
+                                                if let Some(prompt) = floating_window::render_markdown(ui, &entry.text, &format!("chat_entry_{idx}")) {
+                                                    clicked_quick_suggestion = Some(prompt);
+                                                }
+                                            } else {
                                             let mut rich = egui::RichText::new(&entry.text)
                                                 .size(text_size)
                                                 .line_height(Some(line_height))
@@ -2263,6 +2285,7 @@ impl eframe::App for OverlayApp {
                                                     ui.close();
                                                 }
                                             });
+                                            }
 
                                             // Boutons-onglets pour les suggestions rapides
                                             if !entry.quick_suggestions.is_empty() {
@@ -2621,19 +2644,69 @@ impl eframe::App for OverlayApp {
                     egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 50)),
                 );
 
-                // Boîte modale de saisie de la clé API DeepSeek
+                // Boîte modale de saisie multi-fournisseurs LLM
                 if self.show_api_key_modal {
-                    egui::Window::new("🔑 Configuration de la clé API DeepSeek")
+                    egui::Window::new("api_key_modal")
+                        .title_bar(false)
                         .collapsible(false)
                         .resizable(false)
                         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                        .frame(
+                            egui::Frame::new()
+                                .fill(egui::Color32::from_rgb(12, 15, 20))
+                                .stroke(egui::Stroke::new(1.2, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 150)))
+                                .corner_radius(egui::CornerRadius::same(10))
+                                .inner_margin(egui::Margin::symmetric(12, 10)),
+                        )
                         .show(&ctx, |ui| {
+                            // En-tête compact intégré sans barre de titre egui
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("🔑 Configuration du Fournisseur LLM")
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgb(0, 215, 255))
+                                        .strong(),
+                                );
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.add(
+                                        egui::Button::new(
+                                            egui::RichText::new("✕")
+                                                .size(11.0)
+                                                .color(egui::Color32::from_rgb(255, 130, 130)),
+                                        )
+                                        .min_size(egui::vec2(18.0, 16.0))
+                                        .corner_radius(egui::CornerRadius::same(4)),
+                                    ).on_hover_text("Fermer").clicked() {
+                                        self.show_api_key_modal = false;
+                                        self.api_key_error = None;
+                                    }
+                                });
+                            });
+                            ui.add_space(4.0);
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
+                                for &provider in LlmProvider::ALL {
+                                    let is_sel = self.selected_provider_modal == provider;
+                                    if ui.selectable_label(is_sel, provider.display_name()).clicked() {
+                                        self.sync_modal_inputs_for_provider(provider);
+                                    }
+                                }
+                            });
+
+                            ui.add_space(4.0);
+                            let env_var_target = self.selected_provider_modal.env_key_name();
+                            let env_model_target = self.selected_provider_modal.env_model_name();
+                            let default_model_name = self.selected_provider_modal.default_model();
+
+                            // --- Section Clé API ---
                             ui.label(
-                                egui::RichText::new("Renseignez votre DEEPSEEK_API_KEY :")
+                                egui::RichText::new(format!("Clé d'API ({env_var_target}) :"))
+                                    .size(11.0)
                                     .color(egui::Color32::WHITE)
                                     .strong(),
                             );
-                            ui.add_space(4.0);
+                            ui.add_space(2.0);
 
                             ui.horizontal(|ui| {
                                 let edit = egui::TextEdit::singleline(&mut self.api_key_input)
@@ -2696,21 +2769,96 @@ impl eframe::App for OverlayApp {
                                 }
                             });
 
+                            ui.add_space(5.0);
+
+                            // --- Section Modèle de raisonnement ---
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!("Modèle LLM ({env_model_target}) :"))
+                                        .size(11.0)
+                                        .color(egui::Color32::WHITE)
+                                        .strong(),
+                                );
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.small_button("↺ Recommandé")
+                                        .on_hover_text(format!("Rétablir le modèle par défaut ({default_model_name})"))
+                                        .clicked()
+                                    {
+                                        self.model_input = default_model_name.to_string();
+                                    }
+                                });
+                            });
+                            ui.add_space(2.0);
+
+                            ui.horizontal(|ui| {
+                                let model_edit = egui::TextEdit::singleline(&mut self.model_input)
+                                    .id(egui::Id::new("model_input_field"))
+                                    .hint_text(default_model_name)
+                                    .desired_width(240.0);
+                                let model_resp = ui.add(model_edit);
+
+                                model_resp.context_menu(|ui| {
+                                    if ui.button("📋 Coller").clicked() {
+                                        if let Some(clip) = get_clipboard_text() {
+                                            self.model_input = clip.trim().to_string();
+                                        }
+                                        ui.close();
+                                    }
+                                    if ui.button("📄 Copier").clicked() {
+                                        set_clipboard_text(&self.model_input);
+                                        ui.close();
+                                    }
+                                    if ui.button(format!("↺ Rétablir {default_model_name}")).clicked() {
+                                        self.model_input = default_model_name.to_string();
+                                        ui.close();
+                                    }
+                                    if ui.button("🗑 Effacer").clicked() {
+                                        self.model_input.clear();
+                                        ui.close();
+                                    }
+                                });
+
+                                let paste_model_hit = ctx.input(|i| {
+                                    i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                                        || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
+                                        || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                });
+                                if (model_resp.has_focus() || model_resp.hovered()) && paste_model_hit {
+                                    if let Some(clip) = get_clipboard_text() {
+                                        let trimmed = clip.trim().to_string();
+                                        if !trimmed.is_empty() && self.model_input != trimmed {
+                                            self.model_input = trimmed;
+                                        }
+                                    }
+                                }
+                            });
+
                             if let Some(ref err) = self.api_key_error {
                                 ui.add_space(2.0);
                                 ui.label(egui::RichText::new(err).color(egui::Color32::from_rgb(255, 110, 110)).size(11.0));
                             }
 
-                            ui.add_space(6.0);
+                            ui.add_space(5.0);
                             ui.horizontal(|ui| {
-                                if ui.button("💾 Enregistrer & Relancer").clicked() {
+                                if ui.button("💾 Enregistrer & Appliquer").clicked() {
                                     let key = self.api_key_input.trim();
+                                    let model = if self.model_input.trim().is_empty() {
+                                        default_model_name
+                                    } else {
+                                        self.model_input.trim()
+                                    };
+
                                     if key.is_empty() {
                                         self.api_key_error = Some("La clé API ne peut pas être vide.".to_string());
-                                    } else if let Err(e) = write_env_var_to_file(".env", "DEEPSEEK_API_KEY", key) {
-                                        self.api_key_error = Some(format!("Erreur d'écriture : {e}"));
+                                    } else if let Err(e) = write_env_var_to_file(".env", env_var_target, key) {
+                                        self.api_key_error = Some(format!("Erreur d'écriture clé : {e}"));
+                                    } else if let Err(e) = write_env_var_to_file(".env", env_model_target, model) {
+                                        self.api_key_error = Some(format!("Erreur d'écriture modèle : {e}"));
                                     } else {
+                                        let _ = write_env_var_to_file(".env", "LLM_PROVIDER", self.selected_provider_modal.display_name());
+                                        #[cfg(windows)]
                                         restart_application();
+                                        self.show_api_key_modal = false;
                                     }
                                 }
                                 if ui.button("Annuler").clicked() {
@@ -2721,28 +2869,138 @@ impl eframe::App for OverlayApp {
                         });
                 }
 
-                // Affichage dynamique des fenêtres volantes (stats, tables, contenus)
+                // Affichage dynamique des fenêtres volantes (stats, tables, contenus, formulaires de requête)
+                let mut submitted_card_prompts = Vec::new();
+                let prev_card_count = self.floating_cards.len();
                 self.floating_cards.retain_mut(|card| {
-                    card.show(&ctx);
+                    if let Some(prompt) = card.show(&ctx) {
+                        submitted_card_prompts.push(prompt);
+                    }
                     card.open
                 });
+                if self.floating_cards.len() != prev_card_count {
+                    update_open_floating_cards(&self.floating_cards);
+                    ctx.request_repaint();
+                }
+                for prompt in submitted_card_prompts {
+                    self.stop_speaking();
+                    if self.is_recording {
+                        self.stop_recording();
+                    }
+                    self.status = AgentStatus::Thinking;
+                    self.continuous_mode = true;
+                    self.live_transcript.clear();
+                    self.chat_history.push(ChatEntry {
+                        role: ChatRole::User,
+                        text: prompt.clone(),
+                        timestamp: current_time_str(),
+                        quick_suggestions: Vec::new(),
+                        screen_size_kb: None,
+                    });
+                    let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
+                }
             });
     }
 }
 
-fn resolve_deepseek_key() -> String {
-    if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
-        let trimmed = key.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
+fn resolve_llm_config() -> LlmConfig {
+    // Ordre de priorité en cascade
+    let providers_cascade = [
+        (LlmProvider::DeepSeek, &["DEEPSEEK_API_KEY"][..]),
+        (LlmProvider::OpenAI, &["OPENAI_API_KEY"][..]),
+        (LlmProvider::Anthropic, &["ANTHROPIC_API_KEY"][..]),
+        (LlmProvider::Mistral, &["MISTRAL_API_KEY"][..]),
+        (LlmProvider::Glm, &["GLM_API_KEY", "ZHIPU_API_KEY"][..]),
+        (LlmProvider::Groq, &["GROQ_API_KEY"][..]),
+    ];
+
+    // Fournisseur forcé via LLM_PROVIDER
+    let forced_provider = std::env::var("LLM_PROVIDER")
+        .ok()
+        .or_else(|| read_env_var_from_file(".env", "LLM_PROVIDER"))
+        .and_then(|s| LlmProvider::from_name(&s));
+
+    let mut chosen_provider = LlmProvider::DeepSeek;
+    let mut found_key = String::new();
+
+    if let Some(forced) = forced_provider {
+        for (prov, keys) in &providers_cascade {
+            if *prov == forced {
+                for &k in *keys {
+                    if let Ok(val) = std::env::var(k) {
+                        let t = val.trim();
+                        if !t.is_empty() {
+                            found_key = t.to_string();
+                            chosen_provider = *prov;
+                            break;
+                        }
+                    }
+                    if let Some(val) = read_env_var_from_file(".env", k) {
+                        let t = val.trim();
+                        if !t.is_empty() {
+                            found_key = t.to_string();
+                            chosen_provider = *prov;
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
         }
     }
 
-    if let Some(val) = read_env_var_from_file(".env", "DEEPSEEK_API_KEY") {
-        return val;
+    if found_key.is_empty() {
+        for (prov, keys) in &providers_cascade {
+            for &k in *keys {
+                if let Ok(val) = std::env::var(k) {
+                    let t = val.trim();
+                    if !t.is_empty() {
+                        found_key = t.to_string();
+                        chosen_provider = *prov;
+                        break;
+                    }
+                }
+                if let Some(val) = read_env_var_from_file(".env", k) {
+                    let t = val.trim();
+                    if !t.is_empty() {
+                        found_key = t.to_string();
+                        chosen_provider = *prov;
+                        break;
+                    }
+                }
+            }
+            if !found_key.is_empty() {
+                break;
+            }
+        }
     }
 
-    String::new()
+    let specific_model_key = chosen_provider.env_model_name();
+    let model_override = std::env::var(specific_model_key)
+        .ok()
+        .or_else(|| read_env_var_from_file(".env", specific_model_key))
+        .or_else(|| std::env::var("LLM_MODEL").ok())
+        .or_else(|| read_env_var_from_file(".env", "LLM_MODEL"))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let endpoint_override = std::env::var("LLM_BASE_URL")
+        .or_else(|_| std::env::var("LLM_ENDPOINT"))
+        .ok()
+        .or_else(|| read_env_var_from_file(".env", "LLM_BASE_URL"))
+        .or_else(|| read_env_var_from_file(".env", "LLM_ENDPOINT"))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let model = model_override.unwrap_or_else(|| chosen_provider.default_model().to_string());
+    let endpoint = endpoint_override.unwrap_or_else(|| chosen_provider.default_endpoint().to_string());
+
+    LlmConfig {
+        provider: chosen_provider,
+        api_key: found_key,
+        model,
+        endpoint,
+    }
 }
 
 fn resolve_initial_voice() -> VoiceGender {
@@ -2885,8 +3143,123 @@ impl Drop for BusyGuard {
     }
 }
 
+/// Envoi unifié d'une requête de complétion selon le fournisseur configuré
+async fn send_llm_chat_completion(
+    client: &reqwest::Client,
+    config: &LlmConfig,
+    system_prompt: &str,
+    messages_history: &[ChatMessage],
+    temperature: f32,
+    max_tokens: u32,
+) -> Result<reqwest::Response, reqwest::Error> {
+    if config.provider == LlmProvider::Anthropic {
+        let mut anthropic_messages: Vec<ChatMessage> = Vec::new();
+        for msg in messages_history {
+            if msg.role == "system" {
+                continue;
+            }
+            let role = if msg.role == "assistant" { "assistant" } else { "user" };
+            if let Some(last) = anthropic_messages.last_mut() {
+                if last.role == role {
+                    last.content.push_str("\n\n");
+                    last.content.push_str(&msg.content);
+                    continue;
+                }
+            }
+            anthropic_messages.push(ChatMessage {
+                role: role.to_string(),
+                content: msg.content.clone(),
+            });
+        }
+        if anthropic_messages.first().map_or(false, |m| m.role != "user") {
+            anthropic_messages.insert(0, ChatMessage {
+                role: "user".to_string(),
+                content: "Bonjour".to_string(),
+            });
+        }
+
+        let req_payload = AnthropicMessagesRequest {
+            model: config.model.clone(),
+            system: if system_prompt.trim().is_empty() { None } else { Some(system_prompt.to_string()) },
+            messages: anthropic_messages,
+            max_tokens,
+            temperature,
+        };
+
+        client
+            .post(&config.endpoint)
+            .header("x-api-key", &config.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&req_payload)
+            .send()
+            .await
+    } else {
+        let mut messages = Vec::new();
+        if !system_prompt.trim().is_empty() {
+            messages.push(ChatMessage {
+                role: "system".to_string(),
+                content: system_prompt.to_string(),
+            });
+        }
+        messages.extend_from_slice(messages_history);
+
+        let response_format = match config.provider {
+            LlmProvider::DeepSeek | LlmProvider::OpenAI | LlmProvider::Mistral | LlmProvider::Groq => {
+                Some(ChatResponseFormat {
+                    r#type: "json_object".to_string(),
+                })
+            }
+            _ => None,
+        };
+
+        let req_payload = DeepSeekChatRequest {
+            model: config.model.clone(),
+            messages,
+            temperature,
+            max_tokens,
+            top_p: 1.0,
+            stream: false,
+            response_format,
+        };
+
+        client
+            .post(&config.endpoint)
+            .bearer_auth(&config.api_key)
+            .json(&req_payload)
+            .send()
+            .await
+    }
+}
+
+async fn parse_llm_response_text(res: reqwest::Response, provider: LlmProvider) -> Result<String, String> {
+    if provider == LlmProvider::Anthropic {
+        let body = res.json::<AnthropicMessagesResponse>().await
+            .map_err(|e| format!("Erreur décodage JSON Anthropic: {e}"))?;
+        let content = body.content
+            .into_iter()
+            .filter(|b| b.block_type == "text")
+            .filter_map(|b| b.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if content.is_empty() {
+            Err("Réponse Anthropic vide".to_string())
+        } else {
+            Ok(content)
+        }
+    } else {
+        let body = res.json::<DeepSeekChatResponse>().await
+            .map_err(|e| format!("Erreur décodage JSON OpenAI/DeepSeek: {e}"))?;
+        if let Some(choice) = body.choices.first() {
+            Ok(choice.message.content.clone())
+        } else {
+            Err("Aucun choix retourné dans la réponse".to_string())
+        }
+    }
+}
+
 async fn compact_history_if_needed(
-    api_key: &str,
+    llm_config: &LlmConfig,
     history: &mut Vec<ChatMessage>,
     client: &reqwest::Client,
     last_call_time: &mut Option<Instant>,
@@ -2923,53 +3296,43 @@ async fn compact_history_if_needed(
     }
 
     let (_, system_lang_name) = get_system_locale_language();
-    let summary_request = DeepSeekChatRequest {
-        model: "deepseek-chat".to_string(),
-        messages: vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: format!("Tu es un synthétiseur de mémoire conversationnelle. Résume fidèlement les points clés, décisions et actions passées en 250 mots maximum dans la langue du système de l'utilisateur ({system_lang_name}) sous forme de points synthétiques."),
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: format!("Voici les échanges passés à condenser :\n\n{}", safe_conversation_text),
-            },
-        ],
-        temperature: 0.2,
-        max_tokens: 400,
-        top_p: 1.0,
-        stream: false,
-    };
+    let sys_prompt = format!("Tu es un synthétiseur de mémoire conversationnelle. Résume fidèlement les points clés, décisions et actions passées en 250 mots maximum dans la langue du système de l'utilisateur ({system_lang_name}) sous forme de points synthétiques.");
+    let messages_to_condense = vec![
+        ChatMessage {
+            role: "user".to_string(),
+            content: format!("Voici les échanges passés à condenser :\n\n{}", safe_conversation_text),
+        },
+    ];
 
-    let response = client
-        .post("https://api.deepseek.com/chat/completions")
-        .bearer_auth(api_key)
-        .json(&summary_request)
-        .send()
-        .await;
+    let response = send_llm_chat_completion(
+        client,
+        llm_config,
+        &sys_prompt,
+        &messages_to_condense,
+        0.2,
+        400,
+    ).await;
 
     *last_call_time = Some(Instant::now());
 
     if let Ok(res) = response {
         if res.status().is_success() {
-            if let Ok(body) = res.json::<DeepSeekChatResponse>().await {
-                if let Some(choice) = body.choices.first() {
-                    let summary = choice.message.content.trim();
-                    if !summary.is_empty() {
-                        println!("[Mémoire] Compaction contextuelle réussie ({} messages condensés).", to_summarize.len());
-                        let mut new_history = Vec::with_capacity(recent.len() + 2);
-                        new_history.push(ChatMessage {
-                            role: "user".to_string(),
-                            content: format!("[Note contextuelle - résumé des échanges antérieurs] :\n{}", summary),
-                        });
-                        new_history.push(ChatMessage {
-                            role: "assistant".to_string(),
-                            content: "Contexte précédent bien assimilé.".to_string(),
-                        });
-                        new_history.extend(recent);
-                        *history = new_history;
-                        return;
-                    }
+            if let Ok(summary_text) = parse_llm_response_text(res, llm_config.provider).await {
+                let summary = summary_text.trim();
+                if !summary.is_empty() {
+                    println!("[Mémoire] Compaction contextuelle réussie ({} messages condensés).", to_summarize.len());
+                    let mut new_history = Vec::with_capacity(recent.len() + 2);
+                    new_history.push(ChatMessage {
+                        role: "user".to_string(),
+                        content: format!("[Note contextuelle - résumé des échanges antérieurs] :\n{}", summary),
+                    });
+                    new_history.push(ChatMessage {
+                        role: "assistant".to_string(),
+                        content: "Contexte précédent bien assimilé.".to_string(),
+                    });
+                    new_history.extend(recent);
+                    *history = new_history;
+                    return;
                 }
             }
         }
@@ -2981,7 +3344,7 @@ async fn compact_history_if_needed(
 }
 
 fn build_standard_system_instructions(lang_name: &str) -> String {
-    format!(r#"Tu es l'agent d'exploration Libertide pour Windows.
+    format!(r###"Tu es l'agent d'exploration Libertide pour Windows.
 Réponds STRICTEMENT en JSON sans texte hors JSON. "narration" concise rédigée impérativement dans la langue du système de l'utilisateur : {lang_name} (max 2 phrases).
 
 Règles principales :
@@ -3019,17 +3382,41 @@ Règles principales :
      * POLITIQUE DE PIVOT EN CAS D'ÉCHEC (TOUS VOLETS) :
        - L'absence de résultat ou le blocage sur un premier canal (ex: contact absent dans Teams, page web non accessible) NE MET PAS FIN À LA MISSION. C'est un ordre de PIVOT IMMÉDIAT vers le canal suivant (local -> web -> annuaires) sans renvoyer "actions": [].
        - Tant que tous les canaux n'ont pas été explorés et que les résultats ne sont pas projetés dans une fenêtre volante ("show_floating_card"), INTERDICTION de renvoyer "actions": [].
+ 3ter. PROTOCOLE RÉSUMÉ DE PAGE ET SYNTHÈSE DE CONTENU ("résume cette page", "synthèse", "de quoi ça parle", "fais un résumé") :
+   - Dès que l'utilisateur souhaite résumer ou analyser une page web, un document ou un ensemble d'informations à l'écran :
+     * Analyse minutieusement le texte, titres et points clés de la page.
+     * Projette SYSTÉMATIQUEMENT une fenêtre volante au format Markdown via l'action "show_floating_card" :
+       card_type: "markdown", id: "resume_page", title: "Résumé : <Titre de la page/sujet>", data: {{"text": "# SLICE Docus — Synthèse de la chaîne\n\n## Identité\n- **Chaîne** : @SliceDocus — **56,4 k abonnés**, **875 vidéos**.\n\n## Vidéos récentes / populaires\n- ▶ La guerre des satellites qui redessine notre monde (2,7 k vues, il y a 20 h)\n- ▶ Galea: les trésors engloutis de Venise (5 k vues, il y a 3 j)\n- ▶ Bio-invasion | Fourmis de feu (95 k vues, il y a 7 j)\n\n## À retenir\n- Formats longs de 34 à 55 min...\n\n> Cliquez sur une vidéo ci-dessus pour la lancer."}}.
+     * LIENS D'ACTION & VIDÉOS CLIQUABLES : Dans le texte Markdown et la narration, insère systématiquement des liens cliquables via la macro `[link="action:consigne_ou_url"]Icône Libellé[/link]` (ou en Markdown `Icône Libellé`). Un clic sur le lien ouvre l'URL ou envoie immédiatement la consigne à l'agent.
+     * Dans ta "narration" vocale : sois très concis (1 à 2 phrases) pour confirmer oralement que la synthèse est projetée dans la fenêtre volante.
+     * Fournis des suggestions rapides utiles dans "quick_suggestions" (ex: ["Lancer la vidéo 1", "Lancer la vidéo 2", "Fermer le résumé"]).
 4. Interface & Ciblage :
    - Hôte navigateur : préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse").
    - Contenu web : libellé direct sans préfixe issu de "[Page web - ...]".
    - ACCEPTATION AUTOMATIQUE DES COOKIES : Dès qu'une bannière de cookies ou consentement RGPD est présent, clique SYSTÉMATIQUEMENT et immédiatement sur le bouton pour tout accepter ("Tout accepter", "Accepter tout", "Autoriser", "J'accepte", "Continuer sans refuser") sans demander de confirmation.
+   - BANNIÈRES DE NOTIFICATION WEB, PUSH & NEWSLETTERS ("Activez les notifications", "Ne manquez rien", etc.) : Ce ne sont PAS des notifications système Windows (toasts). Ce sont des popups ou bannières intrusives sur la page web. Tu DOIS SYSTÉMATIQUEMENT les traiter immédiatement pour débloquer la page : clique en priorité sur la croix de fermeture ("Fermer (croix ✕)", "croix", "Fermer", "Plus tard", "Refuser", "Non merci"), ou sur "Activer" si demandé ou si aucune option de fermeture n'est présente. Ne laisse JAMAIS une bannière de notification web bloquer la page sans la valider ou la fermer !
    - LECTURE DES NOTIFICATIONS SYSTÈME (TOASTS) : Dès qu'une notification Windows ou un toast est présent, lis impérativement son titre et son contenu dans ta "narration" pour informer l'utilisateur, mais LAISSE-LA TRANQUILLE (ne tente pas de la fermer, ne clique pas dessus et laisse le système la gérer).
    - ALERTES & MESSAGES D'ERREUR (FERMETURE SYSTÉMATIQUE APRÈS LECTURE) : Dès qu'une boîte de dialogue d'alerte, un popup d'avertissement ou un message d'erreur est à l'écran, lis-le clairement ou résume-le dans ta "narration", puis FERME-LA SYSTÉMATIQUEMENT en cliquant sur son bouton de fermeture/validation ("OK", "Fermer", "Annuler", "Continuer", croix) pour débloquer l'écran et poursuivre ton travail. Ne JAMAIS envoyer "escape".
    - PRIORITÉ ABSOLUE AUX CHANGEMENTS WEB : Si des informations, boutons ou données sont présent sur la page web (signalés sous 'INFORMATIONS WEB MODIFIÉES / NOUVELLES'), ils priment impérativement sur tous les éléments statiques et les autres fenêtres. Base en priorité absolue tes actions ou réponses sur ces changements.
-   - "click_element" pour liens/onglets, "click_button" pour boutons. "target": null si saisie sans cible.
+   - OBLIGATION DE CIBLAGE EXPLICITE DU CHAMP : Pour toute saisie, sélection ou clic ("write_text", "replace_field_text", "clear_text", "focus_element", "click_element", "click_button"), tu DOIS IMPÉRATIVEMENT renseigner le champ interactable précis visé ("target", "target_name" ou "button_name") en utilisant sa macro ou son identifiant exact observé à l'écran (ex: input, select, textarea, combobox, bouton, lien, video, audio).
+   - LECTEURS VIDÉO & AUDIO : Les balises vidéo et audio sont des éléments interactables (signalés par [@video:...], [@audio:...], ou [video]/[audio]). Pour lancer la lecture, mettre en pause ou interagir avec un média, utilise "click_element" ou "click_button" en ciblant la vidéo, l'audio ou ses contrôles de lecture ("play", "lecture", etc.).
+   - SÉCURITÉ DU CIBLAGE : "target": null et les cibles génériques ou fictives sont STRICTEMENT INTERDITES. Le moteur d'exécution valide déterministement chaque élément contre l'arbre réel de l'écran ; toute cible non vérifiable ou absente sera rejetée par sécurité.
    - Raccourcis clavier & touches : utilise OBLIGATOIREMENT "accessibility_shortcut" avec le nom ou la combinaison de touches exacte (ex: "ctrl+shift+b" pour la barre des favoris, "ctrl+t", "enter", "close_tab", "copy", "undo"). Ne JAMAIS envoyer "run_command" pour simuler des touches ou raccourcis !
    - Lecture code/fichier : "read_editor_content" (focalise et extrait Ctrl+A/Ctrl+C).
    - Onglet/page : "accessibility_shortcut": "close_tab" (jamais "close_app" pour un onglet).
+4bis. RÈGLES DE LIENS INTERACTIFS & MACRO [link="cible"]label[/link] (CHAT & FENÊTRES VOLANTES) :
+   - RÈGLE D'OR : Tout élément multimédia, ressource, fichier, page web, action ou suggestion mentionné dans "narration" ou dans une fenêtre volante ("show_floating_card") DOIT IMPÉRATIVEMENT être formaté sous forme de lien cliquable, prioritairement avec la macro robuste `[link="cible"]Icône Libellé[/link]` (ou en Markdown `Icône Libellé`).
+   - LIENS DANS LES TABLEAUX MARKDOWN : Tu PEUX et DOIS insérer des liens `[link="..."]...[/link]` à l'intérieur des cellules de tableaux Markdown ou de fenêtres volantes (ex: `| Produit | Action | Prix |\n| --- | --- | --- |\n| Drone Pro | [link="action:Commander Drone Pro"]⚡ Commander[/link] | 299€ |`).
+   - AVANTAGE MAJEUR DE LA MACRO `[link="..."]...[/link]` : Elle évite tout conflit de parenthèses imbriquées dans les requêtes et les URLs complexes.
+   - RÉACTIVITÉ DANS LE CHAT LIBERTIDE : Un clic sur un lien dans le chat ou dans une carte volante insère et envoie automatiquement la consigne dans le chat et déclenche l'exécution par l'agent. La synthèse vocale (TTS) prononce uniquement le libellé sans lire la cible technique ni les balises.
+   - TYPOLOGIE DES MACROS OBLIGATOIRES :
+     * Vidéos (YouTube, streaming) : `[link="action:Lancer la vidéo : Titre"]▶ Titre[/link]` ou `[link="https://..."]▶ Titre[/link]` (INTERDICTION d'énumérer des vidéos sans lien).
+     * Audio & Musique (Spotify, radios, podcasts) : `[link="action:Lancer l'audio : Titre"]🎵 Titre[/link]`.
+     * Images & Visuels : `[link="action:Ouvrir l'image : chemin_ou_titre"]🖼️ Titre[/link]`.
+     * Documents & PDF (tableurs, rapports, logs) : `[link="action:Ouvrir le fichier : nom.pdf"]📄 nom.pdf[/link]`.
+     * Liens Web & Articles : `[link="https://..."]🌐 Nom du site[/link]`.
+     * Actions & Clics système : `[link="action:Valider le panier"]⚡ Valider le panier[/link]`.
+     * Suggestions de choix : `[link="action:Consigne suggérée"]💡 Option recommandée[/link]`.
 5. Audio & Volume :
    - "focus_address_bar" pour cibler/sélectionner universellement la barre d'adresse du navigateur.
    - "mute_audio" coupe sons tiers sans altérer la voix Libertide (à utiliser en urgence ou demande mute).
@@ -3043,11 +3430,11 @@ Règles principales :
    - Démarrage : "enable_autostart", "disable_autostart", "check_autostart", "set_autostart".
    - Sélection : "select_text_between" (from, to).
    - Immersion : "activate_immersion" (Win+Ctrl+D), "deactivate_immersion".
-   - Temporisation & Différé : "schedule_prompt" (delay_seconds: 1..3600, prompt: "...") ou "schedule_prompts" (tasks: [{{"delay_seconds": 10, "prompt": "..."}}]) pour différer des consignes futures (téléchargement en cours, rappel, temporisation).
+   - Temporisation & Différé : "schedule_prompt" (delay_seconds: 1..3600, prompt: "...") ou "schedule_prompts" (tasks: [{{"delay_seconds": 10, "prompt": "..."}}]) pour différer des consignes futures (téléchargement en cours, rappel, temporisation). "cancel_scheduled_tasks" pour annuler immédiatement toutes les commandes différées / timers en attente.
    - Fichiers & Documents : "open_file" (path: "chemin/fichier.ext") pour ouvrir directement toute image, vidéo, PDF, tableur ou document dans son application système par défaut (selon extension / MIME type).
-   - Fenêtres volantes d'analyse : "show_floating_card" (id: "...", title: "...", card_type: "table"|"stats"|"markdown", data: {{...}}) pour projeter une fenêtre volante semi-transparente avec un tableau comparatif, des données chiffrées ou une fiche technique.
-   - Fermeture carte : "close_floating_card" (id: "...").
-8. Fin de passes : Dès que "actions" est vide (tâche finie ou choix requis), fournis OBLIGATOIREMENT 2 à 4 suggestions concrètes dans "quick_suggestions".
+   - Fenêtres volantes d'analyse & formulaires de requête interactifs : "show_floating_card" (id: "...", title: "...", card_type: "form"|"table"|"stats"|"markdown", data: {{...}}) pour projeter une fenêtre volante avec un formulaire interactif de filtres/requête (inputs, jauges/sliders numériques, selectbox, radio, checkbox pour recherche personnalisée de vols, hôtels, shopping), un tableau comparatif, des données chiffrées ou une fiche technique. Pour "markdown", insère des liens cliquables `[link="action:..."]⚡ Libellé[/link]` pour permettre à l'utilisateur de piloter les choix ou actions directement depuis la fenêtre volante.
+   - Fermeture carte : "close_floating_card" (id: "..."). Formate tous les choix, suggestions et références sous forme de liens cliquables cliquables au clic dans le chat.
+ 8. Fin de passes : Dès que "actions" est vide (tâche finie ou choix requis), fournis OBLIGATOIREMENT 2 à 4 suggestions concrètes dans "quick_suggestions".
 
 Format JSON obligatoire :
 {{
@@ -3079,14 +3466,17 @@ Format JSON obligatoire :
     {{"action": "set_reasoning_passes", "passes": 5, "reason": null}},
     {{"action": "schedule_prompt", "delay_seconds": 10, "prompt": "..."}},
     {{"action": "schedule_prompts", "tasks": [{{"delay_seconds": 10, "prompt": "..."}}]}},
+    {{"action": "cancel_scheduled_tasks"}},
     {{"action": "mute_audio"}},
     {{"action": "set_volume", "command": "mute"|"down"|"up"|"min"}},
     {{"action": "open_file", "path": "chemin/vers/image_ou_doc.png"}},
-    {{"action": "show_floating_card", "id": "stats_1", "title": "Tableau comparatif", "card_type": "table", "data": {{"headers": ["Modèle", "Prix"], "rows": [["Produit A", "49€"], ["Produit B", "59€"]]}}}},
-    {{"action": "close_floating_card", "id": "stats_1"}}
+    {{"action": "show_floating_card", "id": "stats_1", "title": "Tableau comparatif", "card_type": "markdown", "data": {{"text": "| Modèle | Lien / Action | Prix |\n| --- | --- | --- |\n| Produit A | [link=\"action:Commander Produit A\"]⚡ Commander[/link] | 49€ |\n| Produit B | [link=\"action:Commander Produit B\"]⚡ Commander[/link] | 59€ |"}}}},
+    {{"action": "show_floating_card", "id": "vol_search", "title": "Filtres Billet d'Avion", "card_type": "form", "data": {{"submit_label": "Rechercher les vols", "prompt_prefix": "Recherche de vol avec les critères suivants :", "fields": [{{"id": "depart", "label": "Ville de départ", "type": "text", "value": "Paris"}}, {{"id": "destination", "label": "Destination", "type": "text", "value": "Tokyo"}}, {{"id": "prix_max", "label": "Budget maximum", "type": "number_slider", "min": 200, "max": 3000, "step": 50, "value": 900, "unit": "€"}}, {{"id": "classe", "label": "Classe", "type": "select", "options": ["Économique", "Premium", "Affaires"], "selected": "Économique"}}, {{"id": "direct", "label": "Vols directs seulement", "type": "checkbox", "checked": true}}, {{"id": "bagage", "label": "Bagages", "type": "radio", "options": ["Cabine seul", "1 bagage en soute", "2 bagages en soute"], "selected": "1 bagage en soute"}}]}}}},
+    {{"action": "show_floating_card", "id": "resume_page", "title": "Résumé de la page", "card_type": "markdown", "data": {{"text": "# SLICE Docus — Synthèse\n## Vidéos populaires\n- [link=\"action:Lancer la vidéo : La guerre des satellites\"]▶ La guerre des satellites (2,7 k vues)[/link]\n- [link=\"action:Lancer la vidéo : Bio-invasion\"]▶ Bio-invasion (95 k vues)[/link]\n\n> Cliquez sur une vidéo pour la lancer."}}}},
+     {{"action": "close_floating_card", "id": "stats_1"}}
   ],
   "quick_suggestions": ["Option 1", "Option 2"]
-}}"#)
+}}"###)
 }
 
 const DICTATION_SYSTEM_INSTRUCTIONS: &str = r#"Tu es l'assistant de dictée vocale et de saisie textuelle pour Windows.
@@ -3123,8 +3513,8 @@ enum PromptTrigger {
     Immersion { screen_changed: bool },
 }
 
-async fn call_deepseek_prompt(
-    api_key: String,
+async fn call_llm_prompt(
+    llm_config: LlmConfig,
     user_instruction: String,
     full_prompt: String,
     history: Arc<tokio::sync::Mutex<Vec<ChatMessage>>>,
@@ -3141,9 +3531,9 @@ async fn call_deepseek_prompt(
     let _busy_guard = BusyGuard;
     let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
 
-    if api_key.is_empty() {
+    if llm_config.api_key.is_empty() {
         let _ = event_tx.send(AgentEvent::ReplaceNarration {
-            text: "Veuillez renseigner DEEPSEEK_API_KEY dans le fichier .env.".into(),
+            text: format!("Veuillez renseigner {} dans le fichier .env.", llm_config.provider.env_key_name()),
             quick_suggestions: Vec::new(),
         });
         let _ = event_tx.send(AgentEvent::RequestApiKey);
@@ -3184,7 +3574,7 @@ async fn call_deepseek_prompt(
         {
             let mut hist_guard = history.lock().await;
             let mut time_guard = last_call_time.lock().await;
-            compact_history_if_needed(&api_key, &mut hist_guard, &client, &mut time_guard).await;
+            compact_history_if_needed(&llm_config, &mut hist_guard, &client, &mut time_guard).await;
         }
 
         if is_request_cancelled(request_id) {
@@ -3211,26 +3601,12 @@ async fn call_deepseek_prompt(
             return;
         }
 
-        let mut messages = Vec::new();
-        messages.push(ChatMessage {
-            role: "system".to_string(),
-            content: system_instructions.to_string(),
-        });
-        messages.extend(history.lock().await.iter().cloned());
+        let hist_snapshot = history.lock().await.clone();
 
         let (temperature, max_tokens) = if is_dictation {
             (0.3, 300)
         } else {
-            (1.0, 600)
-        };
-
-        let request = DeepSeekChatRequest {
-            model: "deepseek-chat".to_string(),
-            messages,
-            temperature,
-            max_tokens,
-            top_p: 1.0,
-            stream: false,
+            (0.7, 1800)
         };
 
         let mut attempts = 0;
@@ -3244,12 +3620,14 @@ async fn call_deepseek_prompt(
             }
             attempts += 1;
 
-            let response = client
-                .post("https://api.deepseek.com/chat/completions")
-                .bearer_auth(&api_key)
-                .json(&request)
-                .send()
-                .await;
+            let response = send_llm_chat_completion(
+                &client,
+                &llm_config,
+                &system_instructions,
+                &hist_snapshot,
+                temperature,
+                max_tokens,
+            ).await;
 
             match response {
                 Ok(res) if res.status().is_success() => {
@@ -3257,22 +3635,19 @@ async fn call_deepseek_prompt(
                         let mut time_guard = last_call_time.lock().await;
                         *time_guard = Some(Instant::now());
                     }
-                    if let Ok(body) = res.json::<DeepSeekChatResponse>().await {
-                        if let Some(choice) = body.choices.first() {
-                            let raw_content = &choice.message.content;
-                            println!("\n=================== [Réponse deepseek brute (passe {}/{})] ===================", pass, max_agent_passes);
-                            println!("{}", raw_content.trim());
-                            println!("============================================================");
+                    if let Ok(raw_content) = parse_llm_response_text(res, llm_config.provider).await {
+                        println!("\n=================== [Réponse {} brute (passe {}/{})] ===================", llm_config.provider.display_name(), pass, max_agent_passes);
+                        println!("{}", raw_content.trim());
+                        println!("============================================================");
 
-                            history.lock().await.push(ChatMessage {
-                                role: "assistant".to_string(),
-                                content: raw_content.clone(),
-                            });
+                        history.lock().await.push(ChatMessage {
+                            role: "assistant".to_string(),
+                            content: raw_content.clone(),
+                        });
 
-                            let payload = parse_agent_response(raw_content);
-                            success_payload = Some(payload);
-                            break;
-                        }
+                        let payload = parse_agent_response(&raw_content);
+                        success_payload = Some(payload);
+                        break;
                     }
                     history.lock().await.pop();
                     if !is_request_cancelled(request_id) {
@@ -3295,7 +3670,7 @@ async fn call_deepseek_prompt(
                     // Si le délai dépasse 12 secondes, il s'agit d'une saturation de jetons : ne pas bloquer l'agent
                     if wait_secs > 12 {
                         let err_body = res.text().await.unwrap_or_default();
-                        println!("[DeepSeek 429] Détails renvoyés par l'API : {}", err_body);
+                        println!("[LLM 429] Détails renvoyés par l'API : {}", err_body);
                         history.lock().await.pop();
                         let mins = (wait_secs + 59) / 60;
                         if !is_request_cancelled(request_id) {
@@ -3328,7 +3703,7 @@ async fn call_deepseek_prompt(
                     let status = res.status();
                     if !is_request_cancelled(request_id) {
                         let _ = event_tx.send(AgentEvent::ReplaceNarration {
-                            text: format!("Erreur api deepseek : {status}"),
+                            text: format!("Erreur API {} : {status}", llm_config.provider.display_name()),
                             quick_suggestions: Vec::new(),
                         });
                     }
@@ -3384,6 +3759,51 @@ async fn call_deepseek_prompt(
             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
             let _ = event_tx.send(AgentEvent::RequestIgnored);
             return;
+        }
+
+        // 2. Dispatch immédiat dès réception du message pour les fenêtres volantes
+        for act in &payload.actions {
+            match act {
+                AgentAction::ShowFloatingCard { id, title, card_type, data } => {
+                    let card = FloatingCard::from_action_data(id.clone(), title.clone(), card_type, data);
+                    let _ = event_tx.send(AgentEvent::ShowFloatingCard(card));
+                }
+                AgentAction::CloseFloatingCard { id } => {
+                    let _ = event_tx.send(AgentEvent::CloseFloatingCard(id.clone()));
+                }
+                _ => {}
+            }
+        }
+
+        // 3. Mise à jour automatique de repli : Si une fenêtre volante Markdown est affichée et que le LLM produit
+        // une synthèse/narration structurée sans ré-émettre formellement l'action JSON, le contenu de la fenêtre
+        // affichée est synchronisé automatiquement.
+        if let Ok(guard) = OPEN_FLOATING_CARDS.lock() {
+            let has_explicit_card = payload.actions.iter().any(|a| matches!(a, AgentAction::ShowFloatingCard { .. }));
+            if !has_explicit_card {
+                if let Some(open_md) = guard.iter().find(|c| c.card_type == "markdown") {
+                    let text_trim = payload.narration.trim();
+                    let is_structured = text_trim.contains('#')
+                        || text_trim.contains('|')
+                        || text_trim.contains("- ")
+                        || text_trim.contains("* ")
+                        || text_trim.contains("▶ ")
+                        || text_trim.contains("[link")
+                        || text_trim.lines().count() >= 3
+                        || text_trim.len() > 140;
+
+                    if is_structured {
+                        println!("[Agent] Mise à jour automatique de repli de la fenêtre volante Markdown '{}'", open_md.id);
+                        let fallback_card = FloatingCard::from_action_data(
+                            Some(open_md.id.clone()),
+                            open_md.title.clone(),
+                            "markdown",
+                            &serde_json::json!({ "text": text_trim }),
+                        );
+                        let _ = event_tx.send(AgentEvent::ShowFloatingCard(fallback_card));
+                    }
+                }
+            }
         }
 
         // En mode immersion, si l'écran n'a pas bougé et qu'aucune action ni suggestion rapide n'est formulée, préserver le silence
@@ -3456,18 +3876,6 @@ async fn call_deepseek_prompt(
         }
 
         let actions_to_run = payload.actions;
-        for act in &actions_to_run {
-            match act {
-                AgentAction::ShowFloatingCard { id, title, card_type, data } => {
-                    let card = FloatingCard::from_action_data(id.clone(), title.clone(), card_type, data);
-                    let _ = event_tx.send(AgentEvent::ShowFloatingCard(card));
-                }
-                AgentAction::CloseFloatingCard { id } => {
-                    let _ = event_tx.send(AgentEvent::CloseFloatingCard(id.clone()));
-                }
-                _ => {}
-            }
-        }
 
         let has_web_action = actions_to_run.iter().any(|a| {
             matches!(
@@ -3554,12 +3962,28 @@ async fn call_deepseek_prompt(
                 step_feedback.push_str(&format!("\n\n[État de l'écran suite aux actions] :\n{safe_screen}"));
             }
 
+            // Injection de l'état des fenêtres volantes ouvertes dans les étapes multi-passes
+            if let Ok(guard) = OPEN_FLOATING_CARDS.lock() {
+                if !guard.is_empty() {
+                    step_feedback.push_str("\n\n[Fenêtres volantes ouvertes à l'écran] :\n");
+                    for c in guard.iter() {
+                        step_feedback.push_str(&format!("- ID: \"{}\" | Titre: \"{}\" | Type: \"{}\"\n", c.id, c.title, c.card_type));
+                    }
+                    step_feedback.push_str("Actualise impérativement leur contenu via \"show_floating_card\" dès que de nouvelles informations sont obtenues.");
+                }
+            }
+
             step_feedback.push_str(&format!(
                 "\n\n[Consigne étape] : Poursuis : \"{}\".\n\
+                - RÈGLE D'OR : Réponds STRICTEMENT et UNIQUEMENT avec un objet JSON valide (contenant \"narration\", \"next_passes\", \"actions\", \"quick_suggestions\"). Aucun texte libre ou markdown en dehors du JSON.\n\
                 - Bannière cookies -> clique automatiquement 'Tout accepter' / 'Accepter'.\n\
+                - Bannière de notification web / push ('Activez les notifications franceinfo...', etc.) -> traite-la immédiatement en cliquant sur la croix 'Fermer (croix ✕)' / 'Fermer' / 'Refuser' / 'Plus tard' ou 'Activer' pour libérer la vue.\n\
+                - Pour lancer ou contrôler une vidéo ou un audio -> clique directement sur l'élément vidéo/audio ou son bouton de lecture ('play' / 'lecture').\n\
                 - Notification système (toast) -> lis son contenu dans ta narration et laisse-la tranquille (ne la ferme pas).\n\
                 - Alerte / modale d'erreur -> lis le message dans ta narration, puis clique impérativement sur 'OK' / 'Fermer' pour la refermer.\n\
-                - Mission approfondie (contact / produit / service) -> définis 'next_passes' (8 à 12), explore méthodiquement (local -> web -> annuaires) et projette les résultats dans 'show_floating_card'. Ne renvoie pas 'actions': [] tant que les résultats ne sont pas trouvés.\n\
+                - Fenêtre volante Markdown -> insère des liens cliquables [link=\"action:...\"]Texte[/link] pour permettre à l'utilisateur de déclencher des suites ou choix en un clic.\n\
+                - Liens interactifs -> Formate SYSTÉMATIQUEMENT vidéos, audios, images, PDF/fichiers et actions en liens cliquables via la macro [link=\"action:...\"]Icône Libellé[/link] ou [link=\"https://...\"]🌐 Web[/link] (y compris dans les cellules de tableaux Markdown). Le clic envoie directement la commande dans le chat de Libertide.\n\
+                 - Mission approfondie (contact / produit / service) -> définis 'next_passes' (8 à 12), explore méthodiquement (local -> web -> annuaires) et projette les résultats dans 'show_floating_card'. Ne renvoie pas 'actions': [] tant que les résultats ne sont pas trouvés.\n\
                 - Échec/blocage -> pivote immédiatement vers une alternative (app, web, autre fenêtre). Ne renvoie JAMAIS 'actions': [] si l'objectif n'est pas achevé.\n\
                 - Tâche finie ou choix requis -> 'actions': [] + 2 à 4 'quick_suggestions'.",
                 safe_user_instruction
@@ -3601,14 +4025,29 @@ async fn call_deepseek_prompt(
 }
 
 fn main() -> eframe::Result<()> {
+    // Si l'application est lancée au démarrage de Windows (CWD = System32),
+    // repositionner le répertoire courant sur le dossier du projet ou de l'exécutable.
+    if let Ok(cwd) = std::env::current_dir() {
+        let cwd_str = cwd.to_string_lossy().to_lowercase();
+        if cwd_str.contains("system32") || cwd_str.contains("syswow64") {
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(parent) = exe.parent() {
+                    let project_dir = parent.parent().and_then(|p| p.parent()).filter(|p| p.join("Cargo.toml").exists());
+                    let target_dir = project_dir.unwrap_or(parent);
+                    let _ = std::env::set_current_dir(target_dir);
+                }
+            }
+        }
+    }
+
     let (event_tx, event_rx) = channel::<AgentEvent>();
     let (cmd_tx, mut cmd_rx) = unbounded_channel::<AgentCommand>();
     let initial_voice = resolve_initial_voice();
     let tts_tx = spawn_tts_worker(event_tx.clone(), initial_voice);
     let (twitch_ch_tx, twitch_ch_rx) = channel::<String>();
     spawn_twitch_worker(event_tx.clone(), twitch_ch_rx);
-    let deepseek_key = resolve_deepseek_key();
-    let audio_tx = spawn_audio_worker(event_tx.clone(), deepseek_key.clone());
+    let llm_config = resolve_llm_config();
+    let audio_tx = spawn_audio_worker(event_tx.clone(), llm_config.api_key.clone());
 
     let initial_twitch_channel = std::env::var("TWITCH_CHANNEL").unwrap_or_default();
 
@@ -3621,8 +4060,8 @@ fn main() -> eframe::Result<()> {
         }
     });
 
-    // Runtime Tokio en arrière-plan pour requêter DeepSeek
-    let deepseek_chat_key = deepseek_key.clone();
+    // Runtime Tokio en arrière-plan pour requêter le fournisseur LLM
+    let bg_llm_config = llm_config.clone();
     let bg_tts_tx = tts_tx.clone();
     let scheduler_cmd_tx = cmd_tx.clone();
     std::thread::spawn(move || {
@@ -3648,7 +4087,7 @@ fn main() -> eframe::Result<()> {
                         let history = history.clone();
                         let last_call_time = last_call_time.clone();
                         let event_tx = event_tx.clone();
-                        let deepseek_chat_key = deepseek_chat_key.clone();
+                        let current_llm_config = bg_llm_config.clone();
 
                         current_task = Some(tokio::spawn(async move {
                             if is_request_cancelled(request_id) {
@@ -3681,8 +4120,8 @@ fn main() -> eframe::Result<()> {
                                 let final_prompt = format!(
                                     "[MODE DICTÉE ACTIF] : L'utilisateur est en mode dictée vocale. Analyse sa voix : s'il s'agit d'une consigne pour arrêter/quitter la dictée, appelle 'deactivate_dictation'. S'il s'agit de texte à insérer, retranscris-le avec ponctuation soignée via 'dictate' (target: null) et garde narration: \"\".\n\n[Demande utilisateur]\n{prompt}"
                                 );
-                                call_deepseek_prompt(
-                                    deepseek_chat_key,
+                                call_llm_prompt(
+                                    current_llm_config,
                                     prompt.clone(),
                                     final_prompt,
                                     history,
@@ -3738,11 +4177,23 @@ fn main() -> eframe::Result<()> {
                                     }
                                 }
 
+                            // 1. Injection automatique de l'état des fenêtres volantes ouvertes au LLM
+                            if let Ok(guard) = OPEN_FLOATING_CARDS.lock() {
+                                if !guard.is_empty() {
+                                    let mut card_section = String::from("[Fenêtres volantes actuellement ouvertes à l'écran] :\n");
+                                    for c in guard.iter() {
+                                        card_section.push_str(&format!("- ID: \"{}\" | Titre: \"{}\" | Type: \"{}\"\n", c.id, c.title, c.card_type));
+                                    }
+                                    card_section.push_str("Instruction : Ces fenêtres volantes sont déjà affichées à l'écran. Si ta réponse apporte de nouvelles données, une synthèse ou une mise à jour, réémets impérativement l'action \"show_floating_card\" avec le même ID pour synchroniser leur contenu.");
+                                    prompt_sections.push(card_section);
+                                }
+                            }
+
                                 prompt_sections.push(format!("[Demande utilisateur]\n{prompt}"));
                                 let final_prompt = prompt_sections.join("\n\n");
 
-                                call_deepseek_prompt(
-                                    deepseek_chat_key,
+                                call_llm_prompt(
+                                    current_llm_config,
                                     prompt.clone(),
                                     final_prompt,
                                     history,
@@ -3794,7 +4245,7 @@ fn main() -> eframe::Result<()> {
                         let history = history.clone();
                         let last_call_time = last_call_time.clone();
                         let event_tx = event_tx.clone();
-                        let deepseek_chat_key = deepseek_chat_key.clone();
+                        let current_llm_config = bg_llm_config.clone();
 
                         current_task = Some(tokio::spawn(async move {
                         #[cfg(windows)]
@@ -3849,7 +4300,7 @@ fn main() -> eframe::Result<()> {
                                 };
 
                                 println!("[Immersion] Changement détecté (diff: {} octets), transmission du diff au LLM...", screen_diff.len());
-                                call_deepseek_prompt(deepseek_chat_key, "Suivi immersion".to_string(), immersion_prompt, history, event_tx, last_call_time, PromptTrigger::Immersion { screen_changed: true }, request_id).await;
+                                call_llm_prompt(current_llm_config, "Suivi immersion".to_string(), immersion_prompt, history, event_tx, last_call_time, PromptTrigger::Immersion { screen_changed: true }, request_id).await;
                                 return;
                             }
 
@@ -3879,7 +4330,7 @@ fn main() -> eframe::Result<()> {
                                     truncate_with_notice(&current_summary, 1500)
                                 );
 
-                                call_deepseek_prompt(deepseek_chat_key, "Surveillance écran".to_string(), diff_prompt, history, event_tx, last_call_time, PromptTrigger::Surveillance, request_id).await;
+                                call_llm_prompt(current_llm_config, "Surveillance écran".to_string(), diff_prompt, history, event_tx, last_call_time, PromptTrigger::Surveillance, request_id).await;
                             } else {
                                 println!("[Surveillance] Premier instantané d'écran enregistré.");
                             }
@@ -3897,8 +4348,8 @@ fn main() -> eframe::Result<()> {
         .with_transparent(true)
         .with_always_on_top()
         .with_resizable(true)
-        .with_min_inner_size([380.0, 134.0])
-        .with_inner_size([560.0, 154.0]);
+        .with_min_inner_size([380.0, 158.0])
+        .with_inner_size([560.0, 178.0]);
 
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../public/favicon-256x256.png")) {
         viewport = viewport.with_icon(Arc::new(icon));

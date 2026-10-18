@@ -193,6 +193,51 @@ struct ActiveSelect {
     options: Vec<String>,
 }
 
+struct ActiveMedia {
+    index: usize,
+    tag: String,
+    id: Option<String>,
+    src: Option<String>,
+    title: Option<String>,
+    aria_label: Option<String>,
+    test_id: Option<String>,
+    text: String,
+}
+
+fn flush_media(
+    media_opt: &mut Option<ActiveMedia>,
+    in_cell: bool,
+    current_cell: &mut String,
+    output: &mut String,
+) {
+    if let Some(media) = media_opt.take() {
+        let tag_type = if media.tag == "audio" { "audio" } else { "video" };
+        let mut macro_str = format!("[@{}:{}", tag_type, media.index);
+        push_macro_attr(&mut macro_str, "id", media.id.as_deref());
+        push_macro_attr(&mut macro_str, "title", media.title.as_deref());
+        push_macro_attr(&mut macro_str, "src", media.src.as_deref());
+        let clean_text = media.text.trim();
+        let text_val = if !clean_text.is_empty() {
+            Some(clean_text)
+        } else {
+            media.aria_label.as_deref().or(media.title.as_deref()).or(media.id.as_deref())
+        };
+        push_macro_attr(&mut macro_str, "text", text_val);
+        push_macro_attr(&mut macro_str, "aria-label", media.aria_label.as_deref());
+        push_macro_attr(&mut macro_str, "data-testid", media.test_id.as_deref());
+        macro_str.push(']');
+
+        let target_out = if in_cell { current_cell } else { output };
+        if !in_cell && !target_out.is_empty() && !target_out.ends_with('\n') {
+            target_out.push('\n');
+        }
+        target_out.push_str(&macro_str);
+        if !in_cell {
+            target_out.push('\n');
+        }
+    }
+}
+
 fn flush_button(
     btn_opt: &mut Option<ActiveButton>,
     in_cell: bool,
@@ -397,6 +442,7 @@ pub fn sanitize_html_to_markdown(html: &str) -> String {
     let mut active_link: Option<ActiveLink> = None;
     let mut active_textarea: Option<ActiveTextarea> = None;
     let mut active_select: Option<ActiveSelect> = None;
+    let mut active_media: Option<ActiveMedia> = None;
     let mut in_option = false;
     let mut current_option = String::new();
 
@@ -649,6 +695,31 @@ pub fn sanitize_html_to_markdown(html: &str) -> String {
                                 current_option.clear();
                             }
                         }
+                        "video" | "audio" => {
+                            if is_closing {
+                                flush_media(&mut active_media, in_cell, &mut current_cell, &mut output);
+                            } else {
+                                flush_media(&mut active_media, in_cell, &mut current_cell, &mut output);
+                                elem_counter += 1;
+                                active_media = Some(ActiveMedia {
+                                    index: elem_counter,
+                                    tag: tag_name.to_string(),
+                                    id: get_attr_decoded(tag_body, "id"),
+                                    src: get_attr_decoded(tag_body, "src"),
+                                    title: get_attr_decoded(tag_body, "title"),
+                                    aria_label: get_attr_decoded(tag_body, "aria-label"),
+                                    test_id: get_test_id(tag_body),
+                                    text: String::new(),
+                                });
+                            }
+                        }
+                        "source" => {
+                            if let Some(ref mut m) = active_media {
+                                if m.src.is_none() {
+                                    m.src = get_attr_decoded(tag_body, "src");
+                                }
+                            }
+                        }
                         tag if tag == "button" || tag.contains("-button") || tag.ends_with("-btn") => {
                             if is_closing {
                                 flush_button(&mut active_button, in_cell, &mut current_cell, &mut output);
@@ -755,6 +826,8 @@ pub fn sanitize_html_to_markdown(html: &str) -> String {
                 btn.text.push(ch);
             } else if let Some(ref mut link) = active_link {
                 link.text.push(ch);
+            } else if let Some(ref mut media) = active_media {
+                media.text.push(ch);
             } else if in_cell {
                 current_cell.push(ch);
             } else if !in_table {
@@ -768,6 +841,7 @@ pub fn sanitize_html_to_markdown(html: &str) -> String {
     flush_link(&mut active_link, in_cell, &mut current_cell, &mut output);
     flush_textarea(&mut active_textarea, in_cell, &mut current_cell, &mut output);
     flush_select(&mut active_select, in_cell, &mut current_cell, &mut output);
+    flush_media(&mut active_media, in_cell, &mut current_cell, &mut output);
 
     let decoded = decode_html_entities(&output);
     let mut cleaned_lines = Vec::new();

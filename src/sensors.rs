@@ -111,6 +111,17 @@ pub fn get_power_status() -> String {
 
 #[cfg(not(windows))]
 pub fn get_power_status() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("pmset").args(["-g", "batt"]).output() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            if let Some(line) = s.lines().nth(1) {
+                return line.trim().to_string();
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
     let base_path = std::path::Path::new("/sys/class/power_supply");
     if let Ok(entries) = std::fs::read_dir(base_path) {
         for entry in entries.flatten() {
@@ -154,6 +165,20 @@ pub fn get_memory_info() -> String {
 
 #[cfg(not(windows))]
 pub fn get_memory_info() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("sysctl").arg("hw.memsize").output() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if let Some((_, bytes_str)) = s.split_once(':') {
+                if let Ok(bytes) = bytes_str.trim().parse::<u64>() {
+                    let gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                    return format!("{:.1} Go installés", gb);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
     if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
         let mut total_kb = 0u64;
         let mut avail_kb = 0u64;

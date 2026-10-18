@@ -1,13 +1,18 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+use crate::automation::IS_DICTATION_ACTIVE;
 use crate::types::{AgentEvent, AgentStatus, AudioCommand};
+
+// ============================================================================
+// 1. Rééchantillonneur audio continu (vers mono 16 kHz)
+// ============================================================================
 
 /// Rééchantillonneur linéaire continu vers mono 16 kHz sans dépendance externe
 pub struct ContinuousResampler {
@@ -59,6 +64,10 @@ impl ContinuousResampler {
     }
 }
 
+// ============================================================================
+// 2. Moteur d'inférence Whisper local (whisper.cpp)
+// ============================================================================
+
 pub struct WhisperEngine {
     ctx: WhisperContext,
 }
@@ -79,7 +88,7 @@ impl WhisperEngine {
         }
 
         let max_abs = samples_16k.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        if max_abs < 0.005 {
+        if max_abs < 0.012 {
             return Ok(String::new());
         }
 
@@ -113,6 +122,10 @@ impl WhisperEngine {
     }
 }
 
+// ============================================================================
+// 3. Gestion et téléchargement des modèles GGML Whisper
+// ============================================================================
+
 pub fn find_whisper_model_file() -> Option<PathBuf> {
     if let Ok(env_path) = std::env::var("WHISPER_MODEL_PATH") {
         let p = PathBuf::from(env_path.trim());
@@ -121,21 +134,89 @@ pub fn find_whisper_model_file() -> Option<PathBuf> {
         }
     }
 
-    let candidates = [
-        "models/ggml-base.bin",
-        "models/ggml-tiny.bin",
-        "ggml-base.bin",
-        "ggml-tiny.bin",
-    ];
+    let model_names = ["ggml-base.bin", "ggml-tiny.bin"];
 
-    for candidate in &candidates {
-        let p = PathBuf::from(candidate);
-        if p.is_file() {
-            return Some(p);
+    // 1. Racine du dépôt via CARGO_MANIFEST_DIR (infaillible lors du dev / cargo run)
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for name in &model_names {
+        let p1 = manifest_dir.join("models").join(name);
+        if p1.is_file() {
+            return Some(p1);
+        }
+        let p2 = manifest_dir.join(name);
+        if p2.is_file() {
+            return Some(p2);
+        }
+    }
+
+    // 2. Dossier de l'exécutable et ses parents (remonte depuis target/debug ou racine d'installation)
+    if let Ok(exe) = std::env::current_exe() {
+        let mut curr = exe.parent();
+        for _ in 0..6 {
+            if let Some(dir) = curr {
+                for name in &model_names {
+                    let p1 = dir.join("models").join(name);
+                    if p1.is_file() {
+                        return Some(p1);
+                    }
+                    let p2 = dir.join(name);
+                    if p2.is_file() {
+                        return Some(p2);
+                    }
+                }
+                curr = dir.parent();
+            } else {
+                break;
+            }
+        }
+    }
+
+    // 3. Répertoire de travail courant et ses parents
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut curr = Some(cwd.as_path());
+        for _ in 0..5 {
+            if let Some(dir) = curr {
+                for name in &model_names {
+                    let p1 = dir.join("models").join(name);
+                    if p1.is_file() {
+                        return Some(p1);
+                    }
+                    let p2 = dir.join(name);
+                    if p2.is_file() {
+                        return Some(p2);
+                    }
+                }
+                curr = dir.parent();
+            } else {
+                break;
+            }
         }
     }
 
     None
+}
+
+fn get_primary_models_dir() -> PathBuf {
+    let manifest_models = Path::new(env!("CARGO_MANIFEST_DIR")).join("models");
+    if manifest_models.parent().map_or(false, |p| p.exists()) {
+        manifest_models
+    } else if let Ok(exe) = std::env::current_exe() {
+        let mut curr = exe.parent();
+        for _ in 0..6 {
+            if let Some(dir) = curr {
+                let candidate = dir.join("models");
+                if candidate.is_dir() {
+                    return candidate;
+                }
+                curr = dir.parent();
+            } else {
+                break;
+            }
+        }
+        exe.parent().map(|p| p.join("models")).unwrap_or_else(|| PathBuf::from("models"))
+    } else {
+        PathBuf::from("models")
+    }
 }
 
 fn ensure_model_downloaded(event_tx: &Sender<AgentEvent>) -> Result<PathBuf, String> {
@@ -143,7 +224,7 @@ fn ensure_model_downloaded(event_tx: &Sender<AgentEvent>) -> Result<PathBuf, Str
         return Ok(existing);
     }
 
-    let target_dir = PathBuf::from("models");
+    let target_dir = get_primary_models_dir();
     let _ = std::fs::create_dir_all(&target_dir);
     let model_path = target_dir.join("ggml-base.bin");
 
@@ -167,23 +248,73 @@ fn ensure_model_downloaded(event_tx: &Sender<AgentEvent>) -> Result<PathBuf, Str
     Ok(model_path)
 }
 
+// ============================================================================
+// 4. Capture CPAL générique et gestion du flux
+// ============================================================================
+
 fn handle_cpal_stream_err(err: impl std::fmt::Display) {
     let msg = err.to_string().to_lowercase();
     if !msg.contains("overrun") && !msg.contains("underrun") {
-        eprintln!("Erreur de capture audio cpal : {err}");
+        eprintln!("[Audio CPAL] Erreur de capture audio : {err}");
     }
 }
+
+/// Factorise la création d'un flux d'enregistrement pour les formats F32, I16 et U16
+fn build_input_stream(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    sample_format: cpal::SampleFormat,
+    audio_tx: Sender<Vec<f32>>,
+) -> Option<cpal::Stream> {
+    match sample_format {
+        cpal::SampleFormat::F32 => device.build_input_stream(
+            config.clone(),
+            move |data: &[f32], _| {
+                let _ = audio_tx.send(data.to_vec());
+            },
+            handle_cpal_stream_err,
+            None,
+        ).ok(),
+        cpal::SampleFormat::I16 => device.build_input_stream(
+            config.clone(),
+            move |data: &[i16], _| {
+                let converted: Vec<f32> =
+                    data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                let _ = audio_tx.send(converted);
+            },
+            handle_cpal_stream_err,
+            None,
+        ).ok(),
+        cpal::SampleFormat::U16 => device.build_input_stream(
+            config.clone(),
+            move |data: &[u16], _| {
+                let converted: Vec<f32> =
+                    data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect();
+                let _ = audio_tx.send(converted);
+            },
+            handle_cpal_stream_err,
+            None,
+        ).ok(),
+        _ => None,
+    }
+}
+
+// ============================================================================
+// 5. Worker Audio : chargement asynchrone et boucle de traitement VAD
+// ============================================================================
 
 pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sender<AudioCommand> {
     let (cmd_tx, cmd_rx) = channel::<AudioCommand>();
     let whisper_instance: Arc<Mutex<Option<WhisperEngine>>> = Arc::new(Mutex::new(None));
     let is_model_ready = Arc::new(AtomicBool::new(false));
+    let model_load_failed = Arc::new(AtomicBool::new(false));
 
     // 1. Thread de chargement asynchrone : ne bloque pas l'affichage de l'interface
     {
+        let event_tx = event_tx.clone();
         let whisper_instance = Arc::clone(&whisper_instance);
         let is_model_ready = Arc::clone(&is_model_ready);
-        let event_tx = event_tx.clone();
+        let model_load_failed = Arc::clone(&model_load_failed);
         std::thread::spawn(move || {
             let is_download_needed = find_whisper_model_file().is_none();
             if is_download_needed {
@@ -198,11 +329,13 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                         println!("[Whisper] Modèle Whisper chargé avec succès depuis {}", path.display());
                         *whisper_instance.lock().unwrap() = Some(m);
                         is_model_ready.store(true, Ordering::SeqCst);
+                        let _ = event_tx.send(AgentEvent::WhisperReady);
                         let _ = event_tx.send(AgentEvent::SilentNarration(
                             "✅ Modèle Whisper prêt. Reconnaissance vocale disponible.".into(),
                         ));
                     }
                     Err(err) => {
+                        model_load_failed.store(true, Ordering::SeqCst);
                         eprintln!("[Whisper] Erreur lors du chargement de Whisper: {err}");
                         let _ = event_tx.send(AgentEvent::SilentNarration(
                             format!("❌ Erreur chargement Whisper : {err}"),
@@ -210,6 +343,7 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                     }
                 },
                 Err(err) => {
+                    model_load_failed.store(true, Ordering::SeqCst);
                     eprintln!("[Whisper] Modèle introuvable et échec de téléchargement: {err}");
                     let _ = event_tx.send(AgentEvent::SilentNarration(
                         format!("❌ Modèle Whisper indisponible : {err}"),
@@ -226,12 +360,30 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                 continue;
             }
 
+            // Résolution de la race condition : attente active si le modèle est encore en chargement
             if !is_model_ready.load(Ordering::SeqCst) {
                 let _ = event_tx.send(AgentEvent::SilentNarration(
-                    "⏳ Le modèle vocal est en cours de chargement en arrière-plan, veuillez patienter un instant...".into(),
+                    "⏳ Initialisation du modèle vocal en cours, mise en attente de l'écoute...".into(),
                 ));
-                let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
-                continue;
+                let mut cancelled = false;
+                while !is_model_ready.load(Ordering::SeqCst) {
+                    if model_load_failed.load(Ordering::SeqCst) {
+                        let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                        cancelled = true;
+                        break;
+                    }
+                    if let Ok(next_cmd) = cmd_rx.try_recv() {
+                        if matches!(next_cmd, AudioCommand::Stop) {
+                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                            cancelled = true;
+                            break;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                if cancelled {
+                    continue;
+                }
             }
 
             let host = cpal::default_host();
@@ -263,39 +415,7 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
             let stream_config: cpal::StreamConfig = config.into();
             let (audio_tx, audio_rx) = channel::<Vec<f32>>();
 
-            let stream = match sample_format {
-                cpal::SampleFormat::F32 => device.build_input_stream(
-                    stream_config.clone(),
-                    move |data: &[f32], _| {
-                        let _ = audio_tx.send(data.to_vec());
-                    },
-                    |err| handle_cpal_stream_err(err),
-                    None,
-                ).ok(),
-                cpal::SampleFormat::I16 => device.build_input_stream(
-                    stream_config.clone(),
-                    move |data: &[i16], _| {
-                        let converted: Vec<f32> =
-                            data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
-                        let _ = audio_tx.send(converted);
-                    },
-                    |err| handle_cpal_stream_err(err),
-                    None,
-                ).ok(),
-                cpal::SampleFormat::U16 => device.build_input_stream(
-                    stream_config,
-                    move |data: &[u16], _| {
-                        let converted: Vec<f32> =
-                            data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect();
-                        let _ = audio_tx.send(converted);
-                    },
-                    |err| handle_cpal_stream_err(err),
-                    None,
-                ).ok(),
-                _ => None,
-            };
-
-            let Some(stream) = stream else {
+            let Some(stream) = build_input_stream(&device, &stream_config, sample_format, audio_tx) else {
                 let _ = event_tx.send(AgentEvent::TranscriptionPartial(
                     "Format de capture microphone non pris en charge.".into(),
                 ));
@@ -313,13 +433,14 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
 
             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Listening));
             let mut resampler = ContinuousResampler::new(sample_rate, channels, 16000);
-            let mut audio_16k_buffer: Vec<f32> = Vec::with_capacity(16000 * 10);
+            let mut audio_16k_buffer: Vec<f32> = Vec::with_capacity(16000 * 40);
             let mut speech_detected = false;
             let mut last_speech_time = Instant::now();
             let mut start_recording_time = Instant::now();
-            // Seuil abaissé à 0.008 pour détecter les voix faibles, chuchotées ou dysarthriques
-            const SPEECH_ENERGY_THRESHOLD: f32 = 0.008;
-            const MAX_RECORDING_DURATION: Duration = Duration::from_secs(25);
+            // Seuil d'énergie calibré pour filtrer les souffles et le bruit de fond
+            const SPEECH_ENERGY_THRESHOLD: f32 = 0.012;
+            const PRE_ROLL_SAMPLES: usize = 8000; // 500 ms à 16 kHz pour sécuriser l'attaque
+            const MAX_RECORDING_DURATION: Duration = Duration::from_secs(40);
 
             let is_listening = true;
             while is_listening {
@@ -340,8 +461,8 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                     let sum_sq: f32 = new_16k.iter().map(|&s| s * s).sum();
                     let rms = (sum_sq / new_16k.len() as f32).sqrt();
 
-                    let mic_level = if rms > 0.003 {
-                        ((rms - 0.003) * 15.0).clamp(0.0, 1.0)
+                    let mic_level = if rms > 0.004 {
+                        ((rms - 0.004) * 16.0).clamp(0.0, 1.0)
                     } else {
                         0.0
                     };
@@ -361,10 +482,10 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                     if speech_detected {
                         audio_16k_buffer.extend_from_slice(&new_16k);
                     } else {
-                        // Pré-tampon de 300 ms pour conserver le début de phrase
+                        // Pré-tampon de 500 ms pour conserver le début de phrase
                         audio_16k_buffer.extend_from_slice(&new_16k);
-                        if audio_16k_buffer.len() > 4800 {
-                            let overflow = audio_16k_buffer.len() - 4800;
+                        if audio_16k_buffer.len() > PRE_ROLL_SAMPLES {
+                            let overflow = audio_16k_buffer.len() - PRE_ROLL_SAMPLES;
                             audio_16k_buffer.drain(0..overflow);
                         }
                     }
@@ -374,14 +495,14 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                     let silence_elapsed = last_speech_time.elapsed();
                     let total_elapsed = start_recording_time.elapsed();
 
-                    let is_dictation = crate::automation::IS_DICTATION_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
+                    let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::Relaxed);
                     let silence_timeout = if is_dictation {
-                        Duration::from_millis(2800)
+                        Duration::from_millis(3200)
                     } else {
-                        Duration::from_millis(2200)
+                        Duration::from_millis(2400)
                     };
 
-                    if (silence_elapsed >= silence_timeout && audio_16k_buffer.len() >= 8000)
+                    if (silence_elapsed >= silence_timeout && audio_16k_buffer.len() >= 12000)
                         || total_elapsed >= MAX_RECORDING_DURATION
                     {
                         crate::set_mic_audio_level(0.0);

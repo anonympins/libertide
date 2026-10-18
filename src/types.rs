@@ -1,6 +1,135 @@
 use serde::{Deserialize, Serialize};
 pub use crate::floating_window::FloatingCard;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LlmProvider {
+    DeepSeek,
+    OpenAI,
+    Anthropic,
+    Mistral,
+    Glm,
+    Groq,
+}
+
+impl LlmProvider {
+    pub const ALL: &'static [Self] = &[
+        Self::DeepSeek,
+        Self::OpenAI,
+        Self::Anthropic,
+        Self::Mistral,
+        Self::Glm,
+        Self::Groq,
+    ];
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::DeepSeek => "DeepSeek",
+            Self::OpenAI => "OpenAI",
+            Self::Anthropic => "Anthropic",
+            Self::Mistral => "Mistral AI",
+            Self::Glm => "Zhipu GLM",
+            Self::Groq => "Groq",
+        }
+    }
+
+    pub fn env_key_name(&self) -> &'static str {
+        match self {
+            Self::DeepSeek => "DEEPSEEK_API_KEY",
+            Self::OpenAI => "OPENAI_API_KEY",
+            Self::Anthropic => "ANTHROPIC_API_KEY",
+            Self::Mistral => "MISTRAL_API_KEY",
+            Self::Glm => "GLM_API_KEY",
+            Self::Groq => "GROQ_API_KEY",
+        }
+    }
+
+    pub fn env_model_name(&self) -> &'static str {
+        match self {
+            Self::DeepSeek => "DEEPSEEK_MODEL",
+            Self::OpenAI => "OPENAI_MODEL",
+            Self::Anthropic => "ANTHROPIC_MODEL",
+            Self::Mistral => "MISTRAL_MODEL",
+            Self::Glm => "GLM_MODEL",
+            Self::Groq => "GROQ_MODEL",
+        }
+    }
+
+    pub fn default_model(&self) -> &'static str {
+        match self {
+            Self::DeepSeek => "deepseek-chat",
+            Self::OpenAI => "gpt-4o",
+            Self::Anthropic => "claude-3-5-sonnet-20241022",
+            Self::Mistral => "mistral-small-latest",
+            Self::Glm => "glm-4-flash",
+            Self::Groq => "llama-3.3-70b-versatile",
+        }
+    }
+
+    pub fn default_endpoint(&self) -> &'static str {
+        match self {
+            Self::DeepSeek => "https://api.deepseek.com/chat/completions",
+            Self::OpenAI => "https://api.openai.com/v1/chat/completions",
+            Self::Anthropic => "https://api.anthropic.com/v1/messages",
+            Self::Mistral => "https://api.mistral.ai/v1/chat/completions",
+            Self::Glm => "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            Self::Groq => "https://api.groq.com/openai/v1/chat/completions",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "deepseek" => Some(Self::DeepSeek),
+            "openai" => Some(Self::OpenAI),
+            "anthropic" | "claude" => Some(Self::Anthropic),
+            "mistral" | "mistralai" => Some(Self::Mistral),
+            "glm" | "zhipu" | "zhipuai" => Some(Self::Glm),
+            "groq" => Some(Self::Groq),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmConfig {
+    pub provider: LlmProvider,
+    pub api_key: String,
+    pub model: String,
+    pub endpoint: String,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            provider: LlmProvider::DeepSeek,
+            api_key: String::new(),
+            model: LlmProvider::DeepSeek.default_model().to_string(),
+            endpoint: LlmProvider::DeepSeek.default_endpoint().to_string(),
+        }
+    }
+}
+
+#[derive(Serialize, Debug)]
+pub struct AnthropicMessagesRequest {
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub max_tokens: u32,
+    pub temperature: f32,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct AnthropicContentBlock {
+    #[serde(rename = "type")]
+    pub block_type: String,
+    pub text: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct AnthropicMessagesResponse {
+    pub content: Vec<AnthropicContentBlock>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStatus {
     Idle,
@@ -18,7 +147,6 @@ pub enum VoiceProfile {
     Paul,
     Sylvie,
     Jean,
-    Kokoro,
 }
 
 pub type VoiceGender = VoiceProfile;
@@ -34,7 +162,6 @@ impl VoiceProfile {
         Self::Paul,
         Self::Sylvie,
         Self::Jean,
-        Self::Kokoro,
     ];
 
     pub fn display_name(&self) -> &'static str {
@@ -45,7 +172,6 @@ impl VoiceProfile {
             Self::Paul => "Paul (Masculin posé)",
             Self::Sylvie => "Sylvie (Féminine canadienne)",
             Self::Jean => "Jean (Masculin dynamique)",
-            Self::Kokoro => "Kokoro (Neuronale IA - 82M)",
         }
     }
 
@@ -56,8 +182,7 @@ impl VoiceProfile {
             Self::Hortense => Self::Paul,
             Self::Paul => Self::Sylvie,
             Self::Sylvie => Self::Jean,
-            Self::Jean => Self::Kokoro,
-            Self::Kokoro => Self::Denise,
+            Self::Jean => Self::Denise,
         }
     }
 
@@ -69,7 +194,6 @@ impl VoiceProfile {
             Self::Paul => "paul",
             Self::Sylvie => "sylvie",
             Self::Jean => "jean",
-            Self::Kokoro => "kokoro",
         }
     }
 
@@ -81,7 +205,6 @@ impl VoiceProfile {
             "paul" => Some(Self::Paul),
             "sylvie" => Some(Self::Sylvie),
             "jean" => Some(Self::Jean),
-            "kokoro" => Some(Self::Kokoro),
             _ => None,
         }
     }
@@ -94,7 +217,6 @@ impl VoiceProfile {
             Self::Paul => "fr-FR-AlainNeural",
             Self::Sylvie => "fr-CA-SylvieNeural",
             Self::Jean => "fr-FR-JeanNeural",
-            Self::Kokoro => "fr-FR-DeniseNeural",
         }
     }
 }
@@ -145,6 +267,7 @@ pub enum AgentEvent {
     SilentNarration(String),
     TranscriptionPartial(String),
     VoicePromptReady(String),
+    WhisperReady,
     TtsFinished,
     ScreenPayloadSize(f32),
     TwitchChatReceived(TwitchMessage),
@@ -366,6 +489,8 @@ pub enum AgentAction {
         #[serde(default, alias = "prompts", alias = "scheduled_tasks", alias = "items")]
         tasks: Vec<ScheduledTaskItem>,
     },
+    #[serde(alias = "cancel_scheduled_prompts", alias = "clear_scheduled_tasks", alias = "cancel_timers", alias = "annuler_differe")]
+    CancelScheduledTasks,
     #[serde(alias = "mute_sound", alias = "sound_mute", alias = "couper_son")]
     MuteAudio,
     #[serde(alias = "volume", alias = "adjust_volume", alias = "sound")]
@@ -459,8 +584,11 @@ impl QuickSuggestionItem {
                 AgentAction::SchedulePrompts { tasks } => {
                     Some(format!("Planifier {} tâche(s) différée(s)", tasks.len()))
                 }
+                AgentAction::CancelScheduledTasks => Some("Annuler les commandes différées".to_string()),
                 AgentAction::MuteAudio => Some("Couper les flux audio parasites".to_string()),
                 AgentAction::SetVolume { command } => Some(format!("Volume : {command}")),
+                AgentAction::ShowFloatingCard { title, .. } => Some(format!("Afficher : {title}")),
+                AgentAction::CloseFloatingCard { id } => Some(format!("Fermer {id}")),
                 _ => None,
             },
         }
@@ -487,6 +615,11 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ChatResponseFormat {
+    pub r#type: String,
+}
+
 #[derive(Serialize, Debug)]
 pub struct DeepSeekChatRequest {
     pub model: String,
@@ -495,6 +628,8 @@ pub struct DeepSeekChatRequest {
     pub max_tokens: u32,
     pub top_p: f32,
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ChatResponseFormat>,
 }
 
 #[derive(Deserialize, Debug)]
