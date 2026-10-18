@@ -25,7 +25,8 @@ use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPRO
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationElement2, IUIAutomationInvokePattern,
     IUIAutomationScrollItemPattern, IUIAutomationScrollPattern, IUIAutomationTextPattern, IUIAutomationValuePattern,
-    TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+    TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_ComboBoxControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+    UIA_ListControlTypeId,
     UIA_TabControlTypeId, UIA_TabItemControlTypeId,
     UIA_HyperlinkControlTypeId, UIA_InvokePatternId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
     UIA_TextPatternId, UIA_ValuePatternId,
@@ -999,6 +1000,8 @@ struct UiaElementInfo {
     is_edit_or_textarea: bool,
     is_explicit_textarea: bool,
     is_input: bool,
+    is_select: bool,
+    is_option: bool,
     is_button: bool,
     is_link: bool,
     is_tab: bool,
@@ -1488,7 +1491,32 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || loc_type.contains("edit")
                         || loc_type.contains("saisie"));
 
-                    let is_edit_or_textarea = is_explicit_textarea || is_input;
+                    let is_select = ctype == UIA_ComboBoxControlTypeId
+                        || ctype == UIA_ListControlTypeId
+                        || loc_type.contains("liste déroulante")
+                        || loc_type.contains("combobox")
+                        || loc_type.contains("select")
+                        || loc_type.contains("menu déroulant")
+                        || aria_role.to_lowercase().contains("combobox")
+                        || aria_role.to_lowercase().contains("listbox")
+                        || aria_role.to_lowercase().contains("select")
+                        || class_name.contains("select")
+                        || class_name.contains("combobox")
+                        || automation_id.to_lowercase().contains("select");
+
+                    let is_option = ctype == windows::Win32::UI::Accessibility::UIA_ListItemControlTypeId
+                        || aria_role == "option"
+                        || aria_role == "listitem"
+                        || aria_role == "menuitem"
+                        || loc_type.contains("option")
+                        || loc_type.contains("élément de liste")
+                        || loc_type.contains("suggestion")
+                        || class_name.contains("suggestion")
+                        || class_name.contains("dropdown")
+                        || class_name.contains("popup")
+                        || automation_id.to_lowercase().contains("option");
+
+                    let is_edit_or_textarea = is_explicit_textarea || is_input || is_select;
 
                     let is_role_button = aria_role == "button"
                         || aria_role.contains("button")
@@ -1563,7 +1591,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         && !aria_properties.contains("tabindex=-1")
                         && !aria_properties.contains("tabindex=\"-1\"")
                         && !aria_properties.contains("tabindex='-1'"))
-                        || (is_web_content && is_focusable && !is_edit_or_textarea && !is_link && !is_button);
+                        || (is_web_content && (is_focusable || is_option) && !is_edit_or_textarea && !is_link && !is_button);
                     let is_tabindex = has_tabindex;
 
                     if is_browser_chrome && !name.is_empty() && !name.starts_with("[Navigateur]") {
@@ -1641,6 +1669,8 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         is_edit_or_textarea,
                         is_explicit_textarea,
                         is_input,
+                        is_select,
+                        is_option,
                         is_button,
                         is_link,
                         is_tab,
@@ -2372,7 +2402,14 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
     if (!name_lower.is_empty() && name_lower == prop_lower)
         || (!aria_label_lower.is_empty() && aria_label_lower == prop_lower)
     {
-        return Some(350.0);
+        return Some(600.0);
+    }
+
+    // Correspondance exacte au début du libellé
+    if name_lower.starts_with(&prop_lower) || aria_label_lower.starts_with(&prop_lower) {
+        let leftover_words = name_words_count(&name_lower).saturating_sub(name_words_count(&prop_lower));
+        let penalty = (leftover_words as f32) * 15.0;
+        return Some((500.0 - penalty).max(300.0));
     }
 
     let ecom_bonus = ecommerce_match_bonus(prop_clean, &elem.name)
@@ -2528,6 +2565,16 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
         total_score *= (matched_words_count as f32) / (q_words.len() as f32);
     }
 
+    // Pénalité stricte pour les mots parasites présents dans le nom mais absents de la recherche
+    // (Évite que "Niagara Falls, État de New York" concurrence "New York, État de New York")
+    let mut unexpected_words_penalty = 0.0f32;
+    for nw in &name_words {
+        if !q_words.iter().any(|qw| qw == nw || nw.contains(qw) || qw.contains(nw)) {
+            unexpected_words_penalty += 35.0;
+        }
+    }
+    total_score = (total_score - unexpected_words_penalty).max(1.0);
+
     if !name_words.is_empty() && name_words.len() > q_words.len() * 4 {
         let excess = (name_words.len() - q_words.len() * 4) as f32;
         total_score = (total_score - excess * 2.0).max(5.0);
@@ -2586,6 +2633,8 @@ fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option
                 let mut final_score = score + chrome_bias;
                 if elem.is_tab {
                     final_score += 80.0;
+                } else if elem.is_option {
+                    final_score += 65.0;
                 } else if elem.is_link {
                     final_score += 40.0;
                 } else if elem.is_tabindex {
@@ -2693,7 +2742,7 @@ fn find_best_input_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> 
 
             score_element(elem, target).map(|score| {
                 let mut final_score = score + chrome_bias;
-                if elem.is_edit_or_textarea || elem.is_input {
+                if elem.is_edit_or_textarea || elem.is_input || elem.is_select {
                     final_score += 40.0;
                 } else if elem.is_focusable {
                     final_score += 15.0;
@@ -3156,14 +3205,21 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             }
         }
 
-        // A. Champs de formulaire et barres de recherche
-        let edits: Vec<&UiaElementInfo> = elements.iter()
-            .filter(|e| (!has_web_doc || e.is_web_content) && (e.is_edit_or_textarea || e.is_input))
+        // A. Champs de formulaire, barres de recherche et sélecteurs (input, select, textarea)
+        let form_fields: Vec<&UiaElementInfo> = elements.iter()
+            .filter(|e| (!has_web_doc || e.is_web_content) && (e.is_edit_or_textarea || e.is_input || e.is_select))
             .collect();
-        if !edits.is_empty() {
-            let prefix = if has_web_doc { "  [Page web - champs de saisie / recherche] :\n" } else { "  [Champs de texte / saisie] :\n" };
+        if !form_fields.is_empty() {
+            let prefix = if has_web_doc { "  [Page web - champs interactables (input / select / textarea)] :\n" } else { "  [Champs interactables (input / select / textarea)] :\n" };
             active_window_content.push_str(prefix);
-            for edit in edits.iter().take(8) {
+            for edit in form_fields.iter().take(15) {
+                let field_type_tag = if edit.is_select {
+                    "[select/combobox]"
+                } else if edit.is_explicit_textarea {
+                    "[textarea]"
+                } else {
+                    "[input]"
+                };
                 let mut label = if !edit.name.is_empty() {
                     edit.name.clone()
                 } else if !edit.primary_class.is_empty() {
@@ -3190,7 +3246,27 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                 } else {
                     String::new()
                 };
-                active_window_content.push_str(&format!("  • {}{}\n", label, val));
+                active_window_content.push_str(&format!("  • {} {}{}\n", field_type_tag, label, val));
+            }
+        }
+
+        // A bis. Suggestions dynamiques, popups et options de listes déroulantes ouvertes
+        let option_fields: Vec<&UiaElementInfo> = elements.iter()
+            .filter(|e| (!has_web_doc || e.is_web_content) && e.is_option && !e.name.is_empty())
+            .collect();
+        if !option_fields.is_empty() {
+            let prefix = if has_web_doc {
+                "  [Page web - suggestions / options de sélection (popup)] :\n"
+            } else {
+                "  [Suggestions / options de sélection (popup)] :\n"
+            };
+            active_window_content.push_str(prefix);
+            for opt in option_fields.iter().take(20) {
+                let mut label = opt.name.clone();
+                if !opt.aria_description.is_empty() {
+                    label.push_str(&format!(" ({})", opt.aria_description));
+                }
+                active_window_content.push_str(&format!("  • [option/suggestion] {}\n", label));
             }
         }
 
@@ -4234,7 +4310,6 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 let should_enter = press_enter.unwrap_or(false) || text.ends_with('\n');
                 let target_desc_opt = target.as_deref().filter(|s| !s.trim().is_empty());
                 let is_address_bar = target_desc_opt.map_or(false, is_address_bar_target);
-                let is_generic = target_desc_opt.map_or(true, is_generic_textarea_target);
 
                 let target_hwnd = match window.as_deref() {
                     Some(w) if !w.trim().is_empty() => {
@@ -4313,112 +4388,51 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                             feedback.push(format!("Navigateur ouvert vers '{}'.", text));
                             handled = true;
                         }
-                } else if is_generic {
-                    let largest_target = if let Some(hwnd) = window.as_deref().and_then(|w| {
-                        if !w.trim().is_empty() {
-                            find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
-                        } else {
-                            None
-                        }
-                    }) {
-                        find_largest_textarea(hwnd).map(|elem| (hwnd, elem))
-                    } else {
-                        find_largest_textarea_on_screen(&user_windows, preferred_target_hwnd)
-                    };
-
-                    if let Some((hwnd, elem)) = largest_target {
-                        if is_window_hung(hwnd) {
-                            feedback.push(format!("Fenêtre cible [HWND {:?}] non réactive. Écriture ignorée.", hwnd.0));
-                            continue;
-                        }
-                        println!("[Actions] Sélection de la plus grande zone de texte à l'écran : [HWND {:?}] name='{}', id='{}', area={}, clic en ({}, {})", hwnd.0, elem.name, elem.automation_id, elem.area, elem.click_x, elem.click_y);
-                        force_foreground_window(hwnd);
-                        unsafe {
-                            let _ = ShowWindow(hwnd, SW_RESTORE);
-                        }
-                        std::thread::sleep(Duration::from_millis(80));
-                        unsafe { let _ = elem.element.SetFocus(); }
-                        click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
-                        std::thread::sleep(Duration::from_millis(50));
-                        send_hotkey(&[VK_CONTROL], VK_A);
-                        std::thread::sleep(Duration::from_millis(30));
-                        clipboard::set_text(text);
-                        std::thread::sleep(Duration::from_millis(30));
-                        send_paste();
-                        if should_enter {
-                            std::thread::sleep(Duration::from_millis(60));
-                            send_hotkey(&[], VK_RETURN);
-                        }
-                        println!("[Actions] Texte inséré avec succès dans la plus grande zone de texte : {:?}", text);
-                        handled = true;
-                    }
-                } else if let (Some(hwnd), Some(target_desc)) = (target_hwnd, target_desc_opt) {
-                    if is_window_hung(hwnd) {
-                        feedback.push(format!("Fenêtre [HWND {:?}] non réactive. Écriture ignorée.", hwnd.0));
-                        continue;
-                    }
-                    force_foreground_window(hwnd);
-                    unsafe {
-                        let _ = ShowWindow(hwnd, SW_RESTORE);
-                    }
-                    std::thread::sleep(Duration::from_millis(70));
-
-                    let elements = list_interactive_elements(hwnd);
-                    if let Some(elem) = find_best_input_element(&elements, target_desc) {
-                        println!("[Actions] Saisie dans l'élément : name='{}', id='{}'", elem.name, elem.automation_id);
-                        unsafe { let _ = elem.element.SetFocus(); }
-                        click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
-                        std::thread::sleep(Duration::from_millis(50));
-
-                        send_hotkey(&[VK_CONTROL], VK_A);
-                        std::thread::sleep(Duration::from_millis(30));
-
-                        clipboard::set_text(text);
-                        std::thread::sleep(Duration::from_millis(30));
-                        send_paste();
-                        if should_enter {
-                            std::thread::sleep(Duration::from_millis(60));
-                            send_hotkey(&[], VK_RETURN);
-                        }
-                        println!("[Actions] Texte inséré avec succès : {:?}", text);
-                        feedback.push(format!("Texte inséré avec succès ({} caractères).", text.len()));
-                        handled = true;
-                    } else {
-                        println!("[Actions] Aucun champ d'entrée trouvé pour {:?}", target_desc);
-                        if let Some((fallback_hwnd, elem)) = find_largest_textarea_on_screen(&user_windows, preferred_target_hwnd) {
-                            println!("[Actions] Repli sur la plus grande zone de texte : [HWND {:?}], clic en ({}, {})", fallback_hwnd.0, elem.click_x, elem.click_y);
-                            force_foreground_window(fallback_hwnd);
+                    } else if let Some(target_desc) = target_desc_opt {
+                        if let Some(hwnd) = target_hwnd {
+                            if is_window_hung(hwnd) {
+                                feedback.push(format!("Fenêtre [HWND {:?}] non réactive. Écriture ignorée.", hwnd.0));
+                                continue;
+                            }
+                            force_foreground_window(hwnd);
                             unsafe {
-                                let _ = ShowWindow(fallback_hwnd, SW_RESTORE);
+                                let _ = ShowWindow(hwnd, SW_RESTORE);
                             }
-                            std::thread::sleep(Duration::from_millis(80));
-                            unsafe { let _ = elem.element.SetFocus(); }
-                            click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
-                            std::thread::sleep(Duration::from_millis(50));
-                            send_hotkey(&[VK_CONTROL], VK_A);
-                            std::thread::sleep(Duration::from_millis(30));
-                            clipboard::set_text(text);
-                            std::thread::sleep(Duration::from_millis(30));
-                            send_paste();
-                            if should_enter {
-                                std::thread::sleep(Duration::from_millis(60));
-                                send_hotkey(&[], VK_RETURN);
+                            std::thread::sleep(Duration::from_millis(70));
+
+                            let elements = list_interactive_elements(hwnd);
+                            if let Some(elem) = find_best_input_element(&elements, target_desc) {
+                                println!("[Actions] Champ interactable validé : name='{}', id='{}', type='{}'", elem.name, elem.automation_id, elem.localized_type);
+                                unsafe { let _ = elem.element.SetFocus(); }
+                                click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
+                                std::thread::sleep(Duration::from_millis(50));
+
+                                send_hotkey(&[VK_CONTROL], VK_A);
+                                std::thread::sleep(Duration::from_millis(30));
+
+                                clipboard::set_text(text);
+                                std::thread::sleep(Duration::from_millis(30));
+                                send_paste();
+                                if should_enter {
+                                    std::thread::sleep(Duration::from_millis(60));
+                                    send_hotkey(&[], VK_RETURN);
+                                }
+                                feedback.push(format!("Texte inséré dans le champ validé '{}'.", elem.name));
+                                handled = true;
+                            } else {
+                                println!("[Actions] Rejet : aucun champ interactable correspondant à '{}'", target_desc);
+                                feedback.push(format!("Ciblage rejeté : le champ interactable '{}' est introuvable parmi les éléments réels de l'écran. Aucune cible arbitraire n'a été sélectionnée.", target_desc));
+                                handled = true;
                             }
-                            feedback.push(format!("Texte inséré dans la zone principale ({} caractères).", text.len()));
-                            handled = true;
                         }
+                    } else {
+                        feedback.push("Action refusée : l'IA doit impérativement spécifier quel champ elle cible (input, select, textarea, etc.). Le système n'autorise aucun ciblage arbitraire.".to_string());
+                        handled = true;
                     }
-                }
                 }
 
                 if !handled {
-                    println!("[Actions] Repli d'écriture dans le document ou fenêtre de repli");
-                    let _ = write_to_browser_or_txt(text);
-                    if should_enter {
-                        std::thread::sleep(Duration::from_millis(60));
-                        send_hotkey(&[], VK_RETURN);
-                    }
-                    feedback.push(format!("Texte écrit via repli système ({} caractères).", text.len()));
+                    feedback.push("Action non exécutée : champ cible non validé.".to_string());
                 }
             }
             AgentAction::ReplaceFieldText { text, target, window } => {
@@ -6119,4 +6133,9 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
         }
     }
     if feedback.is_empty() { "Aucune action exécutée.".to_string() } else { feedback.join("\n") }
+}
+
+#[cfg(windows)]
+fn name_words_count(s: &str) -> usize {
+    s.split_whitespace().count()
 }

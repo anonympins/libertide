@@ -8,7 +8,8 @@ Windows : [![https://github.com/anonympins/fingerprint/actions/workflows/rust.ym
 [![https://github.com/anonympins/libertide](https://img.shields.io/github/repo-size/anonympins/libertide)](https://github.com/anonympins/libertide)
 
 <p align="center">
-  <img src="public/screenshot-1.png" alt="Libertide Overlay Interface">
+  <img src="public/screenshot-1.png" alt="Libertide Overlay Interface" width="350">
+  <img src="public/screenshot-2.png" alt="Libertide Overlay Interface" width="350">
 </p>
 
 Libertide is an inclusive voice and visual assistant for autonomous exploration on Windows, macOS, and Unix / Linux (X11). It combines a discreet transparent overlay interface (developed with [egui](https://github.com/emilk/egui)), continuous local voice recognition with **Whisper**, reasoning from the **DeepSeek-Chat** model, advanced accessibility tools (Switch Access, Click by Number, earcons, high-contrast HUD), and graphical interface automation (Windows UI Automation & X11 EWMH tools, window tiling, web navigation, and input).

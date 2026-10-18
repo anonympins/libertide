@@ -586,6 +586,8 @@ impl QuickSuggestionItem {
                 AgentAction::CancelScheduledTasks => Some("Annuler les commandes différées".to_string()),
                 AgentAction::MuteAudio => Some("Couper les flux audio parasites".to_string()),
                 AgentAction::SetVolume { command } => Some(format!("Volume : {command}")),
+                AgentAction::ShowFloatingCard { title, .. } => Some(format!("Afficher : {title}")),
+                AgentAction::CloseFloatingCard { id } => Some(format!("Fermer {id}")),
                 _ => None,
             },
         }

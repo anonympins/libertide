@@ -2813,11 +2813,31 @@ impl eframe::App for OverlayApp {
                         });
                 }
 
-                // Affichage dynamique des fenêtres volantes (stats, tables, contenus)
+                // Affichage dynamique des fenêtres volantes (stats, tables, contenus, formulaires de requête)
+                let mut submitted_card_prompts = Vec::new();
                 self.floating_cards.retain_mut(|card| {
-                    card.show(&ctx);
+                    if let Some(prompt) = card.show(&ctx) {
+                        submitted_card_prompts.push(prompt);
+                    }
                     card.open
                 });
+                for prompt in submitted_card_prompts {
+                    self.stop_speaking();
+                    if self.is_recording {
+                        self.stop_recording();
+                    }
+                    self.status = AgentStatus::Thinking;
+                    self.continuous_mode = true;
+                    self.live_transcript.clear();
+                    self.chat_history.push(ChatEntry {
+                        role: ChatRole::User,
+                        text: prompt.clone(),
+                        timestamp: current_time_str(),
+                        quick_suggestions: Vec::new(),
+                        screen_size_kb: None,
+                    });
+                    let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
+                }
             });
     }
 }
@@ -3253,7 +3273,7 @@ async fn compact_history_if_needed(
 }
 
 fn build_standard_system_instructions(lang_name: &str) -> String {
-    format!(r#"Tu es l'agent d'exploration Libertide pour Windows.
+    format!(r###"Tu es l'agent d'exploration Libertide pour Windows.
 Réponds STRICTEMENT en JSON sans texte hors JSON. "narration" concise rédigée impérativement dans la langue du système de l'utilisateur : {lang_name} (max 2 phrases).
 
 Règles principales :
@@ -3291,6 +3311,13 @@ Règles principales :
      * POLITIQUE DE PIVOT EN CAS D'ÉCHEC (TOUS VOLETS) :
        - L'absence de résultat ou le blocage sur un premier canal (ex: contact absent dans Teams, page web non accessible) NE MET PAS FIN À LA MISSION. C'est un ordre de PIVOT IMMÉDIAT vers le canal suivant (local -> web -> annuaires) sans renvoyer "actions": [].
        - Tant que tous les canaux n'ont pas été explorés et que les résultats ne sont pas projetés dans une fenêtre volante ("show_floating_card"), INTERDICTION de renvoyer "actions": [].
+ 3ter. PROTOCOLE RÉSUMÉ DE PAGE ET SYNTHÈSE DE CONTENU ("résume cette page", "synthèse", "de quoi ça parle", "fais un résumé") :
+   - Dès que l'utilisateur souhaite résumer ou analyser une page web, un document ou un ensemble d'informations à l'écran :
+     * Analyse minutieusement le texte, titres et points clés de la page.
+     * Projette SYSTÉMATIQUEMENT une fenêtre volante au format Markdown via l'action "show_floating_card" :
+       card_type: "markdown", id: "resume_page", title: "Résumé : <Titre de la page/sujet>", data: {{"text": "# Titre\n\n## Points clés\n- **Point 1** : ...\n- **Point 2** : ...\n\n> Conclusion/Synthèse..."}}.
+     * Dans ta "narration" vocale : sois très concis (1 à 2 phrases) pour confirmer oralement que la synthèse est projetée dans la fenêtre volante.
+     * Fournis des suggestions rapides utiles dans "quick_suggestions" (ex: ["Copier le résumé", "Fermer le résumé", "Détail du point 1"]).
 4. Interface & Ciblage :
    - Hôte navigateur : préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse").
    - Contenu web : libellé direct sans préfixe issu de "[Page web - ...]".
@@ -3298,7 +3325,8 @@ Règles principales :
    - LECTURE DES NOTIFICATIONS SYSTÈME (TOASTS) : Dès qu'une notification Windows ou un toast est présent, lis impérativement son titre et son contenu dans ta "narration" pour informer l'utilisateur, mais LAISSE-LA TRANQUILLE (ne tente pas de la fermer, ne clique pas dessus et laisse le système la gérer).
    - ALERTES & MESSAGES D'ERREUR (FERMETURE SYSTÉMATIQUE APRÈS LECTURE) : Dès qu'une boîte de dialogue d'alerte, un popup d'avertissement ou un message d'erreur est à l'écran, lis-le clairement ou résume-le dans ta "narration", puis FERME-LA SYSTÉMATIQUEMENT en cliquant sur son bouton de fermeture/validation ("OK", "Fermer", "Annuler", "Continuer", croix) pour débloquer l'écran et poursuivre ton travail. Ne JAMAIS envoyer "escape".
    - PRIORITÉ ABSOLUE AUX CHANGEMENTS WEB : Si des informations, boutons ou données sont présent sur la page web (signalés sous 'INFORMATIONS WEB MODIFIÉES / NOUVELLES'), ils priment impérativement sur tous les éléments statiques et les autres fenêtres. Base en priorité absolue tes actions ou réponses sur ces changements.
-   - "click_element" pour liens/onglets, "click_button" pour boutons. "target": null si saisie sans cible.
+   - OBLIGATION DE CIBLAGE EXPLICITE DU CHAMP : Pour toute saisie, sélection ou clic ("write_text", "replace_field_text", "clear_text", "focus_element", "click_element", "click_button"), tu DOIS IMPÉRATIVEMENT renseigner le champ interactable précis visé ("target", "target_name" ou "button_name") en utilisant sa macro ou son identifiant exact observé à l'écran (ex: input, select, textarea, combobox, bouton, lien).
+   - SÉCURITÉ DU CIBLAGE : "target": null et les cibles génériques ou fictives sont STRICTEMENT INTERDITES. Le moteur d'exécution valide déterministement chaque élément contre l'arbre réel de l'écran ; toute cible non vérifiable ou absente sera rejetée par sécurité.
    - Raccourcis clavier & touches : utilise OBLIGATOIREMENT "accessibility_shortcut" avec le nom ou la combinaison de touches exacte (ex: "ctrl+shift+b" pour la barre des favoris, "ctrl+t", "enter", "close_tab", "copy", "undo"). Ne JAMAIS envoyer "run_command" pour simuler des touches ou raccourcis !
    - Lecture code/fichier : "read_editor_content" (focalise et extrait Ctrl+A/Ctrl+C).
    - Onglet/page : "accessibility_shortcut": "close_tab" (jamais "close_app" pour un onglet).
@@ -3317,7 +3345,7 @@ Règles principales :
    - Immersion : "activate_immersion" (Win+Ctrl+D), "deactivate_immersion".
    - Temporisation & Différé : "schedule_prompt" (delay_seconds: 1..3600, prompt: "...") ou "schedule_prompts" (tasks: [{{"delay_seconds": 10, "prompt": "..."}}]) pour différer des consignes futures (téléchargement en cours, rappel, temporisation). "cancel_scheduled_tasks" pour annuler immédiatement toutes les commandes différées / timers en attente.
    - Fichiers & Documents : "open_file" (path: "chemin/fichier.ext") pour ouvrir directement toute image, vidéo, PDF, tableur ou document dans son application système par défaut (selon extension / MIME type).
-   - Fenêtres volantes d'analyse : "show_floating_card" (id: "...", title: "...", card_type: "table"|"stats"|"markdown", data: {{...}}) pour projeter une fenêtre volante semi-transparente avec un tableau comparatif, des données chiffrées ou une fiche technique.
+   - Fenêtres volantes d'analyse & formulaires de requête interactifs : "show_floating_card" (id: "...", title: "...", card_type: "form"|"table"|"stats"|"markdown", data: {{...}}) pour projeter une fenêtre volante avec un formulaire interactif de filtres/requête (inputs, jauges/sliders numériques, selectbox, radio, checkbox pour recherche personnalisée de vols, hôtels, shopping), un tableau comparatif, des données chiffrées ou une fiche technique.
    - Fermeture carte : "close_floating_card" (id: "...").
 8. Fin de passes : Dès que "actions" est vide (tâche finie ou choix requis), fournis OBLIGATOIREMENT 2 à 4 suggestions concrètes dans "quick_suggestions".
 
@@ -3356,10 +3384,12 @@ Format JSON obligatoire :
     {{"action": "set_volume", "command": "mute"|"down"|"up"|"min"}},
     {{"action": "open_file", "path": "chemin/vers/image_ou_doc.png"}},
     {{"action": "show_floating_card", "id": "stats_1", "title": "Tableau comparatif", "card_type": "table", "data": {{"headers": ["Modèle", "Prix"], "rows": [["Produit A", "49€"], ["Produit B", "59€"]]}}}},
+    {{"action": "show_floating_card", "id": "vol_search", "title": "Filtres Billet d'Avion", "card_type": "form", "data": {{"submit_label": "Rechercher les vols", "prompt_prefix": "Recherche de vol avec les critères suivants :", "fields": [{{"id": "depart", "label": "Ville de départ", "type": "text", "value": "Paris"}}, {{"id": "destination", "label": "Destination", "type": "text", "value": "Tokyo"}}, {{"id": "prix_max", "label": "Budget maximum", "type": "number_slider", "min": 200, "max": 3000, "step": 50, "value": 900, "unit": "€"}}, {{"id": "classe", "label": "Classe", "type": "select", "options": ["Économique", "Premium", "Affaires"], "selected": "Économique"}}, {{"id": "direct", "label": "Vols directs seulement", "type": "checkbox", "checked": true}}, {{"id": "bagage", "label": "Bagages", "type": "radio", "options": ["Cabine seul", "1 bagage en soute", "2 bagages en soute"], "selected": "1 bagage en soute"}}]}}}},
+    {{"action": "show_floating_card", "id": "resume_page", "title": "Résumé de la page", "card_type": "markdown", "data": {{"text": "# Résumé\n- **Sujet** : ...\n- **Points clés** : ..."}}}},
     {{"action": "close_floating_card", "id": "stats_1"}}
   ],
   "quick_suggestions": ["Option 1", "Option 2"]
-}}"#)
+}}"###)
 }
 
 const DICTATION_SYSTEM_INSTRUCTIONS: &str = r#"Tu es l'assistant de dictée vocale et de saisie textuelle pour Windows.
