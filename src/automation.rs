@@ -1531,15 +1531,33 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                             || (k.contains("test") && (v.contains("btn") || v.contains("button")))
                     });
 
+                    let is_close_or_cross = name == "×"
+                        || name == "✕"
+                        || name == "⨯"
+                        || name == "x"
+                        || name == "X"
+                        || class_name.contains("close")
+                        || class_name.contains("dismiss")
+                        || class_name.contains("cross")
+                        || automation_id.to_lowercase().contains("close")
+                        || automation_id.to_lowercase().contains("dismiss")
+                        || aria_label.to_lowercase().contains("fermer")
+                        || aria_label.to_lowercase().contains("close");
+
                     let is_button = ctype == UIA_ButtonControlTypeId
                         || loc_type.contains("bouton")
                         || loc_type.contains("button")
                         || is_role_button
                         || has_button_data
+                        || is_close_or_cross
                         || class_name.contains("button")
                         || class_name.contains("btn")
                         || automation_id.to_lowercase().contains("button")
                         || automation_id.to_lowercase().contains("btn");
+
+                    if is_close_or_cross && (name.is_empty() || name == "×" || name == "✕" || name == "⨯" || name.eq_ignore_ascii_case("x")) {
+                        name = "Fermer (croix ✕)".to_string();
+                    }
 
                     let is_role_link = aria_role == "link"
                         || aria_role.contains("link")
@@ -2412,6 +2430,24 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
         return Some((500.0 - penalty).max(300.0));
     }
 
+    // Correspondance dédiée pour les icônes de croix / fermeture
+    let is_elem_cross = elem.name.contains("croix")
+        || elem.name.contains('✕')
+        || elem.name.contains('×')
+        || elem.name.eq_ignore_ascii_case("fermer")
+        || elem.name.eq_ignore_ascii_case("close")
+        || elem.class_name.contains("close")
+        || elem.automation_id.to_lowercase().contains("close");
+    let is_prop_cross = prop_lower.contains("croix")
+        || prop_lower == "fermer"
+        || prop_lower == "close"
+        || prop_lower == "x"
+        || prop_lower.contains("fermer la notification")
+        || prop_lower.contains("fermer le bandeau");
+    if is_elem_cross && is_prop_cross {
+        return Some(550.0);
+    }
+
     let ecom_bonus = ecommerce_match_bonus(prop_clean, &elem.name)
         .max(ecommerce_match_bonus(prop_clean, &elem.aria_label));
     let mut best_score: Option<f32> = None;
@@ -2975,11 +3011,13 @@ fn score_enriched_button(text: &str) -> f32 {
     let lower = clean.to_lowercase();
     let mut score = 10.0f32;
 
-    // Boutons cruciaux de parcours utilisateur (panier, validation, checkout, soumission)
+    // Boutons cruciaux de parcours utilisateur (panier, validation, notifications/cookies, fermeture)
     const HIGH_VALUE_BUTTONS: &[&str] = &[
         "panier", "cart", "commander", "commande", "valider", "passer la commande",
         "voir le panier", "payer", "checkout", "finaliser", "confirmer", "continuer",
         "suivant", "ajouter", "soumettre", "submit", "acheter", "terminer", "accepter",
+        "activer", "autoriser", "fermer", "plus tard", "refuser", "bloquer", "croix", "close", "dismiss",
+        "non merci", "ne plus afficher", "ignorer", "pas maintenant",
     ];
 
     for &kw in HIGH_VALUE_BUTTONS {
@@ -3292,6 +3330,35 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             active_window_content.push_str(&format!("{}{}\n", prefix, display_headings.join(" | ")));
         }
 
+        // B bis. Bannières et popups d'alerte / notification web / consentement
+        let notification_banners: Vec<String> = elements
+            .iter()
+            .filter(|e| {
+                (!has_web_doc || e.is_web_content)
+                    && !e.is_edit_or_textarea
+                    && !e.is_button
+                    && !e.name.is_empty()
+                    && e.name.len() >= 6
+                    && (e.name.to_lowercase().contains("notification")
+                        || e.name.to_lowercase().contains("ne manquez rien")
+                        || e.name.to_lowercase().contains("activez les notifications")
+                        || e.name.to_lowercase().contains("autoriser les notifications")
+                        || e.name.to_lowercase().contains("abonnez-vous à l'actualité")
+                        || e.aria_role == "alert"
+                        || e.aria_role == "alertdialog")
+            })
+            .map(|e| e.name.clone())
+            .collect();
+        if !notification_banners.is_empty() {
+            let mut unique_banners = notification_banners;
+            unique_banners.dedup();
+            let display_banners: Vec<String> = unique_banners.into_iter().take(3).collect();
+            active_window_content.push_str(&format!(
+                "  [Page web - bannières / popups de notification ou abonnement à traiter (Activer / Fermer)] : {}\n",
+                display_banners.join(" | ")
+            ));
+        }
+
         // C. Textes informatifs, contacts, e-mails, téléphones, météo, données et prix
         let mut text_items: Vec<String> = elements
             .iter()
@@ -3332,6 +3399,13 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                         || e.name.to_lowercase().contains("nuag")
                         || e.name.to_lowercase().contains("orage")
                         || e.name.to_lowercase().contains("eur")
+                        || e.name.to_lowercase().contains("notification")
+                        || e.name.to_lowercase().contains("actualité")
+                        || e.name.to_lowercase().contains("actualite")
+                        || e.name.to_lowercase().contains("activez")
+                        || e.name.to_lowercase().contains("abonnez")
+                        || e.name.to_lowercase().contains("ne manquez")
+                        || e.name.to_lowercase().contains("autoriser")
                         || e.name.to_lowercase().contains("usd"))
             })
             .map(|e| e.name.clone())
