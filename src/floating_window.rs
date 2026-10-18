@@ -11,6 +11,7 @@ pub struct OpenCardSummary {
     pub id: String,
     pub title: String,
     pub card_type: String,
+    pub content_preview: String,
 }
 
 /// Registre global en temps réel des fenêtres volantes ouvertes
@@ -22,15 +23,30 @@ pub fn update_open_floating_cards(cards: &[FloatingCard]) {
         *lock = cards
             .iter()
             .filter(|c| c.open)
-            .map(|c| OpenCardSummary {
-                id: c.id.clone(),
-                title: c.title.clone(),
-                card_type: match &c.content {
-                    FloatingContentType::Table { .. } => "table".to_string(),
-                    FloatingContentType::Stats { .. } => "stats".to_string(),
-                    FloatingContentType::Markdown { .. } => "markdown".to_string(),
-                    FloatingContentType::Form { .. } => "form".to_string(),
-                },
+            .map(|c| {
+                let (ctype, preview) = match &c.content {
+                    FloatingContentType::Table { headers, rows } => {
+                        let row_sample = rows.iter().take(10).map(|r| r.join(" | ")).collect::<Vec<_>>().join("\n");
+                        ("table", format!("Headers: {}\nRows:\n{}", headers.join(" | "), row_sample))
+                    }
+                    FloatingContentType::Stats { items } => {
+                        let it = items.iter().map(|(k, v)| format!("{k}: {v}")).collect::<Vec<_>>().join(", ");
+                        ("stats", it)
+                    }
+                    FloatingContentType::Markdown { text } => {
+                        ("markdown", text.clone())
+                    }
+                    FloatingContentType::Form { fields, .. } => {
+                        let f_summary = fields.iter().map(|f| f.label.clone()).collect::<Vec<_>>().join(", ");
+                        ("form", format!("Fields: {}", f_summary))
+                    }
+                };
+                OpenCardSummary {
+                    id: c.id.clone(),
+                    title: c.title.clone(),
+                    card_type: ctype.to_string(),
+                    content_preview: preview,
+                }
             })
             .collect();
     }
@@ -439,6 +455,7 @@ impl FloatingCard {
                     let mut close_window = false;
 
                     egui::ScrollArea::vertical()
+                        .id_salt(format!("card_scroll_vert_{card_id}"))
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             match &mut self.content {
@@ -485,6 +502,7 @@ impl FloatingCard {
                                     let col_widths = calculate_proportional_col_widths(&col_lens, avail_w, 14.0);
 
                                     egui::ScrollArea::horizontal()
+                                        .id_salt(format!("card_tbl_scroll_horiz_{card_id}"))
                                         .auto_shrink([false, false])
                                         .show(ui, |ui| {
                                             egui::Grid::new(format!("grid_{card_id}"))
@@ -1535,6 +1553,8 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
         let trimmed = line.trim();
 
         if trimmed.starts_with("```") {
+            block_idx += 1;
+            let code_scroll_id = format!("md_code_scroll_{card_id}_{block_idx}");
             let lang = trimmed.trim_start_matches('`').trim();
             let mut code_lines = Vec::new();
             while let Some(&next_line) = lines.peek() {
@@ -1572,6 +1592,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                     ui.add_space(2.0);
 
                     egui::ScrollArea::horizontal()
+                        .id_salt(code_scroll_id)
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
                             let mut code_job = LayoutJob::default();
@@ -1667,6 +1688,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
             }
             block_idx += 1;
             let table_id = format!("md_tbl_{card_id}_{block_idx}");
+            let table_scroll_id = format!("md_tbl_scroll_{card_id}_{block_idx}");
 
             let mut headers = Vec::new();
             let mut rows = Vec::new();
@@ -1719,6 +1741,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                         let col_widths = calculate_proportional_col_widths(&col_lens, avail_w, 12.0);
 
                         egui::ScrollArea::horizontal()
+                            .id_salt(table_scroll_id)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 egui::Grid::new(table_id)

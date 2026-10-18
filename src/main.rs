@@ -2157,6 +2157,7 @@ impl eframe::App for OverlayApp {
                         ActiveTab::Assistance => {
                             let max_scroll_h = (messages_rect.height()).max(20.0);
                             let scroll_out = egui::ScrollArea::vertical()
+                                .id_salt("assistance_chat_scroll")
                                 .stick_to_bottom(true)
                                 .max_height(max_scroll_h)
                                 .auto_shrink([false, true])
@@ -2410,6 +2411,7 @@ impl eframe::App for OverlayApp {
                             ui.separator();
                             let max_chat_scroll_h = (messages_rect.height() - 28.0).max(20.0);
                             let scroll_out = egui::ScrollArea::vertical()
+                                .id_salt("twitch_chat_scroll")
                                 .stick_to_bottom(true)
                                 .max_height(max_chat_scroll_h)
                                 .auto_shrink([false, true])
@@ -3813,6 +3815,11 @@ async fn call_llm_prompt(
         }
 
         // 2. Dispatch immédiat dès réception du message pour les fenêtres volantes
+        let shown_card_ids: Vec<String> = payload.actions.iter().filter_map(|act| match act {
+            AgentAction::ShowFloatingCard { id: Some(cid), .. } => Some(cid.clone()),
+            _ => None,
+        }).collect();
+
         for act in &payload.actions {
             match act {
                 AgentAction::ShowFloatingCard { id, title, card_type, data } => {
@@ -3820,7 +3827,11 @@ async fn call_llm_prompt(
                     let _ = event_tx.send(AgentEvent::ShowFloatingCard(card));
                 }
                 AgentAction::CloseFloatingCard { id } => {
-                    let _ = event_tx.send(AgentEvent::CloseFloatingCard(id.clone()));
+                    if shown_card_ids.contains(id) {
+                        println!("[Agent] Ignoré close_floating_card(\"{id}\") car la carte a été mise à jour dans la même passe.");
+                    } else {
+                        let _ = event_tx.send(AgentEvent::CloseFloatingCard(id.clone()));
+                    }
                 }
                 _ => {}
             }
@@ -3988,8 +3999,12 @@ async fn call_llm_prompt(
                     step_feedback.push_str("\n\n[Fenêtres volantes ouvertes à l'écran] :\n");
                     for c in guard.iter() {
                         step_feedback.push_str(&format!("- ID: \"{}\" | Titre: \"{}\" | Type: \"{}\"\n", c.id, c.title, c.card_type));
+                        if !c.content_preview.is_empty() {
+                            let preview = truncate_with_notice(&c.content_preview, 1500);
+                            step_feedback.push_str(&format!("  [Contenu actuel déjà affiché à conserver/fusionner] :\n\"\"\"\n{}\n\"\"\"\n", preview.trim()));
+                        }
                     }
-                    step_feedback.push_str("Actualise impérativement leur contenu via \"show_floating_card\" dès que de nouvelles informations sont obtenues.");
+                    step_feedback.push_str("RÈGLE DE FUSION IMPÉRATIVE : Conserve et fusionne les éléments déjà présents ci-dessus avec les nouvelles informations dans \"show_floating_card\". Ne ferme JAMAIS la carte (\"close_floating_card\") !");
                 }
             }
 
@@ -4004,6 +4019,7 @@ async fn call_llm_prompt(
                 - Alerte / modale d'erreur -> lis le message dans ta narration, puis clique impérativement sur 'OK' / 'Fermer' pour la refermer.\n\
                 - Fenêtre volante Markdown -> insère des liens cliquables [link=\"action:...\"]Texte[/link] pour permettre à l'utilisateur de déclencher des suites ou choix en un clic.\n\
                 - Liens interactifs -> Formate SYSTÉMATIQUEMENT vidéos, audios, images, PDF/fichiers et actions en liens cliquables via la macro [link=\"action:...\"]Icône Libellé[/link] ou [link=\"https://...\"]🌐 Web[/link] (y compris dans les cellules de tableaux Markdown). Le clic envoie directement la commande dans le chat de Libertide.\n\
+                - Fenêtre volante (\"show_floating_card\") -> CONSERVE et FUSIONNE impérativement les données précédentes avec les nouvelles (ne supprime pas les éléments déjà trouvés lors des passes précédentes). INTERDICTION d'émettre \"close_floating_card\" pour une carte que tu viens d'ouvrir ou mettre à jour.\n\
                  - Mission approfondie (contact / produit / service) -> définis 'next_passes' (8 à 12), explore méthodiquement (local -> web -> annuaires) et projette les résultats dans 'show_floating_card'. Ne renvoie pas 'actions': [] tant que les résultats ne sont pas trouvés.\n\
                 - Échec/blocage -> pivote immédiatement vers une alternative (app, web, autre fenêtre). Ne renvoie JAMAIS 'actions': [] si l'objectif n'est pas achevé.\n\
                 - Tâche finie ou choix requis -> 'actions': [] + 2 à 4 'quick_suggestions'.",
@@ -4209,8 +4225,12 @@ fn main() -> eframe::Result<()> {
                                     let mut card_section = String::from("[Fenêtres volantes actuellement ouvertes à l'écran] :\n");
                                     for c in guard.iter() {
                                         card_section.push_str(&format!("- ID: \"{}\" | Titre: \"{}\" | Type: \"{}\"\n", c.id, c.title, c.card_type));
+                                        if !c.content_preview.is_empty() {
+                                            let preview = truncate_with_notice(&c.content_preview, 1500);
+                                            card_section.push_str(&format!("  [Contenu actuel déjà affiché à conserver/fusionner] :\n\"\"\"\n{}\n\"\"\"\n", preview.trim()));
+                                        }
                                     }
-                                    card_section.push_str("Instruction : Ces fenêtres volantes sont déjà affichées à l'écran. Si ta réponse apporte de nouvelles données, une synthèse ou une mise à jour, réémets impérativement l'action \"show_floating_card\" avec le même ID pour synchroniser leur contenu.");
+                                    card_section.push_str("Instruction : Ces fenêtres volantes sont déjà affichées à l'écran. Si ta réponse apporte de nouvelles données, une synthèse ou une mise à jour, réémets impérativement \"show_floating_card\" avec le même ID en FUSIONNANT les données existantes. Ne ferme JAMAIS la carte si tu la mets à jour.");
                                     prompt_sections.push(card_section);
                                 }
                             }
