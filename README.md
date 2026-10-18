@@ -1,7 +1,7 @@
 
 # <img src="public/favicon-256x256.png" width="64" alt="Libertide Overlay Interface" valign="middle"> Libertide
 
-Windows : [![https://github.com/anonympins/fingerprint/actions/workflows/rust.yml](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust.yml)](https://github.com/anonympins/libertide/actions/workflows/rust.yml) / UNIX : [![https://github.com/anonympins/libertide/actions/workflows/rust-unix.yml](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-unix.yml)](https://github.com/anonympins/libertide/actions/workflows/rust-unix.yml)
+Windows : [![https://github.com/anonympins/fingerprint/actions/workflows/rust.yml](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust.yml)](https://github.com/anonympins/libertide/actions/workflows/rust.yml) / UNIX : [![https://github.com/anonympins/libertide/actions/workflows/rust-unix.yml](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-unix.yml)](https://github.com/anonympins/libertide/actions/workflows/rust-unix.yml) / macOS : [![https://github.com/anonympins/libertide/actions/workflows/rust-macos.yml](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-macos.yml)](https://github.com/anonympins/libertide/actions/workflows/rust-macos.yml)
 
 [![https://github.com/anonympins/libertide/releases/tag/libertide-0.5.0](https://img.shields.io/github/v/release/anonympins/libertide)](https://github.com/anonympins/libertide/releases)
 [![https://raw.githubusercontent.com/anonympins/libertide/refs/heads/main/LICENSE](https://img.shields.io/github/license/anonympins/libertide)](https://github.com/anonympins/libertide/blob/main/LICENSE)
@@ -11,7 +11,7 @@ Windows : [![https://github.com/anonympins/fingerprint/actions/workflows/rust.ym
   <img src="public/screenshot-1.png" alt="Libertide Overlay Interface">
 </p>
 
-Libertide is an inclusive voice and visual assistant for autonomous exploration on Windows and Unix / Linux (X11). It combines a discreet transparent overlay interface (developed with [egui](https://github.com/emilk/egui)), continuous local voice recognition with **Whisper**, reasoning from the **DeepSeek-Chat** model, advanced accessibility tools (Switch Access, Click by Number, earcons, high-contrast HUD), and graphical interface automation (Windows UI Automation & X11 EWMH tools, window tiling, web navigation, and input).
+Libertide is an inclusive voice and visual assistant for autonomous exploration on Windows, macOS, and Unix / Linux (X11). It combines a discreet transparent overlay interface (developed with [egui](https://github.com/emilk/egui)), continuous local voice recognition with **Whisper**, reasoning from the **DeepSeek-Chat** model, advanced accessibility tools (Switch Access, Click by Number, earcons, high-contrast HUD), and graphical interface automation (Windows UI Automation & X11 EWMH tools, window tiling, web navigation, and input).
 
 ---
 
@@ -19,8 +19,9 @@ Libertide is an inclusive voice and visual assistant for autonomous exploration 
 
 1. **Operating System**:
    - **Windows**: Windows 10 / 11 (64-bit).
+   - **macOS**: macOS 12+ (Apple Silicon / arm64).
    - **Unix / Linux**: Any modern distribution running an X11 / Xorg desktop session (Ubuntu, Debian, Fedora, Arch Linux, etc.).
-2. **Microphone and speakers**: For Whisper dictation and voice feedback (via Windows SAPI or Unix `spd-say` / `espeak-ng`).
+2. **Microphone and speakers**: For Whisper dictation and voice feedback (via Windows SAPI, macOS `say`, or Unix `spd-say` / `espeak-ng`).
 3. **DeepSeek API Key**: Obtain it from the [DeepSeek Platform](https://platform.deepseek.com/). Data consumption : 5-10ko per input message, and very low on output messages.
 
 Go to [the current release](https://github.com/anonympins/libertide/releases) and select the executable for your operating system.
