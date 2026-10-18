@@ -267,6 +267,41 @@ mod clipboard {
         let output = std::process::Command::new("pbpaste").output().ok()?;
         Some(String::from_utf8_lossy(&output.stdout).to_string())
     }
+
+    pub fn get_plain_text() -> Option<String> {
+        get_text()
+    }
+
+    pub fn get_advanced_text() -> Option<String> {
+        if let Some(text) = get_text() {
+            let lines: Vec<&str> = text.lines().collect();
+            // Heuristic: if all lines are valid, absolute paths, treat as file list.
+            if !lines.is_empty() && lines.iter().all(|l| l.starts_with('/')) {
+                let mut spans = Vec::new();
+                for line in lines {
+                    let path = line.trim();
+                    if path.is_empty() { continue; }
+                    let p = std::path::Path::new(path);
+                    if p.exists() {
+                        let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or(path);
+                        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                        let is_img = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg");
+                        let tag = if is_img {
+                            format!("[link=\"action:Ouvrir l'image : {path}\"]🖼️ {fname}[/link]")
+                        } else {
+                            format!("[link=\"action:Ouvrir le fichier : {path}\"]📄 {fname}[/link]")
+                        };
+                        spans.push(tag);
+                    }
+                }
+                if !spans.is_empty() {
+                    return Some(spans.join(" "));
+                }
+            }
+            return Some(text);
+        }
+        None
+    }
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
