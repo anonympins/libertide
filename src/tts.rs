@@ -1123,7 +1123,6 @@ impl SystemTtsBackend for SapiBackend {
 
 #[cfg(not(windows))]
 struct UnixTtsBackend {
-    current_process: Option<std::process::Child>,
     current_gender: VoiceGender,
 }
 
@@ -1131,7 +1130,6 @@ struct UnixTtsBackend {
 impl UnixTtsBackend {
     fn new(initial_voice: VoiceGender) -> Option<Self> {
         Some(Self {
-            current_process: None,
             current_gender: initial_voice,
         })
     }
@@ -1144,9 +1142,6 @@ impl SystemTtsBackend for UnixTtsBackend {
     }
 
     fn stop(&mut self) {
-        if let Some(mut child) = self.current_process.take() {
-            let _ = child.kill();
-        }
         set_tts_audio_level(0.0);
     }
 
@@ -1156,25 +1151,21 @@ impl SystemTtsBackend for UnixTtsBackend {
         rx: &std::sync::mpsc::Receiver<TtsCommand>,
         pending_cmd: &mut Option<TtsCommand>,
     ) -> bool {
-        if let Some(mut child) = self.current_process.take() {
-            let _ = child.kill();
-        }
-
         #[cfg(target_os = "macos")]
-        {
+        let mut child_proc = {
             let macos_voice = match self.current_gender {
                 VoiceGender::Denise | VoiceGender::Hortense | VoiceGender::Sylvie | VoiceGender::Kokoro => "Amelie",
                 VoiceGender::Henri | VoiceGender::Paul | VoiceGender::Jean => "Thomas",
             };
-            self.current_process = std::process::Command::new("say")
+            std::process::Command::new("say")
                 .args(["-v", macos_voice, sentence])
                 .spawn()
                 .or_else(|_| std::process::Command::new("say").arg(sentence).spawn())
-                .ok();
-        }
+                .ok()
+        };
 
         #[cfg(not(target_os = "macos"))]
-        {
+        let mut child_proc = {
             let (spd_voice, espeak_voice) = match self.current_gender {
                 VoiceGender::Denise => ("female1", "fr+f2"),
                 VoiceGender::Henri => ("male1", "fr+m2"),
@@ -1185,15 +1176,15 @@ impl SystemTtsBackend for UnixTtsBackend {
                 VoiceGender::Kokoro => ("female1", "fr+f2"),
             };
 
-            self.current_process = std::process::Command::new("spd-say")
+            std::process::Command::new("spd-say")
                 .args(["-l", "fr", "-t", spd_voice, "-w", sentence])
                 .spawn()
                 .or_else(|_| std::process::Command::new("espeak-ng").args(["-v", espeak_voice, sentence]).spawn())
                 .or_else(|_| std::process::Command::new("espeak").args(["-v", espeak_voice, sentence]).spawn())
-                .ok();
-        }
+                .ok()
+        };
 
-        if let Some(ref mut proc) = self.current_process {
+        if let Some(ref mut proc) = child_proc {
             while let Ok(None) = proc.try_wait() {
                 let t = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1211,14 +1202,12 @@ impl SystemTtsBackend for UnixTtsBackend {
                         TtsCommand::Stop => {
                             let _ = proc.kill();
                             set_tts_audio_level(0.0);
-                            self.current_process = None;
                             return true;
                         }
                         TtsCommand::Speak(next_text) => {
                             let _ = proc.kill();
                             set_tts_audio_level(0.0);
                             *pending_cmd = Some(TtsCommand::Speak(next_text));
-                            self.current_process = None;
                             return true;
                         }
                     }
@@ -1226,7 +1215,6 @@ impl SystemTtsBackend for UnixTtsBackend {
             }
         }
 
-        self.current_process = None;
         set_tts_audio_level(0.0);
         false
     }
