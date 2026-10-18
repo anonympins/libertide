@@ -323,8 +323,9 @@ impl FloatingCard {
 
         let default_size = match &self.content {
             FloatingContentType::Form { .. } => [460.0, 390.0],
-            FloatingContentType::Markdown { .. } => [500.0, 360.0],
-            _ => [440.0, 270.0],
+            FloatingContentType::Markdown { .. } => [560.0, 380.0],
+            FloatingContentType::Table { .. } => [580.0, 340.0],
+            _ => [480.0, 280.0],
         };
 
         let builder = egui::ViewportBuilder::default()
@@ -478,9 +479,10 @@ impl FloatingCard {
                                     });
                                     ui.add_space(2.0);
 
-                                    let num_cols = headers.len().max(1);
+                                    let num_cols = headers.len().max(rows.iter().map(|r| r.len()).max().unwrap_or(1));
+                                    let col_lens = calculate_col_lengths(headers, rows, num_cols);
                                     let avail_w = ui.available_width();
-                                    let min_col_width = (avail_w / num_cols as f32).max(85.0);
+                                    let col_widths = calculate_proportional_col_widths(&col_lens, avail_w, 14.0);
 
                                     egui::ScrollArea::horizontal()
                                         .auto_shrink([false, false])
@@ -488,10 +490,11 @@ impl FloatingCard {
                                             egui::Grid::new(format!("grid_{card_id}"))
                                                 .striped(true)
                                                 .spacing([14.0, 6.0])
-                                                .min_col_width(min_col_width)
+                                                .min_col_width(0.0)
                                                 .show(ui, |ui| {
-                                                    for h in headers.iter() {
-                                                        render_table_cell(ui, h, egui::Color32::from_rgb(0, 210, 255), headers, &full_table_md, true);
+                                                    for (c_idx, h) in headers.iter().enumerate() {
+                                                        let w = col_widths.get(c_idx).copied().unwrap_or(85.0);
+                                                        render_table_cell(ui, h, egui::Color32::from_rgb(0, 210, 255), headers, &full_table_md, true, w);
                                                     }
                                                     ui.end_row();
 
@@ -502,7 +505,8 @@ impl FloatingCard {
                                                             } else {
                                                                 egui::Color32::from_rgb(205, 220, 235)
                                                             };
-                                                            if let Some(act) = render_table_cell(ui, cell, text_color, row, &full_table_md, false) {
+                                                            let w = col_widths.get(c_idx).copied().unwrap_or(85.0);
+                                                            if let Some(act) = render_table_cell(ui, cell, text_color, row, &full_table_md, false, w) {
                                                                 submitted_prompt = Some(act);
                                                             }
                                                         }
@@ -1396,6 +1400,69 @@ fn split_table_row(line: &str) -> Vec<String> {
     cells
 }
 
+fn estimate_visible_length(text: &str) -> usize {
+    let spans = parse_inline_markdown(text);
+    let mut len = 0;
+    for span in &spans {
+        len += span.text.chars().count();
+    }
+    len.max(text.chars().count().min(8))
+}
+
+fn calculate_col_lengths(headers: &[String], rows: &[Vec<String>], num_cols: usize) -> Vec<usize> {
+    let mut lens = vec![8usize; num_cols];
+    for (c, l) in lens.iter_mut().enumerate() {
+        if let Some(h) = headers.get(c) {
+            *l = (*l).max(estimate_visible_length(h).clamp(6, 120));
+        }
+        for row in rows {
+            if let Some(cell) = row.get(c) {
+                *l = (*l).max(estimate_visible_length(cell).clamp(6, 120));
+            }
+        }
+    }
+    lens
+}
+
+fn calculate_proportional_col_widths(col_lens: &[usize], avail_w: f32, spacing: f32) -> Vec<f32> {
+    let n = col_lens.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let total_spacing = (n.saturating_sub(1) as f32) * spacing;
+    let min_col_w = 70.0f32;
+    let usable_w = (avail_w - total_spacing).max(n as f32 * min_col_w);
+
+    let total_len: usize = col_lens.iter().sum::<usize>().max(1);
+    let mut widths: Vec<f32> = col_lens
+        .iter()
+        .map(|&l| (l as f32 / total_len as f32) * usable_w)
+        .collect();
+
+    let mut underflow = 0.0f32;
+    let mut flexible_indices = Vec::new();
+    let mut flexible_total_weight = 0.0f32;
+
+    for (i, w) in widths.iter_mut().enumerate() {
+        if *w < min_col_w {
+            underflow += min_col_w - *w;
+            *w = min_col_w;
+        } else {
+            flexible_indices.push(i);
+            flexible_total_weight += col_lens[i] as f32;
+        }
+    }
+
+    if underflow > 0.0 && flexible_total_weight > 0.0 {
+        for &idx in &flexible_indices {
+            let share = (col_lens[idx] as f32 / flexible_total_weight) * underflow;
+            widths[idx] = (widths[idx] - share).max(min_col_w);
+        }
+    }
+
+    widths
+}
+
 fn render_table_cell(
     ui: &mut egui::Ui,
     cell: &str,
@@ -1403,12 +1470,15 @@ fn render_table_cell(
     row: &[String],
     table_markdown: &str,
     is_header: bool,
+    col_width: f32,
 ) -> Option<String> {
     let mut clicked_action = None;
     let resp = ui.scope(|ui| {
+        ui.set_min_width(col_width);
+        ui.set_max_width(col_width);
+
         if is_header {
-            let avail = ui.available_width().max(40.0);
-            let job = create_layout_job(cell, 12.0, avail, false, text_color);
+            let job = create_layout_job(cell, 12.0, col_width, false, text_color);
             let l_resp = ui.add(egui::Label::new(job).selectable(true).wrap());
             l_resp.context_menu(|ui| {
                 if ui.button("📋 Copier l'en-tête").clicked() {
@@ -1643,28 +1713,40 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                         ui.separator();
                         ui.add_space(2.0);
 
-                        egui::Grid::new(table_id)
-                            .striped(true)
-                            .spacing([12.0, 5.0])
-                            .show(ui, |ui| {
-                                for h in &headers {
-                                    render_table_cell(ui, h, egui::Color32::from_rgb(0, 215, 255), &headers, &raw_table_md, true);
-                                }
-                                ui.end_row();
+                        let num_cols = headers.len().max(rows.iter().map(|r| r.len()).max().unwrap_or(1));
+                        let col_lens = calculate_col_lengths(&headers, &rows, num_cols);
+                        let avail_w = ui.available_width();
+                        let col_widths = calculate_proportional_col_widths(&col_lens, avail_w, 12.0);
 
-                                for row in &rows {
-                                    for (c_idx, cell) in row.iter().enumerate() {
-                                        let text_color = if c_idx == 0 {
-                                            egui::Color32::from_rgb(240, 245, 255)
-                                        } else {
-                                            egui::Color32::from_rgb(205, 220, 235)
-                                        };
-                                        if let Some(act) = render_table_cell(ui, cell, text_color, row, &raw_table_md, false) {
-                                            clicked_action = Some(act);
+                        egui::ScrollArea::horizontal()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                egui::Grid::new(table_id)
+                                    .striped(true)
+                                    .spacing([12.0, 5.0])
+                                    .min_col_width(0.0)
+                                    .show(ui, |ui| {
+                                        for (c_idx, h) in headers.iter().enumerate() {
+                                            let w = col_widths.get(c_idx).copied().unwrap_or(70.0);
+                                            render_table_cell(ui, h, egui::Color32::from_rgb(0, 215, 255), &headers, &raw_table_md, true, w);
                                         }
-                                    }
-                                    ui.end_row();
-                                }
+                                        ui.end_row();
+
+                                        for row in &rows {
+                                            for (c_idx, cell) in row.iter().enumerate() {
+                                                let text_color = if c_idx == 0 {
+                                                    egui::Color32::from_rgb(240, 245, 255)
+                                                } else {
+                                                    egui::Color32::from_rgb(205, 220, 235)
+                                                };
+                                                let w = col_widths.get(c_idx).copied().unwrap_or(70.0);
+                                                if let Some(act) = render_table_cell(ui, cell, text_color, row, &raw_table_md, false, w) {
+                                                    clicked_action = Some(act);
+                                                }
+                                            }
+                                            ui.end_row();
+                                        }
+                                    });
                             });
                     });
                 ui.add_space(3.0);
