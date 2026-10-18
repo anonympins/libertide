@@ -3775,37 +3775,6 @@ async fn call_llm_prompt(
             }
         }
 
-        // 3. Mise à jour automatique de repli : Si une fenêtre volante Markdown est affichée et que le LLM produit
-        // une synthèse/narration structurée sans ré-émettre formellement l'action JSON, le contenu de la fenêtre
-        // affichée est synchronisé automatiquement.
-        if let Ok(guard) = OPEN_FLOATING_CARDS.lock() {
-            let has_explicit_card = payload.actions.iter().any(|a| matches!(a, AgentAction::ShowFloatingCard { .. }));
-            if !has_explicit_card {
-                if let Some(open_md) = guard.iter().find(|c| c.card_type == "markdown") {
-                    let text_trim = payload.narration.trim();
-                    let is_structured = text_trim.contains('#')
-                        || text_trim.contains('|')
-                        || text_trim.contains("- ")
-                        || text_trim.contains("* ")
-                        || text_trim.contains("▶ ")
-                        || text_trim.contains("[link")
-                        || text_trim.lines().count() >= 3
-                        || text_trim.len() > 140;
-
-                    if is_structured {
-                        println!("[Agent] Mise à jour automatique de repli de la fenêtre volante Markdown '{}'", open_md.id);
-                        let fallback_card = FloatingCard::from_action_data(
-                            Some(open_md.id.clone()),
-                            open_md.title.clone(),
-                            "markdown",
-                            &serde_json::json!({ "text": text_trim }),
-                        );
-                        let _ = event_tx.send(AgentEvent::ShowFloatingCard(fallback_card));
-                    }
-                }
-            }
-        }
-
         // En mode immersion, si l'écran n'a pas bougé et qu'aucune action ni suggestion rapide n'est formulée, préserver le silence
         if let PromptTrigger::Immersion { screen_changed } = trigger {
             let no_actions_or_suggestions = payload.actions.is_empty() && payload.quick_suggestions.is_empty();
