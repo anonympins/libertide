@@ -1,9 +1,11 @@
+mod autostart;
 mod audio;
 mod automation;
 mod floating_window;
 mod fs_util;
 mod html_util;
 mod pattern;
+mod scheduler;
 mod tts;
 mod twitch;
 mod types;
@@ -1364,44 +1366,6 @@ impl eframe::App for OverlayApp {
                         return;
                     }
 
-                    // Détection et planification locale immédiate des commandes différées (<10 ms, 0 token LLM)
-                    if let Some(tasks) = parse_scheduled_prompts(&prompt) {
-                        for (dur, task_prompt) in &tasks {
-                            schedule_prompt_execution(*dur, task_prompt.clone());
-                        }
-                        play_earcon(Earcon::Success);
-                        let (reply_chat, reply_tts) = if tasks.len() == 1 {
-                            let friendly = format_duration_friendly(tasks[0].0);
-                            let cmd = &tasks[0].1;
-                            (format!("Commande planifiée dans {friendly} : « {cmd} »."), format!("Commande planifiée dans {friendly}."))
-                        } else {
-                            let mut chat = format!("{} commandes différées planifiées :", tasks.len());
-                            for (dur, cmd) in &tasks {
-                                chat.push_str(&format!("\n• Dans {} : « {} »", format_duration_friendly(*dur), cmd));
-                            }
-                            (chat, format!("{} commandes différées planifiées.", tasks.len()))
-                        };
-                        self.chat_history.push(ChatEntry {
-                            role: ChatRole::User,
-                            text: prompt,
-                            timestamp: current_time_str(),
-                            quick_suggestions: Vec::new(),
-                            screen_size_kb: None,
-                        });
-                        self.chat_history.push(ChatEntry {
-                            role: ChatRole::Agent,
-                            text: reply_chat,
-                            timestamp: current_time_str(),
-                            quick_suggestions: Vec::new(),
-                            screen_size_kb: None,
-                        });
-                        let _ = self.tts_sender.send(TtsCommand::Speak(reply_tts));
-                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
-                        }
-                        return;
-                    }
-
                     // 2. Sortie déterministe immédiate du mode dictée
                     if self.dictation_mode && is_stop_dictation_command(&prompt) {
                         self.exit_dictation_mode();
@@ -2036,33 +2000,6 @@ impl eframe::App for OverlayApp {
                                                     screen_size_kb: None,
                                                 });
                                                 let _ = self.tts_sender.send(TtsCommand::Speak(reply));
-                                                self.status = AgentStatus::Idle;
-                                                self.continuous_mode = false;
-                                                return;
-                                            } else if let Some(tasks) = parse_scheduled_prompts(&prompt) {
-                                                for (dur, task_prompt) in &tasks {
-                                                    schedule_prompt_execution(*dur, task_prompt.clone());
-                                                }
-                                                play_earcon(Earcon::Success);
-                                                let (reply_chat, reply_tts) = if tasks.len() == 1 {
-                                                    let friendly = format_duration_friendly(tasks[0].0);
-                                                    let cmd = &tasks[0].1;
-                                                    (format!("Commande planifiée dans {friendly} : « {cmd} »."), format!("Commande planifiée dans {friendly}."))
-                                                } else {
-                                                    let mut chat = format!("{} commandes différées planifiées :", tasks.len());
-                                                    for (dur, cmd) in &tasks {
-                                                        chat.push_str(&format!("\n• Dans {} : « {} »", format_duration_friendly(*dur), cmd));
-                                                    }
-                                                    (chat, format!("{} commandes différées planifiées.", tasks.len()))
-                                                };
-                                                self.chat_history.push(ChatEntry {
-                                                    role: ChatRole::Agent,
-                                                    text: reply_chat,
-                                                    timestamp: current_time_str(),
-                                                    quick_suggestions: Vec::new(),
-                                                    screen_size_kb: None,
-                                                });
-                                                let _ = self.tts_sender.send(TtsCommand::Speak(reply_tts));
                                                 self.status = AgentStatus::Idle;
                                                 self.continuous_mode = false;
                                                 return;
@@ -3043,7 +2980,7 @@ Règles principales :
    - Démarrage : "enable_autostart", "disable_autostart", "check_autostart", "set_autostart".
    - Sélection : "select_text_between" (from, to).
    - Immersion : "activate_immersion" (Win+Ctrl+D), "deactivate_immersion".
-   - Temporisation & Différé : "schedule_prompt" (delay_seconds: 1..3600, prompt: "...") ou "schedule_prompts" (tasks: [{{"delay_seconds": 10, "prompt": "..."}}]) pour différer des consignes futures (téléchargement en cours, rappel, temporisation).
+   - Temporisation & Différé : "schedule_prompt" (delay_seconds: 1..3600, prompt: "...") ou "schedule_prompts" (tasks: [{{"delay_seconds": 10, "prompt": "..."}}]) pour différer des consignes futures (téléchargement en cours, rappel, temporisation). "cancel_scheduled_tasks" pour annuler immédiatement toutes les commandes différées / timers en attente.
    - Fichiers & Documents : "open_file" (path: "chemin/fichier.ext") pour ouvrir directement toute image, vidéo, PDF, tableur ou document dans son application système par défaut (selon extension / MIME type).
    - Fenêtres volantes d'analyse : "show_floating_card" (id: "...", title: "...", card_type: "table"|"stats"|"markdown", data: {{...}}) pour projeter une fenêtre volante semi-transparente avec un tableau comparatif, des données chiffrées ou une fiche technique.
    - Fermeture carte : "close_floating_card" (id: "...").
@@ -3079,6 +3016,7 @@ Format JSON obligatoire :
     {{"action": "set_reasoning_passes", "passes": 5, "reason": null}},
     {{"action": "schedule_prompt", "delay_seconds": 10, "prompt": "..."}},
     {{"action": "schedule_prompts", "tasks": [{{"delay_seconds": 10, "prompt": "..."}}]}},
+    {{"action": "cancel_scheduled_tasks"}},
     {{"action": "mute_audio"}},
     {{"action": "set_volume", "command": "mute"|"down"|"up"|"min"}},
     {{"action": "open_file", "path": "chemin/vers/image_ou_doc.png"}},

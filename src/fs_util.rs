@@ -1,5 +1,11 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 /// Résout l'emplacement réel du fichier .env sur le disque
 pub fn find_env_file() -> PathBuf {
     let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
@@ -87,6 +93,44 @@ pub fn write_env_var_to_file(file_path: &str, key: &str, value: &str) -> std::io
         out.push('\n');
     }
     std::fs::write(&resolved_path, out)
+}
+
+#[cfg(windows)]
+pub fn open_path_with_default_app(path: &str) -> Result<(), String> {
+    let p = std::path::Path::new(path);
+    let resolved = if p.exists() {
+        p.to_path_buf()
+    } else if let Some((found, _)) = find_file_in_workspace(path) {
+        std::path::PathBuf::from(found)
+    } else {
+        std::path::PathBuf::from(path)
+    };
+
+    let target_str = resolved.to_string_lossy().to_string();
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &target_str])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(|e| format!("Erreur lors de l'ouverture du fichier : {e}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Code de retour non nul lors de l'ouverture de '{target_str}'"))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn open_path_with_default_app(path: &str) -> Result<(), String> {
+    let status = std::process::Command::new("xdg-open")
+        .arg(path)
+        .status()
+        .map_err(|e| format!("Erreur lors de l'ouverture du fichier : {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Code de retour non nul pour xdg-open '{path}'"))
+    }
 }
 
 /// Crée un fichier texte temporaire contenant le texte fourni.

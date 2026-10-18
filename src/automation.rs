@@ -1,9 +1,14 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::UnboundedSender;
 
-use crate::fs_util::{create_temp_note_file, find_executable_in_path, find_file_in_workspace};
+pub use crate::scheduler::*;
+pub use crate::autostart::*;
+
+use crate::fs_util::{
+    create_temp_note_file, find_executable_in_path, find_file_in_workspace,
+    open_path_with_default_app,
+};
 use crate::pattern::{clean_words, extract_target_propositions, matches_pattern};
 use crate::types::{AgentAction, AgentCommand, QuickSuggestionItem, ScheduledTaskItem};
 use crate::window_util::*;
@@ -46,19 +51,6 @@ const CREATE_NEW_CONSOLE: u32 = 0x00000010;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-#[cfg(windows)]
-pub fn is_autostart_enabled() -> bool {
-    let output = std::process::Command::new("reg")
-        .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Libertide"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    if let Ok(out) = output {
-        out.status.success()
-    } else {
-        false
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct NumberedElementTarget {
     pub index: usize,
@@ -96,131 +88,6 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
 }
 
 #[cfg(windows)]
-pub fn set_autostart(enable: bool) -> Result<String, String> {
-    if enable {
-        let exe_path = std::env::current_exe()
-            .map_err(|e| format!("Impossible de déterminer le chemin de l'exécutable : {e}"))?;
-        let exe_str = exe_path.to_string_lossy();
-        let val = format!("\"{}\"", exe_str);
-        let status = std::process::Command::new("reg")
-            .args([
-                "add",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                "/v",
-                "Libertide",
-                "/t",
-                "REG_SZ",
-                "/d",
-                &val,
-                "/f",
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status()
-            .map_err(|e| format!("Erreur lors de l'exécution de reg.exe : {e}"))?;
-
-        if status.success() {
-            Ok(format!("Lancement au démarrage de Windows activé (exécutable : {}).", exe_str))
-        } else {
-            Err("Échec de l'écriture dans le Registre Windows.".to_string())
-        }
-    } else {
-        let status = std::process::Command::new("reg")
-            .args([
-                "delete",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                "/v",
-                "Libertide",
-                "/f",
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status()
-            .map_err(|e| format!("Erreur lors de l'exécution de reg.exe : {e}"))?;
-
-        if status.success() {
-            Ok("Lancement au démarrage de Windows désactivé.".to_string())
-        } else {
-            Ok("Lancement au démarrage désactivé (aucune entrée existante dans le Registre).".to_string())
-        }
-    }
-}
-
-#[cfg(not(windows))]
-pub fn is_autostart_enabled() -> bool {
-    if let Ok(home) = std::env::var("HOME") {
-        let path = std::path::PathBuf::from(home)
-            .join(".config/autostart/libertide.desktop");
-        path.exists()
-    } else {
-        false
-    }
-}
-
-#[cfg(not(windows))]
-pub fn set_autostart(enable: bool) -> Result<String, String> {
-    let home = std::env::var("HOME").map_err(|e| format!("Variable HOME introuvable : {e}"))?;
-    let autostart_dir = std::path::PathBuf::from(home).join(".config/autostart");
-    let desktop_file = autostart_dir.join("libertide.desktop");
-
-    if enable {
-        std::fs::create_dir_all(&autostart_dir)
-            .map_err(|e| format!("Impossible de créer le dossier autostart : {e}"))?;
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("Chemin exécutable introuvable : {e}"))?;
-        let content = format!(
-            "[Desktop Entry]\nType=Application\nName=Libertide\nExec={}\nTerminal=false\nStartupNotify=false\n",
-            exe.display()
-        );
-        std::fs::write(&desktop_file, content)
-            .map_err(|e| format!("Échec d'écriture du fichier .desktop : {e}"))?;
-        Ok("Démarrage automatique activé dans ~/.config/autostart/libertide.desktop.".to_string())
-    } else {
-        if desktop_file.exists() {
-            std::fs::remove_file(&desktop_file)
-                .map_err(|e| format!("Échec de suppression du fichier .desktop : {e}"))?;
-        }
-        Ok("Démarrage automatique désactivé (fichier .desktop supprimé).".to_string())
-    }
-}
-
-#[cfg(windows)]
-pub fn open_path_with_default_app(path: &str) -> Result<(), String> {
-    let p = std::path::Path::new(path);
-    let resolved = if p.exists() {
-        p.to_path_buf()
-    } else if let Some((found, _)) = find_file_in_workspace(path) {
-        std::path::PathBuf::from(found)
-    } else {
-        std::path::PathBuf::from(path)
-    };
-
-    let target_str = resolved.to_string_lossy().to_string();
-    let status = std::process::Command::new("cmd")
-        .args(["/C", "start", "", &target_str])
-        .creation_flags(CREATE_NO_WINDOW)
-        .status()
-        .map_err(|e| format!("Erreur lors de l'ouverture du fichier : {e}"))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("Code de retour non nul lors de l'ouverture de '{target_str}'"))
-    }
-}
-
-#[cfg(not(windows))]
-pub fn open_path_with_default_app(path: &str) -> Result<(), String> {
-    let status = std::process::Command::new("xdg-open")
-        .arg(path)
-        .status()
-        .map_err(|e| format!("Erreur lors de l'ouverture du fichier : {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("Code de retour non nul pour xdg-open '{path}'"))
-    }
-}
-
-#[cfg(windows)]
 static LAST_TXT_HWND: Mutex<Option<isize>> = Mutex::new(None);
 pub static LAST_EXTERNAL_HWND: Mutex<Option<isize>> = Mutex::new(None);
 pub static LAST_FOCUSED_CHILD_HWND: Mutex<Option<isize>> = Mutex::new(None);
@@ -230,280 +97,6 @@ pub static CURRENT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 pub static IS_EMERGENCY_STOPPED: AtomicBool = AtomicBool::new(false);
 pub static AGENT_BUSY: AtomicBool = AtomicBool::new(false);
 pub static TARGET_REASONING_PASSES: AtomicUsize = AtomicUsize::new(5);
-pub static SCHEDULE_GENERATION: AtomicU64 = AtomicU64::new(0);
-pub static SCHEDULED_TASKS_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-static SCHEDULER_CMD_TX: Mutex<Option<UnboundedSender<AgentCommand>>> = Mutex::new(None);
-static TOKIO_HANDLE: Mutex<Option<tokio::runtime::Handle>> = Mutex::new(None);
-
-pub fn init_scheduler(tx: UnboundedSender<AgentCommand>, handle: tokio::runtime::Handle) {
-    if let Ok(mut lock) = SCHEDULER_CMD_TX.lock() {
-        *lock = Some(tx);
-    }
-    if let Ok(mut lock) = TOKIO_HANDLE.lock() {
-        *lock = Some(handle);
-    }
-}
-
-pub fn cancel_all_scheduled_tasks() -> usize {
-    SCHEDULE_GENERATION.fetch_add(1, Ordering::SeqCst);
-    SCHEDULED_TASKS_COUNT.swap(0, Ordering::SeqCst)
-}
-
-pub fn schedule_prompt_execution(delay: Duration, prompt: String) {
-    let current_gen = SCHEDULE_GENERATION.load(Ordering::SeqCst);
-    SCHEDULED_TASKS_COUNT.fetch_add(1, Ordering::SeqCst);
-
-    let tx_opt = SCHEDULER_CMD_TX.lock().ok().and_then(|g| g.clone());
-    let Some(cmd_tx) = tx_opt else {
-        eprintln!("[Scheduler] Erreur : SCHEDULER_CMD_TX non initialisé.");
-        return;
-    };
-
-    if let Ok(guard) = TOKIO_HANDLE.lock() {
-        if let Some(ref handle) = *guard {
-            handle.spawn(async move {
-                tokio::time::sleep(delay).await;
-
-                if SCHEDULE_GENERATION.load(Ordering::SeqCst) != current_gen
-                    || IS_EMERGENCY_STOPPED.load(Ordering::SeqCst)
-                {
-                    println!("[Scheduler] Tâche différée annulée ou invalidée : \"{prompt}\"");
-                    return;
-                }
-
-                SCHEDULED_TASKS_COUNT.fetch_sub(1, Ordering::SeqCst);
-                println!("[Scheduler] Exécution programmée de la tâche : \"{prompt}\"");
-                let _ = cmd_tx.send(AgentCommand::Prompt(prompt));
-            });
-            return;
-        }
-    }
-
-    std::thread::spawn(move || {
-        std::thread::sleep(delay);
-        if SCHEDULE_GENERATION.load(Ordering::SeqCst) != current_gen
-            || IS_EMERGENCY_STOPPED.load(Ordering::SeqCst)
-        {
-            println!("[Scheduler] Tâche différée annulée ou invalidée : \"{prompt}\"");
-            return;
-        }
-        SCHEDULED_TASKS_COUNT.fetch_sub(1, Ordering::SeqCst);
-        println!("[Scheduler] Exécution programmée de la tâche : \"{prompt}\"");
-        let _ = cmd_tx.send(AgentCommand::Prompt(prompt));
-    });
-}
-
-pub fn format_duration_friendly(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs >= 3600 {
-        let hours = secs / 3600;
-        let mins = (secs % 3600) / 60;
-        if mins > 0 {
-            format!("{hours} h {mins} min")
-        } else {
-            format!("{hours} heure{}", if hours > 1 { "s" } else { "" })
-        }
-    } else if secs >= 60 {
-        let mins = secs / 60;
-        let rem_secs = secs % 60;
-        if rem_secs > 0 {
-            format!("{mins} min {rem_secs} s")
-        } else {
-            format!("{mins} minute{}", if mins > 1 { "s" } else { "" })
-        }
-    } else {
-        format!("{secs} seconde{}", if secs > 1 { "s" } else { "" })
-    }
-}
-
-fn parse_number_word_or_digit(word: &str) -> Option<u64> {
-    let clean = word.trim().to_lowercase();
-    let clean = clean.trim_matches(|c: char| !c.is_alphanumeric());
-    if let Ok(n) = clean.parse::<u64>() {
-        return Some(n);
-    }
-    match clean {
-        "un" | "une" | "one" => Some(1),
-        "deux" | "two" => Some(2),
-        "trois" | "three" => Some(3),
-        "quatre" | "four" => Some(4),
-        "cinq" | "five" => Some(5),
-        "six" => Some(6),
-        "sept" | "seven" => Some(7),
-        "huit" | "eight" => Some(8),
-        "neuf" | "nine" => Some(9),
-        "dix" | "ten" => Some(10),
-        "onze" | "eleven" => Some(11),
-        "douze" | "twelve" => Some(12),
-        "treize" | "thirteen" => Some(13),
-        "quatorze" | "fourteen" => Some(14),
-        "quinze" | "fifteen" => Some(15),
-        "seize" | "sixteen" => Some(16),
-        "vingt" | "twenty" => Some(20),
-        "trente" | "thirty" => Some(30),
-        "quarante" | "forty" => Some(40),
-        "cinquante" | "fifty" => Some(50),
-        "soixante" | "sixty" => Some(60),
-        _ => None,
-    }
-}
-
-fn parse_duration_tokens(tokens: &[&str]) -> Option<(Duration, usize)> {
-    if tokens.is_empty() {
-        return None;
-    }
-    let first = tokens[0].trim().to_lowercase();
-    let first_clean = first.trim_matches(|c: char| c == ',' || c == '.' || c == ';');
-
-    // Formats compacts : "10s", "30sec", "5min", "2h"
-    let unit_suffixes: &[(&str, u64)] = &[
-        ("secondes", 1), ("seconds", 1), ("seconde", 1), ("second", 1), ("secs", 1), ("sec", 1), ("s", 1),
-        ("minutes", 60), ("minute", 60), ("mins", 60), ("min", 60), ("m", 60),
-        ("heures", 3600), ("heure", 3600), ("hours", 3600), ("hour", 3600), ("hrs", 3600), ("hr", 3600), ("h", 3600),
-    ];
-
-    for &(sfx, mult) in unit_suffixes {
-        if first_clean.ends_with(sfx) && first_clean.len() > sfx.len() {
-            let num_part = &first_clean[..first_clean.len() - sfx.len()];
-            if let Some(val) = parse_number_word_or_digit(num_part) {
-                return Some((Duration::from_secs(val.saturating_mul(mult)), 1));
-            }
-        }
-    }
-
-    // Formats séparés : "10" "secondes", "cinq" "minutes", "une" "heure"
-    if let Some(val) = parse_number_word_or_digit(first_clean) {
-        if tokens.len() >= 2 {
-            let unit_raw = tokens[1].trim().to_lowercase();
-            let unit = unit_raw.trim_matches(|c: char| c == ',' || c == '.' || c == ';');
-            for &(sfx, mult) in unit_suffixes {
-                if unit == sfx {
-                    return Some((Duration::from_secs(val.saturating_mul(mult)), 2));
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn parse_single_scheduled_clause(clause: &str) -> Option<(Duration, String)> {
-    let tokens: Vec<&str> = clause.split_whitespace().collect();
-    if tokens.is_empty() {
-        return None;
-    }
-
-    let first_lower = tokens[0].trim().to_lowercase();
-    let first_clean = first_lower.trim_matches(|c: char| c == ',' || c == '.' || c == ':');
-
-    let (dur, consumed) = if first_clean == "dans" || first_clean == "in" {
-        let (d, c) = parse_duration_tokens(&tokens[1..])?;
-        (d, c + 1)
-    } else if first_clean == "attends" || first_clean == "attendre" || first_clean == "wait" {
-        let (d, c) = parse_duration_tokens(&tokens[1..])?;
-        (d, c + 1)
-    } else {
-        parse_duration_tokens(&tokens)?
-    };
-
-    let mut rem_tokens = &tokens[consumed..];
-    if !rem_tokens.is_empty() {
-        let conn = rem_tokens[0].trim().to_lowercase();
-        let conn_clean = conn.trim_matches(|c: char| c == ',' || c == '.' || c == ':');
-        if conn_clean == "puis" || conn_clean == "ensuite" || conn_clean == "then" || conn_clean == "and" || conn_clean == "et" || conn_clean == "de" {
-            rem_tokens = &rem_tokens[1..];
-        } else if conn_clean == "avant" && rem_tokens.len() >= 2 && rem_tokens[1].eq_ignore_ascii_case("de") {
-            rem_tokens = &rem_tokens[2..];
-        }
-    }
-
-    let cmd = rem_tokens.join(" ").trim().trim_matches(|c: char| c == '.' || c == ',').to_string();
-    Some((dur, cmd))
-}
-
-pub fn parse_scheduled_prompts(input: &str) -> Option<Vec<(Duration, String)>> {
-    let trimmed = input.trim();
-    let lower = trimmed.to_lowercase();
-
-    // 1. Détection du format liste / badges ("différé : 10s ferme notepad, 20s lance chrome")
-    let list_prefixes = ["différé :", "differe :", "différé:", "differe:", "différé ", "differe ", "scheduled :", "scheduled:", "delay :", "delay:"];
-    for pfx in list_prefixes {
-        if lower.starts_with(pfx) {
-            let rest = &trimmed[pfx.len()..].trim();
-            let parts: Vec<&str> = rest.split(|c| c == ',' || c == ';' || c == '\n').collect();
-            let mut results = Vec::new();
-            for part in parts {
-                let p_trim = part.trim();
-                if !p_trim.is_empty() {
-                    if let Some((d, cmd)) = parse_single_scheduled_clause(p_trim) {
-                        if !cmd.is_empty() {
-                            results.push((d, cmd));
-                        }
-                    }
-                }
-            }
-            if !results.is_empty() {
-                return Some(results);
-            }
-        }
-    }
-
-    // 2. Détection en langage naturel direct (unique ou chaîné avec "puis", "ensuite", "and then")
-    let raw_clauses: Vec<&str> = if lower.contains(" puis ") {
-        trimmed.split(" puis ").collect()
-    } else if lower.contains(" ensuite ") {
-        trimmed.split(" ensuite ").collect()
-    } else if lower.contains(" and then ") {
-        trimmed.split(" and then ").collect()
-    } else {
-        vec![trimmed]
-    };
-
-    let mut results: Vec<(Duration, String)> = Vec::new();
-    for clause in raw_clauses {
-        let c_trim = clause.trim();
-        if c_trim.is_empty() {
-            continue;
-        }
-        if let Some((dur, cmd)) = parse_single_scheduled_clause(c_trim) {
-            results.push((dur, cmd));
-        } else if let Some(last) = results.last_mut() {
-            if last.1.is_empty() {
-                last.1 = c_trim.trim_matches(|c: char| c == '.' || c == ',').to_string();
-            }
-        }
-    }
-
-    let valid_tasks: Vec<(Duration, String)> = results.into_iter().filter(|(_, c)| !c.trim().is_empty()).collect();
-    if !valid_tasks.is_empty() {
-        Some(valid_tasks)
-    } else {
-        None
-    }
-}
-
-pub fn is_cancel_scheduled_command(text: &str) -> bool {
-    let norm = clean_words(text).join(" ");
-    const TRIGGERS: &[&str] = &[
-        "annule les commandes differees", "annule les commandes différées",
-        "annuler les commandes differees", "annuler les commandes différées",
-        "annule les taches differees", "annule les tâches différées",
-        "annuler les taches differees", "annuler les tâches différées",
-        "annule la commande differee", "annule la commande différée",
-        "annule les differees", "annule les différées",
-        "annuler differe", "annuler différé", "annule differe", "annule différé",
-        "annule les timers", "annuler les timers", "arrete les timers", "arrête les timers",
-        "supprime les commandes differees", "supprime les commandes différées",
-        "cancel scheduled tasks", "cancel scheduled commands", "cancel scheduled prompt",
-        "cancel scheduled prompts", "cancel timers", "stop timers", "clear timers",
-        "cancelar comandos diferidos", "cancelar tareas programadas",
-        "geplante aufgaben abbrechen", "timer abbrechen",
-        "annulla comandi ritardati", "annulla compiti programmati",
-    ];
-    TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.to_lowercase().contains(trig))
-}
-
 pub fn is_request_cancelled(request_id: u64) -> bool {
     CURRENT_REQUEST_ID.load(Ordering::SeqCst) != request_id || IS_EMERGENCY_STOPPED.load(Ordering::SeqCst)
 }
@@ -6082,6 +5675,17 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     feedback.push(format!("{count} commande(s) différée(s) planifiée(s)."));
                 }
             }
+            AgentAction::CancelScheduledTasks => {
+                let count = cancel_all_scheduled_tasks();
+                crate::play_earcon(crate::Earcon::Success);
+                if count > 0 {
+                    println!("[Actions] {count} commande(s) différée(s) annulée(s).");
+                    feedback.push(format!("Toutes les commandes différées ont été annulées ({count} annulée{}).", if count > 1 { "s" } else { "" }));
+                } else {
+                    println!("[Actions] Aucune commande différée active à annuler.");
+                    feedback.push("Aucune commande différée active à annuler.".to_string());
+                }
+            }
             AgentAction::MuteAudio => {
                 // Stoppe immédiatement la lecture multimédia (Spotify, YouTube, navigateurs)
                 const VK_MEDIA_STOP: VIRTUAL_KEY = VIRTUAL_KEY(0xB2);
@@ -6406,6 +6010,15 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 if count > 0 {
                     crate::play_earcon(crate::Earcon::Success);
                     feedback.push(format!("{count} commande(s) différée(s) planifiée(s)."));
+                }
+            }
+            AgentAction::CancelScheduledTasks => {
+                let count = cancel_all_scheduled_tasks();
+                crate::play_earcon(crate::Earcon::Success);
+                if count > 0 {
+                    feedback.push(format!("Toutes les commandes différées ont été annulées ({count} annulée{}).", if count > 1 { "s" } else { "" }));
+                } else {
+                    feedback.push("Aucune commande différée active à annuler.".to_string());
                 }
             }
             AgentAction::MuteAudio => {

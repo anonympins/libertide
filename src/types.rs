@@ -366,6 +366,8 @@ pub enum AgentAction {
         #[serde(default, alias = "prompts", alias = "scheduled_tasks", alias = "items")]
         tasks: Vec<ScheduledTaskItem>,
     },
+    #[serde(alias = "cancel_scheduled_prompts", alias = "clear_scheduled_tasks", alias = "cancel_timers", alias = "annuler_differe")]
+    CancelScheduledTasks,
     #[serde(alias = "mute_sound", alias = "sound_mute", alias = "couper_son")]
     MuteAudio,
     #[serde(alias = "volume", alias = "adjust_volume", alias = "sound")]
@@ -459,6 +461,7 @@ impl QuickSuggestionItem {
                 AgentAction::SchedulePrompts { tasks } => {
                     Some(format!("Planifier {} tâche(s) différée(s)", tasks.len()))
                 }
+                AgentAction::CancelScheduledTasks => Some("Annuler les commandes différées".to_string()),
                 AgentAction::MuteAudio => Some("Couper les flux audio parasites".to_string()),
                 AgentAction::SetVolume { command } => Some(format!("Volume : {command}")),
                 _ => None,
