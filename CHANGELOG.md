@@ -6,6 +6,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.1] - 2026-10-18
+
+### 🍏 macOS Port & Unix Compatibility
+- **Native macOS Support (Apple Silicon M1/M2/M3 & Intel)**:
+  - Speech synthesis via the system `say` command with French voice selection (`Amelie`, `Thomas`).
+  - Clipboard management on macOS via `pbcopy` and `pbpaste` with heuristic file and image detection.
+  - Native document and URL opening using the `open` command.
+  - Autostart support managed through `LaunchAgent` (`com.libertide.overlay.plist`).
+- **Unix / Linux Stability**:
+  - Fixed Unix unit tests and consolidated `xclip` backend for plain text, URI lists, and HTML.
+  - Upgraded cryptographic dependency `ring` to version 0.17.13.
+
+### 🤖 Multi-Provider LLM & Reasoning Capacity
+- **Expanded API Provider Support**:
+  - Unified integration and configuration modal dialog for **OpenAI**, **Anthropic** (Claude), **Mistral AI**, **Zhipu GLM**, **Groq**, and **DeepSeek**.
+  - Dynamic persistence of API keys and associated models in the `.env` file.
+- **Extended Token Budget**:
+  - Increased output generation quota up to 1800 tokens (`max_tokens`) for richer summaries and responses.
+
+### 📊 Interactive Floating Windows & Markdown Rendering
+- **Filter and Query Forms (`card_type: "form"`)**:
+  - Dynamic generation of interactive forms featuring text inputs, numeric sliders/gauges (`number_slider`), dropdowns (`select`), checkboxes (`checkbox`), and radio buttons (`radio`).
+  - Validation and automatic transmission of submitted form criteria to the conversational agent.
+- **Rich Markdown Rendering & Responsive Tables**:
+  - Support for syntax-highlighted code blocks, blockquotes, horizontal rules, and ordered/unordered lists.
+  - Markdown tables with striped rows, horizontal scrolling, and one-click full-table copy.
+  - Robust link macro `[link="target"]Label[/link]` and clickable markdown links to trigger actions, file launches, or media playback instantly.
+
+### 🌐 Web Automation & Multimedia Controls
+- **Media Detection & Playback Control**:
+  - Automatic recognition of `<video>` and `<audio>` tags and player controls via UIA/HTML macros (`[@video]`, `[@audio]`) to start or pause playback.
+- **Web Notification Banner Handling**:
+  - Automated dismissal or acceptance of intrusive push notification popups and web banners.
+- **Microphone Affinity & Lightweight TTS**:
+  - Optimized CPAL microphone capture and trimmed direct TTS dependencies in favor of OS-native engines.
+  - Reliable executable path resolution during relative launches or executions from `System32`.
+
 ## [0.5.0] - 2026-10-17
 
 ### ♿ Accessibility & Inclusive Ergonomics
