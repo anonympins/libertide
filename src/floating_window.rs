@@ -402,7 +402,9 @@ impl FloatingCard {
                                     });
                                 }
                                 FloatingContentType::Markdown { text } => {
-                                    render_markdown(ui, text, &card_id);
+                                    if let Some(prompt) = render_markdown(ui, text, &card_id) {
+                                        submitted_prompt = Some(prompt);
+                                    }
                                 }
                                 FloatingContentType::Form { fields, submit_label, prompt_prefix } => {
                                     let mut form_submitted = false;
@@ -595,6 +597,7 @@ enum InlineStyle {
 struct InlineSpan<'a> {
     text: &'a str,
     style: InlineStyle,
+    target: Option<&'a str>,
 }
 
 fn parse_inline_markdown(line: &str) -> Vec<InlineSpan<'_>> {
@@ -611,11 +614,13 @@ fn parse_inline_markdown(line: &str) -> Vec<InlineSpan<'_>> {
                     spans.push(InlineSpan {
                         text: &line[plain_start..i],
                         style: InlineStyle::Normal,
+                        target: None,
                     });
                 }
                 spans.push(InlineSpan {
                     text: &line[i + 1..i + 1 + end],
                     style: InlineStyle::Code,
+                    target: None,
                 });
                 i += 1 + end + 1;
                 plain_start = i;
@@ -627,11 +632,13 @@ fn parse_inline_markdown(line: &str) -> Vec<InlineSpan<'_>> {
                     spans.push(InlineSpan {
                         text: &line[plain_start..i],
                         style: InlineStyle::Normal,
+                        target: None,
                     });
                 }
                 spans.push(InlineSpan {
                     text: &line[i + 3..i + 3 + end],
                     style: InlineStyle::BoldItalic,
+                    target: None,
                 });
                 i += 3 + end + 3;
                 plain_start = i;
@@ -643,11 +650,13 @@ fn parse_inline_markdown(line: &str) -> Vec<InlineSpan<'_>> {
                     spans.push(InlineSpan {
                         text: &line[plain_start..i],
                         style: InlineStyle::Normal,
+                        target: None,
                     });
                 }
                 spans.push(InlineSpan {
                     text: &line[i + 2..i + 2 + end],
                     style: InlineStyle::Bold,
+                    target: None,
                 });
                 i += 2 + end + 2;
                 plain_start = i;
@@ -659,11 +668,13 @@ fn parse_inline_markdown(line: &str) -> Vec<InlineSpan<'_>> {
                     spans.push(InlineSpan {
                         text: &line[plain_start..i],
                         style: InlineStyle::Normal,
+                        target: None,
                     });
                 }
                 spans.push(InlineSpan {
                     text: &line[i + 2..i + 2 + end],
                     style: InlineStyle::Strike,
+                    target: None,
                 });
                 i += 2 + end + 2;
                 plain_start = i;
@@ -676,11 +687,13 @@ fn parse_inline_markdown(line: &str) -> Vec<InlineSpan<'_>> {
                         spans.push(InlineSpan {
                             text: &line[plain_start..i],
                             style: InlineStyle::Normal,
+                            target: None,
                         });
                     }
                     spans.push(InlineSpan {
                         text: &line[i + 1..i + 1 + end],
                         style: InlineStyle::Italic,
+                        target: None,
                     });
                     i += 1 + end + 1;
                     plain_start = i;
@@ -689,18 +702,25 @@ fn parse_inline_markdown(line: &str) -> Vec<InlineSpan<'_>> {
             }
         } else if bytes[i] == b'[' {
             if let Some(bracket_end) = line[i + 1..].find(']') {
-                let after_bracket = i + 1 + bracket_end + 1;
+                let mut after_bracket = i + 1 + bracket_end + 1;
+                while after_bracket < len && (bytes[after_bracket] == b' ' || bytes[after_bracket] == b'\t') {
+                    after_bracket += 1;
+                }
                 if after_bracket < len && bytes[after_bracket] == b'(' {
                     if let Some(paren_end) = line[after_bracket + 1..].find(')') {
                         if i > plain_start {
                             spans.push(InlineSpan {
                                 text: &line[plain_start..i],
                                 style: InlineStyle::Normal,
+                                target: None,
                             });
                         }
+                        let link_text = &line[i + 1..i + 1 + bracket_end];
+                        let link_target = &line[after_bracket + 1..after_bracket + 1 + paren_end];
                         spans.push(InlineSpan {
-                            text: &line[i + 1..i + 1 + bracket_end],
+                            text: link_text,
                             style: InlineStyle::Link,
+                            target: Some(link_target),
                         });
                         i = after_bracket + 1 + paren_end + 1;
                         plain_start = i;
@@ -721,6 +741,7 @@ fn parse_inline_markdown(line: &str) -> Vec<InlineSpan<'_>> {
         spans.push(InlineSpan {
             text: &line[plain_start..len],
             style: InlineStyle::Normal,
+            target: None,
         });
     }
 
@@ -797,9 +818,150 @@ fn parse_numbered_list(s: &str) -> Option<(&str, &str)> {
     None
 }
 
-pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) {
+fn extract_action_prompt(target: &str) -> Option<String> {
+    let t = target.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let lower = t.to_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:") {
+        return None;
+    }
+
+    let prompt_raw = if let Some(rest) = t.strip_prefix("action:") {
+        rest.trim()
+    } else if let Some(rest) = t.strip_prefix("prompt:") {
+        rest.trim()
+    } else if let Some(rest) = t.strip_prefix("send:") {
+        rest.trim()
+    } else if let Some(rest) = t.strip_prefix("cmd:") {
+        rest.trim()
+    } else {
+        t
+    };
+
+    let unquoted = prompt_raw
+        .strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+        .or_else(|| prompt_raw.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .unwrap_or(prompt_raw)
+        .trim();
+
+    if !unquoted.is_empty() {
+        Some(unquoted.to_string())
+    } else {
+        None
+    }
+}
+
+fn handle_link_click(ctx: &egui::Context, target: &str, fallback_text: &str) -> Option<String> {
+    let t = target.trim();
+    if let Some(prompt) = extract_action_prompt(t) {
+        return Some(prompt);
+    }
+    if t.starts_with("http://") || t.starts_with("https://") {
+        ctx.open_url(egui::OpenUrl::new_tab(t));
+        return None;
+    }
+    let fallback_clean = fallback_text.trim();
+    if !fallback_clean.is_empty() {
+        Some(fallback_clean.to_string())
+    } else {
+        None
+    }
+}
+
+fn render_line_spans(
+    ui: &mut egui::Ui,
+    line: &str,
+    base_size: f32,
+    force_italic: bool,
+    base_color: egui::Color32,
+) -> Option<String> {
+    let spans = parse_inline_markdown(line);
+    let has_links = spans.iter().any(|s| s.style == InlineStyle::Link && s.target.is_some());
+
+    if !has_links {
+        let avail = ui.available_width().max(40.0);
+        let job = create_layout_job(line, base_size, avail, force_italic, base_color);
+        ui.label(job);
+        return None;
+    }
+
+    let mut action_to_run: Option<String> = None;
+
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(3.5, 3.5);
+
+        for span in spans {
+            if span.style == InlineStyle::Link && span.target.is_some() {
+                let raw_text = span.text.trim();
+                let clean_text = raw_text
+                    .trim_start_matches("**")
+                    .trim_end_matches("**")
+                    .trim_start_matches('*')
+                    .trim_end_matches('*')
+                    .trim();
+                let target = span.target.unwrap_or(clean_text);
+
+                let is_action = extract_action_prompt(target).is_some();
+                let icon = if is_action { "⚡ " } else { "🔗 " };
+                let display_label = format!("{icon}{clean_text}");
+
+                let (bg_color, stroke_color, text_color) = if is_action {
+                    (
+                        egui::Color32::from_rgba_unmultiplied(0, 180, 255, 38),
+                        egui::Color32::from_rgba_unmultiplied(0, 215, 255, 130),
+                        egui::Color32::from_rgb(0, 235, 255),
+                    )
+                } else {
+                    (
+                        egui::Color32::from_rgba_unmultiplied(100, 180, 255, 20),
+                        egui::Color32::from_rgba_unmultiplied(100, 180, 255, 70),
+                        egui::Color32::from_rgb(140, 200, 255),
+                    )
+                };
+
+                let btn = egui::Button::new(
+                    egui::RichText::new(display_label)
+                        .size(base_size)
+                        .color(text_color)
+                        .strong(),
+                )
+                .fill(bg_color)
+                .stroke(egui::Stroke::new(1.0, stroke_color))
+                .corner_radius(egui::CornerRadius::same(5))
+                .small();
+
+                let hover_desc = if let Some(prompt) = extract_action_prompt(target) {
+                    format!("⚡ Demander à l'IA : « {prompt} »\nCliquer pour exécuter immédiatement")
+                } else {
+                    format!("Ouvrir le lien web : {target}")
+                };
+
+                if ui.add(btn).on_hover_text(hover_desc).clicked() {
+                    action_to_run = handle_link_click(ui.ctx(), target, clean_text);
+                }
+            } else {
+                let words: Vec<&str> = span.text.split_whitespace().collect();
+                if words.is_empty() {
+                    continue;
+                }
+                for word in words {
+                    let avail = ui.available_width().max(40.0);
+                    let word_job = create_layout_job(word, base_size, avail, force_italic, base_color);
+                    ui.label(word_job);
+                }
+            }
+        }
+    });
+
+    action_to_run
+}
+
+pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<String> {
     let mut lines = text.lines().peekable();
     let mut block_idx = 0usize;
+    let mut clicked_action: Option<String> = None;
 
     while let Some(line) = lines.next() {
         let trimmed = line.trim();
@@ -872,9 +1034,9 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) {
                 };
 
                 ui.add_space(extra_space);
-                let avail = ui.available_width().max(40.0);
-                let job = create_layout_job(content, font_size, avail, false, color);
-                ui.label(job);
+                if let Some(act) = render_line_spans(ui, content, font_size, false, color) {
+                    clicked_action = Some(act);
+                }
 
                 if hashes == 1 {
                     ui.add_space(2.0);
@@ -912,9 +1074,9 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("▍").size(13.0).color(egui::Color32::from_rgb(0, 200, 255)));
-                        let avail = ui.available_width().max(40.0);
-                        let job = create_layout_job(&quote_text, 12.0, avail, true, egui::Color32::from_rgb(205, 225, 245));
-                        ui.label(job);
+                        if let Some(act) = render_line_spans(ui, &quote_text, 12.0, true, egui::Color32::from_rgb(205, 225, 245)) {
+                            clicked_action = Some(act);
+                        }
                     });
                 });
             ui.add_space(2.0);
@@ -979,9 +1141,9 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) {
                                         } else {
                                             egui::Color32::from_rgb(205, 220, 235)
                                         };
-                                        let avail = ui.available_width().max(40.0);
-                                        let job = create_layout_job(cell, 11.5, avail, false, text_color);
-                                        ui.label(job);
+                                        if let Some(act) = render_line_spans(ui, cell, 11.5, false, text_color) {
+                                            clicked_action = Some(act);
+                                        }
                                     }
                                     ui.end_row();
                                 }
@@ -1013,9 +1175,9 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) {
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 ui.label(egui::RichText::new(bullet).size(12.0).color(bullet_color).strong());
-                let avail = ui.available_width().max(40.0);
-                let job = create_layout_job(item_content, 12.5, avail, false, egui::Color32::from_rgb(225, 235, 245));
-                ui.label(job);
+                if let Some(act) = render_line_spans(ui, item_content, 12.5, false, egui::Color32::from_rgb(225, 235, 245)) {
+                    clicked_action = Some(act);
+                }
             });
             ui.add_space(1.5);
             continue;
@@ -1027,17 +1189,19 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) {
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 ui.label(egui::RichText::new(num_str).size(12.0).color(egui::Color32::from_rgb(255, 215, 110)).strong());
-                let avail = ui.available_width().max(40.0);
-                let job = create_layout_job(item_content, 12.5, avail, false, egui::Color32::from_rgb(225, 235, 245));
-                ui.label(job);
+                if let Some(act) = render_line_spans(ui, item_content, 12.5, false, egui::Color32::from_rgb(225, 235, 245)) {
+                    clicked_action = Some(act);
+                }
             });
             ui.add_space(1.5);
             continue;
         }
 
-        let avail = ui.available_width().max(40.0);
-        let job = create_layout_job(trimmed, 12.5, avail, false, egui::Color32::from_rgb(220, 230, 242));
-        ui.label(job);
+        if let Some(act) = render_line_spans(ui, trimmed, 12.5, false, egui::Color32::from_rgb(220, 230, 242)) {
+            clicked_action = Some(act);
+        }
         ui.add_space(2.0);
     }
+
+    clicked_action
 }

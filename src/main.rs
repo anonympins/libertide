@@ -1558,6 +1558,16 @@ impl eframe::App for OverlayApp {
                         self.start_recording(&ctx);
                     }
                 }
+                AgentEvent::WhisperReady => {
+                    println!("[Whisper] Notification WhisperReady reçue.");
+                    if self.continuous_mode
+                        && self.status != AgentStatus::EmergencyStopped
+                        && !AGENT_BUSY.load(Ordering::SeqCst)
+                        && !self.is_recording
+                    {
+                        self.start_recording(&ctx);
+                    }
+                }
                 AgentEvent::TwitchChatReceived(twitch_msg) => {
                     self.twitch_messages.push(twitch_msg);
                     if self.twitch_messages.len() > 300 {
@@ -3326,6 +3336,7 @@ Règles principales :
      * Analyse minutieusement le texte, titres et points clés de la page.
      * Projette SYSTÉMATIQUEMENT une fenêtre volante au format Markdown via l'action "show_floating_card" :
        card_type: "markdown", id: "resume_page", title: "Résumé : <Titre de la page/sujet>", data: {{"text": "# Titre\n\n## Points clés\n- **Point 1** : ...\n- **Point 2** : ...\n\n> Conclusion/Synthèse..."}}.
+     * LIENS D'ACTION CLICQUABLES : Dans le texte Markdown, insère systématiquement des liens d'action interactifs sous la forme `Libellé explicite de l'action` (ex: `👉 Réserver ce vol à 84€`, `🔍 Afficher les détails`). Un clic de l'utilisateur sur le lien déclenche directement l'action auprès de l'agent.
      * Dans ta "narration" vocale : sois très concis (1 à 2 phrases) pour confirmer oralement que la synthèse est projetée dans la fenêtre volante.
      * Fournis des suggestions rapides utiles dans "quick_suggestions" (ex: ["Copier le résumé", "Fermer le résumé", "Détail du point 1"]).
 4. Interface & Ciblage :
@@ -3336,7 +3347,8 @@ Règles principales :
    - LECTURE DES NOTIFICATIONS SYSTÈME (TOASTS) : Dès qu'une notification Windows ou un toast est présent, lis impérativement son titre et son contenu dans ta "narration" pour informer l'utilisateur, mais LAISSE-LA TRANQUILLE (ne tente pas de la fermer, ne clique pas dessus et laisse le système la gérer).
    - ALERTES & MESSAGES D'ERREUR (FERMETURE SYSTÉMATIQUE APRÈS LECTURE) : Dès qu'une boîte de dialogue d'alerte, un popup d'avertissement ou un message d'erreur est à l'écran, lis-le clairement ou résume-le dans ta "narration", puis FERME-LA SYSTÉMATIQUEMENT en cliquant sur son bouton de fermeture/validation ("OK", "Fermer", "Annuler", "Continuer", croix) pour débloquer l'écran et poursuivre ton travail. Ne JAMAIS envoyer "escape".
    - PRIORITÉ ABSOLUE AUX CHANGEMENTS WEB : Si des informations, boutons ou données sont présent sur la page web (signalés sous 'INFORMATIONS WEB MODIFIÉES / NOUVELLES'), ils priment impérativement sur tous les éléments statiques et les autres fenêtres. Base en priorité absolue tes actions ou réponses sur ces changements.
-   - OBLIGATION DE CIBLAGE EXPLICITE DU CHAMP : Pour toute saisie, sélection ou clic ("write_text", "replace_field_text", "clear_text", "focus_element", "click_element", "click_button"), tu DOIS IMPÉRATIVEMENT renseigner le champ interactable précis visé ("target", "target_name" ou "button_name") en utilisant sa macro ou son identifiant exact observé à l'écran (ex: input, select, textarea, combobox, bouton, lien).
+   - OBLIGATION DE CIBLAGE EXPLICITE DU CHAMP : Pour toute saisie, sélection ou clic ("write_text", "replace_field_text", "clear_text", "focus_element", "click_element", "click_button"), tu DOIS IMPÉRATIVEMENT renseigner le champ interactable précis visé ("target", "target_name" ou "button_name") en utilisant sa macro ou son identifiant exact observé à l'écran (ex: input, select, textarea, combobox, bouton, lien, video, audio).
+   - LECTEURS VIDÉO & AUDIO : Les balises vidéo et audio sont des éléments interactables (signalés par [@video:...], [@audio:...], ou [video]/[audio]). Pour lancer la lecture, mettre en pause ou interagir avec un média, utilise "click_element" ou "click_button" en ciblant la vidéo, l'audio ou ses contrôles de lecture ("play", "lecture", etc.).
    - SÉCURITÉ DU CIBLAGE : "target": null et les cibles génériques ou fictives sont STRICTEMENT INTERDITES. Le moteur d'exécution valide déterministement chaque élément contre l'arbre réel de l'écran ; toute cible non vérifiable ou absente sera rejetée par sécurité.
    - Raccourcis clavier & touches : utilise OBLIGATOIREMENT "accessibility_shortcut" avec le nom ou la combinaison de touches exacte (ex: "ctrl+shift+b" pour la barre des favoris, "ctrl+t", "enter", "close_tab", "copy", "undo"). Ne JAMAIS envoyer "run_command" pour simuler des touches ou raccourcis !
    - Lecture code/fichier : "read_editor_content" (focalise et extrait Ctrl+A/Ctrl+C).
@@ -3356,7 +3368,7 @@ Règles principales :
    - Immersion : "activate_immersion" (Win+Ctrl+D), "deactivate_immersion".
    - Temporisation & Différé : "schedule_prompt" (delay_seconds: 1..3600, prompt: "...") ou "schedule_prompts" (tasks: [{{"delay_seconds": 10, "prompt": "..."}}]) pour différer des consignes futures (téléchargement en cours, rappel, temporisation). "cancel_scheduled_tasks" pour annuler immédiatement toutes les commandes différées / timers en attente.
    - Fichiers & Documents : "open_file" (path: "chemin/fichier.ext") pour ouvrir directement toute image, vidéo, PDF, tableur ou document dans son application système par défaut (selon extension / MIME type).
-   - Fenêtres volantes d'analyse & formulaires de requête interactifs : "show_floating_card" (id: "...", title: "...", card_type: "form"|"table"|"stats"|"markdown", data: {{...}}) pour projeter une fenêtre volante avec un formulaire interactif de filtres/requête (inputs, jauges/sliders numériques, selectbox, radio, checkbox pour recherche personnalisée de vols, hôtels, shopping), un tableau comparatif, des données chiffrées ou une fiche technique.
+   - Fenêtres volantes d'analyse & formulaires de requête interactifs : "show_floating_card" (id: "...", title: "...", card_type: "form"|"table"|"stats"|"markdown", data: {{...}}) pour projeter une fenêtre volante avec un formulaire interactif de filtres/requête (inputs, jauges/sliders numériques, selectbox, radio, checkbox pour recherche personnalisée de vols, hôtels, shopping), un tableau comparatif, des données chiffrées ou une fiche technique. Pour "markdown", insère des liens cliquables `Action` pour permettre à l'utilisateur de piloter les choix ou actions directement depuis la fenêtre volante.
    - Fermeture carte : "close_floating_card" (id: "...").
 8. Fin de passes : Dès que "actions" est vide (tâche finie ou choix requis), fournis OBLIGATOIREMENT 2 à 4 suggestions concrètes dans "quick_suggestions".
 
@@ -3396,7 +3408,7 @@ Format JSON obligatoire :
     {{"action": "open_file", "path": "chemin/vers/image_ou_doc.png"}},
     {{"action": "show_floating_card", "id": "stats_1", "title": "Tableau comparatif", "card_type": "table", "data": {{"headers": ["Modèle", "Prix"], "rows": [["Produit A", "49€"], ["Produit B", "59€"]]}}}},
     {{"action": "show_floating_card", "id": "vol_search", "title": "Filtres Billet d'Avion", "card_type": "form", "data": {{"submit_label": "Rechercher les vols", "prompt_prefix": "Recherche de vol avec les critères suivants :", "fields": [{{"id": "depart", "label": "Ville de départ", "type": "text", "value": "Paris"}}, {{"id": "destination", "label": "Destination", "type": "text", "value": "Tokyo"}}, {{"id": "prix_max", "label": "Budget maximum", "type": "number_slider", "min": 200, "max": 3000, "step": 50, "value": 900, "unit": "€"}}, {{"id": "classe", "label": "Classe", "type": "select", "options": ["Économique", "Premium", "Affaires"], "selected": "Économique"}}, {{"id": "direct", "label": "Vols directs seulement", "type": "checkbox", "checked": true}}, {{"id": "bagage", "label": "Bagages", "type": "radio", "options": ["Cabine seul", "1 bagage en soute", "2 bagages en soute"], "selected": "1 bagage en soute"}}]}}}},
-    {{"action": "show_floating_card", "id": "resume_page", "title": "Résumé de la page", "card_type": "markdown", "data": {{"text": "# Résumé\n- **Sujet** : ...\n- **Points clés** : ..."}}}},
+    {{"action": "show_floating_card", "id": "resume_page", "title": "Résumé de la page", "card_type": "markdown", "data": {{"text": "# Résumé\n- **Option 1** : ... -> 👉 Choisir\n- **Option 2** : ... -> 👉 Choisir"}}}},
     {{"action": "close_floating_card", "id": "stats_1"}}
   ],
   "quick_suggestions": ["Option 1", "Option 2"]
@@ -3858,8 +3870,10 @@ async fn call_llm_prompt(
                 - RÈGLE D'OR : Réponds STRICTEMENT et UNIQUEMENT avec un objet JSON valide (contenant \"narration\", \"next_passes\", \"actions\", \"quick_suggestions\"). Aucun texte libre ou markdown en dehors du JSON.\n\
                 - Bannière cookies -> clique automatiquement 'Tout accepter' / 'Accepter'.\n\
                 - Bannière de notification web / push ('Activez les notifications franceinfo...', etc.) -> traite-la immédiatement en cliquant sur la croix 'Fermer (croix ✕)' / 'Fermer' / 'Refuser' / 'Plus tard' ou 'Activer' pour libérer la vue.\n\
+                - Pour lancer ou contrôler une vidéo ou un audio -> clique directement sur l'élément vidéo/audio ou son bouton de lecture ('play' / 'lecture').\n\
                 - Notification système (toast) -> lis son contenu dans ta narration et laisse-la tranquille (ne la ferme pas).\n\
                 - Alerte / modale d'erreur -> lis le message dans ta narration, puis clique impérativement sur 'OK' / 'Fermer' pour la refermer.\n\
+                - Fenêtre volante Markdown -> insère des liens interactifs cliquables 'Texte' pour permettre à l'utilisateur de déclencher des suites ou choix en un clic.\n\
                 - Mission approfondie (contact / produit / service) -> définis 'next_passes' (8 à 12), explore méthodiquement (local -> web -> annuaires) et projette les résultats dans 'show_floating_card'. Ne renvoie pas 'actions': [] tant que les résultats ne sont pas trouvés.\n\
                 - Échec/blocage -> pivote immédiatement vers une alternative (app, web, autre fenêtre). Ne renvoie JAMAIS 'actions': [] si l'objectif n'est pas achevé.\n\
                 - Tâche finie ou choix requis -> 'actions': [] + 2 à 4 'quick_suggestions'.",

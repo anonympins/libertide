@@ -267,6 +267,7 @@ pub enum AgentEvent {
     SilentNarration(String),
     TranscriptionPartial(String),
     VoicePromptReady(String),
+    WhisperReady,
     TtsFinished,
     ScreenPayloadSize(f32),
     TwitchChatReceived(TwitchMessage),

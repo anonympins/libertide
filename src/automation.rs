@@ -70,7 +70,7 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
     let elements = list_interactive_elements(active_hwnd);
     elements
         .into_iter()
-        .filter(|e| !e.is_offscreen && (e.is_button || e.is_link || e.is_tab || e.is_edit_or_textarea || e.is_tabindex))
+        .filter(|e| !e.is_offscreen && (e.is_button || e.is_link || e.is_tab || e.is_edit_or_textarea || e.is_tabindex || e.is_media))
         .take(30)
         .enumerate()
         .map(|(i, e)| NumberedElementTarget {
@@ -1002,6 +1002,7 @@ struct UiaElementInfo {
     is_input: bool,
     is_select: bool,
     is_option: bool,
+    is_media: bool,
     is_button: bool,
     is_link: bool,
     is_tab: bool,
@@ -1516,6 +1517,25 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || class_name.contains("popup")
                         || automation_id.to_lowercase().contains("option");
 
+                    let is_media = aria_role == "video"
+                        || aria_role == "audio"
+                        || aria_role == "media"
+                        || loc_type.contains("vidéo")
+                        || loc_type.contains("video")
+                        || loc_type.contains("audio")
+                        || loc_type.contains("lecteur")
+                        || loc_type.contains("player")
+                        || class_name.contains("video-stream")
+                        || class_name.contains("html5-main-video")
+                        || class_name.contains("html5-video-player")
+                        || class_name.contains("jw-video")
+                        || class_name.contains("vjs-tech")
+                        || (class_name.contains("video") && !class_name.contains("vide"))
+                        || class_name.contains("audio")
+                        || automation_id.to_lowercase().contains("video")
+                        || automation_id.to_lowercase().contains("audio")
+                        || automation_id.to_lowercase().contains("player");
+
                     let is_edit_or_textarea = is_explicit_textarea || is_input || is_select;
 
                     let is_role_button = aria_role == "button"
@@ -1550,6 +1570,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || is_role_button
                         || has_button_data
                         || is_close_or_cross
+                        || is_media
                         || class_name.contains("button")
                         || class_name.contains("btn")
                         || automation_id.to_lowercase().contains("button")
@@ -1557,6 +1578,13 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
 
                     if is_close_or_cross && (name.is_empty() || name == "×" || name == "✕" || name == "⨯" || name.eq_ignore_ascii_case("x")) {
                         name = "Fermer (croix ✕)".to_string();
+                    } else if is_media && name.is_empty() {
+                        let is_aud = aria_role == "audio" || loc_type.contains("audio") || class_name.contains("audio");
+                        name = if is_aud {
+                            "Lecteur audio (cliquer pour jouer)".to_string()
+                        } else {
+                            "Lecteur vidéo (cliquer pour jouer)".to_string()
+                        };
                     }
 
                     let is_role_link = aria_role == "link"
@@ -1609,7 +1637,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         && !aria_properties.contains("tabindex=-1")
                         && !aria_properties.contains("tabindex=\"-1\"")
                         && !aria_properties.contains("tabindex='-1'"))
-                        || (is_web_content && (is_focusable || is_option) && !is_edit_or_textarea && !is_link && !is_button);
+                        || (is_web_content && (is_focusable || is_option || is_media) && !is_edit_or_textarea && !is_link && !is_button);
                     let is_tabindex = has_tabindex;
 
                     if is_browser_chrome && !name.is_empty() && !name.starts_with("[Navigateur]") {
@@ -1657,7 +1685,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
 
                     if name.is_empty() && aria_label.is_empty() && automation_id.is_empty() && help_text.is_empty() && value_text.is_empty()
                         && data_attrs.is_empty() && primary_class.is_empty()
-                        && !is_edit_or_textarea && !is_button && !is_link && !is_tab && !is_focusable && !is_tabindex {
+                        && !is_edit_or_textarea && !is_button && !is_link && !is_tab && !is_focusable && !is_tabindex && !is_media {
                         continue;
                     }
 
@@ -1689,6 +1717,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         is_input,
                         is_select,
                         is_option,
+                        is_media,
                         is_button,
                         is_link,
                         is_tab,
@@ -2366,6 +2395,9 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
             .or_else(|| tag.strip_prefix("input:"))
             .or_else(|| tag.strip_prefix("textarea:"))
             .or_else(|| tag.strip_prefix("select:"))
+            .or_else(|| tag.strip_prefix("video:"))
+            .or_else(|| tag.strip_prefix("audio:"))
+            .or_else(|| tag.strip_prefix("media:"))
             .unwrap_or(tag);
 
         if let Ok(target_idx) = num_str.trim().parse::<usize>() {
@@ -2428,6 +2460,25 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
         let leftover_words = name_words_count(&name_lower).saturating_sub(name_words_count(&prop_lower));
         let penalty = (leftover_words as f32) * 15.0;
         return Some((500.0 - penalty).max(300.0));
+    }
+
+    // Correspondance dédiée pour les éléments multimédia (vidéo / audio / play)
+    if elem.is_media {
+        let is_media_query = prop_lower.contains("video")
+            || prop_lower.contains("vidéo")
+            || prop_lower.contains("audio")
+            || prop_lower.contains("lecteur")
+            || prop_lower.contains("player")
+            || prop_lower.contains("play")
+            || prop_lower.contains("lecture")
+            || prop_lower.contains("jouer")
+            || prop_lower.contains("lancer")
+            || prop_lower.contains("regarder")
+            || prop_lower.contains("ecouter")
+            || prop_lower.contains("écouter");
+        if is_media_query {
+            return Some(540.0);
+        }
     }
 
     // Correspondance dédiée pour les icônes de croix / fermeture
@@ -2661,7 +2712,7 @@ fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option
             }
 
             let word_count = elem.name.split_whitespace().count();
-            if is_target_short && (word_count > 12 || elem.name.len() > 90) {
+            if !elem.is_media && is_target_short && (word_count > 12 || elem.name.len() > 90) {
                 return None;
             }
 
@@ -2669,6 +2720,8 @@ fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option
                 let mut final_score = score + chrome_bias;
                 if elem.is_tab {
                     final_score += 80.0;
+                } else if elem.is_media {
+                    final_score += 75.0;
                 } else if elem.is_option {
                     final_score += 65.0;
                 } else if elem.is_link {
@@ -2709,7 +2762,7 @@ fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) ->
         .filter_map(|elem| {
             // Un bouton ne peut pas être un paragraphe explicatif
             let word_count = elem.name.split_whitespace().count();
-            if word_count > 15 || elem.name.len() > 120 {
+            if !elem.is_media && (word_count > 15 || elem.name.len() > 120) {
                 return None;
             }
             let mut chrome_bias = 0.0f32;
@@ -2727,7 +2780,7 @@ fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) ->
 
             score_element(elem, target).map(|score| {
                 let mut final_score = score + chrome_bias;
-                if elem.is_button || elem.is_tabindex {
+                if elem.is_button || elem.is_tabindex || elem.is_media {
                     final_score += 100.0;
                 } else if elem.pattern.is_some() {
                     final_score += 40.0;
@@ -2737,7 +2790,7 @@ fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) ->
                 if elem.is_web_content {
                     final_score += 40.0;
                 }
-                if elem.area > 150_000 {
+                if elem.area > 150_000 && !elem.is_media {
                     final_score -= 100.0;
                 }
                 (final_score, elem)
@@ -3018,6 +3071,7 @@ fn score_enriched_button(text: &str) -> f32 {
         "suivant", "ajouter", "soumettre", "submit", "acheter", "terminer", "accepter",
         "activer", "autoriser", "fermer", "plus tard", "refuser", "bloquer", "croix", "close", "dismiss",
         "non merci", "ne plus afficher", "ignorer", "pas maintenant",
+        "play", "lecture", "jouer", "pause", "vidéo", "video", "audio", "écouter", "regarder",
     ];
 
     for &kw in HIGH_VALUE_BUTTONS {
@@ -3308,6 +3362,37 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             }
         }
 
+        // A ter. Lecteurs vidéo et audio interactables
+        let media_fields: Vec<&UiaElementInfo> = elements.iter()
+            .filter(|e| (!has_web_doc || e.is_web_content) && e.is_media)
+            .collect();
+        if !media_fields.is_empty() {
+            let prefix = if has_web_doc {
+                "  [Page web - lecteurs vidéo / audio interactables (cliquer pour jouer)] :\n"
+            } else {
+                "  [Lecteurs vidéo / audio interactables (cliquer pour jouer)] :\n"
+            };
+            active_window_content.push_str(prefix);
+            for m in media_fields.iter().take(10) {
+                let tag = if m.aria_role == "audio" || m.name.to_lowercase().contains("audio") || m.localized_type.contains("audio") {
+                    "[audio]"
+                } else {
+                    "[video]"
+                };
+                let mut label = if !m.name.is_empty() {
+                    m.name.clone()
+                } else if !m.primary_class.is_empty() {
+                    format!(".{}", m.primary_class)
+                } else {
+                    "Média".to_string()
+                };
+                if !m.aria_indications.is_empty() {
+                    label.push_str(&format!(" ({})", m.aria_indications));
+                }
+                active_window_content.push_str(&format!("  • {} {}\n", tag, label));
+            }
+        }
+
         // B. Titres et en-têtes de sections
         let mut headings: Vec<String> = elements
             .iter()
@@ -3426,6 +3511,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                     && (!e.name.is_empty() || !e.help_text.is_empty() || !e.automation_id.is_empty() || !e.primary_class.is_empty() || !e.data_attributes.is_empty())
                     && (e.is_button
                         || e.is_tabindex
+                        || e.is_media
                         || e.pattern.is_some()
                         || e.localized_type.contains("bouton")
                         || e.localized_type.contains("button")
