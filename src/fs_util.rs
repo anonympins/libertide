@@ -98,6 +98,19 @@ pub fn write_env_var_to_file(file_path: &str, key: &str, value: &str) -> std::io
 #[cfg(windows)]
 pub fn open_path_with_default_app(path: &str) -> Result<(), String> {
     let p = std::path::Path::new(path);
+    let trimmed = path.trim();
+
+    // Gestion directe des URIs Windows (ex: ms-settings:sound) sans invite de commande
+    if trimmed.starts_with("ms-settings:") {
+        let explorer_path = r"C:\Windows\explorer.exe";
+        let status = std::process::Command::new(explorer_path)
+            .arg(trimmed)
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .map_err(|e| format!("Erreur lors du lancement de explorer.exe : {e}"))?;
+        return if status.success() { Ok(()) } else { Err("Code retour non nul".into()) };
+    }
+
     let resolved = if p.exists() {
         p.to_path_buf()
     } else if let Some((found, _)) = find_file_in_workspace(path) {

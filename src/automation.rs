@@ -24,12 +24,13 @@ use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPRO
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationElement2, IUIAutomationInvokePattern,
-    IUIAutomationScrollItemPattern, IUIAutomationScrollPattern, IUIAutomationTextPattern, IUIAutomationValuePattern,
+    IUIAutomationRangeValuePattern, IUIAutomationScrollItemPattern, IUIAutomationScrollPattern, IUIAutomationTextPattern,
+    IUIAutomationTogglePattern, IUIAutomationValuePattern,
     TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_ComboBoxControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
-    UIA_ListControlTypeId,
+    UIA_CheckBoxControlTypeId, UIA_ListControlTypeId, UIA_RadioButtonControlTypeId, UIA_SliderControlTypeId,
     UIA_TabControlTypeId, UIA_TabItemControlTypeId,
-    UIA_HyperlinkControlTypeId, UIA_InvokePatternId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
-    UIA_TextPatternId, UIA_ValuePatternId,
+    UIA_HyperlinkControlTypeId, UIA_InvokePatternId, UIA_RangeValuePatternId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
+    UIA_TextPatternId, UIA_TogglePatternId, UIA_ValuePatternId,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -70,7 +71,7 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
     let elements = list_interactive_elements(active_hwnd);
     elements
         .into_iter()
-        .filter(|e| !e.is_offscreen && (e.is_button || e.is_link || e.is_tab || e.is_edit_or_textarea || e.is_tabindex || e.is_media))
+        .filter(|e| !e.is_offscreen && (e.is_button || e.is_link || e.is_tab || e.is_edit_or_textarea || e.is_tabindex || e.is_media || e.is_slider || e.is_toggle))
         .take(30)
         .enumerate()
         .map(|(i, e)| NumberedElementTarget {
@@ -1384,6 +1385,8 @@ struct UiaElementInfo {
     is_select: bool,
     is_option: bool,
     is_media: bool,
+    is_slider: bool,
+    is_toggle: bool,
     is_button: bool,
     is_link: bool,
     is_tab: bool,
@@ -1709,7 +1712,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
             false
         };
 
-        let count = elements.Length().unwrap_or(0).clamp(0, 250);
+        let count = elements.Length().unwrap_or(0).clamp(0, 450);
 
         // Délimitation géométrique du document web par rapport à la fenêtre
         let mut doc_rect: Option<RECT> = None;
@@ -1834,7 +1837,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let (aria_label_opt, aria_desc_opt, indications_vec) = extract_aria_details(&aria_properties);
                     let aria_label = aria_label_opt.unwrap_or_default();
                     let aria_description = aria_desc_opt.unwrap_or_default();
-                    let aria_indications = indications_vec.join(", ");
+                    let mut aria_indications = indications_vec.join(", ");
 
                     let is_root_web_area = class_name.contains("rootwebarea")
                         || loc_type.contains("rootwebarea")
@@ -1843,7 +1846,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         continue;
                     }
 
-                    let value_text = item
+                    let mut value_text = item
                         .GetCurrentPattern(UIA_ValuePatternId)
                         .ok()
                         .and_then(|p| p.cast::<IUIAutomationValuePattern>().ok())
@@ -1851,6 +1854,33 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         .map(|b| b.to_string())
                         .unwrap_or_default()
                         .trim().to_string();
+
+                    if value_text.is_empty() {
+                        if let Ok(p) = item.GetCurrentPattern(UIA_RangeValuePatternId) {
+                            if let Ok(rvp) = p.cast::<IUIAutomationRangeValuePattern>() {
+                                if let Ok(val) = rvp.CurrentValue() {
+                                    value_text = format!("{:.0}", val);
+                                }
+                            }
+                        }
+                    }
+
+                    if let Ok(p) = item.GetCurrentPattern(UIA_TogglePatternId) {
+                        if let Ok(tp) = p.cast::<IUIAutomationTogglePattern>() {
+                            if let Ok(st) = tp.CurrentToggleState() {
+                                let st_str = match st.0 {
+                                    0 => "désactivé",
+                                    1 => "activé",
+                                    _ => "indéterminé",
+                                };
+                                if !aria_indications.is_empty() {
+                                    aria_indications.push_str(&format!(", état: {st_str}"));
+                                } else {
+                                    aria_indications = format!("état: {st_str}");
+                                }
+                            }
+                        }
+                    }
                     let is_focusable = item.CurrentIsKeyboardFocusable().map(|b| b.as_bool()).unwrap_or(false);
 
                     let is_explicit_textarea = class_name.contains("textarea")
@@ -1885,6 +1915,18 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || class_name.contains("select")
                         || class_name.contains("combobox")
                         || automation_id.to_lowercase().contains("select");
+
+                    let is_slider = ctype == UIA_SliderControlTypeId
+                        || loc_type.contains("curseur")
+                        || loc_type.contains("slider")
+                        || class_name.contains("slider");
+
+                    let is_toggle = ctype == UIA_CheckBoxControlTypeId
+                        || ctype == UIA_RadioButtonControlTypeId
+                        || loc_type.contains("case à cocher")
+                        || loc_type.contains("bascule")
+                        || loc_type.contains("toggle")
+                        || loc_type.contains("commutateur");
 
                     let is_option = ctype == windows::Win32::UI::Accessibility::UIA_ListItemControlTypeId
                         || aria_role == "option"
@@ -1952,6 +1994,8 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || has_button_data
                         || is_close_or_cross
                         || is_media
+                        || is_slider
+                        || is_toggle
                         || class_name.contains("button")
                         || class_name.contains("btn")
                         || automation_id.to_lowercase().contains("button")
@@ -2066,7 +2110,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
 
                     if name.is_empty() && aria_label.is_empty() && automation_id.is_empty() && help_text.is_empty() && value_text.is_empty()
                         && data_attrs.is_empty() && primary_class.is_empty()
-                        && !is_edit_or_textarea && !is_button && !is_link && !is_tab && !is_focusable && !is_tabindex && !is_media {
+                        && !is_edit_or_textarea && !is_button && !is_link && !is_tab && !is_focusable && !is_tabindex && !is_media && !is_slider && !is_toggle {
                         continue;
                     }
 
@@ -2099,6 +2143,8 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         is_select,
                         is_option,
                         is_media,
+                        is_slider,
+                        is_toggle,
                         is_button,
                         is_link,
                         is_tab,
@@ -2294,6 +2340,22 @@ pub fn run_system_command(command: &str) -> bool {
         return false;
     }
 
+    let lower = trimmed.to_lowercase();
+
+    // Interception des tentatives d'ouverture des paramètres son ou réglages Windows via console
+    if lower.contains("ms-settings:sound") || lower.contains("mmsys.cpl") {
+        const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
+        const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
+        send_hotkey(&[VK_LWIN], VK_A);
+        return true;
+    }
+    if lower.contains("ms-settings:") {
+        const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
+        const VK_I: VIRTUAL_KEY = VIRTUAL_KEY(0x49);
+        send_hotkey(&[VK_LWIN], VK_I);
+        return true;
+    }
+
     let mut process = std::process::Command::new("cmd.exe");
     process.creation_flags(CREATE_NEW_CONSOLE);
 
@@ -2311,6 +2373,12 @@ pub fn run_system_command(command: &str) -> bool {
         cur = cur[9..].trim();
     } else if cur.len() >= 6 && cur[..6].eq_ignore_ascii_case("start ") {
         cur = cur[6..].trim();
+    }
+
+    // Si la commande commence par explorer ou explorer.exe, la lancer avec son chemin complet sans console parasite
+    if cur.to_lowercase().starts_with("explorer.exe") || cur.to_lowercase().starts_with("explorer ") {
+        let _ = open_path_with_default_app(cur.strip_prefix("explorer.exe").or_else(|| cur.strip_prefix("explorer")).unwrap_or(cur).trim());
+        return true;
     }
 
     // 3. Maintien impératif de la console ouverte via /K au lieu de /C
@@ -3771,6 +3839,22 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                     label.push_str(&format!(" ({})", m.aria_indications));
                 }
                 active_window_content.push_str(&format!("  • {} {}\n", tag, label));
+            }
+        }
+
+        // A quater. Curseurs et sliders OS (ex: réglage du volume dans Paramètres)
+        let sliders: Vec<&UiaElementInfo> = elements.iter()
+            .filter(|e| (!has_web_doc || e.is_web_content) && e.is_slider && !e.name.is_empty())
+            .collect();
+        if !sliders.is_empty() {
+            active_window_content.push_str("  [Curseurs / Barres de réglage (Volume / Sliders)] :\n");
+            for s in sliders.iter().take(10) {
+                let val = if !s.value_text.is_empty() {
+                    format!(" (niveau actuel : {})", s.value_text)
+                } else {
+                    String::new()
+                };
+                active_window_content.push_str(&format!("  • [slider] {}{}\n", s.name, val));
             }
         }
 
@@ -5441,6 +5525,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 const VK_F5: VIRTUAL_KEY = VIRTUAL_KEY(0x74);
                 const VK_D: VIRTUAL_KEY = VIRTUAL_KEY(0x44);
                 const VK_L: VIRTUAL_KEY = VIRTUAL_KEY(0x4C);
+                const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
 
                 match shortcut.as_str() {
                     "magnifier_zoom_in" => send_hotkey(&[VK_LWIN], VK_OEM_PLUS),
@@ -5469,6 +5554,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     "open_search" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x53)),
                     "open_run" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x52)),
                     "open_settings" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x49)),
+                    "sound_settings" | "audio_settings" | "volume_mixer" => {
+                        // Win + A ouvre le panneau latéral rapide avec curseur de volume et sélection du périphérique audio
+                        send_hotkey(&[VK_LWIN], VK_A);
+                    }
                     "lock_screen" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x4C)),
                     "emoji_panel" => send_hotkey(&[VK_LWIN], VK_OEM_PERIOD),
                     "minimize_all" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x4D)),
