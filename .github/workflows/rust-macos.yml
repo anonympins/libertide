@@ -31,10 +31,6 @@ jobs:
         with:
           cache-targets: "true"
 
-      # Sécurité anti-panic ring 0.17.14 sur Apple Silicon : rétrogradation vers 0.17.13
-      - name: Ensure stable ring dependency
-        run: cargo update -p ring --precise 0.17.13
-
       - name: Run tests (release)
         run: cargo test --release
 
