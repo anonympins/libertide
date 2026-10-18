@@ -88,7 +88,7 @@ impl WhisperEngine {
         }
 
         let max_abs = samples_16k.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        if max_abs < 0.005 {
+        if max_abs < 0.012 {
             return Ok(String::new());
         }
 
@@ -433,13 +433,14 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
 
             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Listening));
             let mut resampler = ContinuousResampler::new(sample_rate, channels, 16000);
-            let mut audio_16k_buffer: Vec<f32> = Vec::with_capacity(16000 * 10);
+            let mut audio_16k_buffer: Vec<f32> = Vec::with_capacity(16000 * 40);
             let mut speech_detected = false;
             let mut last_speech_time = Instant::now();
             let mut start_recording_time = Instant::now();
-            const SPEECH_ENERGY_THRESHOLD: f32 = 0.0035;
-            const PRE_ROLL_SAMPLES: usize = 4800; // 300 ms à 16 kHz
-            const MAX_RECORDING_DURATION: Duration = Duration::from_secs(25);
+            // Seuil d'énergie calibré pour filtrer les souffles et le bruit de fond
+            const SPEECH_ENERGY_THRESHOLD: f32 = 0.012;
+            const PRE_ROLL_SAMPLES: usize = 8000; // 500 ms à 16 kHz pour sécuriser l'attaque
+            const MAX_RECORDING_DURATION: Duration = Duration::from_secs(40);
 
             let is_listening = true;
             while is_listening {
@@ -460,8 +461,8 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                     let sum_sq: f32 = new_16k.iter().map(|&s| s * s).sum();
                     let rms = (sum_sq / new_16k.len() as f32).sqrt();
 
-                    let mic_level = if rms > 0.001 {
-                        ((rms - 0.001) * 20.0).clamp(0.0, 1.0)
+                    let mic_level = if rms > 0.004 {
+                        ((rms - 0.004) * 16.0).clamp(0.0, 1.0)
                     } else {
                         0.0
                     };
@@ -481,7 +482,7 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                     if speech_detected {
                         audio_16k_buffer.extend_from_slice(&new_16k);
                     } else {
-                        // Pré-tampon de 300 ms pour conserver le début de phrase
+                        // Pré-tampon de 500 ms pour conserver le début de phrase
                         audio_16k_buffer.extend_from_slice(&new_16k);
                         if audio_16k_buffer.len() > PRE_ROLL_SAMPLES {
                             let overflow = audio_16k_buffer.len() - PRE_ROLL_SAMPLES;
@@ -496,12 +497,12 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
 
                     let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::Relaxed);
                     let silence_timeout = if is_dictation {
-                        Duration::from_millis(1600)
+                        Duration::from_millis(3200)
                     } else {
-                        Duration::from_millis(1100)
+                        Duration::from_millis(2400)
                     };
 
-                    if (silence_elapsed >= silence_timeout && audio_16k_buffer.len() >= 8000)
+                    if (silence_elapsed >= silence_timeout && audio_16k_buffer.len() >= 12000)
                         || total_elapsed >= MAX_RECORDING_DURATION
                     {
                         crate::set_mic_audio_level(0.0);
