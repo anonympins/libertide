@@ -1166,6 +1166,9 @@ impl eframe::App for OverlayApp {
                     }
                 }
                 AgentEvent::ReplaceNarration { text, quick_suggestions } => {
+                    if text.trim().is_empty() && quick_suggestions.is_empty() {
+                        continue;
+                    }
                     if !sanitize_for_tts(&text).trim().is_empty() {
                         self.status = AgentStatus::Speaking;
                     }
@@ -1208,6 +1211,13 @@ impl eframe::App for OverlayApp {
                     self.stop_speaking();
 
                     let norm_prompt = normalize_for_command_match(&prompt);
+                    if norm_prompt.trim().is_empty() {
+                        println!("[Voice] Bruit parasite ignoré (aucun mot détecté) : aucune requête LLM.");
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx);
+                        }
+                        return;
+                    }
 
                     // Changement de voix à la voix
                     if norm_prompt.contains("voix suivante") || norm_prompt.contains("autre voix") || norm_prompt.contains("change de voix") || norm_prompt.contains("changer voix") || norm_prompt.contains("changer de voix") {
@@ -3022,7 +3032,7 @@ fn resolve_initial_voice() -> VoiceGender {
 fn parse_agent_response(raw: &str) -> AgentResponsePayload {
     let clean = raw.trim();
 
-    if clean.eq_ignore_ascii_case("invalid_request") {
+    if clean.is_empty() || clean.eq_ignore_ascii_case("invalid_request") {
         return AgentResponsePayload {
             narration: String::new(),
             actions: Vec::new(),
@@ -3054,7 +3064,16 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
     };
 
     // 1. Désérialisation directe
-    if let Ok(payload) = serde_json::from_str::<AgentResponsePayload>(unquoted) {
+    if let Ok(mut payload) = serde_json::from_str::<AgentResponsePayload>(unquoted) {
+        if payload.narration.trim().is_empty() && payload.actions.is_empty() {
+            return AgentResponsePayload {
+                narration: String::new(),
+                actions: Vec::new(),
+                quick_suggestions: Vec::new(),
+                invalid_request: true,
+                next_passes: None,
+            };
+        }
         return payload;
     }
 
@@ -3063,6 +3082,15 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
         if start <= end {
             let json_candidate = &unquoted[start..=end];
             if let Ok(payload) = serde_json::from_str::<AgentResponsePayload>(json_candidate) {
+                if payload.narration.trim().is_empty() && payload.actions.is_empty() {
+                    return AgentResponsePayload {
+                        narration: String::new(),
+                        actions: Vec::new(),
+                        quick_suggestions: Vec::new(),
+                        invalid_request: true,
+                        next_passes: None,
+                    };
+                }
                 return payload;
             }
 
@@ -3105,6 +3133,15 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
                 }
 
                 if !narration.is_empty() || !actions.is_empty() || invalid_request || next_passes.is_some() {
+                    if narration.trim().is_empty() && actions.is_empty() {
+                        return AgentResponsePayload {
+                            narration: String::new(),
+                            actions: Vec::new(),
+                            quick_suggestions: Vec::new(),
+                            invalid_request: true,
+                            next_passes: None,
+                        };
+                    }
                     return AgentResponsePayload {
                         narration,
                         actions,
@@ -3527,6 +3564,13 @@ async fn call_llm_prompt(
         return;
     }
 
+    // Si la consigne est vide ou composée uniquement de bruits/symboles parasites, ne pas solliciter le LLM
+    if user_instruction.trim().is_empty() || !user_instruction.chars().any(|c| c.is_alphanumeric()) {
+        println!("[LLM] Instruction vide ou bruit parasite ignoré, aucune requête LLM envoyée.");
+        let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+        return;
+    }
+
     AGENT_BUSY.store(true, Ordering::SeqCst);
     let _busy_guard = BusyGuard;
     let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
@@ -3753,8 +3797,11 @@ async fn call_llm_prompt(
             println!("[Agent] Quota de raisonnement mis à jour via next_passes : {max_agent_passes} passe(s) max");
         }
 
-        if payload.invalid_request || payload.narration.trim().eq_ignore_ascii_case("invalid_request") {
-            println!("[Agent] Requête incomplète ou incomprise : mode silencieux activé (aucun affichage ni TTS).");
+        if payload.invalid_request
+            || payload.narration.trim().eq_ignore_ascii_case("invalid_request")
+            || (payload.narration.trim().is_empty() && payload.actions.is_empty())
+        {
+            println!("[Agent] Requête incomplète, bruit parasite ou incomprise (narration vide sans action) : mode silencieux activé (aucun affichage, TTS ni requête LLM supplémentaire).");
             history.lock().await.pop();
             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
             let _ = event_tx.send(AgentEvent::RequestIgnored);
@@ -4044,6 +4091,11 @@ fn main() -> eframe::Result<()> {
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     AgentCommand::Prompt(prompt) => {
+                        if prompt.trim().is_empty() || !prompt.chars().any(|c| c.is_alphanumeric()) {
+                            println!("[Agent] Commande vide ignorée (bruit parasite), aucune requête LLM.");
+                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                            continue;
+                        }
                         let request_id = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst) + 1;
                         if let Some(handle) = current_task.take() {
                             handle.abort();

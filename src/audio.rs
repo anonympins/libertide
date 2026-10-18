@@ -520,7 +520,7 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                         };
 
                         match transcribe_res {
-                            Ok(text) if !text.trim().is_empty() => {
+                            Ok(text) if !text.trim().is_empty() && text.chars().any(|c| c.is_alphanumeric()) => {
                                 let _ = event_tx.send(AgentEvent::VoicePromptReady(text));
                                 break;
                             }
