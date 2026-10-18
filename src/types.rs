@@ -18,7 +18,6 @@ pub enum VoiceProfile {
     Paul,
     Sylvie,
     Jean,
-    Kokoro,
 }
 
 pub type VoiceGender = VoiceProfile;
@@ -34,7 +33,6 @@ impl VoiceProfile {
         Self::Paul,
         Self::Sylvie,
         Self::Jean,
-        Self::Kokoro,
     ];
 
     pub fn display_name(&self) -> &'static str {
@@ -45,7 +43,6 @@ impl VoiceProfile {
             Self::Paul => "Paul (Masculin posé)",
             Self::Sylvie => "Sylvie (Féminine canadienne)",
             Self::Jean => "Jean (Masculin dynamique)",
-            Self::Kokoro => "Kokoro (Neuronale IA - 82M)",
         }
     }
 
@@ -56,8 +53,7 @@ impl VoiceProfile {
             Self::Hortense => Self::Paul,
             Self::Paul => Self::Sylvie,
             Self::Sylvie => Self::Jean,
-            Self::Jean => Self::Kokoro,
-            Self::Kokoro => Self::Denise,
+            Self::Jean => Self::Denise,
         }
     }
 
@@ -69,7 +65,6 @@ impl VoiceProfile {
             Self::Paul => "paul",
             Self::Sylvie => "sylvie",
             Self::Jean => "jean",
-            Self::Kokoro => "kokoro",
         }
     }
 
@@ -81,7 +76,6 @@ impl VoiceProfile {
             "paul" => Some(Self::Paul),
             "sylvie" => Some(Self::Sylvie),
             "jean" => Some(Self::Jean),
-            "kokoro" => Some(Self::Kokoro),
             _ => None,
         }
     }
@@ -94,7 +88,6 @@ impl VoiceProfile {
             Self::Paul => "fr-FR-AlainNeural",
             Self::Sylvie => "fr-CA-SylvieNeural",
             Self::Jean => "fr-FR-JeanNeural",
-            Self::Kokoro => "fr-FR-DeniseNeural",
         }
     }
 }

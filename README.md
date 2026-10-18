@@ -119,7 +119,7 @@ Switches directly to text input inside whatever window currently has focus (text
 ### 4. ♿ Accessibility & System Voice Commands
 - **Targeting & Switch**: *"Show numbers"*, *"Badges"*, *"Badge 4"*, *"Activate switch access"*.
 - **Scale & Zoom**: *"Zoom in"*, *"Zoom out"*, *"Normal size"*, *"Reset zoom"*.
-- **Voice Profiles & Engines**: *"Denise voice"*, *"Henri voice"*, *"Hortense voice"*, *"Paul voice"*, *"Canadian French voice"*, *"Kokoro neural voice"*, *"Next voice"*.
+- **Voice Profiles & Engines**: *"Denise voice"*, *"Henri voice"*, *"Hortense voice"*, *"Paul voice"*, *"Canadian French voice"*, *"Next voice"*.
 - **Audio & Isolation**: *"Mute audio"* / *"Coupe le son"* (pauses third-party media players while preserving Libertide's voice feedback), *"Volume down"*, *"Volume up"*.
 - **Native Windows Accessibility Tools**: *"Magnifier"* (Win + `+`/`-`), *"Color filters"*, *"Accessibility settings"*, *"Clipboard history"*.
 
