@@ -52,6 +52,33 @@ pub fn sanitize_for_tts(text: &str) -> String {
             i += 1;
             continue;
         }
+        // Traitement de la macro [link="url"]label[/link] -> on conserve le label et on saute les balises
+        if c == '[' && i + 2 < chars.len() && chars[i + 1] == '/' {
+            let rem: String = chars[i..std::cmp::min(i + 10, chars.len())].iter().collect();
+            if rem.to_ascii_lowercase().starts_with("[/link") {
+                while i < chars.len() && chars[i] != ']' {
+                    i += 1;
+                }
+                if i < chars.len() && chars[i] == ']' {
+                    i += 1;
+                }
+                result.push(' ');
+                continue;
+            }
+        }
+        if c == '[' && i + 5 < chars.len() {
+            let prefix: String = chars[i..i + 5].iter().collect();
+            if prefix.eq_ignore_ascii_case("[link") && (chars[i + 5] == '=' || chars[i + 5] == ' ' || chars[i + 5] == ']') {
+                while i < chars.len() && chars[i] != ']' {
+                    i += 1;
+                }
+                if i < chars.len() && chars[i] == ']' {
+                    i += 1;
+                }
+                result.push(' ');
+                continue;
+            }
+        }
         // Traitement des liens Markdown [texte](url) -> on conserve le texte et on saute l'url
         if c == ']' && i + 1 < chars.len() && chars[i + 1] == '(' {
             i += 2;

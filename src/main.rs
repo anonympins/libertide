@@ -2193,6 +2193,21 @@ impl eframe::App for OverlayApp {
                                                 }
                                             };
 
+                                            let has_interactive_md = (entry.text.contains('[') && entry.text.contains("]("))
+                                                || entry.text.contains("[link")
+                                                || entry.text.contains("[/link]")
+                                                || entry.text.contains("```")
+                                                || entry.text.contains("▶ ")
+                                                || entry.text.contains("🎬 ")
+                                                || entry.text.contains("🎵 ")
+                                                || entry.text.contains("📄 ")
+                                                || entry.text.contains("🖼");
+
+                                            if entry.role == ChatRole::Agent && has_interactive_md {
+                                                if let Some(prompt) = floating_window::render_markdown(ui, &entry.text, &format!("chat_entry_{idx}")) {
+                                                    clicked_quick_suggestion = Some(prompt);
+                                                }
+                                            } else {
                                             let mut rich = egui::RichText::new(&entry.text)
                                                 .size(text_size)
                                                 .line_height(Some(line_height))
@@ -2240,6 +2255,7 @@ impl eframe::App for OverlayApp {
                                                     ui.close();
                                                 }
                                             });
+                                            }
 
                                             // Boutons-onglets pour les suggestions rapides
                                             if !entry.quick_suggestions.is_empty() {
@@ -3335,10 +3351,10 @@ Règles principales :
    - Dès que l'utilisateur souhaite résumer ou analyser une page web, un document ou un ensemble d'informations à l'écran :
      * Analyse minutieusement le texte, titres et points clés de la page.
      * Projette SYSTÉMATIQUEMENT une fenêtre volante au format Markdown via l'action "show_floating_card" :
-       card_type: "markdown", id: "resume_page", title: "Résumé : <Titre de la page/sujet>", data: {{"text": "# Titre\n\n## Points clés\n- **Point 1** : ...\n- **Point 2** : ...\n\n> Conclusion/Synthèse..."}}.
-     * LIENS D'ACTION CLICQUABLES : Dans le texte Markdown, insère systématiquement des liens d'action interactifs sous la forme `Libellé explicite de l'action` (ex: `👉 Réserver ce vol à 84€`, `🔍 Afficher les détails`). Un clic de l'utilisateur sur le lien déclenche directement l'action auprès de l'agent.
+       card_type: "markdown", id: "resume_page", title: "Résumé : <Titre de la page/sujet>", data: {{"text": "# SLICE Docus — Synthèse de la chaîne\n\n## Identité\n- **Chaîne** : @SliceDocus — **56,4 k abonnés**, **875 vidéos**.\n\n## Vidéos récentes / populaires\n- ▶ La guerre des satellites qui redessine notre monde (2,7 k vues, il y a 20 h)\n- ▶ Galea: les trésors engloutis de Venise (5 k vues, il y a 3 j)\n- ▶ Bio-invasion | Fourmis de feu (95 k vues, il y a 7 j)\n\n## À retenir\n- Formats longs de 34 à 55 min...\n\n> Cliquez sur une vidéo ci-dessus pour la lancer."}}.
+     * LIENS D'ACTION & VIDÉOS CLIQUABLES : Dans le texte Markdown et la narration, insère systématiquement des liens cliquables via la macro `[link="action:consigne_ou_url"]Icône Libellé[/link]` (ou en Markdown `Icône Libellé`). Un clic sur le lien ouvre l'URL ou envoie immédiatement la consigne à l'agent.
      * Dans ta "narration" vocale : sois très concis (1 à 2 phrases) pour confirmer oralement que la synthèse est projetée dans la fenêtre volante.
-     * Fournis des suggestions rapides utiles dans "quick_suggestions" (ex: ["Copier le résumé", "Fermer le résumé", "Détail du point 1"]).
+     * Fournis des suggestions rapides utiles dans "quick_suggestions" (ex: ["Lancer la vidéo 1", "Lancer la vidéo 2", "Fermer le résumé"]).
 4. Interface & Ciblage :
    - Hôte navigateur : préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse").
    - Contenu web : libellé direct sans préfixe issu de "[Page web - ...]".
@@ -3353,6 +3369,18 @@ Règles principales :
    - Raccourcis clavier & touches : utilise OBLIGATOIREMENT "accessibility_shortcut" avec le nom ou la combinaison de touches exacte (ex: "ctrl+shift+b" pour la barre des favoris, "ctrl+t", "enter", "close_tab", "copy", "undo"). Ne JAMAIS envoyer "run_command" pour simuler des touches ou raccourcis !
    - Lecture code/fichier : "read_editor_content" (focalise et extrait Ctrl+A/Ctrl+C).
    - Onglet/page : "accessibility_shortcut": "close_tab" (jamais "close_app" pour un onglet).
+4bis. RÈGLES DE LIENS INTERACTIFS & MACRO [link="cible"]label[/link] (CHAT & FENÊTRES VOLANTES) :
+   - RÈGLE D'OR : Tout élément multimédia, ressource, fichier, page web, action ou suggestion mentionné dans "narration" ou dans une fenêtre volante ("show_floating_card") DOIT IMPÉRATIVEMENT être formaté sous forme de lien cliquable, prioritairement avec la macro robuste `[link="cible"]Icône Libellé[/link]` (ou en Markdown `Icône Libellé`).
+   - AVANTAGE MAJEUR DE LA MACRO `[link="..."]...[/link]` : Elle évite tout conflit de parenthèses imbriquées dans les requêtes et les URLs complexes.
+   - RÉACTIVITÉ DANS LE CHAT LIBERTIDE : Un clic sur un lien dans le chat ou dans une carte volante insère et envoie automatiquement la consigne dans le chat et déclenche l'exécution par l'agent. La synthèse vocale (TTS) prononce uniquement le libellé sans lire la cible technique ni les balises.
+   - TYPOLOGIE DES MACROS OBLIGATOIRES :
+     * Vidéos (YouTube, streaming) : `[link="action:Lancer la vidéo : Titre"]▶ Titre[/link]` ou `[link="https://..."]▶ Titre[/link]` (INTERDICTION d'énumérer des vidéos sans lien).
+     * Audio & Musique (Spotify, radios, podcasts) : `[link="action:Lancer l'audio : Titre"]🎵 Titre[/link]`.
+     * Images & Visuels : `[link="action:Ouvrir l'image : chemin_ou_titre"]🖼️ Titre[/link]`.
+     * Documents & PDF (tableurs, rapports, logs) : `[link="action:Ouvrir le fichier : nom.pdf"]📄 nom.pdf[/link]`.
+     * Liens Web & Articles : `[link="https://..."]🌐 Nom du site[/link]`.
+     * Actions & Clics système : `[link="action:Valider le panier"]⚡ Valider le panier[/link]`.
+     * Suggestions de choix : `[link="action:Consigne suggérée"]💡 Option recommandée[/link]`.
 5. Audio & Volume :
    - "focus_address_bar" pour cibler/sélectionner universellement la barre d'adresse du navigateur.
    - "mute_audio" coupe sons tiers sans altérer la voix Libertide (à utiliser en urgence ou demande mute).
@@ -3368,9 +3396,9 @@ Règles principales :
    - Immersion : "activate_immersion" (Win+Ctrl+D), "deactivate_immersion".
    - Temporisation & Différé : "schedule_prompt" (delay_seconds: 1..3600, prompt: "...") ou "schedule_prompts" (tasks: [{{"delay_seconds": 10, "prompt": "..."}}]) pour différer des consignes futures (téléchargement en cours, rappel, temporisation). "cancel_scheduled_tasks" pour annuler immédiatement toutes les commandes différées / timers en attente.
    - Fichiers & Documents : "open_file" (path: "chemin/fichier.ext") pour ouvrir directement toute image, vidéo, PDF, tableur ou document dans son application système par défaut (selon extension / MIME type).
-   - Fenêtres volantes d'analyse & formulaires de requête interactifs : "show_floating_card" (id: "...", title: "...", card_type: "form"|"table"|"stats"|"markdown", data: {{...}}) pour projeter une fenêtre volante avec un formulaire interactif de filtres/requête (inputs, jauges/sliders numériques, selectbox, radio, checkbox pour recherche personnalisée de vols, hôtels, shopping), un tableau comparatif, des données chiffrées ou une fiche technique. Pour "markdown", insère des liens cliquables `Action` pour permettre à l'utilisateur de piloter les choix ou actions directement depuis la fenêtre volante.
-   - Fermeture carte : "close_floating_card" (id: "...").
-8. Fin de passes : Dès que "actions" est vide (tâche finie ou choix requis), fournis OBLIGATOIREMENT 2 à 4 suggestions concrètes dans "quick_suggestions".
+   - Fenêtres volantes d'analyse & formulaires de requête interactifs : "show_floating_card" (id: "...", title: "...", card_type: "form"|"table"|"stats"|"markdown", data: {{...}}) pour projeter une fenêtre volante avec un formulaire interactif de filtres/requête (inputs, jauges/sliders numériques, selectbox, radio, checkbox pour recherche personnalisée de vols, hôtels, shopping), un tableau comparatif, des données chiffrées ou une fiche technique. Pour "markdown", insère des liens cliquables `[link="action:..."]⚡ Libellé[/link]` pour permettre à l'utilisateur de piloter les choix ou actions directement depuis la fenêtre volante.
+   - Fermeture carte : "close_floating_card" (id: "..."). Formate tous les choix, suggestions et références sous forme de liens cliquables cliquables au clic dans le chat.
+ 8. Fin de passes : Dès que "actions" est vide (tâche finie ou choix requis), fournis OBLIGATOIREMENT 2 à 4 suggestions concrètes dans "quick_suggestions".
 
 Format JSON obligatoire :
 {{
@@ -3408,8 +3436,8 @@ Format JSON obligatoire :
     {{"action": "open_file", "path": "chemin/vers/image_ou_doc.png"}},
     {{"action": "show_floating_card", "id": "stats_1", "title": "Tableau comparatif", "card_type": "table", "data": {{"headers": ["Modèle", "Prix"], "rows": [["Produit A", "49€"], ["Produit B", "59€"]]}}}},
     {{"action": "show_floating_card", "id": "vol_search", "title": "Filtres Billet d'Avion", "card_type": "form", "data": {{"submit_label": "Rechercher les vols", "prompt_prefix": "Recherche de vol avec les critères suivants :", "fields": [{{"id": "depart", "label": "Ville de départ", "type": "text", "value": "Paris"}}, {{"id": "destination", "label": "Destination", "type": "text", "value": "Tokyo"}}, {{"id": "prix_max", "label": "Budget maximum", "type": "number_slider", "min": 200, "max": 3000, "step": 50, "value": 900, "unit": "€"}}, {{"id": "classe", "label": "Classe", "type": "select", "options": ["Économique", "Premium", "Affaires"], "selected": "Économique"}}, {{"id": "direct", "label": "Vols directs seulement", "type": "checkbox", "checked": true}}, {{"id": "bagage", "label": "Bagages", "type": "radio", "options": ["Cabine seul", "1 bagage en soute", "2 bagages en soute"], "selected": "1 bagage en soute"}}]}}}},
-    {{"action": "show_floating_card", "id": "resume_page", "title": "Résumé de la page", "card_type": "markdown", "data": {{"text": "# Résumé\n- **Option 1** : ... -> 👉 Choisir\n- **Option 2** : ... -> 👉 Choisir"}}}},
-    {{"action": "close_floating_card", "id": "stats_1"}}
+    {{"action": "show_floating_card", "id": "resume_page", "title": "Résumé de la page", "card_type": "markdown", "data": {{"text": "# SLICE Docus — Synthèse\n## Vidéos populaires\n- [link=\"action:Lancer la vidéo : La guerre des satellites\"]▶ La guerre des satellites (2,7 k vues)[/link]\n- [link=\"action:Lancer la vidéo : Bio-invasion\"]▶ Bio-invasion (95 k vues)[/link]\n\n> Cliquez sur une vidéo pour la lancer."}}}},
+     {{"action": "close_floating_card", "id": "stats_1"}}
   ],
   "quick_suggestions": ["Option 1", "Option 2"]
 }}"###)
@@ -3873,8 +3901,9 @@ async fn call_llm_prompt(
                 - Pour lancer ou contrôler une vidéo ou un audio -> clique directement sur l'élément vidéo/audio ou son bouton de lecture ('play' / 'lecture').\n\
                 - Notification système (toast) -> lis son contenu dans ta narration et laisse-la tranquille (ne la ferme pas).\n\
                 - Alerte / modale d'erreur -> lis le message dans ta narration, puis clique impérativement sur 'OK' / 'Fermer' pour la refermer.\n\
-                - Fenêtre volante Markdown -> insère des liens interactifs cliquables 'Texte' pour permettre à l'utilisateur de déclencher des suites ou choix en un clic.\n\
-                - Mission approfondie (contact / produit / service) -> définis 'next_passes' (8 à 12), explore méthodiquement (local -> web -> annuaires) et projette les résultats dans 'show_floating_card'. Ne renvoie pas 'actions': [] tant que les résultats ne sont pas trouvés.\n\
+                - Fenêtre volante Markdown -> insère des liens cliquables [link=\"action:...\"]Texte[/link] pour permettre à l'utilisateur de déclencher des suites ou choix en un clic.\n\
+                - Liens interactifs -> Formate SYSTÉMATIQUEMENT vidéos, audios, images, PDF/fichiers et actions en liens cliquables via la macro [link=\"action:...\"]Icône Libellé[/link] ou [link=\"https://...\"]🌐 Web[/link]. Le clic envoie directement la commande dans le chat de Libertide.\n\
+                 - Mission approfondie (contact / produit / service) -> définis 'next_passes' (8 à 12), explore méthodiquement (local -> web -> annuaires) et projette les résultats dans 'show_floating_card'. Ne renvoie pas 'actions': [] tant que les résultats ne sont pas trouvés.\n\
                 - Échec/blocage -> pivote immédiatement vers une alternative (app, web, autre fenêtre). Ne renvoie JAMAIS 'actions': [] si l'objectif n'est pas achevé.\n\
                 - Tâche finie ou choix requis -> 'actions': [] + 2 à 4 'quick_suggestions'.",
                 safe_user_instruction

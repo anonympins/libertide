@@ -2,6 +2,8 @@ use eframe::egui;
 use eframe::egui::text::LayoutJob;
 use eframe::egui::TextFormat;
 use serde::{Deserialize, Serialize};
+use crate::automation::set_clipboard_text;
+use crate::{play_earcon, Earcon};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -334,6 +336,40 @@ impl FloatingCard {
                         if title_resp.dragged() {
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
                         }
+                        
+                        // Raccourcis et boutons de copie pour le contenu Markdown
+                        if let FloatingContentType::Markdown { ref text } = self.content {
+                            let copy_all = ui.input(|i| {
+                                (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C)
+                            });
+                            let select_all = ui.input(|i| {
+                                (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::A)
+                            });
+
+                            if select_all || copy_all {
+                                set_clipboard_text(text);
+                                ui.ctx().copy_text(text.clone());
+                                play_earcon(Earcon::Success);
+                            }
+
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.add_space(8.0);
+                                let copy_btn = ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new("📋 Copier tout")
+                                            .size(10.5)
+                                            .color(egui::Color32::from_rgb(180, 220, 255)),
+                                    )
+                                    .small()
+                                    .corner_radius(egui::CornerRadius::same(4)),
+                                );
+                                if copy_btn.on_hover_text("Copier tout le contenu (Ctrl+A / Ctrl+C)").clicked() {
+                                    set_clipboard_text(text);
+                                    ui.ctx().copy_text(text.clone());
+                                    play_earcon(Earcon::Success);
+                                }
+                            });
+                        }
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button(
@@ -358,7 +394,7 @@ impl FloatingCard {
                     let card_title = self.title.clone();
                     let mut close_window = false;
 
-                    egui::ScrollArea::both()
+                    egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             match &mut self.content {
@@ -402,6 +438,27 @@ impl FloatingCard {
                                     });
                                 }
                                 FloatingContentType::Markdown { text } => {
+                                    // Permet le clic droit pour copier l'ensemble du Markdown
+                                    let full_rect = ui.available_rect_before_wrap();
+                                    let bg_resp = ui.interact(full_rect, ui.id().with("md_bg_context"), egui::Sense::click());
+                                    bg_resp.context_menu(|ui| {
+                                        if ui.button("📋 Tout copier (Ctrl+C / Ctrl+A)").clicked() {
+                                            set_clipboard_text(text);
+                                            ui.ctx().copy_text(text.clone());
+                                            play_earcon(Earcon::Success);
+                                            ui.close();
+                                        }
+                                    });
+
+                                    let select_or_copy = ui.input(|i| {
+                                        (i.modifiers.ctrl || i.modifiers.command) && (i.key_pressed(egui::Key::C) || i.key_pressed(egui::Key::A))
+                                    });
+                                    if select_or_copy && (bg_resp.hovered() || ui.rect_contains_pointer(full_rect)) {
+                                        set_clipboard_text(text);
+                                        ui.ctx().copy_text(text.clone());
+                                        play_earcon(Earcon::Success);
+                                    }
+
                                     if let Some(prompt) = render_markdown(ui, text, &card_id) {
                                         submitted_prompt = Some(prompt);
                                     }
@@ -700,7 +757,76 @@ fn parse_inline_markdown(line: &str) -> Vec<InlineSpan<'_>> {
                     continue;
                 }
             }
+        } else if line[i..].starts_with("http://") || line[i..].starts_with("https://") {
+            // Détection automatique des URLs brutes
+            let end = line[i..]
+                .find(|c: char| c.is_whitespace() || c == ')' || c == ']' || c == '>')
+                .map(|p| i + p)
+                .unwrap_or(len);
+            if i > plain_start {
+                spans.push(InlineSpan {
+                    text: &line[plain_start..i],
+                    style: InlineStyle::Normal,
+                    target: None,
+                });
+            }
+            let url_slice = &line[i..end];
+            spans.push(InlineSpan {
+                text: url_slice,
+                style: InlineStyle::Link,
+                target: Some(url_slice),
+            });
+            i = end;
+            plain_start = i;
+            continue;
         } else if bytes[i] == b'[' {
+            // Détection et parsing de la macro [link="url"]label[/link]
+            let remaining = &line[i..];
+            let rem_lower = remaining.to_ascii_lowercase();
+            if rem_lower.starts_with("[link=") || rem_lower.starts_with("[link ") {
+                if let Some(open_tag_end) = remaining.find(']') {
+                    let open_tag_content = &remaining[..open_tag_end];
+                    let target_val = if let Some(eq_pos) = open_tag_content.find('=') {
+                        let after_eq = open_tag_content[eq_pos + 1..].trim();
+                        if let Some(quote) = after_eq.chars().next().filter(|&c| c == '"' || c == '\'') {
+                            let rest = &after_eq[quote.len_utf8()..];
+                            if let Some(end_q) = rest.find(quote) {
+                                Some(&rest[..end_q])
+                            } else {
+                                Some(rest.trim())
+                            }
+                        } else {
+                            let end_val = after_eq
+                                .find(|c: char| c.is_whitespace() || c == ']')
+                                .unwrap_or(after_eq.len());
+                            Some(&after_eq[..end_val])
+                        }
+                    } else {
+                        None
+                    };
+
+                    let after_open = i + open_tag_end + 1;
+                    if let Some(close_pos) = line[after_open..].to_ascii_lowercase().find("[/link]") {
+                        if i > plain_start {
+                            spans.push(InlineSpan {
+                                text: &line[plain_start..i],
+                                style: InlineStyle::Normal,
+                                target: None,
+                            });
+                        }
+                        let link_text = &line[after_open..after_open + close_pos];
+                        spans.push(InlineSpan {
+                            text: link_text,
+                            style: InlineStyle::Link,
+                            target: target_val,
+                        });
+                        i = after_open + close_pos + "[/link]".len();
+                        plain_start = i;
+                        continue;
+                    }
+                }
+            }
+
             if let Some(bracket_end) = line[i + 1..].find(']') {
                 let mut after_bracket = i + 1 + bracket_end + 1;
                 while after_bracket < len && (bytes[after_bracket] == b' ' || bytes[after_bracket] == b'\t') {
@@ -823,9 +949,41 @@ fn extract_action_prompt(target: &str) -> Option<String> {
     if t.is_empty() {
         return None;
     }
-    let lower = t.to_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:") {
+    let clean = t.trim_start_matches('<').trim_end_matches('>').trim_matches('"').trim_matches('\'').trim();
+    let lower = clean.to_lowercase();
+    if lower.starts_with("mailto:") {
         return None;
+    }
+    
+    // Si c'est un libellé préfixé par un symbole vidéo
+    if clean.starts_with('▶') || clean.starts_with("🎬") || lower.starts_with("voir :") || lower.starts_with("voir:") {
+        let clean_video_title = clean.trim_start_matches(['▶', '🎬', ' ']).trim();
+        return Some(format!("Lancer la vidéo ou chercher : {clean_video_title}"));
+    }
+
+    if clean.starts_with('🎵') || clean.starts_with("🎙") || clean.starts_with("📻") || lower.starts_with("audio:") || lower.starts_with("ecouter:") || lower.starts_with("écouter:") {
+        let clean_audio_title = clean.trim_start_matches(['🎵', '🎙', '📻', ' ']).trim();
+        return Some(format!("Lancer l'audio ou écouter : {clean_audio_title}"));
+    }
+
+    if clean.starts_with('📄') || lower.starts_with("doc:") || lower.starts_with("file:") || lower.starts_with("pdf:") {
+        let clean_file_path = clean.trim_start_matches(['📄', ' ']).trim();
+        return Some(format!("Ouvrir le fichier {clean_file_path}"));
+    }
+
+    if clean.starts_with('🖼') || lower.starts_with("image:") || lower.starts_with("img:") {
+        let clean_img_path = clean.trim_start_matches(['🖼', ' ']).trim();
+        return Some(format!("Ouvrir l'image {clean_img_path}"));
+    }
+
+    if lower.starts_with("file://") {
+        let path = clean.trim_start_matches("file://").trim_start_matches('/');
+        return Some(format!("Ouvrir le fichier {path}"));
+    }
+
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        let url_clean = clean.split_whitespace().next().unwrap_or(clean);
+        return Some(format!("Navigue vers {url_clean}"));
     }
 
     let prompt_raw = if let Some(rest) = t.strip_prefix("action:") {
@@ -858,9 +1016,14 @@ fn handle_link_click(ctx: &egui::Context, target: &str, fallback_text: &str) -> 
     if let Some(prompt) = extract_action_prompt(t) {
         return Some(prompt);
     }
-    if t.starts_with("http://") || t.starts_with("https://") {
-        ctx.open_url(egui::OpenUrl::new_tab(t));
-        return None;
+    let clean = t.trim_start_matches('<').trim_end_matches('>').trim_matches('"').trim_matches('\'').trim();
+    if clean.starts_with("http://") || clean.starts_with("https://") {
+        let url_clean = clean.split_whitespace().next().unwrap_or(clean);
+        return Some(format!("Navigue vers {url_clean}"));
+    }
+    if clean.starts_with("mailto:") {
+        let _ = ctx.open_url(egui::OpenUrl::new_tab(clean));
+        return Some(format!("Écris un email à {}", clean.trim_start_matches("mailto:")));
     }
     let fallback_clean = fallback_text.trim();
     if !fallback_clean.is_empty() {
@@ -883,7 +1046,7 @@ fn render_line_spans(
     if !has_links {
         let avail = ui.available_width().max(40.0);
         let job = create_layout_job(line, base_size, avail, force_italic, base_color);
-        ui.label(job);
+        ui.add(egui::Label::new(job).wrap());
         return None;
     }
 
@@ -904,8 +1067,13 @@ fn render_line_spans(
                 let target = span.target.unwrap_or(clean_text);
 
                 let is_action = extract_action_prompt(target).is_some();
-                let icon = if is_action { "⚡ " } else { "🔗 " };
-                let display_label = format!("{icon}{clean_text}");
+                let has_icon = clean_text.starts_with(|c: char| !c.is_alphanumeric() && c != '[' && c != '(');
+                let display_label = if has_icon {
+                    clean_text.to_string()
+                } else {
+                    let icon = if is_action { "⚡ " } else { "🔗 " };
+                    format!("{icon}{clean_text}")
+                };
 
                 let (bg_color, stroke_color, text_color) = if is_action {
                     (
@@ -947,9 +1115,7 @@ fn render_line_spans(
                     continue;
                 }
                 for word in words {
-                    let avail = ui.available_width().max(40.0);
-                    let word_job = create_layout_job(word, base_size, avail, force_italic, base_color);
-                    ui.label(word_job);
+                    ui.add(egui::Label::new(egui::RichText::new(word).size(base_size).color(base_color)).wrap());
                 }
             }
         }
@@ -1003,18 +1169,21 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                     ui.separator();
                     ui.add_space(2.0);
 
-                    let mut code_job = LayoutJob::default();
-                    code_job.wrap.max_width = ui.available_width().max(40.0);
-                    let mut fmt = TextFormat::default();
-                    fmt.font_id = egui::FontId::monospace(11.5);
-                    fmt.color = egui::Color32::from_rgb(215, 230, 245);
-                    code_job.append(&full_code, 0.0, fmt);
-                    ui.label(code_job);
+                    egui::ScrollArea::horizontal()
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            let mut code_job = LayoutJob::default();
+                            code_job.wrap.max_width = f32::INFINITY;
+                            let mut fmt = TextFormat::default();
+                            fmt.font_id = egui::FontId::monospace(11.5);
+                            fmt.color = egui::Color32::from_rgb(215, 230, 245);
+                            code_job.append(&full_code, 0.0, fmt);
+                            ui.label(code_job);
+                        });
                 });
             ui.add_space(3.0);
             continue;
         }
-
         if trimmed == "---" || trimmed == "***" || trimmed == "___" {
             ui.add_space(4.0);
             ui.separator();
@@ -1161,6 +1330,72 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
 
         let indent_spaces = line.chars().take_while(|c| c.is_whitespace()).count();
         let indent_level = (indent_spaces / 2).min(4);
+
+        // Auto-génération de liens pour les vidéos et éléments multimédias commençant par ▶ ou 🎬
+        if (trimmed.starts_with("▶ ") || trimmed.starts_with("🎬 ")) && !trimmed.contains("](") && !trimmed.contains("[/link]") {
+            let video_title = trimmed.trim_start_matches(['▶', '🎬', ' ']).trim();
+            let prompt_target = format!("action:Lancer la vidéo : {video_title}");
+            ui.horizontal(|ui| {
+                if indent_level > 0 {
+                    ui.add_space(indent_level as f32 * 12.0);
+                }
+                let synthetic_link = format!("[▶ {video_title}]({prompt_target})");
+                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255)) {
+                    clicked_action = Some(act);
+                }
+            });
+            ui.add_space(2.0);
+            continue;
+        }
+
+        // Auto-génération de liens pour les fichiers audio, documents et images avec emojis
+        if (trimmed.starts_with("🎵 ") || trimmed.starts_with("🎙️ ") || trimmed.starts_with("📻 ")) && !trimmed.contains("](") && !trimmed.contains("[/link]") {
+            let audio_title = trimmed.trim_start_matches(['🎵', '🎙', '📻', ' ']).trim();
+            let prompt_target = format!("action:Lancer l'audio : {audio_title}");
+            ui.horizontal(|ui| {
+                if indent_level > 0 {
+                    ui.add_space(indent_level as f32 * 12.0);
+                }
+                let synthetic_link = format!("[🎵 {audio_title}]({prompt_target})");
+                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255)) {
+                    clicked_action = Some(act);
+                }
+            });
+            ui.add_space(2.0);
+            continue;
+        }
+
+        if trimmed.starts_with("📄 ") && !trimmed.contains("](") && !trimmed.contains("[/link]") {
+            let doc_title = trimmed.trim_start_matches(['📄', ' ']).trim();
+            let prompt_target = format!("action:Ouvrir le fichier : {doc_title}");
+            ui.horizontal(|ui| {
+                if indent_level > 0 {
+                    ui.add_space(indent_level as f32 * 12.0);
+                }
+                let synthetic_link = format!("[📄 {doc_title}]({prompt_target})");
+                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255)) {
+                    clicked_action = Some(act);
+                }
+            });
+            ui.add_space(2.0);
+            continue;
+        }
+
+        if trimmed.starts_with("🖼️ ") && !trimmed.contains("](") && !trimmed.contains("[/link]") {
+            let img_title = trimmed.trim_start_matches(['🖼', ' ']).trim();
+            let prompt_target = format!("action:Ouvrir l'image : {img_title}");
+            ui.horizontal(|ui| {
+                if indent_level > 0 {
+                    ui.add_space(indent_level as f32 * 12.0);
+                }
+                let synthetic_link = format!("[🖼️ {img_title}]({prompt_target})");
+                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255)) {
+                    clicked_action = Some(act);
+                }
+            });
+            ui.add_space(2.0);
+            continue;
+        }
 
         if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") || trimmed.starts_with("• ") {
             let item_content = &trimmed[2..].trim();
