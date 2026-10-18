@@ -3143,6 +3143,15 @@ async fn send_llm_chat_completion(
         }
         messages.extend_from_slice(messages_history);
 
+        let response_format = match config.provider {
+            LlmProvider::DeepSeek | LlmProvider::OpenAI | LlmProvider::Mistral | LlmProvider::Groq => {
+                Some(ChatResponseFormat {
+                    r#type: "json_object".to_string(),
+                })
+            }
+            _ => None,
+        };
+
         let req_payload = DeepSeekChatRequest {
             model: config.model.clone(),
             messages,
@@ -3150,6 +3159,7 @@ async fn send_llm_chat_completion(
             max_tokens,
             top_p: 1.0,
             stream: false,
+            response_format,
         };
 
         client
@@ -3519,7 +3529,7 @@ async fn call_llm_prompt(
         let (temperature, max_tokens) = if is_dictation {
             (0.3, 300)
         } else {
-            (1.0, 600)
+            (0.7, 1800)
         };
 
         let mut attempts = 0;
@@ -3844,6 +3854,7 @@ async fn call_llm_prompt(
 
             step_feedback.push_str(&format!(
                 "\n\n[Consigne étape] : Poursuis : \"{}\".\n\
+                - RÈGLE D'OR : Réponds STRICTEMENT et UNIQUEMENT avec un objet JSON valide (contenant \"narration\", \"next_passes\", \"actions\", \"quick_suggestions\"). Aucun texte libre ou markdown en dehors du JSON.\n\
                 - Bannière cookies -> clique automatiquement 'Tout accepter' / 'Accepter'.\n\
                 - Notification système (toast) -> lis son contenu dans ta narration et laisse-la tranquille (ne la ferme pas).\n\
                 - Alerte / modale d'erreur -> lis le message dans ta narration, puis clique impérativement sur 'OK' / 'Fermer' pour la refermer.\n\

@@ -614,6 +614,11 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ChatResponseFormat {
+    pub r#type: String,
+}
+
 #[derive(Serialize, Debug)]
 pub struct DeepSeekChatRequest {
     pub model: String,
@@ -622,6 +627,8 @@ pub struct DeepSeekChatRequest {
     pub max_tokens: u32,
     pub top_p: f32,
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ChatResponseFormat>,
 }
 
 #[derive(Deserialize, Debug)]
