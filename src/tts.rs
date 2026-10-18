@@ -683,6 +683,7 @@ pub fn spawn_tts_worker(event_tx: StdSender<AgentEvent>, initial_voice: VoiceGen
                         }
                         if was_interrupted {
                             break;
+                        }
                     }
 
                     if !was_interrupted {
