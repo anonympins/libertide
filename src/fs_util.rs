@@ -120,7 +120,20 @@ pub fn open_path_with_default_app(path: &str) -> Result<(), String> {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn open_path_with_default_app(path: &str) -> Result<(), String> {
+    let status = std::process::Command::new("open")
+        .arg(path)
+        .status()
+        .map_err(|e| format!("Erreur lors de l'ouverture du fichier : {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Code de retour non nul pour open '{path}'"))
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn open_path_with_default_app(path: &str) -> Result<(), String> {
     let status = std::process::Command::new("xdg-open")
         .arg(path)

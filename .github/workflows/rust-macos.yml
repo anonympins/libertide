@@ -1,0 +1,58 @@
+name: Build & Package macOS Executable
+
+on:
+  push:
+    branches: [ "main" ]
+    tags:
+      - "*"
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-macos:
+    name: Build & Package (macOS Apple Silicon)
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests (release)
+        run: cargo test --release
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Prepare distribution package
+        run: |
+          mkdir -p dist
+          cp target/release/libertide dist/libertide
+          [ -f README.md ] && cp README.md dist/
+          [ -f LICENSE ] && cp LICENSE dist/
+          tar -czvf libertide-macos-arm64.tar.gz -C dist .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libertide-macos-arm64
+          path: libertide-macos-arm64.tar.gz
+
+      - name: Release on GitHub
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: libertide-macos-arm64.tar.gz
+          fail_on_unmatched_files: false
+          token: ${{ secrets.GITHUB_TOKEN }}

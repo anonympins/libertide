@@ -247,7 +247,28 @@ pub fn restore_external_focus() -> bool {
     false
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod clipboard {
+    use std::io::Write;
+    pub fn set_text(text: &str) -> bool {
+        let mut child = match std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        child.wait().map(|s| s.success()).unwrap_or(false)
+    }
+    pub fn get_text() -> Option<String> {
+        let output = std::process::Command::new("pbpaste").output().ok()?;
+        Some(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 mod clipboard {
     use std::io::Write;
 
@@ -5922,15 +5943,26 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
             }
             AgentAction::OpenBrowser { url } => {
                 let url_str = format_url_for_navigation(url.as_deref().unwrap_or(""));
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("open").arg(&url_str).spawn();
+                #[cfg(not(target_os = "macos"))]
                 let _ = std::process::Command::new("xdg-open").arg(&url_str).spawn();
                 feedback.push(format!("Navigateur ouvert sur '{}'.", url_str));
             }
             AgentAction::FocusAddressBar { .. } => {
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", "tell application \"System Events\" to keystroke \"l\" using command down"])
+                    .status();
+                #[cfg(not(target_os = "macos"))]
                 let _ = std::process::Command::new("xdotool").args(["key", "ctrl+l"]).status();
                 feedback.push("Barre d'adresse sélectionnée (Ctrl+L).".to_string());
             }
             AgentAction::NavigateToUrl { url, .. } => {
                 let formatted = format_url_for_navigation(url);
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("open").arg(&formatted).spawn();
+                #[cfg(not(target_os = "macos"))]
                 let _ = std::process::Command::new("xdg-open").arg(&formatted).spawn();
                 feedback.push(format!("Navigation vers '{}'.", formatted));
             }
@@ -6022,35 +6054,54 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 }
             }
             AgentAction::MuteAudio => {
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("osascript").args(["-e", "set volume output muted true"]).spawn();
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
                 let _ = std::process::Command::new("playerctl").arg("pause").spawn();
                 let _ = std::process::Command::new("sh")
                     .arg("-c")
                     .arg("pactl list sink-inputs short | awk '{print $1}' | xargs -r -I{} pactl set-sink-input-mute {} 1")
                     .spawn();
+                }
                 feedback.push("Flux sonores externes mis en sourdine (voix Libertide préservée).".to_string());
             }
             AgentAction::SetVolume { command } => {
                 let cmd_lower = command.to_lowercase();
                 match cmd_lower.as_str() {
                     "mute" | "couper" => {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("osascript").args(["-e", "set volume output muted true"]).spawn();
+                        #[cfg(not(target_os = "macos"))]
                         let _ = std::process::Command::new("pactl")
                             .args(["set-sink-mute", "@DEFAULT_SINK@", "1"])
                             .spawn();
                         feedback.push("Son système coupé.".to_string());
                     }
                     "unmute" => {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("osascript").args(["-e", "set volume output muted false"]).spawn();
+                        #[cfg(not(target_os = "macos"))]
                         let _ = std::process::Command::new("pactl")
                             .args(["set-sink-mute", "@DEFAULT_SINK@", "0"])
                             .spawn();
                         feedback.push("Son système réactivé.".to_string());
                     }
                     "down" | "baisser" => {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("osascript").args(["-e", "set volume output volume ((output volume of (get volume settings)) - 10)"]).spawn();
+                        #[cfg(not(target_os = "macos"))]
                         let _ = std::process::Command::new("pactl")
                             .args(["set-sink-volume", "@DEFAULT_SINK@", "-10%"])
                             .spawn();
                         feedback.push("Volume diminué.".to_string());
                     }
                     "up" | "monter" => {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("osascript").args(["-e", "set volume output volume ((output volume of (get volume settings)) + 10)"]).spawn();
+                        #[cfg(not(target_os = "macos"))]
                         let _ = std::process::Command::new("pactl")
                             .args(["set-sink-volume", "@DEFAULT_SINK@", "+10%"])
                             .spawn();

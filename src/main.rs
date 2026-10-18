@@ -586,6 +586,12 @@ fn setup_custom_fonts(ctx: &egui::Context) {
     #[cfg(not(windows))]
     {
         let font_candidates = [
+            // Chemins macOS
+            "/System/Library/Fonts/Apple Color Emoji.ttc",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/SFNS.ttf",
+            // Chemins Linux
             "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
             "/usr/share/fonts/noto/NotoColorEmoji.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",

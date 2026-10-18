@@ -448,13 +448,13 @@ enum PlaybackOutcome {
     Failed,
 }
 
-fn play_kokoro_pcm(
+fn play_kokoro_pcm<F: FnMut(VoiceGender)>(
     samples: &[f32],
     sample_rate: u32,
     rx: &std::sync::mpsc::Receiver<TtsCommand>,
     pending_cmd: &mut Option<TtsCommand>,
     current_gender: &mut VoiceGender,
-    #[cfg(windows)] voice: &windows::Win32::Media::Speech::ISpVoice,
+    mut on_gender_changed: F,
 ) -> PlaybackOutcome {
     let host = cpal::default_host();
     let Some(device) = host.default_output_device() else {
@@ -556,10 +556,7 @@ fn play_kokoro_pcm(
             match next_cmd {
                 TtsCommand::SetGender(new_gender) => {
                     *current_gender = new_gender;
-                    #[cfg(windows)]
-                    unsafe {
-                        find_and_apply_voice(voice, *current_gender);
-                    }
+                    on_gender_changed(new_gender);
                 }
                 TtsCommand::Stop => {
                     interrupted.store(true, Ordering::SeqCst);
@@ -975,6 +972,327 @@ fn synthesize_kokoro_safe(
     None
 }
 
+struct PrefetchTask {
+    gender: VoiceGender,
+    cancel_flag: Arc<AtomicBool>,
+    handle: std::thread::JoinHandle<Option<(Vec<f32>, u32)>>,
+}
+
+impl PrefetchTask {
+    fn cancel(self) {
+        self.cancel_flag.store(true, Ordering::SeqCst);
+    }
+}
+
+trait SystemTtsBackend {
+    fn set_gender(&mut self, gender: VoiceGender);
+    fn stop(&mut self);
+    fn speak_sentence(
+        &mut self,
+        sentence: &str,
+        rx: &std::sync::mpsc::Receiver<TtsCommand>,
+        pending_cmd: &mut Option<TtsCommand>,
+    ) -> bool; // renvoie true si interrompu
+}
+
+#[cfg(windows)]
+struct SapiBackend {
+    voice: windows::Win32::Media::Speech::ISpVoice,
+    current_gender: VoiceGender,
+    base_flags: u32,
+}
+
+#[cfg(windows)]
+impl SapiBackend {
+    fn new(initial_voice: VoiceGender) -> Option<Self> {
+        use windows::Win32::Media::Speech::{SpVoice, SPF_ASYNC, SPF_IS_NOT_XML, SPF_PURGEBEFORESPEAK};
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
+
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let voice: Result<windows::Win32::Media::Speech::ISpVoice, _> = CoCreateInstance(&SpVoice, None, CLSCTX_ALL);
+            let Ok(voice) = voice else {
+                eprintln!("[TTS] Impossible d'initialiser le synthétiseur vocal Windows.");
+                return None;
+            };
+
+            find_and_apply_voice(&voice, initial_voice);
+            let _ = voice.SetVolume(100);
+            let _ = voice.SetRate(1);
+            let base_flags = (SPF_ASYNC.0 | SPF_PURGEBEFORESPEAK.0 | SPF_IS_NOT_XML.0) as u32;
+
+            Some(Self {
+                voice,
+                current_gender: initial_voice,
+                base_flags,
+            })
+        }
+    }
+}
+
+#[cfg(windows)]
+impl SystemTtsBackend for SapiBackend {
+    fn set_gender(&mut self, gender: VoiceGender) {
+        self.current_gender = gender;
+        unsafe {
+            find_and_apply_voice(&self.voice, self.current_gender);
+        }
+    }
+
+    fn stop(&mut self) {
+        use windows::core::PCWSTR;
+        unsafe {
+            let _ = self.voice.Speak(PCWSTR::null(), self.base_flags, None);
+        }
+        set_tts_audio_level(0.0);
+    }
+
+    fn speak_sentence(
+        &mut self,
+        sentence: &str,
+        rx: &std::sync::mpsc::Receiver<TtsCommand>,
+        pending_cmd: &mut Option<TtsCommand>,
+    ) -> bool {
+        use windows::core::PCWSTR;
+        use windows::Win32::Media::Speech::SPVOICESTATUS;
+
+        let active_wide_buf: Vec<u16> = sentence.encode_utf16().chain(std::iter::once(0)).collect();
+
+        unsafe {
+            if self.voice.Speak(PCWSTR(active_wide_buf.as_ptr()), self.base_flags, None).is_err() {
+                return false;
+            }
+
+            let start_wait = Instant::now();
+            let mut has_started = false;
+            let mut smoothed_level = 0.0f32;
+            const STARTUP_TIMEOUT: Duration = Duration::from_millis(3000);
+
+            loop {
+                std::thread::sleep(Duration::from_millis(20));
+
+                if let Ok(next_cmd) = rx.try_recv() {
+                    match next_cmd {
+                        TtsCommand::SetGender(new_gender) => {
+                            self.set_gender(new_gender);
+                        }
+                        TtsCommand::Stop => {
+                            let _ = self.voice.Speak(PCWSTR::null(), self.base_flags, None);
+                            set_tts_audio_level(0.0);
+                            return true;
+                        }
+                        TtsCommand::Speak(next_text) => {
+                            let _ = self.voice.Speak(PCWSTR::null(), self.base_flags, None);
+                            set_tts_audio_level(0.0);
+                            *pending_cmd = Some(TtsCommand::Speak(next_text));
+                            return true;
+                        }
+                    }
+                }
+
+                let mut status = SPVOICESTATUS::default();
+                if self.voice.GetStatus(&mut status, std::ptr::null_mut()).is_ok() {
+                    if status.dwRunningState == 2 {
+                        has_started = true;
+                        let elapsed = start_wait.elapsed().as_secs_f32();
+                        smoothed_level = calculate_viseme_audio_level(
+                            status.VisemeId.0,
+                            status.PhonemeId as u32,
+                            elapsed,
+                            smoothed_level,
+                        );
+                        set_tts_audio_level(smoothed_level);
+                    } else if has_started {
+                        set_tts_audio_level(0.0);
+                        break;
+                    } else if start_wait.elapsed() > STARTUP_TIMEOUT {
+                        set_tts_audio_level(0.0);
+                        break;
+                    } else {
+                        set_tts_audio_level(0.0);
+                    }
+                } else {
+                    set_tts_audio_level(0.0);
+                    break;
+                }
+            }
+        }
+        false
+    }
+}
+
+#[cfg(not(windows))]
+struct UnixTtsBackend {
+    current_process: Option<std::process::Child>,
+    current_gender: VoiceGender,
+}
+
+#[cfg(not(windows))]
+impl UnixTtsBackend {
+    fn new(initial_voice: VoiceGender) -> Option<Self> {
+        Some(Self {
+            current_process: None,
+            current_gender: initial_voice,
+        })
+    }
+}
+
+#[cfg(not(windows))]
+impl SystemTtsBackend for UnixTtsBackend {
+    fn set_gender(&mut self, gender: VoiceGender) {
+        self.current_gender = gender;
+    }
+
+    fn stop(&mut self) {
+        if let Some(mut child) = self.current_process.take() {
+            let _ = child.kill();
+        }
+        set_tts_audio_level(0.0);
+    }
+
+    fn speak_sentence(
+        &mut self,
+        sentence: &str,
+        rx: &std::sync::mpsc::Receiver<TtsCommand>,
+        pending_cmd: &mut Option<TtsCommand>,
+    ) -> bool {
+        if let Some(mut child) = self.current_process.take() {
+            let _ = child.kill();
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let macos_voice = match self.current_gender {
+                VoiceGender::Denise | VoiceGender::Hortense | VoiceGender::Sylvie | VoiceGender::Kokoro => "Amelie",
+                VoiceGender::Henri | VoiceGender::Paul | VoiceGender::Jean => "Thomas",
+            };
+            self.current_process = std::process::Command::new("say")
+                .args(["-v", macos_voice, sentence])
+                .spawn()
+                .or_else(|_| std::process::Command::new("say").arg(sentence).spawn())
+                .ok();
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let (spd_voice, espeak_voice) = match self.current_gender {
+                VoiceGender::Denise => ("female1", "fr+f2"),
+                VoiceGender::Henri => ("male1", "fr+m2"),
+                VoiceGender::Hortense => ("female2", "fr+f4"),
+                VoiceGender::Paul => ("male2", "fr+m1"),
+                VoiceGender::Sylvie => ("female3", "fr-ca+f2"),
+                VoiceGender::Jean => ("male3", "fr+m3"),
+                VoiceGender::Kokoro => ("female1", "fr+f2"),
+            };
+
+            self.current_process = std::process::Command::new("spd-say")
+                .args(["-l", "fr", "-t", spd_voice, "-w", sentence])
+                .spawn()
+                .or_else(|_| std::process::Command::new("espeak-ng").args(["-v", espeak_voice, sentence]).spawn())
+                .or_else(|_| std::process::Command::new("espeak").args(["-v", espeak_voice, sentence]).spawn())
+                .ok();
+        }
+
+        if let Some(ref mut proc) = self.current_process {
+            while let Ok(None) = proc.try_wait() {
+                let t = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as f32 * 0.015;
+                let sim_level = (0.35 + 0.35 * (t * 1.8).sin().abs()).clamp(0.15, 0.85);
+                set_tts_audio_level(sim_level);
+                std::thread::sleep(Duration::from_millis(25));
+
+                if let Ok(next_cmd) = rx.try_recv() {
+                    match next_cmd {
+                        TtsCommand::SetGender(new_gender) => {
+                            self.set_gender(new_gender);
+                        }
+                        TtsCommand::Stop => {
+                            let _ = proc.kill();
+                            set_tts_audio_level(0.0);
+                            self.current_process = None;
+                            return true;
+                        }
+                        TtsCommand::Speak(next_text) => {
+                            let _ = proc.kill();
+                            set_tts_audio_level(0.0);
+                            *pending_cmd = Some(TtsCommand::Speak(next_text));
+                            self.current_process = None;
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        self.current_process = None;
+        set_tts_audio_level(0.0);
+        false
+    }
+}
+
+fn synthesize_sentence_pipeline(
+    kokoro_engine: &Arc<Mutex<Option<Box<dyn TtsModel>>>>,
+    sentence: &str,
+    gender: VoiceGender,
+    prefetch: &mut Option<PrefetchTask>,
+) -> Option<(Vec<f32>, u32)> {
+    if let Some(task) = prefetch.take() {
+        if task.gender == gender && !task.cancel_flag.load(Ordering::Relaxed) {
+            return task.handle.join().unwrap_or(None);
+        } else {
+            task.cancel();
+        }
+    }
+
+    let mut guard = match kokoro_engine.lock() {
+        Ok(g) => g,
+        Err(p) => {
+            eprintln!("[Kokoro TTS] Mutex empoisonné suite à une panique, récupération.");
+            p.into_inner()
+        }
+    };
+
+    if let Some(ref mut tts) = *guard {
+        let voice_name = get_kokoro_voice(gender);
+        synthesize_kokoro_safe(tts, sentence, voice_name)
+    } else {
+        None
+    }
+}
+
+fn spawn_prefetch_worker(
+    kokoro_engine: &Arc<Mutex<Option<Box<dyn TtsModel>>>>,
+    next_sentence: String,
+    gender: VoiceGender,
+) -> PrefetchTask {
+    let next_voice = get_kokoro_voice(gender);
+    let engine_clone = Arc::clone(kokoro_engine);
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let cancel_clone = Arc::clone(&cancel_flag);
+
+    let handle = std::thread::spawn(move || {
+        if cancel_clone.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut guard = match engine_clone.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if cancel_clone.load(Ordering::Relaxed) {
+            return None;
+        }
+        if let Some(ref mut tts) = *guard {
+            synthesize_kokoro_safe(tts, &next_sentence, next_voice)
+        } else {
+            None
+        }
+    });
+
+    PrefetchTask { gender, cancel_flag, handle }
+}
+
 /// Lance le worker de synthèse vocale réactif
 pub fn spawn_tts_worker(event_tx: StdSender<AgentEvent>, initial_voice: VoiceGender) -> StdSender<TtsCommand> {
     let (tx, rx) = channel::<TtsCommand>();
@@ -1029,34 +1347,15 @@ pub fn spawn_tts_worker(event_tx: StdSender<AgentEvent>, initial_voice: VoiceGen
         }
 
         #[cfg(windows)]
-        unsafe {
-            use windows::core::PCWSTR;
-            use windows::Win32::Media::Speech::{
-                ISpVoice, SpVoice, SPF_ASYNC, SPF_IS_NOT_XML, SPF_PURGEBEFORESPEAK, SPVOICESTATUS,
-            };
-            use windows::Win32::System::Com::{
-                CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
-            };
+        let mut system_backend = SapiBackend::new(current_gender);
 
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            let voice: Result<ISpVoice, _> = CoCreateInstance(&SpVoice, None, CLSCTX_ALL);
-            let Ok(voice) = voice else {
-                eprintln!("[TTS] Impossible d'initialiser le synthétiseur vocal Windows.");
-                return;
-            };
+        #[cfg(not(windows))]
+        let mut system_backend = UnixTtsBackend::new(current_gender);
 
-            // Initialisation de la voix selon le genre configuré (Denise / Henri)
-            find_and_apply_voice(&voice, current_gender);
-
-            let _ = voice.SetVolume(100);
-            let _ = voice.SetRate(1);
-            let base_flags = (SPF_ASYNC.0 | SPF_PURGEBEFORESPEAK.0 | SPF_IS_NOT_XML.0) as u32;
-
-            let mut pending_cmd: Option<TtsCommand> = None;
+        let mut pending_cmd: Option<TtsCommand> = None;
 
             loop {
                 let cmd = if let Some(c) = pending_cmd.take() {
-                    set_tts_audio_level(0.0);
                     c
                 } else {
                     match rx.recv() {
@@ -1068,473 +1367,155 @@ pub fn spawn_tts_worker(event_tx: StdSender<AgentEvent>, initial_voice: VoiceGen
                 match cmd {
                     TtsCommand::SetGender(new_gender) => {
                         current_gender = new_gender;
-                        find_and_apply_voice(&voice, current_gender);
+                    if let Some(ref mut backend) = system_backend {
+                        backend.set_gender(new_gender);
+                    }
                     }
                     TtsCommand::Stop => {
-                        let _ = voice.Speak(PCWSTR::null(), base_flags, None);
+                    if let Some(ref mut backend) = system_backend {
+                        backend.stop();
+                        }
                         set_tts_audio_level(0.0);
                     }
-                    TtsCommand::Speak(raw_text) => {
-                        let clean_text = sanitize_for_tts(&raw_text);
+                TtsCommand::Speak(raw_text) => {
+                    let clean_text = sanitize_for_tts(&raw_text);
                         let sentences = split_into_sentences(&clean_text);
                         if sentences.is_empty() {
-                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                        let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                             let _ = event_tx.send(AgentEvent::TtsFinished);
                             continue;
                         }
 
                         let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Speaking));
                         let mut was_interrupted = false;
-                        let mut smoothed_level = 0.0f32;
                         let mut kokoro_failed_in_speech = false;
-                        let mut prefetch: Option<(
-                            VoiceGender,
-                            Arc<AtomicBool>,
-                            std::thread::JoinHandle<Option<(Vec<f32>, u32)>>,
-                        )> = None;
+                    let mut prefetch: Option<PrefetchTask> = None;
 
                         for (idx, sentence) in sentences.iter().enumerate() {
                             let mut played_with_kokoro = false;
 
-                            // Exécution réservée exclusivement au profil neuronal Kokoro
+                        // Synthèse neuronale Kokoro prioritaire
                             if current_gender == VoiceGender::Kokoro && !kokoro_failed_in_speech {
                                 if kokoro_ready.load(Ordering::SeqCst) {
-                                    let synth_res = if let Some((p_gender, cancel_flag, handle)) = prefetch.take() {
-                                        if p_gender == current_gender && !cancel_flag.load(Ordering::Relaxed) {
-                                            handle.join().unwrap_or(None)
-                                        } else {
-                                            cancel_flag.store(true, Ordering::SeqCst);
-                                            let mut guard = match kokoro_engine.lock() {
-                                                Ok(g) => g,
-                                                Err(p) => {
-                                                    eprintln!("[Kokoro TTS] Mutex empoisonné suite à une panique, récupération.");
-                                                    p.into_inner()
-                                                }
-                                            };
-                                            if let Some(ref mut tts) = *guard {
-                                                let voice_name = get_kokoro_voice(current_gender);
-                                                synthesize_kokoro_safe(tts, sentence, voice_name)
-                                            } else {
-                                                None
-                                            }
-                                        }
-                                    } else {
-                                        let mut guard = match kokoro_engine.lock() {
-                                            Ok(g) => g,
-                                            Err(p) => {
-                                                eprintln!("[Kokoro TTS] Mutex empoisonné suite à une panique, récupération.");
-                                                p.into_inner()
-                                            }
-                                        };
-                                        if let Some(ref mut tts) = *guard {
-                                            let voice_name = get_kokoro_voice(current_gender);
-                                            synthesize_kokoro_safe(tts, sentence, voice_name)
-                                        } else {
-                                            None
-                                        }
-                                    };
+                                let synth_res = synthesize_sentence_pipeline(
+                                    &kokoro_engine,
+                                    sentence,
+                                    current_gender,
+                                    &mut prefetch,
+                                );
+
                                 if let Some((samples, sample_rate)) = synth_res {
                                     if !samples.is_empty() {
-                                        // Pipelining : pré-synthèse en tâche de fond de la phrase suivante
+                                        // Pré-calcul en arrière-plan de la phrase suivante
                                         if idx + 1 < sentences.len() {
-                                            let next_sentence = sentences[idx + 1].clone();
-                                            let next_voice = get_kokoro_voice(current_gender);
-                                            let engine_clone = Arc::clone(&kokoro_engine);
-                                            let cancel_flag = Arc::new(AtomicBool::new(false));
-                                            let cancel_clone = Arc::clone(&cancel_flag);
-
-                                            let handle = std::thread::spawn(move || {
-                                                if cancel_clone.load(Ordering::Relaxed) {
-                                                    return None;
-                                                }
-                                                let mut guard = match engine_clone.lock() {
-                                                    Ok(g) => g,
-                                                    Err(p) => p.into_inner(),
-                                                };
-                                                if cancel_clone.load(Ordering::Relaxed) {
-                                                    return None;
-                                                }
-                                                if let Some(ref mut tts) = *guard {
-                                                    synthesize_kokoro_safe(tts, &next_sentence, next_voice)
-                                                } else {
-                                                    None
-                                                }
-                                            });
-
-                                            prefetch = Some((current_gender, cancel_flag, handle));
+                                            prefetch = Some(spawn_prefetch_worker(
+                                                &kokoro_engine,
+                                                sentences[idx + 1].clone(),
+                                                current_gender,
+                                            ));
                                         }
 
+                                        let backend_ref = &mut system_backend;
                                         match play_kokoro_pcm(
                                             &samples,
                                             sample_rate,
                                             &rx,
                                             &mut pending_cmd,
                                             &mut current_gender,
-                                            &voice,
+                                            |new_g| {
+                                                if let Some(ref mut b) = backend_ref {
+                                                    b.set_gender(new_g);
+                                                }
+                                            },
                                         ) {
                                             PlaybackOutcome::Completed => {
                                                 played_with_kokoro = true;
                                             }
                                             PlaybackOutcome::Interrupted => {
-                                                if let Some((_, cancel, _)) = prefetch.take() {
-                                                    cancel.store(true, Ordering::SeqCst);
+                                                if let Some(task) = prefetch.take() {
+                                                    task.cancel();
                                                 }
                                                 was_interrupted = true;
                                                 break;
                                             }
                                             PlaybackOutcome::Failed => {
-                                                if let Some((_, cancel, _)) = prefetch.take() {
-                                                    cancel.store(true, Ordering::SeqCst);
+                                                if let Some(task) = prefetch.take() {
+                                                    task.cancel();
                                                 }
-                                                eprintln!("[Kokoro TTS] Échec lecture audio cpal. Bascule sur SAPI.");
+                                                eprintln!("[Kokoro TTS] Échec lecture audio cpal. Bascule sur le moteur système.");
                                             }
                                         }
                                     }
                                 } else {
-                                    // Disjoncteur : si Kokoro échoue sur cette phrase, on évite de faire
-                                    // mouliner le CPU sur les phrases suivantes et on bascule directement sur SAPI.
-                                    if let Some((_, cancel, _)) = prefetch.take() {
-                                        cancel.store(true, Ordering::SeqCst);
+                                    if let Some(task) = prefetch.take() {
+                                        task.cancel();
                                     }
                                     kokoro_failed_in_speech = true;
                                 }
                                 } else {
-                                    println!("[Kokoro TTS] Modèle Kokoro en cours de chargement. Repli temporaire sur SAPI.");
+                                println!("[Kokoro TTS] Modèle en cours de chargement. Repli temporaire sur le système.");
                                 }
                             }
 
-                            // Repli immédiat sur SAPI (ISpVoice) si Kokoro échoue ou n'est pas encore prêt
+                        // Repli sur le moteur vocal système (SAPI / macOS say / Linux spd-say)
                             if !played_with_kokoro {
-                            let active_wide_buf: Vec<u16> =
-                                sentence.encode_utf16().chain(std::iter::once(0)).collect();
+                            if let Some(ref mut backend) = system_backend {
+                                if backend.speak_sentence(sentence, &rx, &mut pending_cmd) {
+                                    was_interrupted = true;
+                                }
+                            }
+                        }
 
-                            if voice
-                                .Speak(PCWSTR(active_wide_buf.as_ptr()), base_flags, None)
-                                .is_ok()
-                            {
-                                let start_wait = Instant::now();
-                                let mut has_started = false;
-                                const STARTUP_TIMEOUT: Duration = Duration::from_millis(3000);
+                        if was_interrupted {
+                            if let Some(task) = prefetch.take() {
+                                task.cancel();
+                            }
+                            break;
+                        }
 
-                                loop {
-                                    std::thread::sleep(Duration::from_millis(20));
-
-                                    if let Ok(next_cmd) = rx.try_recv() {
-                                        match next_cmd {
-                                            TtsCommand::SetGender(new_gender) => {
-                                                current_gender = new_gender;
-                                                find_and_apply_voice(&voice, current_gender);
-                                            }
-                                            TtsCommand::Stop => {
-                                                let _ = voice.Speak(PCWSTR::null(), base_flags, None);
-                                                set_tts_audio_level(0.0);
-                                                was_interrupted = true;
-                                                break;
-                                            }
-                                            TtsCommand::Speak(next_text) => {
-                                                let _ = voice.Speak(PCWSTR::null(), base_flags, None);
-                                                set_tts_audio_level(0.0);
-                                                pending_cmd = Some(TtsCommand::Speak(next_text));
-                                                was_interrupted = true;
-                                                break;
-                                            }
+                        // Pause prosodique entre les phrases
+                        let pause_dur = punctuation_pause_duration(sentence);
+                        let pause_start = Instant::now();
+                        while pause_start.elapsed() < pause_dur {
+                            std::thread::sleep(Duration::from_millis(10));
+                            if let Ok(next_cmd) = rx.try_recv() {
+                                match next_cmd {
+                                    TtsCommand::SetGender(new_gender) => {
+                                        current_gender = new_gender;
+                                        if let Some(ref mut backend) = system_backend {
+                                            backend.set_gender(new_gender);
                                         }
                                     }
-
-                                    let mut status = SPVOICESTATUS::default();
-                                    if voice.GetStatus(&mut status, std::ptr::null_mut()).is_ok()
-                                    {
-                                        // dwRunningState == 2 correspond à SPRS_IS_SPEAKING
-                                        if status.dwRunningState == 2 {
-                                            has_started = true;
-                                            let elapsed = start_wait.elapsed().as_secs_f32();
-                                            smoothed_level = calculate_viseme_audio_level(status.VisemeId.0, status.PhonemeId as u32, elapsed, smoothed_level);
-                                            set_tts_audio_level(smoothed_level);
-                                        } else if has_started {
-                                            set_tts_audio_level(0.0);
-                                            break;
-                                        } else if start_wait.elapsed() > STARTUP_TIMEOUT {
-                                            // La phrase est complètement restituée
-                                            set_tts_audio_level(0.0);
-                                            smoothed_level = 0.0;
-                                            break;
-                                        } else {
-                                            set_tts_audio_level(0.0);
-                                        }
-                                    } else {
+                                    TtsCommand::Stop => {
                                         set_tts_audio_level(0.0);
+                                        was_interrupted = true;
+                                        break;
+                                    }
+                                    TtsCommand::Speak(next_text) => {
+                                        set_tts_audio_level(0.0);
+                                        pending_cmd = Some(TtsCommand::Speak(next_text));
+                                        was_interrupted = true;
                                         break;
                                     }
                                 }
-                            } else {
-                                break;
-                            }
-                            }
-
-                            if was_interrupted {
-                                if let Some((_, cancel, _)) = prefetch.take() {
-                                    cancel.store(true, Ordering::SeqCst);
-                                }
-                                break;
-                            }
-
-                            // Micro-pause prosodique inter-phrases avec surveillance de préemption
-                            let pause_dur = punctuation_pause_duration(&sentence);
-                            let pause_start = Instant::now();
-                            while pause_start.elapsed() < pause_dur {
-                                std::thread::sleep(Duration::from_millis(10));
-                                if let Ok(next_cmd) = rx.try_recv() {
-                                    match next_cmd {
-                                        TtsCommand::SetGender(new_gender) => {
-                                            current_gender = new_gender;
-                                            find_and_apply_voice(&voice, current_gender);
-                                        }
-                                        TtsCommand::Stop => {
-                                            set_tts_audio_level(0.0);
-                                            was_interrupted = true;
-                                            break;
-                                        }
-                                        TtsCommand::Speak(next_text) => {
-                                            set_tts_audio_level(0.0);
-                                            pending_cmd = Some(TtsCommand::Speak(next_text));
-                                            was_interrupted = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            if was_interrupted {
-                                if let Some((_, cancel, _)) = prefetch.take() {
-                                    cancel.store(true, Ordering::SeqCst);
-                                }
-                                break;
                             }
                         }
-                        if let Some((_, cancel, _)) = prefetch.take() {
-                            cancel.store(true, Ordering::SeqCst);
-                        }
-
-                        if !was_interrupted {
-                            set_tts_audio_level(0.0);
-                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
-                            let _ = event_tx.send(AgentEvent::TtsFinished);
+                        if was_interrupted {
+                            if let Some(task) = prefetch.take() {
+                                task.cancel();
+                            }
+                            break;
                         }
                     }
-                }
-            }
-        }
 
-        #[cfg(not(windows))]
-        {
-            let mut current_process: Option<std::process::Child> = None;
-            let mut pending_cmd: Option<TtsCommand> = None;
-
-            loop {
-                let cmd = if let Some(c) = pending_cmd.take() {
-                    c
-                } else {
-                    match rx.recv() {
-                        Ok(c) => c,
-                        Err(_) => break,
+                    if let Some(task) = prefetch.take() {
+                        task.cancel();
                     }
-                };
 
-                match cmd {
-                    TtsCommand::SetGender(new_gender) => {
-                        current_gender = new_gender;
-                    }
-                    TtsCommand::Stop => {
-                        if let Some(mut child) = current_process.take() {
-                            let _ = child.kill();
-                        }
+                    if !was_interrupted {
                         set_tts_audio_level(0.0);
-                    }
-                    TtsCommand::Speak(text) => {
-                        if let Some(mut child) = current_process.take() {
-                            let _ = child.kill();
-                        }
-                        let clean_text = sanitize_for_tts(&text);
-                        let sentences = split_into_sentences(&clean_text);
-                        if sentences.is_empty() {
-                            let _ = event_tx.send(AgentEvent::TtsFinished);
-                            continue;
-                        }
-                        let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Speaking));
-                        let (spd_voice, espeak_voice) = match current_gender {
-                            VoiceGender::Denise => ("female1", "fr+f2"),
-                            VoiceGender::Henri => ("male1", "fr+m2"),
-                            VoiceGender::Hortense => ("female2", "fr+f4"),
-                            VoiceGender::Paul => ("male2", "fr+m1"),
-                            VoiceGender::Sylvie => ("female3", "fr-ca+f2"),
-                            VoiceGender::Jean => ("male3", "fr+m3"),
-                            VoiceGender::Kokoro => ("female1", "fr+f2"),
-                        };
-
-                        let mut was_interrupted = false;
-                        let mut kokoro_failed_in_speech = false;
-                        let mut prefetch: Option<(
-                            VoiceGender,
-                            Arc<AtomicBool>,
-                            std::thread::JoinHandle<Option<(Vec<f32>, u32)>>,
-                        )> = None;
-
-                        for (idx, sentence) in sentences.iter().enumerate() {
-                            let mut played_with_kokoro = false;
-
-                            if current_gender == VoiceGender::Kokoro && !kokoro_failed_in_speech {
-                                if kokoro_ready.load(Ordering::SeqCst) {
-                                    let synth_res = if let Some((p_gender, cancel_flag, handle)) = prefetch.take() {
-                                        if p_gender == current_gender && !cancel_flag.load(Ordering::Relaxed) {
-                                            handle.join().unwrap_or(None)
-                                        } else {
-                                            cancel_flag.store(true, Ordering::SeqCst);
-                                            let mut guard = match kokoro_engine.lock() {
-                                                Ok(g) => g,
-                                                Err(p) => p.into_inner(),
-                                            };
-                                            if let Some(ref mut tts) = *guard {
-                                                let voice_name = get_kokoro_voice(current_gender);
-                                                synthesize_kokoro_safe(tts, sentence, voice_name)
-                                            } else {
-                                                None
-                                            }
-                                        }
-                                    } else {
-                                        let mut guard = match kokoro_engine.lock() {
-                                            Ok(g) => g,
-                                            Err(p) => p.into_inner(),
-                                        };
-                                        if let Some(ref mut tts) = *guard {
-                                            let voice_name = get_kokoro_voice(current_gender);
-                                            synthesize_kokoro_safe(tts, sentence, voice_name)
-                                        } else {
-                                            None
-                                        }
-                                    };
-                                if let Some((samples, sample_rate)) = synth_res {
-                                    if !samples.is_empty() {
-                                        if idx + 1 < sentences.len() {
-                                            let next_sentence = sentences[idx + 1].clone();
-                                            let next_voice = get_kokoro_voice(current_gender);
-                                            let engine_clone = Arc::clone(&kokoro_engine);
-                                            let cancel_flag = Arc::new(AtomicBool::new(false));
-                                            let cancel_clone = Arc::clone(&cancel_flag);
-
-                                            let handle = std::thread::spawn(move || {
-                                                if cancel_clone.load(Ordering::Relaxed) {
-                                                    return None;
-                                                }
-                                                let mut guard = match engine_clone.lock() {
-                                                    Ok(g) => g,
-                                                    Err(p) => p.into_inner(),
-                                                };
-                                                if cancel_clone.load(Ordering::Relaxed) {
-                                                    return None;
-                                                }
-                                                if let Some(ref mut tts) = *guard {
-                                                    synthesize_kokoro_safe(tts, &next_sentence, next_voice)
-                                                } else {
-                                                    None
-                                                }
-                                            });
-
-                                            prefetch = Some((current_gender, cancel_flag, handle));
-                                        }
-
-                                        match play_kokoro_pcm(
-                                            &samples,
-                                            sample_rate,
-                                            &rx,
-                                            &mut pending_cmd,
-                                            &mut current_gender,
-                                        ) {
-                                            PlaybackOutcome::Completed => {
-                                                played_with_kokoro = true;
-                                            }
-                                            PlaybackOutcome::Interrupted => {
-                                                if let Some((_, cancel, _)) = prefetch.take() {
-                                                    cancel.store(true, Ordering::SeqCst);
-                                                }
-                                                was_interrupted = true;
-                                                break;
-                                            }
-                                            PlaybackOutcome::Failed => {
-                                                if let Some((_, cancel, _)) = prefetch.take() {
-                                                    cancel.store(true, Ordering::SeqCst);
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    if let Some((_, cancel, _)) = prefetch.take() {
-                                        cancel.store(true, Ordering::SeqCst);
-                                    }
-                                    kokoro_failed_in_speech = true;
-                                }
-                                } else {
-                                    println!("[Kokoro TTS] Modèle Kokoro en cours de chargement. Repli temporaire sur le moteur système.");
-                                }
-                            }
-
-                            if !played_with_kokoro {
-                            let child = std::process::Command::new("spd-say")
-                                .args(["-l", "fr", "-t", spd_voice, "-w", &sentence])
-                                .spawn()
-                                .or_else(|_| std::process::Command::new("espeak-ng").args(["-v", espeak_voice, &sentence]).spawn())
-                                .or_else(|_| std::process::Command::new("espeak").args(["-v", espeak_voice, &sentence]).spawn())
-                                .ok();
-
-                            current_process = child;
-                            if let Some(ref mut proc) = current_process {
-                                while let Ok(None) = proc.try_wait() {
-                                    // Animation dynamique de l'avatar pendant la lecture Linux
-                                    let t = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_millis() as f32 * 0.015;
-                                    let sim_level = (0.35 + 0.35 * (t * 1.8).sin().abs()).clamp(0.15, 0.85);
-                                    set_tts_audio_level(sim_level);
-                                    std::thread::sleep(Duration::from_millis(25));
-                                    if let Ok(next_cmd) = rx.try_recv() {
-                                        match next_cmd {
-                                            TtsCommand::SetGender(new_gender) => {
-                                                current_gender = new_gender;
-                                            }
-                                            TtsCommand::Stop => {
-                                                let _ = proc.kill();
-                                                set_tts_audio_level(0.0);
-                                                was_interrupted = true;
-                                                break;
-                                            }
-                                            TtsCommand::Speak(next_text) => {
-                                                let _ = proc.kill();
-                                                set_tts_audio_level(0.0);
-                                                pending_cmd = Some(TtsCommand::Speak(next_text));
-                                                was_interrupted = true;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            }
-                            if was_interrupted {
-                                if let Some((_, cancel, _)) = prefetch.take() {
-                                    cancel.store(true, Ordering::SeqCst);
-                                }
-                                break;
-                            }
-                            set_tts_audio_level(0.0);
-                        }
-                        if let Some((_, cancel, _)) = prefetch.take() {
-                            cancel.store(true, Ordering::SeqCst);
-                        }
-
-                        current_process = None;
-                        if !was_interrupted {
-                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
-                            let _ = event_tx.send(AgentEvent::TtsFinished);
-                        }
+                        let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                        let _ = event_tx.send(AgentEvent::TtsFinished);
                     }
                 }
             }
