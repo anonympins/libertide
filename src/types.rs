@@ -313,6 +313,14 @@ pub enum AgentAction {
     OpenApp {
         name: String,
     },
+    #[serde(alias = "search_windows", alias = "windows_search", alias = "system_search")]
+    OpenSearch,
+    #[serde(alias = "search_browser", alias = "browser_search", alias = "search_web")]
+    OpenSearchBrowser,
+    #[serde(alias = "browser_back", alias = "history_back", alias = "back", alias = "retour", alias = "retour_arriere")]
+    NavigateBack,
+    #[serde(alias = "browser_forward", alias = "history_forward", alias = "forward", alias = "avance")]
+    NavigateForward,
     CloseApp {
         name: String,
     },
@@ -546,6 +554,10 @@ impl QuickSuggestionItem {
             QuickSuggestionItem::Action(act) => match act {
                 AgentAction::OpenApp { name } => Some(format!("Ouvrir {name}")),
                 AgentAction::NavigateToUrl { url, .. } => Some(format!("Naviguer vers {url}")),
+                AgentAction::OpenSearch => Some("Recherche Windows (OS)".to_string()),
+                AgentAction::OpenSearchBrowser => Some("Recherche Web (Navigateur)".to_string()),
+                AgentAction::NavigateBack => Some("Page précédente (Retour)".to_string()),
+                AgentAction::NavigateForward => Some("Page suivante (Avance)".to_string()),
                 AgentAction::FocusAddressBar { .. } => Some("Sélectionner la barre d'adresse".to_string()),
                 AgentAction::ClickElement { target_name, .. } => Some(format!("Cliquer {target_name}")),
                 AgentAction::ClickButton { button_name, .. } => Some(format!("Cliquer {button_name}")),

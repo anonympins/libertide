@@ -957,7 +957,7 @@ pub fn launch_browser_new_window(url: &str) -> Option<HWND> {
         r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
     ];
     let edge_paths = [
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
     ];
 

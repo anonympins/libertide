@@ -323,6 +323,39 @@ fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
             send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x56)); // Ctrl + V
             Some("Collé.")
         }
+        "retour" | "retour arriere" | "retour arrière" | "reculer" | "back" | "browser back" => {
+            #[cfg(windows)]
+            send_hotkey(&[VIRTUAL_KEY(0x12)], VIRTUAL_KEY(0x25)); // Alt + Gauche
+            #[cfg(not(windows))]
+            let _ = std::process::Command::new("xdotool").args(["key", "alt+Left"]).status();
+            Some("Page précédente (Retour arrière).")
+        }
+        "avance" | "avancer" | "forward" | "browser forward" => {
+            #[cfg(windows)]
+            send_hotkey(&[VIRTUAL_KEY(0x12)], VIRTUAL_KEY(0x27)); // Alt + Droite
+            #[cfg(not(windows))]
+            let _ = std::process::Command::new("xdotool").args(["key", "alt+Right"]).status();
+            Some("Page suivante.")
+        }
+        "omnibox" | "l omnibox" | "omnibar" | "l omnibar" | "barre d adresse" | "barre adresse" | "barre de recherche" | "adresse" | "address bar"
+        | "ouvre l omnibox" | "ouvrir l omnibox" | "va sur l omnibox" | "selectionne l omnibox" | "selectionner l omnibox"
+        | "focus omnibox" | "focus barre d adresse" => {
+            #[cfg(windows)]
+            {
+                let user_windows = list_user_windows();
+                if let Some(hwnd) = find_best_browser_window(&user_windows, None) {
+                    focus_browser_address_bar(hwnd);
+                    Some("Barre d'adresse (omnibox) sélectionnée.")
+                } else {
+                    launch_browser_new_window("https://www.google.com");
+                    Some("Navigateur ouvert avec focus sur l'omnibox.")
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                Some("Barre d'adresse (omnibox) sélectionnée.")
+            }
+        }
         _ => None,
     }
 }
@@ -3676,6 +3709,9 @@ Règles principales :
    - Raccourcis clavier & touches : utilise OBLIGATOIREMENT "accessibility_shortcut" avec le nom ou la combinaison de touches exacte (ex: "action_center", "open_settings", "ctrl+shift+b", "ctrl+t", "enter", "close_tab", "copy", "undo", "space"). Ne JAMAIS envoyer "run_command" pour simuler des touches ou des raccourcis système !
    - Lecture code/fichier : "read_editor_content" (focalise et extrait Ctrl+A/Ctrl+C).
    - Onglet/page : "accessibility_shortcut": "close_tab" (jamais "close_app" pour un onglet).
+   - DISTINCTION ABSOLUE ENTRE "open_search" ET "open_search_browser" (2 COMMANDES DISTINCTES) :
+     * "open_search" (ou accessibility_shortcut: "open_search") : Recherche SYSTÈME / OS locale (Win+S). Sert STRICTEMENT ET UNIQUEMENT à rechercher un fichier local, une application installée ou un paramètre Windows sur l'ordinateur. INTERDICTION FORMELLE d'utiliser "open_search" pour chercher sur internet ou sur le web !
+     * "open_search_browser" (ou "focus_address_bar" / accessibility_shortcut: "open_search_browser") : Recherche WEB / NAVIGATEUR. Sert SYSTÉMATIQUEMENT pour chercher sur le web, aller sur internet, ou saisir une requête dans l'omnibox/barre d'adresse du navigateur. Si l'utilisateur demande de chercher sur le web, Google, YouTube, la météo, un produit, etc., utilise TOUJOURS "open_search_browser" (ou "focus_address_bar" / "navigate_to_url").
 4bis. RÈGLES DE LIENS INTERACTIFS & MACRO [link="cible"]label[/link] (CHAT & FENÊTRES VOLANTES) :
    - RÈGLE D'OR : Tout élément multimédia, ressource, fichier, page web, action ou suggestion mentionné dans "narration" ou dans une fenêtre volante ("show_floating_card") DOIT IMPÉRATIVEMENT être formaté sous forme de lien cliquable, prioritairement avec la macro robuste `[link="cible"]Icône Libellé[/link]` (ou en Markdown `Icône Libellé`).
    - LIENS DANS LES TABLEAUX MARKDOWN : Tu PEUX et DOIS insérer des liens `[link="..."]...[/link]` à l'intérieur des cellules de tableaux Markdown ou de fenêtres volantes (ex: `| Produit | Action | Prix |\n| --- | --- | --- |\n| Drone Pro | [link="action:Commander Drone Pro"]⚡ Commander[/link] | 299€ |`).
@@ -3701,6 +3737,7 @@ Règles principales :
    - "navigate_to_url" ouvre par défaut un nouvel onglet ("target": "new_tab").
    - Achat : panier -> valider panier -> AVANT paiement stopper avec "actions": [] et demander confirmation.
    - "scroll" ("down"|"up"|"bottom"|"top", amount: 1..2) pour explorer.
+   - RETOUR EN ARRIÈRE & UNDO NAVIGATION : "navigate_back" (ou "accessibility_shortcut": "browser_back", Alt+Gauche) pour revenir immédiatement à la page ou aux résultats précédents si une navigation s'est trompée de page, mène à une impasse ou à un tag erroné. "navigate_forward" pour avancer.
 7. Autres actions :
    - Dictée : "activate_dictation", "deactivate_dictation", "toggle_dictation", "dictate".
    - Démarrage : "enable_autostart", "disable_autostart", "check_autostart", "set_autostart".
@@ -3718,6 +3755,10 @@ Format JSON obligatoire :
   "next_passes": 5,
   "actions": [
     {{"action": "open_app", "name": "nom_executable"}},
+    {{"action": "open_search"}},
+    {{"action": "open_search_browser"}},
+    {{"action": "navigate_back"}},
+    {{"action": "navigate_forward"}},
     {{"action": "close_app", "name": "nom_ou_titre"}},
     {{"action": "click_element", "window": null, "target_name": "nom"}},
     {{"action": "click_button", "window": null, "button_name": "nom"}},
@@ -3737,7 +3778,7 @@ Format JSON obligatoire :
     {{"action": "run_command", "command": "..."}},
     {{"action": "kill_process", "pid": null, "name": null}},
     {{"action": "navigate_to_url", "url": "...", "target": "new_tab"|"current_tab"|"new_window"}},
-    {{"action": "accessibility_shortcut", "shortcut": "action_center"|"open_settings"|"sound_settings"|"volume_up"|"volume_down"|"mute_volume"|"enter"|"escape"|"space"|"close_tab"|"refresh_page"|"ctrl+shift+b"|"<combinaison_touches>"}},
+    {{"action": "accessibility_shortcut", "shortcut": "browser_back"|"browser_forward"|"open_search"|"open_search_browser"|"action_center"|"open_settings"|"sound_settings"|"volume_up"|"volume_down"|"mute_volume"|"enter"|"escape"|"space"|"close_tab"|"refresh_page"|"ctrl+shift+b"|"<combinaison_touches>"}},
     {{"action": "deactivate_immersion"}},
     {{"action": "set_reasoning_passes", "passes": 5, "reason": null}},
     {{"action": "schedule_prompt", "delay_seconds": 10, "prompt": "..."}},
