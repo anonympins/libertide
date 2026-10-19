@@ -113,16 +113,30 @@ Switches directly to text input inside whatever window currently has focus (text
   - *"Delete word"* / *"Efface le mot"*, *"Delete line"* / *"Efface la ligne"*, *"Select all"* / *"Tout sélectionner"*
 
 ### 3. 🌐 Web Browsing, Search & Shopping
-- **Search / Navigation**:
-  - *"Open Google and search for the best noise cancelling headphones"*
-  - *"Go to wikipedia.org"*
-  - *"Open youtube.com in a new tab"*
-- **Interactions & Obstacles**:
-  - *"Click 'Accept all'"* (the agent detects and clicks cookie consent dialogs and GDPR banners automatically)
-  - *"Click the first result"*
-  - *"Scroll down"* / *"Fais défiler vers le bas"*, *"Scroll to the top"*
-- **Assisted Shopping**:
-  - *"Add the item to the cart and proceed to checkout"* (Libertide will automatically stop before payment and ask for spoken confirmation).
+- **✈️ Flights, Trains & Ticket Search (Interactive Forms & Web Navigation)**:
+  - *"Trouve-moi des billets d'avion Paris - Tokyo le mois prochain"* / *"Search for flights to Tokyo"*: Launches web booking search or directly spawns an interactive floating **Search Form** (`card_type: "form"`) with departure/destination inputs, budget range sliders, flight class selector, and direct-flight toggles. Submitting the form instantly instructs the agent.
+  - *"Cherche des billets de train pour Lyon ce week-end"* / *"Find train tickets to Lyon this weekend"*.
+
+- **🎸 Concerts, Festivals & Live Events**:
+  - *"Quels sont les prochains concerts de rock à Paris ?"* / *"Find rock concerts in London next month"*: Explores venues and ticketing portals (Fnac Spectacles, Ticketmaster, Dice, Eventbrite), extracts tour dates and ticket prices, and projects a structured comparison table or card with direct clickable booking actions.
+  - *"Trouve des festivals de jazz près de chez moi cet été"*.
+
+- **📺 YouTube Channels & Video Exploration**:
+  - *"Résume cette chaîne YouTube"* / *"De quoi parle cette chaîne ?"*: Inspects the active channel page, computes subscriber count and video volume, and projects a standalone Markdown card with key themes and clickable video links (`[▶ Titre de la vidéo]`) to play them with a single click or voice prompt.
+  - *"Lance la dernière vidéo de la chaîne"* / *"Play the latest video"*.
+
+- **📄 Articles, Documents & Web Page Summaries**:
+  - *"Fais-moi un résumé de cet article"* / *"Synthèse de la page"* / *"Summarize this page"*: Reads titles, headings, and body content, then generates an independent, high-contrast floating Markdown HUD summarizing key points, numbers, and quotes without losing focus on the original tab.
+
+- **📊 Product, Service & Price Comparisons**:
+  - *"Compare les meilleurs casques à réduction de bruit"* / *"Find the best noise cancelling headphones under 300€"*: Navigates review and e-commerce websites, compares specs and verified ratings, and builds a floating comparison matrix (`card_type: "table"`) with clickable actions (`[⚡ Commander ...]`).
+
+- **🛡️ Automated Consent & Obstacle Dismissal**:
+  - **Cookie & GDPR Banners**: The agent automatically identifies and accepts cookie consent banners (*"Tout accepter"*, *"Accepter tout"*, *"Accept all"*) without prompting the user.
+  - **Push Notification & Newsletter Popups**: Intrusive web banners (*"Activez les notifications"*, *"Ne manquez rien"*) are automatically dismissed or closed (clicking ✕ / *"Fermer"* / *"Plus tard"* / *"Refuser"*) to unlock the page view.
+
+- **🛒 Assisted Shopping & Safe Checkout**:
+  - *"Ajoute au panier et valide la commande"* / *"Add item to cart and proceed to checkout"*: Fills delivery options and navigates through the checkout funnel, then **strictly halts before payment** with `actions: []` to request explicit spoken confirmation from the user.
 
 ### 4. ♿ Accessibility & System Voice Commands
 - **Targeting & Switch**: *"Show numbers"*, *"Badges"*, *"Badge 4"*, *"Activate switch access"*.

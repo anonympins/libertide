@@ -6,6 +6,7 @@ mod fs_util;
 mod html_util;
 mod pattern;
 mod scheduler;
+mod theme;
 mod tts;
 mod twitch;
 mod types;
@@ -16,6 +17,7 @@ use floating_window::{update_open_floating_cards, FloatingCard, OPEN_FLOATING_CA
 use automation::*;
 use fs_util::*;
 use pattern::clean_words;
+use theme::{AppTheme, SettingsTab, ThemeColors};
 use tts::{sanitize_for_tts, spawn_tts_worker};
 use twitch::{search_twitch_channels, spawn_twitch_worker};
 use window_util::*;
@@ -105,6 +107,8 @@ pub struct OverlayApp {
     zoom_factor: f32,
     voice_gender: VoiceGender,
     llm_config: LlmConfig,
+    theme: AppTheme,
+    settings_tab: SettingsTab,
 
     // Accessibilité : Ciblage par numéros & Mode contacteur unique (Switch Access)
     numbered_targets: Vec<NumberedElementTarget>,
@@ -658,6 +662,7 @@ impl OverlayApp {
         setup_custom_fonts(&cc.egui_ctx);
 
         let llm_config = resolve_llm_config();
+        let theme = AppTheme::resolve_theme();
         let has_no_key = llm_config.api_key.is_empty();
         let initial_subtitle = if has_no_key {
             "Veuillez renseigner votre clé API LLM pour activer l'assistant.".to_string()
@@ -686,6 +691,8 @@ impl OverlayApp {
             zoom_factor: 1.0,
             voice_gender: initial_voice,
             llm_config: llm_config.clone(),
+            theme,
+            settings_tab: SettingsTab::LlmProvider,
 
             numbered_targets: Vec::new(),
             show_numbered_targets: false,
@@ -742,6 +749,12 @@ impl OverlayApp {
         self.api_key_error = None;
     }
 
+    pub fn set_theme(&mut self, theme: AppTheme) {
+        self.theme = theme;
+        let _ = write_env_var_to_file(".env", "THEME", theme.key());
+        std::env::set_var("THEME", theme.key());
+    }
+
     fn draw_avatar(&self, ui: &mut egui::Ui, center: egui::Pos2, base_radius: f32, time: f64) {
         let painter = ui.painter();
 
@@ -758,11 +771,12 @@ impl OverlayApp {
             ((time * pulse_speed).sin() as f32).max(0.0)
         };
 
-        // Teinte rouge/corail en écoute micro, bleu cyan le reste du temps
+        // Teinte rouge/corail en écoute micro, couleur d'accent du thème le reste du temps
+        let theme = self.theme.colors();
         let (ring_base_color, core_color) = if self.status == AgentStatus::Listening {
             ([255, 65, 80], egui::Color32::from_rgb(255, 50, 70))
         } else {
-            ([0, 180, 255], egui::Color32::from_rgba_unmultiplied(0, 180, 255, 220))
+            (theme.avatar_ring, theme.avatar_core)
         };
 
         // Empreinte sonore radiale (audio voiceprint spectrum)
@@ -822,11 +836,12 @@ impl OverlayApp {
         let bar_width = 3.0;
         let spacing = 2.5;
 
+        let theme = self.theme.colors();
         let (base_color, activity_mult) = match self.status {
-            AgentStatus::Speaking => (egui::Color32::from_rgb(0, 215, 255), self.smoothed_audio_level),
+            AgentStatus::Speaking => (theme.accent, self.smoothed_audio_level),
             AgentStatus::Listening => (egui::Color32::from_rgb(255, 75, 90), self.smoothed_audio_level),
             AgentStatus::Thinking => (egui::Color32::from_rgb(180, 120, 255), 0.55f32),
-            AgentStatus::Idle => (egui::Color32::from_rgba_unmultiplied(0, 180, 255, 120), 0.15f32),
+            AgentStatus::Idle => (theme.border, 0.15f32),
             AgentStatus::EmergencyStopped => (egui::Color32::from_rgb(220, 50, 50), 0.0f32),
         };
 
@@ -957,7 +972,7 @@ impl OverlayApp {
         let _ = self.tts_sender.send(TtsCommand::Speak(msg));
     }
 
-    fn start_recording(&mut self, _ctx: &egui::Context) {
+    fn start_recording(&mut self, _ctx: &egui::Context, play_sound: bool) {
         if self.status == AgentStatus::EmergencyStopped {
             return;
         }
@@ -966,7 +981,9 @@ impl OverlayApp {
         self.continuous_mode = true;
         self.is_recording = true;
         self.status = AgentStatus::Listening;
-        play_earcon(Earcon::MicOpen);
+        if play_sound {
+            play_earcon(Earcon::MicOpen);
+        }
         self.live_transcript.clear();
         if self.dictation_mode {
             restore_external_focus();
@@ -988,7 +1005,7 @@ impl OverlayApp {
         if self.is_recording {
             self.stop_recording();
         } else {
-            self.start_recording(ctx);
+            self.start_recording(ctx, true);
         }
     }
 }
@@ -998,8 +1015,7 @@ impl eframe::App for OverlayApp {
         if self.is_hidden {
             [0.0, 0.0, 0.0, 0.0]
         } else {
-            // Fond noir à 75 % d'opacité
-            [0.0, 0.0, 0.0, 0.75]
+            self.theme.colors().clear_color
         }
     }
 
@@ -1028,10 +1044,18 @@ impl eframe::App for OverlayApp {
             self.smoothed_audio_level += (0.0 - self.smoothed_audio_level) * 0.25;
         }
 
+        let theme = self.theme.colors();
+
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = egui::Color32::TRANSPARENT;
         visuals.window_fill = egui::Color32::TRANSPARENT;
-        visuals.extreme_bg_color = egui::Color32::from_rgb(18, 20, 26);
+        visuals.extreme_bg_color = theme.control_bg;
+        visuals.selection.bg_fill = theme.tab_active_bg;
+        visuals.selection.stroke = egui::Stroke::new(1.0, theme.accent);
+        visuals.widgets.active.bg_fill = theme.tab_active_bg;
+        visuals.widgets.active.weak_bg_fill = theme.tab_active_bg;
+        visuals.widgets.hovered.weak_bg_fill = theme.tab_inactive_bg;
+        visuals.widgets.inactive.weak_bg_fill = theme.tab_inactive_bg;
         ctx.set_visuals(visuals);
 
         let ppp = ctx.pixels_per_point().max(0.5);
@@ -1066,7 +1090,7 @@ impl eframe::App for OverlayApp {
         let current_chat_h = self.chat_height.clamp(min_chat_h, max_chat_h);
 
         // Arrondi pour éviter les oscillations de conversion DPI sub-pixel
-        let modal_min_h = if self.show_api_key_modal { 268.0 } else { min_win_h };
+        let modal_min_h = if self.show_api_key_modal { 320.0 } else { min_win_h };
         let target_win_h = (padding + current_chat_h + padding + control_h + padding).max(modal_min_h).round();
         let active_win_h = inner_rect_opt.map_or(self.current_win_h, |r| r.height().max(min_win_h));
 
@@ -1132,7 +1156,7 @@ impl eframe::App for OverlayApp {
                                 && !self.is_hidden
                                 && !AGENT_BUSY.load(Ordering::SeqCst)
                             {
-                                self.start_recording(&ctx);
+                                self.start_recording(&ctx, false);
                             }
                         }
                     }
@@ -1204,7 +1228,7 @@ impl eframe::App for OverlayApp {
                     if is_user_typing {
                         // L'utilisateur est activement en train de taper au clavier : on préserve son texte
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1214,7 +1238,33 @@ impl eframe::App for OverlayApp {
                     if norm_prompt.trim().is_empty() {
                         println!("[Voice] Bruit parasite ignoré (aucun mot détecté) : aucune requête LLM.");
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
+                        }
+                        return;
+                    }
+
+                    // Changement de thème d'accessibilité à la voix
+                    if norm_prompt.contains("theme suivant") || norm_prompt.contains("thème suivant") || norm_prompt.contains("change de theme") || norm_prompt.contains("change de thème") || norm_prompt.contains("changer de theme") || norm_prompt.contains("changer de thème") {
+                        play_earcon(Earcon::Success);
+                        self.set_theme(self.theme.next());
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx, false);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("contraste eleve") || norm_prompt.contains("contraste élevé") || norm_prompt.contains("high contrast") {
+                        play_earcon(Earcon::Success);
+                        self.set_theme(AppTheme::HighContrastYellow);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx, false);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("theme sombre") || norm_prompt.contains("thème sombre") || norm_prompt.contains("theme par defaut") || norm_prompt.contains("thème par défaut") {
+                        play_earcon(Earcon::Success);
+                        self.set_theme(AppTheme::CyberCyan);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1224,7 +1274,7 @@ impl eframe::App for OverlayApp {
                         play_earcon(Earcon::Success);
                         self.set_voice_gender(self.voice_gender.next());
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1232,7 +1282,7 @@ impl eframe::App for OverlayApp {
                         play_earcon(Earcon::Success);
                         self.set_voice_gender(VoiceProfile::Denise);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1240,7 +1290,7 @@ impl eframe::App for OverlayApp {
                         play_earcon(Earcon::Success);
                         self.set_voice_gender(VoiceProfile::Henri);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1248,7 +1298,7 @@ impl eframe::App for OverlayApp {
                         play_earcon(Earcon::Success);
                         self.set_voice_gender(VoiceProfile::Hortense);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1256,7 +1306,7 @@ impl eframe::App for OverlayApp {
                         play_earcon(Earcon::Success);
                         self.set_voice_gender(VoiceProfile::Paul);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1264,7 +1314,7 @@ impl eframe::App for OverlayApp {
                         play_earcon(Earcon::Success);
                         self.set_voice_gender(VoiceProfile::Sylvie);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1272,7 +1322,7 @@ impl eframe::App for OverlayApp {
                         play_earcon(Earcon::Success);
                         self.set_voice_gender(VoiceProfile::Jean);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1282,7 +1332,7 @@ impl eframe::App for OverlayApp {
                         self.zoom_factor = (self.zoom_factor + 0.15).clamp(0.7, 2.5);
                         play_earcon(Earcon::Success);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1290,7 +1340,7 @@ impl eframe::App for OverlayApp {
                         self.zoom_factor = (self.zoom_factor - 0.15).clamp(0.7, 2.5);
                         play_earcon(Earcon::Success);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1298,7 +1348,7 @@ impl eframe::App for OverlayApp {
                         self.zoom_factor = 1.0;
                         play_earcon(Earcon::Success);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1309,7 +1359,7 @@ impl eframe::App for OverlayApp {
                         self.show_numbered_targets = !self.numbered_targets.is_empty();
                         play_earcon(Earcon::Success);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1347,7 +1397,7 @@ impl eframe::App for OverlayApp {
                                 self.show_numbered_targets = false;
                                 self.numbered_targets.clear();
                                 if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                                    self.start_recording(&ctx);
+                                    self.start_recording(&ctx, false);
                                 }
                                 return;
                             }
@@ -1358,7 +1408,7 @@ impl eframe::App for OverlayApp {
                         self.switch_access_mode = !self.switch_access_mode;
                         play_earcon(Earcon::Success);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1397,7 +1447,7 @@ impl eframe::App for OverlayApp {
                         });
                         let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1419,7 +1469,7 @@ impl eframe::App for OverlayApp {
                             screen_size_kb: None,
                         });
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1488,7 +1538,7 @@ impl eframe::App for OverlayApp {
                             self.continuous_mode = true;
                         } else if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             // Tout autre message est ignoré lorsque l'overlay est masqué
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                     } else {
                         if is_hide_command(&prompt) {
@@ -1557,7 +1607,7 @@ impl eframe::App for OverlayApp {
                             });
                             let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
                         } else if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                     }
                 }
@@ -1566,7 +1616,7 @@ impl eframe::App for OverlayApp {
                         && self.status != AgentStatus::EmergencyStopped
                         && !AGENT_BUSY.load(Ordering::SeqCst)
                     {
-                        self.start_recording(&ctx);
+                        self.start_recording(&ctx, false);
                     }
                 }
                 AgentEvent::WhisperReady => {
@@ -1576,7 +1626,7 @@ impl eframe::App for OverlayApp {
                         && !AGENT_BUSY.load(Ordering::SeqCst)
                         && !self.is_recording
                     {
-                        self.start_recording(&ctx);
+                        self.start_recording(&ctx, false);
                     }
                 }
                 AgentEvent::TwitchChatReceived(twitch_msg) => {
@@ -1596,7 +1646,7 @@ impl eframe::App for OverlayApp {
                     }
                     self.live_transcript.clear();
                     if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                        self.start_recording(&ctx);
+                        self.start_recording(&ctx, false);
                     }
                 }
                 AgentEvent::RequestApiKey => {
@@ -1704,8 +1754,8 @@ impl eframe::App for OverlayApp {
                 ui.painter().rect(
                     response_rect,
                     egui::CornerRadius::same(12),
-                    egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 55)),
+                    theme.panel_bg,
+                    egui::Stroke::new(1.0, theme.border_subtle),
                     egui::StrokeKind::Inside,
                 );
 
@@ -1785,14 +1835,14 @@ impl eframe::App for OverlayApp {
                 ui.painter().hline(
                     (response_rect.min.x + 8.0)..=(response_rect.max.x - 8.0),
                     sep_y,
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 45)),
+                    egui::Stroke::new(1.0, theme.border_subtle),
                 );
 
                 // 2. Zone inférieure évaluée en deuxième (contrôles, avatar et saisie) pour précéder les messages au focus Tab
                 ui.scope_builder(egui::UiBuilder::new().max_rect(control_rect), |ui| {
                     egui::Frame::new()
-                        .fill(egui::Color32::from_rgb(18, 20, 26))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 75)))
+                        .fill(theme.control_bg)
+                        .stroke(egui::Stroke::new(1.0, theme.border))
                         .corner_radius(egui::CornerRadius::same(12))
                         .inner_margin(egui::Margin::symmetric(10, 8))
                         .show(ui, |ui| {
@@ -1836,7 +1886,7 @@ impl eframe::App for OverlayApp {
                                     } else if self.status == AgentStatus::Listening {
                                         egui::Color32::from_rgb(255, 80, 80)
                                     } else {
-                                        egui::Color32::from_rgb(0, 200, 255)
+                                        theme.accent
                                     };
 
                                     ui.horizontal(|ui| {
@@ -1968,7 +2018,7 @@ impl eframe::App for OverlayApp {
                                             egui::Button::new(
                                                 egui::RichText::new("Envoyer")
                                                     .size(11.5)
-                                                    .color(egui::Color32::from_rgb(220, 240, 255)),
+                                                    .color(theme.accent_text),
                                             ),
                                         );
                                         if (send_btn.clicked() || enter_hit) && !self.input_text.trim().is_empty() {
@@ -2079,7 +2129,7 @@ impl eframe::App for OverlayApp {
                                                 IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
                                                 restore_external_focus();
                                                 if !self.is_recording {
-                                                    self.start_recording(ui.ctx());
+                                                    self.start_recording(ui.ctx(), true);
                                                 }
                                             }
                                         }
@@ -2114,9 +2164,10 @@ impl eframe::App for OverlayApp {
                                         });
 
                                         let key_btn = ui
-                                            .button("🔑")
-                                            .on_hover_text("Configurer le fournisseur LLM et sa clé API");
+                                            .button("⚙")
+                                            .on_hover_text("Paramètres (Fournisseurs LLM, clé API, Thèmes & Accessibilité)");
                                         if key_btn.clicked() {
+                                            self.settings_tab = SettingsTab::LlmProvider;
                                             self.show_api_key_modal = true;
                                             self.sync_modal_inputs_for_provider(self.llm_config.provider);
                                             self.api_key_error = None;
@@ -2185,7 +2236,7 @@ impl eframe::App for OverlayApp {
                                                         };
                                                         (name, egui::Color32::from_rgb(255, 215, 120))
                                                     }
-                                            ChatRole::Agent => (self.llm_config.provider.display_name().to_string(), egui::Color32::from_rgb(0, 195, 255)),
+                                            ChatRole::Agent => (self.llm_config.provider.display_name().to_string(), theme.accent),
                                                 };
                                                 ui.label(
                                                     egui::RichText::new(&label_name)
@@ -2219,7 +2270,7 @@ impl eframe::App for OverlayApp {
                                             let (text_size, line_height, text_color, is_strong) = match entry.role {
                                                 ChatRole::User => {
                                                     if is_highlighted {
-                                                        (14.5, 20.0, egui::Color32::from_rgb(255, 230, 150), true)
+                                                        (14.5, 20.0, theme.text_user, true)
                                                     } else {
                                                         (12.0, 16.5, egui::Color32::from_rgba_unmultiplied(225, 210, 160, 185), false)
                                                     }
@@ -2283,7 +2334,7 @@ impl eframe::App for OverlayApp {
                                                 ui.painter().rect_stroke(
                                                     label_resp.rect.expand(4.0),
                                                     egui::CornerRadius::same(6),
-                                                    egui::Stroke::new(1.8, egui::Color32::from_rgb(0, 200, 255)),
+                                                    egui::Stroke::new(1.8, theme.accent),
                                                     egui::StrokeKind::Outside,
                                                 );
                                             }
@@ -2310,10 +2361,10 @@ impl eframe::App for OverlayApp {
                                                             }
                                                             let btn_text = egui::RichText::new(format!("💡 {clean_label}"))
                                                                 .size(11.0)
-                                                                .color(egui::Color32::from_rgb(130, 220, 255));
+                                                                .color(theme.accent);
 
                                                             let btn = egui::Button::new(btn_text)
-                                                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 95)))
+                                                                .stroke(egui::Stroke::new(1.0, theme.border))
                                                                 .corner_radius(egui::CornerRadius::same(10));
 
                                                             if ui.add(btn).on_hover_text("Cliquer pour choisir cette suggestion").clicked() {
@@ -2656,29 +2707,51 @@ impl eframe::App for OverlayApp {
                     egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 50)),
                 );
 
-                // Boîte modale de saisie multi-fournisseurs LLM
+                // Boîte modale de configuration (Fournisseurs LLM & Thèmes d'accessibilité)
                 if self.show_api_key_modal {
-                    egui::Window::new("api_key_modal")
+                    egui::Window::new("settings_modal")
                         .title_bar(false)
                         .collapsible(false)
                         .resizable(false)
                         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                         .frame(
                             egui::Frame::new()
-                                .fill(egui::Color32::from_rgb(12, 15, 20))
-                                .stroke(egui::Stroke::new(1.2, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 150)))
+                                .fill(theme.modal_bg)
+                                .stroke(egui::Stroke::new(1.2, theme.border))
                                 .corner_radius(egui::CornerRadius::same(10))
                                 .inner_margin(egui::Margin::symmetric(12, 10)),
                         )
                         .show(&ctx, |ui| {
-                            // En-tête compact intégré sans barre de titre egui
+                            // En-tête avec onglets de configuration
                             ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new("🔑 Configuration du Fournisseur LLM")
+                                let tab_llm = ui.selectable_label(
+                                    self.settings_tab == SettingsTab::LlmProvider,
+                                    egui::RichText::new("🔑 Fournisseur LLM")
                                         .size(12.0)
-                                        .color(egui::Color32::from_rgb(0, 215, 255))
+                                        .color(if self.settings_tab == SettingsTab::LlmProvider {
+                                            theme.accent
+                                        } else {
+                                            theme.text_secondary
+                                        })
                                         .strong(),
                                 );
+                                if tab_llm.clicked() {
+                                    self.settings_tab = SettingsTab::LlmProvider;
+                                }
+                                let tab_theme = ui.selectable_label(
+                                    self.settings_tab == SettingsTab::Theme,
+                                    egui::RichText::new("🎨 Thèmes & Accessibilité")
+                                        .size(12.0)
+                                        .color(if self.settings_tab == SettingsTab::Theme {
+                                            theme.accent
+                                        } else {
+                                            theme.text_secondary
+                                        })
+                                        .strong(),
+                                );
+                                if tab_theme.clicked() {
+                                    self.settings_tab = SettingsTab::Theme;
+                                }
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if ui.add(
                                         egui::Button::new(
@@ -2695,7 +2768,12 @@ impl eframe::App for OverlayApp {
                                 });
                             });
                             ui.add_space(4.0);
+                            ui.separator();
+                            ui.add_space(4.0);
 
+                            match self.settings_tab {
+                                SettingsTab::LlmProvider => {
+                            // --- Onglet Fournisseur LLM ---
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
                                 for &provider in LlmProvider::ALL {
@@ -2878,6 +2956,85 @@ impl eframe::App for OverlayApp {
                                     self.api_key_error = None;
                                 }
                             });
+                                }
+                                SettingsTab::Theme => {
+                            // --- Onglet Thèmes & Accessibilité ---
+                            ui.label(
+                                egui::RichText::new("Profils de contraste et accessibilité visuelle :")
+                                    .size(11.5)
+                                    .color(theme.text_secondary),
+                            );
+                            ui.add_space(6.0);
+
+                            let mut current_theme = self.theme;
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Thème :").size(12.0).strong().color(egui::Color32::WHITE));
+                                egui::ComboBox::from_id_salt("settings_theme_combobox")
+                                    .selected_text(current_theme.display_name())
+                                    .width(260.0)
+                                    .show_ui(ui, |ui| {
+                                        for &t in AppTheme::ALL {
+                                            let t_colors = t.colors();
+                                            ui.horizontal(|ui| {
+                                                if ui.selectable_value(&mut current_theme, t, t.display_name()).clicked() {
+                                                    self.set_theme(t);
+                                                }
+                                                let (rect, _) = ui.allocate_exact_size(egui::vec2(44.0, 12.0), egui::Sense::hover());
+                                                let p = ui.painter();
+                                                p.rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(10.0, 12.0)), egui::CornerRadius::same(2), t_colors.control_bg);
+                                                p.rect_filled(egui::Rect::from_min_size(egui::pos2(rect.min.x + 11.0, rect.min.y), egui::vec2(10.0, 12.0)), egui::CornerRadius::same(2), t_colors.border);
+                                                p.rect_filled(egui::Rect::from_min_size(egui::pos2(rect.min.x + 22.0, rect.min.y), egui::vec2(10.0, 12.0)), egui::CornerRadius::same(2), t_colors.accent);
+                                                p.rect_filled(egui::Rect::from_min_size(egui::pos2(rect.min.x + 33.0, rect.min.y), egui::vec2(10.0, 12.0)), egui::CornerRadius::same(2), t_colors.text_user);
+                                            });
+                                        }
+                                    });
+                            });
+
+                            if current_theme != self.theme {
+                                self.set_theme(current_theme);
+                            }
+
+                            ui.add_space(8.0);
+                            let cur_colors = self.theme.colors();
+                            egui::Frame::new()
+                                .fill(cur_colors.control_bg)
+                                .stroke(egui::Stroke::new(1.0, cur_colors.border))
+                                .corner_radius(egui::CornerRadius::same(8))
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(self.theme.display_name()).strong().size(12.0).color(cur_colors.accent));
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            let (rect, _) = ui.allocate_exact_size(egui::vec2(58.0, 14.0), egui::Sense::hover());
+                                            let p = ui.painter();
+                                            p.rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(14.0, 14.0)), egui::CornerRadius::same(2), cur_colors.control_bg);
+                                            p.rect_filled(egui::Rect::from_min_size(egui::pos2(rect.min.x + 15.0, rect.min.y), egui::vec2(14.0, 14.0)), egui::CornerRadius::same(2), cur_colors.border);
+                                            p.rect_filled(egui::Rect::from_min_size(egui::pos2(rect.min.x + 30.0, rect.min.y), egui::vec2(14.0, 14.0)), egui::CornerRadius::same(2), cur_colors.accent);
+                                            p.rect_filled(egui::Rect::from_min_size(egui::pos2(rect.min.x + 45.0, rect.min.y), egui::vec2(13.0, 14.0)), egui::CornerRadius::same(2), cur_colors.text_user);
+                                        });
+                                    });
+                                    ui.add_space(3.0);
+                                    ui.label(
+                                        egui::RichText::new(self.theme.description())
+                                            .size(10.5)
+                                            .color(cur_colors.text_secondary)
+                                            .italics(),
+                                    );
+                                });
+
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("Fermer").clicked() {
+                                    self.show_api_key_modal = false;
+                                }
+                                ui.label(
+                                    egui::RichText::new("Astuce vocale : dites « thème suivant » ou « contraste élevé »")
+                                        .size(10.0)
+                                        .color(theme.text_secondary),
+                                );
+                            });
+                                }
+                            }
                         });
                 }
 
