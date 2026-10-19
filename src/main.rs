@@ -1946,6 +1946,61 @@ impl eframe::App for OverlayApp {
                                         let send_btn_w = 64.0;
                                         let edit_width = (ui.available_width() - send_btn_w - ui.spacing().item_spacing.x).max(60.0);
                                         let input_id = egui::Id::new("prompt_input_text");
+                                        let is_input_focused = ctx.memory(|m| m.has_focus(input_id));
+                                        let is_modal_open = self.show_api_key_modal;
+                                        let is_other_typing = ctx.memory(|m| {
+                                            m.has_focus(egui::Id::new("api_key_input_field"))
+                                                || m.has_focus(egui::Id::new("model_input_field"))
+                                        });
+
+                                        let paste_hit = ctx.input(|i| {
+                                            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
+                                                || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                        });
+
+                                        let mut pending_paste_fallback: Option<String> = None;
+
+                                        // Traitement du collage avant que TextEdit ne consomme la touche Ctrl+V
+                                        if paste_hit && !is_modal_open && !is_other_typing {
+                                            let clip_opt = get_clipboard_text()
+                                                .or_else(get_plain_clipboard_text)
+                                                .or_else(|| ctx.input(|i| {
+                                                    i.events.iter().find_map(|e| {
+                                                        if let egui::Event::Paste(text) = e {
+                                                            Some(text.clone())
+                                                        } else {
+                                                            None
+                                                        }
+                                                    })
+                                                }));
+
+                                            if let Some(clip) = clip_opt {
+                                                let clean_clip = clip.replace(['\r', '\n'], " ");
+                                                let trimmed_clean = clean_clip.trim().to_string();
+                                                if !trimmed_clean.is_empty() {
+                                                    self.stop_speaking();
+                                                    play_earcon(Earcon::Success);
+
+                                                    if is_input_focused {
+                                                        pending_paste_fallback = Some(trimmed_clean.clone());
+                                                        ctx.input_mut(|i| {
+                                                            i.events.retain(|e| !matches!(e, egui::Event::Paste(_)));
+                                                            i.events.push(egui::Event::Paste(trimmed_clean.clone()));
+                                                        });
+                                                    } else {
+                                                        self.input_text = trimmed_clean;
+                                                        ctx.memory_mut(|m| m.request_focus(input_id));
+                                                    }
+                                                    ctx.request_repaint();
+                                                }
+                                            }
+
+                                            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V));
+                                            ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::V));
+                                        }
+
+                                        let prev_text = self.input_text.clone();
                                         let response = ui.add_sized(
                                             [edit_width, 24.0],
                                             egui::TextEdit::singleline(&mut self.input_text)
@@ -1957,22 +2012,38 @@ impl eframe::App for OverlayApp {
                                                 }),
                                         );
 
+                                        if let Some(pasted) = pending_paste_fallback {
+                                            if self.input_text == prev_text {
+                                                self.input_text = pasted;
+                                                ctx.request_repaint();
+                                            }
+                                        }
+
                                         response.context_menu(|ui| {
-                                            if ui.button("📋 Coller").clicked() {
-                                                if let Some(clip) = get_clipboard_text() {
+                                            if ui.button("📋 Coller (Ctrl+V)").clicked() {
+                                                if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
                                                     let clean_clip = clip.replace(['\r', '\n'], " ");
-                                                    self.input_text = clean_clip.trim().to_string();
-                                                    self.stop_speaking();
+                                                    let trimmed_clean = clean_clip.trim().to_string();
+                                                    if !trimmed_clean.is_empty() {
+                                                        self.input_text = trimmed_clean;
+                                                        self.stop_speaking();
+                                                        play_earcon(Earcon::Success);
+                                                    }
                                                 }
+                                                ui.memory_mut(|m| m.request_focus(input_id));
                                                 ui.close();
                                             }
                                             if ui.button("📄 Copier tout (Ctrl+C)").clicked() {
                                                 set_clipboard_text(&self.input_text);
+                                                ctx.copy_text(self.input_text.clone());
+                                                play_earcon(Earcon::Success);
                                                 ui.close();
                                             }
-                                            if ui.button("✂ Couper tout").clicked() {
+                                            if ui.button("✂ Couper tout (Ctrl+X)").clicked() {
                                                 set_clipboard_text(&self.input_text);
+                                                ctx.copy_text(self.input_text.clone());
                                                 self.input_text.clear();
+                                                play_earcon(Earcon::Success);
                                                 ui.close();
                                             }
                                             if ui.button("🗑 Effacer").clicked() {
@@ -1985,26 +2056,21 @@ impl eframe::App for OverlayApp {
                                             i.events.iter().any(|e| matches!(e, egui::Event::Copy))
                                                 || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
                                         });
-                                        if response.has_focus() && copy_hit && !self.input_text.is_empty() {
+                                        if (response.has_focus() || is_input_focused) && copy_hit && !self.input_text.is_empty() {
                                             set_clipboard_text(&self.input_text);
                                             ctx.copy_text(self.input_text.clone());
                                             play_earcon(Earcon::Success);
                                         }
 
-                                        let paste_hit = ctx.input(|i| {
-                                            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
-                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
-                                                || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                        let cut_hit = ctx.input(|i| {
+                                            i.events.iter().any(|e| matches!(e, egui::Event::Cut))
+                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::X))
                                         });
-                                        if (response.has_focus() || response.hovered()) && paste_hit {
-                                            if let Some(clip) = get_clipboard_text() {
-                                                let clean_clip = clip.replace(['\r', '\n'], " ");
-                                                let trimmed_clean = clean_clip.trim().to_string();
-                                                if !trimmed_clean.is_empty() {
-                                                    self.input_text = trimmed_clean;
-                                                    self.stop_speaking();
-                                                }
-                                            }
+                                        if (response.has_focus() || is_input_focused) && cut_hit && !self.input_text.is_empty() {
+                                            set_clipboard_text(&self.input_text);
+                                            ctx.copy_text(self.input_text.clone());
+                                            self.input_text.clear();
+                                            play_earcon(Earcon::Success);
                                         }
 
                                         if response.changed() {
@@ -2799,8 +2865,26 @@ impl eframe::App for OverlayApp {
                             ui.add_space(2.0);
 
                             ui.horizontal(|ui| {
+                                let key_input_id = egui::Id::new("api_key_input_field");
+                                let is_key_focused = ctx.memory(|m| m.has_focus(key_input_id));
+                                let paste_key_hit = ctx.input(|i| {
+                                    i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                                        || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
+                                        || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                });
+                                if is_key_focused && paste_key_hit {
+                                    if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
+                                        let trimmed = clip.trim().to_string();
+                                        if !trimmed.is_empty() {
+                                            self.api_key_input = trimmed;
+                                            play_earcon(Earcon::Success);
+                                        }
+                                    }
+                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V));
+                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::V));
+                                }
                                 let edit = egui::TextEdit::singleline(&mut self.api_key_input)
-                                    .id(egui::Id::new("api_key_input_field"))
+                                    .id(key_input_id)
                                     .password(!self.show_api_key_plain)
                                     .hint_text("sk-...")
                                     .desired_width(230.0);
@@ -2844,19 +2928,6 @@ impl eframe::App for OverlayApp {
                                     play_earcon(Earcon::Success);
                                 }
 
-                                let paste_key_hit = ctx.input(|i| {
-                                    i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
-                                        || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
-                                        || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
-                                });
-                                if (edit_resp.has_focus() || edit_resp.hovered()) && paste_key_hit {
-                                    if let Some(clip) = get_clipboard_text() {
-                                        let trimmed = clip.trim().to_string();
-                                        if !trimmed.is_empty() && self.api_key_input != trimmed {
-                                            self.api_key_input = trimmed;
-                                        }
-                                    }
-                                }
                             });
 
                             ui.add_space(5.0);
@@ -2881,8 +2952,26 @@ impl eframe::App for OverlayApp {
                             ui.add_space(2.0);
 
                             ui.horizontal(|ui| {
+                                let model_input_id = egui::Id::new("model_input_field");
+                                let is_model_focused = ctx.memory(|m| m.has_focus(model_input_id));
+                                let paste_model_hit = ctx.input(|i| {
+                                    i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                                        || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
+                                        || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                });
+                                if is_model_focused && paste_model_hit {
+                                    if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
+                                        let trimmed = clip.trim().to_string();
+                                        if !trimmed.is_empty() {
+                                            self.model_input = trimmed;
+                                            play_earcon(Earcon::Success);
+                                        }
+                                    }
+                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V));
+                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::V));
+                                }
                                 let model_edit = egui::TextEdit::singleline(&mut self.model_input)
-                                    .id(egui::Id::new("model_input_field"))
+                                    .id(model_input_id)
                                     .hint_text(default_model_name)
                                     .desired_width(240.0);
                                 let model_resp = ui.add(model_edit);
@@ -2908,19 +2997,6 @@ impl eframe::App for OverlayApp {
                                     }
                                 });
 
-                                let paste_model_hit = ctx.input(|i| {
-                                    i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
-                                        || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
-                                        || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
-                                });
-                                if (model_resp.has_focus() || model_resp.hovered()) && paste_model_hit {
-                                    if let Some(clip) = get_clipboard_text() {
-                                        let trimmed = clip.trim().to_string();
-                                        if !trimmed.is_empty() && self.model_input != trimmed {
-                                            self.model_input = trimmed;
-                                        }
-                                    }
-                                }
                             });
 
                             if let Some(ref err) = self.api_key_error {
