@@ -14,6 +14,55 @@ use crate::types::{AgentEvent, AgentStatus, AudioCommand};
 // 1. Rééchantillonneur audio continu (vers mono 16 kHz)
 // ============================================================================
 
+/// Détecte les bruits parasites, didascalies ou hallucinations fréquentes de Whisper sur le silence
+fn is_hallucination_or_noise(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    let clean: String = lower.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+    let clean_str = clean.trim();
+    let words: Vec<&str> = clean_str.split_whitespace().collect();
+    if words.is_empty() {
+        return true;
+    }
+    const EXACT_NOISE_PHRASES: &[&str] = &[
+        "merci",
+        "merci beaucoup",
+        "merci d avoir regarde",
+        "merci davoir regarde",
+        "merci a tous",
+        "merci davoir visionne",
+        "sous titres",
+        "sous titrage",
+        "sous titres realises par",
+        "amara org",
+        "musique",
+        "musique douce",
+        "musique de fond",
+        "applaudissements",
+        "rires",
+        "soupir",
+        "bruit",
+        "bruit de fond",
+        "chuchotement",
+        "silence",
+        "you",
+        "thank you",
+        "thanks for watching",
+        "subtitles",
+        "transcription",
+        "a bientot",
+        "au revoir",
+        "bye",
+    ];
+    let trimmed = text.trim();
+    EXACT_NOISE_PHRASES.iter().any(|&p| clean_str == p)
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        || (trimmed.starts_with('(') && trimmed.ends_with(')'))
+        || (trimmed.starts_with('*') && trimmed.ends_with('*'))
+        || (trimmed.starts_with('♪') || trimmed.ends_with('♪'))
+        || (trimmed.starts_with('♫') || trimmed.ends_with('♫'))
+        || trimmed.chars().all(|c| !c.is_alphanumeric())
+}
+
 /// Rééchantillonneur linéaire continu vers mono 16 kHz sans dépendance externe
 pub struct ContinuousResampler {
     in_rate: f64,
@@ -520,7 +569,9 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                         };
 
                         match transcribe_res {
-                            Ok(text) if !text.trim().is_empty() => {
+                            Ok(text) if !text.trim().is_empty()
+                                && text.chars().any(|c| c.is_alphanumeric())
+                                && !is_hallucination_or_noise(&text) => {
                                 let _ = event_tx.send(AgentEvent::VoicePromptReady(text));
                                 break;
                             }

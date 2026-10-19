@@ -6,6 +6,7 @@ mod fs_util;
 mod html_util;
 mod pattern;
 mod scheduler;
+mod theme;
 mod tts;
 mod twitch;
 mod types;
@@ -16,6 +17,7 @@ use floating_window::{update_open_floating_cards, FloatingCard, OPEN_FLOATING_CA
 use automation::*;
 use fs_util::*;
 use pattern::clean_words;
+use theme::{AppTheme, SettingsTab, ThemeColors};
 use tts::{sanitize_for_tts, spawn_tts_worker};
 use twitch::{search_twitch_channels, spawn_twitch_worker};
 use window_util::*;
@@ -105,6 +107,8 @@ pub struct OverlayApp {
     zoom_factor: f32,
     voice_gender: VoiceGender,
     llm_config: LlmConfig,
+    theme: AppTheme,
+    settings_tab: SettingsTab,
 
     // Accessibilité : Ciblage par numéros & Mode contacteur unique (Switch Access)
     numbered_targets: Vec<NumberedElementTarget>,
@@ -658,6 +662,7 @@ impl OverlayApp {
         setup_custom_fonts(&cc.egui_ctx);
 
         let llm_config = resolve_llm_config();
+        let theme = AppTheme::resolve_theme();
         let has_no_key = llm_config.api_key.is_empty();
         let initial_subtitle = if has_no_key {
             "Veuillez renseigner votre clé API LLM pour activer l'assistant.".to_string()
@@ -686,6 +691,8 @@ impl OverlayApp {
             zoom_factor: 1.0,
             voice_gender: initial_voice,
             llm_config: llm_config.clone(),
+            theme,
+            settings_tab: SettingsTab::LlmProvider,
 
             numbered_targets: Vec::new(),
             show_numbered_targets: false,
@@ -742,6 +749,12 @@ impl OverlayApp {
         self.api_key_error = None;
     }
 
+    pub fn set_theme(&mut self, theme: AppTheme) {
+        self.theme = theme;
+        let _ = write_env_var_to_file(".env", "THEME", theme.key());
+        std::env::set_var("THEME", theme.key());
+    }
+
     fn draw_avatar(&self, ui: &mut egui::Ui, center: egui::Pos2, base_radius: f32, time: f64) {
         let painter = ui.painter();
 
@@ -758,11 +771,12 @@ impl OverlayApp {
             ((time * pulse_speed).sin() as f32).max(0.0)
         };
 
-        // Teinte rouge/corail en écoute micro, bleu cyan le reste du temps
+        // Teinte rouge/corail en écoute micro, couleur d'accent du thème le reste du temps
+        let theme = self.theme.colors();
         let (ring_base_color, core_color) = if self.status == AgentStatus::Listening {
             ([255, 65, 80], egui::Color32::from_rgb(255, 50, 70))
         } else {
-            ([0, 180, 255], egui::Color32::from_rgba_unmultiplied(0, 180, 255, 220))
+            (theme.avatar_ring, theme.avatar_core)
         };
 
         // Empreinte sonore radiale (audio voiceprint spectrum)
@@ -822,11 +836,12 @@ impl OverlayApp {
         let bar_width = 3.0;
         let spacing = 2.5;
 
+        let theme = self.theme.colors();
         let (base_color, activity_mult) = match self.status {
-            AgentStatus::Speaking => (egui::Color32::from_rgb(0, 215, 255), self.smoothed_audio_level),
+            AgentStatus::Speaking => (theme.accent, self.smoothed_audio_level),
             AgentStatus::Listening => (egui::Color32::from_rgb(255, 75, 90), self.smoothed_audio_level),
             AgentStatus::Thinking => (egui::Color32::from_rgb(180, 120, 255), 0.55f32),
-            AgentStatus::Idle => (egui::Color32::from_rgba_unmultiplied(0, 180, 255, 120), 0.15f32),
+            AgentStatus::Idle => (theme.border, 0.15f32),
             AgentStatus::EmergencyStopped => (egui::Color32::from_rgb(220, 50, 50), 0.0f32),
         };
 
@@ -957,7 +972,7 @@ impl OverlayApp {
         let _ = self.tts_sender.send(TtsCommand::Speak(msg));
     }
 
-    fn start_recording(&mut self, _ctx: &egui::Context) {
+    fn start_recording(&mut self, _ctx: &egui::Context, play_sound: bool) {
         if self.status == AgentStatus::EmergencyStopped {
             return;
         }
@@ -966,7 +981,9 @@ impl OverlayApp {
         self.continuous_mode = true;
         self.is_recording = true;
         self.status = AgentStatus::Listening;
-        play_earcon(Earcon::MicOpen);
+        if play_sound {
+            play_earcon(Earcon::MicOpen);
+        }
         self.live_transcript.clear();
         if self.dictation_mode {
             restore_external_focus();
@@ -988,7 +1005,7 @@ impl OverlayApp {
         if self.is_recording {
             self.stop_recording();
         } else {
-            self.start_recording(ctx);
+            self.start_recording(ctx, true);
         }
     }
 }
@@ -998,8 +1015,7 @@ impl eframe::App for OverlayApp {
         if self.is_hidden {
             [0.0, 0.0, 0.0, 0.0]
         } else {
-            // Fond noir à 75 % d'opacité
-            [0.0, 0.0, 0.0, 0.75]
+            self.theme.colors().clear_color
         }
     }
 
@@ -1028,10 +1044,18 @@ impl eframe::App for OverlayApp {
             self.smoothed_audio_level += (0.0 - self.smoothed_audio_level) * 0.25;
         }
 
+        let theme = self.theme.colors();
+
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = egui::Color32::TRANSPARENT;
         visuals.window_fill = egui::Color32::TRANSPARENT;
-        visuals.extreme_bg_color = egui::Color32::from_rgb(18, 20, 26);
+        visuals.extreme_bg_color = theme.control_bg;
+        visuals.selection.bg_fill = theme.tab_active_bg;
+        visuals.selection.stroke = egui::Stroke::new(1.0, theme.accent);
+        visuals.widgets.active.bg_fill = theme.tab_active_bg;
+        visuals.widgets.active.weak_bg_fill = theme.tab_active_bg;
+        visuals.widgets.hovered.weak_bg_fill = theme.tab_inactive_bg;
+        visuals.widgets.inactive.weak_bg_fill = theme.tab_inactive_bg;
         ctx.set_visuals(visuals);
 
         let ppp = ctx.pixels_per_point().max(0.5);
@@ -1066,7 +1090,7 @@ impl eframe::App for OverlayApp {
         let current_chat_h = self.chat_height.clamp(min_chat_h, max_chat_h);
 
         // Arrondi pour éviter les oscillations de conversion DPI sub-pixel
-        let modal_min_h = if self.show_api_key_modal { 268.0 } else { min_win_h };
+        let modal_min_h = if self.show_api_key_modal { 320.0 } else { min_win_h };
         let target_win_h = (padding + current_chat_h + padding + control_h + padding).max(modal_min_h).round();
         let active_win_h = inner_rect_opt.map_or(self.current_win_h, |r| r.height().max(min_win_h));
 
@@ -1132,7 +1156,7 @@ impl eframe::App for OverlayApp {
                                 && !self.is_hidden
                                 && !AGENT_BUSY.load(Ordering::SeqCst)
                             {
-                                self.start_recording(&ctx);
+                                self.start_recording(&ctx, false);
                             }
                         }
                     }
@@ -1166,6 +1190,9 @@ impl eframe::App for OverlayApp {
                     }
                 }
                 AgentEvent::ReplaceNarration { text, quick_suggestions } => {
+                    if text.trim().is_empty() && quick_suggestions.is_empty() {
+                        continue;
+                    }
                     if !sanitize_for_tts(&text).trim().is_empty() {
                         self.status = AgentStatus::Speaking;
                     }
@@ -1201,20 +1228,53 @@ impl eframe::App for OverlayApp {
                     if is_user_typing {
                         // L'utilisateur est activement en train de taper au clavier : on préserve son texte
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
                     self.stop_speaking();
 
                     let norm_prompt = normalize_for_command_match(&prompt);
+                    if norm_prompt.trim().is_empty() {
+                        println!("[Voice] Bruit parasite ignoré (aucun mot détecté) : aucune requête LLM.");
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx, false);
+                        }
+                        return;
+                    }
+
+                    // Changement de thème d'accessibilité à la voix
+                    if norm_prompt.contains("theme suivant") || norm_prompt.contains("thème suivant") || norm_prompt.contains("change de theme") || norm_prompt.contains("change de thème") || norm_prompt.contains("changer de theme") || norm_prompt.contains("changer de thème") {
+                        play_earcon(Earcon::Success);
+                        self.set_theme(self.theme.next());
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx, false);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("contraste eleve") || norm_prompt.contains("contraste élevé") || norm_prompt.contains("high contrast") {
+                        play_earcon(Earcon::Success);
+                        self.set_theme(AppTheme::HighContrastYellow);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx, false);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("theme sombre") || norm_prompt.contains("thème sombre") || norm_prompt.contains("theme par defaut") || norm_prompt.contains("thème par défaut") {
+                        play_earcon(Earcon::Success);
+                        self.set_theme(AppTheme::CyberCyan);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx, false);
+                        }
+                        return;
+                    }
 
                     // Changement de voix à la voix
                     if norm_prompt.contains("voix suivante") || norm_prompt.contains("autre voix") || norm_prompt.contains("change de voix") || norm_prompt.contains("changer voix") || norm_prompt.contains("changer de voix") {
                         play_earcon(Earcon::Success);
                         self.set_voice_gender(self.voice_gender.next());
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1222,7 +1282,7 @@ impl eframe::App for OverlayApp {
                         play_earcon(Earcon::Success);
                         self.set_voice_gender(VoiceProfile::Denise);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1230,7 +1290,7 @@ impl eframe::App for OverlayApp {
                         play_earcon(Earcon::Success);
                         self.set_voice_gender(VoiceProfile::Henri);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1238,7 +1298,7 @@ impl eframe::App for OverlayApp {
                         play_earcon(Earcon::Success);
                         self.set_voice_gender(VoiceProfile::Hortense);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1246,7 +1306,7 @@ impl eframe::App for OverlayApp {
                         play_earcon(Earcon::Success);
                         self.set_voice_gender(VoiceProfile::Paul);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1254,7 +1314,7 @@ impl eframe::App for OverlayApp {
                         play_earcon(Earcon::Success);
                         self.set_voice_gender(VoiceProfile::Sylvie);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1262,7 +1322,7 @@ impl eframe::App for OverlayApp {
                         play_earcon(Earcon::Success);
                         self.set_voice_gender(VoiceProfile::Jean);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1272,7 +1332,7 @@ impl eframe::App for OverlayApp {
                         self.zoom_factor = (self.zoom_factor + 0.15).clamp(0.7, 2.5);
                         play_earcon(Earcon::Success);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1280,7 +1340,7 @@ impl eframe::App for OverlayApp {
                         self.zoom_factor = (self.zoom_factor - 0.15).clamp(0.7, 2.5);
                         play_earcon(Earcon::Success);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1288,7 +1348,7 @@ impl eframe::App for OverlayApp {
                         self.zoom_factor = 1.0;
                         play_earcon(Earcon::Success);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1299,7 +1359,7 @@ impl eframe::App for OverlayApp {
                         self.show_numbered_targets = !self.numbered_targets.is_empty();
                         play_earcon(Earcon::Success);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1337,7 +1397,7 @@ impl eframe::App for OverlayApp {
                                 self.show_numbered_targets = false;
                                 self.numbered_targets.clear();
                                 if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                                    self.start_recording(&ctx);
+                                    self.start_recording(&ctx, false);
                                 }
                                 return;
                             }
@@ -1348,7 +1408,7 @@ impl eframe::App for OverlayApp {
                         self.switch_access_mode = !self.switch_access_mode;
                         play_earcon(Earcon::Success);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1387,7 +1447,7 @@ impl eframe::App for OverlayApp {
                         });
                         let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1409,7 +1469,7 @@ impl eframe::App for OverlayApp {
                             screen_size_kb: None,
                         });
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                         return;
                     }
@@ -1478,7 +1538,7 @@ impl eframe::App for OverlayApp {
                             self.continuous_mode = true;
                         } else if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             // Tout autre message est ignoré lorsque l'overlay est masqué
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                     } else {
                         if is_hide_command(&prompt) {
@@ -1547,7 +1607,7 @@ impl eframe::App for OverlayApp {
                             });
                             let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
                         } else if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                            self.start_recording(&ctx);
+                            self.start_recording(&ctx, false);
                         }
                     }
                 }
@@ -1556,7 +1616,7 @@ impl eframe::App for OverlayApp {
                         && self.status != AgentStatus::EmergencyStopped
                         && !AGENT_BUSY.load(Ordering::SeqCst)
                     {
-                        self.start_recording(&ctx);
+                        self.start_recording(&ctx, false);
                     }
                 }
                 AgentEvent::WhisperReady => {
@@ -1566,7 +1626,7 @@ impl eframe::App for OverlayApp {
                         && !AGENT_BUSY.load(Ordering::SeqCst)
                         && !self.is_recording
                     {
-                        self.start_recording(&ctx);
+                        self.start_recording(&ctx, false);
                     }
                 }
                 AgentEvent::TwitchChatReceived(twitch_msg) => {
@@ -1586,7 +1646,7 @@ impl eframe::App for OverlayApp {
                     }
                     self.live_transcript.clear();
                     if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                        self.start_recording(&ctx);
+                        self.start_recording(&ctx, false);
                     }
                 }
                 AgentEvent::RequestApiKey => {
@@ -1694,8 +1754,8 @@ impl eframe::App for OverlayApp {
                 ui.painter().rect(
                     response_rect,
                     egui::CornerRadius::same(12),
-                    egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 55)),
+                    theme.panel_bg,
+                    egui::Stroke::new(1.0, theme.border_subtle),
                     egui::StrokeKind::Inside,
                 );
 
@@ -1775,14 +1835,14 @@ impl eframe::App for OverlayApp {
                 ui.painter().hline(
                     (response_rect.min.x + 8.0)..=(response_rect.max.x - 8.0),
                     sep_y,
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 45)),
+                    egui::Stroke::new(1.0, theme.border_subtle),
                 );
 
                 // 2. Zone inférieure évaluée en deuxième (contrôles, avatar et saisie) pour précéder les messages au focus Tab
                 ui.scope_builder(egui::UiBuilder::new().max_rect(control_rect), |ui| {
                     egui::Frame::new()
-                        .fill(egui::Color32::from_rgb(18, 20, 26))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 75)))
+                        .fill(theme.control_bg)
+                        .stroke(egui::Stroke::new(1.0, theme.border))
                         .corner_radius(egui::CornerRadius::same(12))
                         .inner_margin(egui::Margin::symmetric(10, 8))
                         .show(ui, |ui| {
@@ -1826,7 +1886,7 @@ impl eframe::App for OverlayApp {
                                     } else if self.status == AgentStatus::Listening {
                                         egui::Color32::from_rgb(255, 80, 80)
                                     } else {
-                                        egui::Color32::from_rgb(0, 200, 255)
+                                        theme.accent
                                     };
 
                                     ui.horizontal(|ui| {
@@ -1886,6 +1946,61 @@ impl eframe::App for OverlayApp {
                                         let send_btn_w = 64.0;
                                         let edit_width = (ui.available_width() - send_btn_w - ui.spacing().item_spacing.x).max(60.0);
                                         let input_id = egui::Id::new("prompt_input_text");
+                                        let is_input_focused = ctx.memory(|m| m.has_focus(input_id));
+                                        let is_modal_open = self.show_api_key_modal;
+                                        let is_other_typing = ctx.memory(|m| {
+                                            m.has_focus(egui::Id::new("api_key_input_field"))
+                                                || m.has_focus(egui::Id::new("model_input_field"))
+                                        });
+
+                                        let paste_hit = ctx.input(|i| {
+                                            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
+                                                || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                        });
+
+                                        let mut pending_paste_fallback: Option<String> = None;
+
+                                        // Traitement du collage avant que TextEdit ne consomme la touche Ctrl+V
+                                        if paste_hit && !is_modal_open && !is_other_typing {
+                                            let clip_opt = get_clipboard_text()
+                                                .or_else(get_plain_clipboard_text)
+                                                .or_else(|| ctx.input(|i| {
+                                                    i.events.iter().find_map(|e| {
+                                                        if let egui::Event::Paste(text) = e {
+                                                            Some(text.clone())
+                                                        } else {
+                                                            None
+                                                        }
+                                                    })
+                                                }));
+
+                                            if let Some(clip) = clip_opt {
+                                                let clean_clip = clip.replace(['\r', '\n'], " ");
+                                                let trimmed_clean = clean_clip.trim().to_string();
+                                                if !trimmed_clean.is_empty() {
+                                                    self.stop_speaking();
+                                                    play_earcon(Earcon::Success);
+
+                                                    if is_input_focused {
+                                                        pending_paste_fallback = Some(trimmed_clean.clone());
+                                                        ctx.input_mut(|i| {
+                                                            i.events.retain(|e| !matches!(e, egui::Event::Paste(_)));
+                                                            i.events.push(egui::Event::Paste(trimmed_clean.clone()));
+                                                        });
+                                                    } else {
+                                                        self.input_text = trimmed_clean;
+                                                        ctx.memory_mut(|m| m.request_focus(input_id));
+                                                    }
+                                                    ctx.request_repaint();
+                                                }
+                                            }
+
+                                            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V));
+                                            ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::V));
+                                        }
+
+                                        let prev_text = self.input_text.clone();
                                         let response = ui.add_sized(
                                             [edit_width, 24.0],
                                             egui::TextEdit::singleline(&mut self.input_text)
@@ -1897,22 +2012,38 @@ impl eframe::App for OverlayApp {
                                                 }),
                                         );
 
+                                        if let Some(pasted) = pending_paste_fallback {
+                                            if self.input_text == prev_text {
+                                                self.input_text = pasted;
+                                                ctx.request_repaint();
+                                            }
+                                        }
+
                                         response.context_menu(|ui| {
-                                            if ui.button("📋 Coller").clicked() {
-                                                if let Some(clip) = get_clipboard_text() {
+                                            if ui.button("📋 Coller (Ctrl+V)").clicked() {
+                                                if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
                                                     let clean_clip = clip.replace(['\r', '\n'], " ");
-                                                    self.input_text = clean_clip.trim().to_string();
-                                                    self.stop_speaking();
+                                                    let trimmed_clean = clean_clip.trim().to_string();
+                                                    if !trimmed_clean.is_empty() {
+                                                        self.input_text = trimmed_clean;
+                                                        self.stop_speaking();
+                                                        play_earcon(Earcon::Success);
+                                                    }
                                                 }
+                                                ui.memory_mut(|m| m.request_focus(input_id));
                                                 ui.close();
                                             }
                                             if ui.button("📄 Copier tout (Ctrl+C)").clicked() {
                                                 set_clipboard_text(&self.input_text);
+                                                ctx.copy_text(self.input_text.clone());
+                                                play_earcon(Earcon::Success);
                                                 ui.close();
                                             }
-                                            if ui.button("✂ Couper tout").clicked() {
+                                            if ui.button("✂ Couper tout (Ctrl+X)").clicked() {
                                                 set_clipboard_text(&self.input_text);
+                                                ctx.copy_text(self.input_text.clone());
                                                 self.input_text.clear();
+                                                play_earcon(Earcon::Success);
                                                 ui.close();
                                             }
                                             if ui.button("🗑 Effacer").clicked() {
@@ -1925,26 +2056,21 @@ impl eframe::App for OverlayApp {
                                             i.events.iter().any(|e| matches!(e, egui::Event::Copy))
                                                 || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
                                         });
-                                        if response.has_focus() && copy_hit && !self.input_text.is_empty() {
+                                        if (response.has_focus() || is_input_focused) && copy_hit && !self.input_text.is_empty() {
                                             set_clipboard_text(&self.input_text);
                                             ctx.copy_text(self.input_text.clone());
                                             play_earcon(Earcon::Success);
                                         }
 
-                                        let paste_hit = ctx.input(|i| {
-                                            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
-                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
-                                                || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                        let cut_hit = ctx.input(|i| {
+                                            i.events.iter().any(|e| matches!(e, egui::Event::Cut))
+                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::X))
                                         });
-                                        if (response.has_focus() || response.hovered()) && paste_hit {
-                                            if let Some(clip) = get_clipboard_text() {
-                                                let clean_clip = clip.replace(['\r', '\n'], " ");
-                                                let trimmed_clean = clean_clip.trim().to_string();
-                                                if !trimmed_clean.is_empty() {
-                                                    self.input_text = trimmed_clean;
-                                                    self.stop_speaking();
-                                                }
-                                            }
+                                        if (response.has_focus() || is_input_focused) && cut_hit && !self.input_text.is_empty() {
+                                            set_clipboard_text(&self.input_text);
+                                            ctx.copy_text(self.input_text.clone());
+                                            self.input_text.clear();
+                                            play_earcon(Earcon::Success);
                                         }
 
                                         if response.changed() {
@@ -1958,7 +2084,7 @@ impl eframe::App for OverlayApp {
                                             egui::Button::new(
                                                 egui::RichText::new("Envoyer")
                                                     .size(11.5)
-                                                    .color(egui::Color32::from_rgb(220, 240, 255)),
+                                                    .color(theme.accent_text),
                                             ),
                                         );
                                         if (send_btn.clicked() || enter_hit) && !self.input_text.trim().is_empty() {
@@ -2069,7 +2195,7 @@ impl eframe::App for OverlayApp {
                                                 IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
                                                 restore_external_focus();
                                                 if !self.is_recording {
-                                                    self.start_recording(ui.ctx());
+                                                    self.start_recording(ui.ctx(), true);
                                                 }
                                             }
                                         }
@@ -2104,9 +2230,10 @@ impl eframe::App for OverlayApp {
                                         });
 
                                         let key_btn = ui
-                                            .button("🔑")
-                                            .on_hover_text("Configurer le fournisseur LLM et sa clé API");
+                                            .button("⚙")
+                                            .on_hover_text("Paramètres (Fournisseurs LLM, clé API, Thèmes & Accessibilité)");
                                         if key_btn.clicked() {
+                                            self.settings_tab = SettingsTab::LlmProvider;
                                             self.show_api_key_modal = true;
                                             self.sync_modal_inputs_for_provider(self.llm_config.provider);
                                             self.api_key_error = None;
@@ -2147,6 +2274,7 @@ impl eframe::App for OverlayApp {
                         ActiveTab::Assistance => {
                             let max_scroll_h = (messages_rect.height()).max(20.0);
                             let scroll_out = egui::ScrollArea::vertical()
+                                .id_salt("assistance_chat_scroll")
                                 .stick_to_bottom(true)
                                 .max_height(max_scroll_h)
                                 .auto_shrink([false, true])
@@ -2174,7 +2302,7 @@ impl eframe::App for OverlayApp {
                                                         };
                                                         (name, egui::Color32::from_rgb(255, 215, 120))
                                                     }
-                                            ChatRole::Agent => (self.llm_config.provider.display_name().to_string(), egui::Color32::from_rgb(0, 195, 255)),
+                                            ChatRole::Agent => (self.llm_config.provider.display_name().to_string(), theme.accent),
                                                 };
                                                 ui.label(
                                                     egui::RichText::new(&label_name)
@@ -2208,7 +2336,7 @@ impl eframe::App for OverlayApp {
                                             let (text_size, line_height, text_color, is_strong) = match entry.role {
                                                 ChatRole::User => {
                                                     if is_highlighted {
-                                                        (14.5, 20.0, egui::Color32::from_rgb(255, 230, 150), true)
+                                                        (14.5, 20.0, theme.text_user, true)
                                                     } else {
                                                         (12.0, 16.5, egui::Color32::from_rgba_unmultiplied(225, 210, 160, 185), false)
                                                     }
@@ -2272,7 +2400,7 @@ impl eframe::App for OverlayApp {
                                                 ui.painter().rect_stroke(
                                                     label_resp.rect.expand(4.0),
                                                     egui::CornerRadius::same(6),
-                                                    egui::Stroke::new(1.8, egui::Color32::from_rgb(0, 200, 255)),
+                                                    egui::Stroke::new(1.8, theme.accent),
                                                     egui::StrokeKind::Outside,
                                                 );
                                             }
@@ -2299,10 +2427,10 @@ impl eframe::App for OverlayApp {
                                                             }
                                                             let btn_text = egui::RichText::new(format!("💡 {clean_label}"))
                                                                 .size(11.0)
-                                                                .color(egui::Color32::from_rgb(130, 220, 255));
+                                                                .color(theme.accent);
 
                                                             let btn = egui::Button::new(btn_text)
-                                                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 95)))
+                                                                .stroke(egui::Stroke::new(1.0, theme.border))
                                                                 .corner_radius(egui::CornerRadius::same(10));
 
                                                             if ui.add(btn).on_hover_text("Cliquer pour choisir cette suggestion").clicked() {
@@ -2400,6 +2528,7 @@ impl eframe::App for OverlayApp {
                             ui.separator();
                             let max_chat_scroll_h = (messages_rect.height() - 28.0).max(20.0);
                             let scroll_out = egui::ScrollArea::vertical()
+                                .id_salt("twitch_chat_scroll")
                                 .stick_to_bottom(true)
                                 .max_height(max_chat_scroll_h)
                                 .auto_shrink([false, true])
@@ -2644,29 +2773,51 @@ impl eframe::App for OverlayApp {
                     egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 50)),
                 );
 
-                // Boîte modale de saisie multi-fournisseurs LLM
+                // Boîte modale de configuration (Fournisseurs LLM & Thèmes d'accessibilité)
                 if self.show_api_key_modal {
-                    egui::Window::new("api_key_modal")
+                    egui::Window::new("settings_modal")
                         .title_bar(false)
                         .collapsible(false)
                         .resizable(false)
                         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                         .frame(
                             egui::Frame::new()
-                                .fill(egui::Color32::from_rgb(12, 15, 20))
-                                .stroke(egui::Stroke::new(1.2, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 150)))
+                                .fill(theme.modal_bg)
+                                .stroke(egui::Stroke::new(1.2, theme.border))
                                 .corner_radius(egui::CornerRadius::same(10))
                                 .inner_margin(egui::Margin::symmetric(12, 10)),
                         )
                         .show(&ctx, |ui| {
-                            // En-tête compact intégré sans barre de titre egui
+                            // En-tête avec onglets de configuration
                             ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new("🔑 Configuration du Fournisseur LLM")
+                                let tab_llm = ui.selectable_label(
+                                    self.settings_tab == SettingsTab::LlmProvider,
+                                    egui::RichText::new("🔑 Fournisseur LLM")
                                         .size(12.0)
-                                        .color(egui::Color32::from_rgb(0, 215, 255))
+                                        .color(if self.settings_tab == SettingsTab::LlmProvider {
+                                            theme.accent
+                                        } else {
+                                            theme.text_secondary
+                                        })
                                         .strong(),
                                 );
+                                if tab_llm.clicked() {
+                                    self.settings_tab = SettingsTab::LlmProvider;
+                                }
+                                let tab_theme = ui.selectable_label(
+                                    self.settings_tab == SettingsTab::Theme,
+                                    egui::RichText::new("🎨 Thèmes & Accessibilité")
+                                        .size(12.0)
+                                        .color(if self.settings_tab == SettingsTab::Theme {
+                                            theme.accent
+                                        } else {
+                                            theme.text_secondary
+                                        })
+                                        .strong(),
+                                );
+                                if tab_theme.clicked() {
+                                    self.settings_tab = SettingsTab::Theme;
+                                }
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if ui.add(
                                         egui::Button::new(
@@ -2683,7 +2834,12 @@ impl eframe::App for OverlayApp {
                                 });
                             });
                             ui.add_space(4.0);
+                            ui.separator();
+                            ui.add_space(4.0);
 
+                            match self.settings_tab {
+                                SettingsTab::LlmProvider => {
+                            // --- Onglet Fournisseur LLM ---
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
                                 for &provider in LlmProvider::ALL {
@@ -2709,8 +2865,26 @@ impl eframe::App for OverlayApp {
                             ui.add_space(2.0);
 
                             ui.horizontal(|ui| {
+                                let key_input_id = egui::Id::new("api_key_input_field");
+                                let is_key_focused = ctx.memory(|m| m.has_focus(key_input_id));
+                                let paste_key_hit = ctx.input(|i| {
+                                    i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                                        || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
+                                        || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                });
+                                if is_key_focused && paste_key_hit {
+                                    if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
+                                        let trimmed = clip.trim().to_string();
+                                        if !trimmed.is_empty() {
+                                            self.api_key_input = trimmed;
+                                            play_earcon(Earcon::Success);
+                                        }
+                                    }
+                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V));
+                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::V));
+                                }
                                 let edit = egui::TextEdit::singleline(&mut self.api_key_input)
-                                    .id(egui::Id::new("api_key_input_field"))
+                                    .id(key_input_id)
                                     .password(!self.show_api_key_plain)
                                     .hint_text("sk-...")
                                     .desired_width(230.0);
@@ -2754,19 +2928,6 @@ impl eframe::App for OverlayApp {
                                     play_earcon(Earcon::Success);
                                 }
 
-                                let paste_key_hit = ctx.input(|i| {
-                                    i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
-                                        || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
-                                        || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
-                                });
-                                if (edit_resp.has_focus() || edit_resp.hovered()) && paste_key_hit {
-                                    if let Some(clip) = get_clipboard_text() {
-                                        let trimmed = clip.trim().to_string();
-                                        if !trimmed.is_empty() && self.api_key_input != trimmed {
-                                            self.api_key_input = trimmed;
-                                        }
-                                    }
-                                }
                             });
 
                             ui.add_space(5.0);
@@ -2791,8 +2952,26 @@ impl eframe::App for OverlayApp {
                             ui.add_space(2.0);
 
                             ui.horizontal(|ui| {
+                                let model_input_id = egui::Id::new("model_input_field");
+                                let is_model_focused = ctx.memory(|m| m.has_focus(model_input_id));
+                                let paste_model_hit = ctx.input(|i| {
+                                    i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                                        || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
+                                        || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                });
+                                if is_model_focused && paste_model_hit {
+                                    if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
+                                        let trimmed = clip.trim().to_string();
+                                        if !trimmed.is_empty() {
+                                            self.model_input = trimmed;
+                                            play_earcon(Earcon::Success);
+                                        }
+                                    }
+                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V));
+                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::V));
+                                }
                                 let model_edit = egui::TextEdit::singleline(&mut self.model_input)
-                                    .id(egui::Id::new("model_input_field"))
+                                    .id(model_input_id)
                                     .hint_text(default_model_name)
                                     .desired_width(240.0);
                                 let model_resp = ui.add(model_edit);
@@ -2818,19 +2997,6 @@ impl eframe::App for OverlayApp {
                                     }
                                 });
 
-                                let paste_model_hit = ctx.input(|i| {
-                                    i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
-                                        || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
-                                        || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
-                                });
-                                if (model_resp.has_focus() || model_resp.hovered()) && paste_model_hit {
-                                    if let Some(clip) = get_clipboard_text() {
-                                        let trimmed = clip.trim().to_string();
-                                        if !trimmed.is_empty() && self.model_input != trimmed {
-                                            self.model_input = trimmed;
-                                        }
-                                    }
-                                }
                             });
 
                             if let Some(ref err) = self.api_key_error {
@@ -2866,6 +3032,85 @@ impl eframe::App for OverlayApp {
                                     self.api_key_error = None;
                                 }
                             });
+                                }
+                                SettingsTab::Theme => {
+                            // --- Onglet Thèmes & Accessibilité ---
+                            ui.label(
+                                egui::RichText::new("Profils de contraste et accessibilité visuelle :")
+                                    .size(11.5)
+                                    .color(theme.text_secondary),
+                            );
+                            ui.add_space(6.0);
+
+                            let mut current_theme = self.theme;
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Thème :").size(12.0).strong().color(egui::Color32::WHITE));
+                                egui::ComboBox::from_id_salt("settings_theme_combobox")
+                                    .selected_text(current_theme.display_name())
+                                    .width(260.0)
+                                    .show_ui(ui, |ui| {
+                                        for &t in AppTheme::ALL {
+                                            let t_colors = t.colors();
+                                            ui.horizontal(|ui| {
+                                                if ui.selectable_value(&mut current_theme, t, t.display_name()).clicked() {
+                                                    self.set_theme(t);
+                                                }
+                                                let (rect, _) = ui.allocate_exact_size(egui::vec2(44.0, 12.0), egui::Sense::hover());
+                                                let p = ui.painter();
+                                                p.rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(10.0, 12.0)), egui::CornerRadius::same(2), t_colors.control_bg);
+                                                p.rect_filled(egui::Rect::from_min_size(egui::pos2(rect.min.x + 11.0, rect.min.y), egui::vec2(10.0, 12.0)), egui::CornerRadius::same(2), t_colors.border);
+                                                p.rect_filled(egui::Rect::from_min_size(egui::pos2(rect.min.x + 22.0, rect.min.y), egui::vec2(10.0, 12.0)), egui::CornerRadius::same(2), t_colors.accent);
+                                                p.rect_filled(egui::Rect::from_min_size(egui::pos2(rect.min.x + 33.0, rect.min.y), egui::vec2(10.0, 12.0)), egui::CornerRadius::same(2), t_colors.text_user);
+                                            });
+                                        }
+                                    });
+                            });
+
+                            if current_theme != self.theme {
+                                self.set_theme(current_theme);
+                            }
+
+                            ui.add_space(8.0);
+                            let cur_colors = self.theme.colors();
+                            egui::Frame::new()
+                                .fill(cur_colors.control_bg)
+                                .stroke(egui::Stroke::new(1.0, cur_colors.border))
+                                .corner_radius(egui::CornerRadius::same(8))
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(self.theme.display_name()).strong().size(12.0).color(cur_colors.accent));
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            let (rect, _) = ui.allocate_exact_size(egui::vec2(58.0, 14.0), egui::Sense::hover());
+                                            let p = ui.painter();
+                                            p.rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(14.0, 14.0)), egui::CornerRadius::same(2), cur_colors.control_bg);
+                                            p.rect_filled(egui::Rect::from_min_size(egui::pos2(rect.min.x + 15.0, rect.min.y), egui::vec2(14.0, 14.0)), egui::CornerRadius::same(2), cur_colors.border);
+                                            p.rect_filled(egui::Rect::from_min_size(egui::pos2(rect.min.x + 30.0, rect.min.y), egui::vec2(14.0, 14.0)), egui::CornerRadius::same(2), cur_colors.accent);
+                                            p.rect_filled(egui::Rect::from_min_size(egui::pos2(rect.min.x + 45.0, rect.min.y), egui::vec2(13.0, 14.0)), egui::CornerRadius::same(2), cur_colors.text_user);
+                                        });
+                                    });
+                                    ui.add_space(3.0);
+                                    ui.label(
+                                        egui::RichText::new(self.theme.description())
+                                            .size(10.5)
+                                            .color(cur_colors.text_secondary)
+                                            .italics(),
+                                    );
+                                });
+
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("Fermer").clicked() {
+                                    self.show_api_key_modal = false;
+                                }
+                                ui.label(
+                                    egui::RichText::new("Astuce vocale : dites « thème suivant » ou « contraste élevé »")
+                                        .size(10.0)
+                                        .color(theme.text_secondary),
+                                );
+                            });
+                                }
+                            }
                         });
                 }
 
@@ -3022,7 +3267,7 @@ fn resolve_initial_voice() -> VoiceGender {
 fn parse_agent_response(raw: &str) -> AgentResponsePayload {
     let clean = raw.trim();
 
-    if clean.eq_ignore_ascii_case("invalid_request") {
+    if clean.is_empty() || clean.eq_ignore_ascii_case("invalid_request") {
         return AgentResponsePayload {
             narration: String::new(),
             actions: Vec::new(),
@@ -3054,7 +3299,16 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
     };
 
     // 1. Désérialisation directe
-    if let Ok(payload) = serde_json::from_str::<AgentResponsePayload>(unquoted) {
+    if let Ok(mut payload) = serde_json::from_str::<AgentResponsePayload>(unquoted) {
+        if payload.narration.trim().is_empty() && payload.actions.is_empty() {
+            return AgentResponsePayload {
+                narration: String::new(),
+                actions: Vec::new(),
+                quick_suggestions: Vec::new(),
+                invalid_request: true,
+                next_passes: None,
+            };
+        }
         return payload;
     }
 
@@ -3063,6 +3317,15 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
         if start <= end {
             let json_candidate = &unquoted[start..=end];
             if let Ok(payload) = serde_json::from_str::<AgentResponsePayload>(json_candidate) {
+                if payload.narration.trim().is_empty() && payload.actions.is_empty() {
+                    return AgentResponsePayload {
+                        narration: String::new(),
+                        actions: Vec::new(),
+                        quick_suggestions: Vec::new(),
+                        invalid_request: true,
+                        next_passes: None,
+                    };
+                }
                 return payload;
             }
 
@@ -3105,6 +3368,15 @@ fn parse_agent_response(raw: &str) -> AgentResponsePayload {
                 }
 
                 if !narration.is_empty() || !actions.is_empty() || invalid_request || next_passes.is_some() {
+                    if narration.trim().is_empty() && actions.is_empty() {
+                        return AgentResponsePayload {
+                            narration: String::new(),
+                            actions: Vec::new(),
+                            quick_suggestions: Vec::new(),
+                            invalid_request: true,
+                            next_passes: None,
+                        };
+                    }
                     return AgentResponsePayload {
                         narration,
                         actions,
@@ -3344,7 +3616,7 @@ async fn compact_history_if_needed(
 }
 
 fn build_standard_system_instructions(lang_name: &str) -> String {
-    format!(r###"Tu es l'agent d'exploration Libertide pour Windows.
+    format!(r###"Tu es l'agent d'exploration Libertide multiplateforme (Windows, macOS, Linux).
 Réponds STRICTEMENT en JSON sans texte hors JSON. "narration" concise rédigée impérativement dans la langue du système de l'utilisateur : {lang_name} (max 2 phrases).
 
 Règles principales :
@@ -3401,7 +3673,7 @@ Règles principales :
    - OBLIGATION DE CIBLAGE EXPLICITE DU CHAMP : Pour toute saisie, sélection ou clic ("write_text", "replace_field_text", "clear_text", "focus_element", "click_element", "click_button"), tu DOIS IMPÉRATIVEMENT renseigner le champ interactable précis visé ("target", "target_name" ou "button_name") en utilisant sa macro ou son identifiant exact observé à l'écran (ex: input, select, textarea, combobox, bouton, lien, video, audio).
    - LECTEURS VIDÉO & AUDIO : Les balises vidéo et audio sont des éléments interactables (signalés par [@video:...], [@audio:...], ou [video]/[audio]). Pour lancer la lecture, mettre en pause ou interagir avec un média, utilise "click_element" ou "click_button" en ciblant la vidéo, l'audio ou ses contrôles de lecture ("play", "lecture", etc.).
    - SÉCURITÉ DU CIBLAGE : "target": null et les cibles génériques ou fictives sont STRICTEMENT INTERDITES. Le moteur d'exécution valide déterministement chaque élément contre l'arbre réel de l'écran ; toute cible non vérifiable ou absente sera rejetée par sécurité.
-   - Raccourcis clavier & touches : utilise OBLIGATOIREMENT "accessibility_shortcut" avec le nom ou la combinaison de touches exacte (ex: "ctrl+shift+b" pour la barre des favoris, "ctrl+t", "enter", "close_tab", "copy", "undo"). Ne JAMAIS envoyer "run_command" pour simuler des touches ou raccourcis !
+   - Raccourcis clavier & touches : utilise OBLIGATOIREMENT "accessibility_shortcut" avec le nom ou la combinaison de touches exacte (ex: "action_center", "open_settings", "ctrl+shift+b", "ctrl+t", "enter", "close_tab", "copy", "undo", "space"). Ne JAMAIS envoyer "run_command" pour simuler des touches ou des raccourcis système !
    - Lecture code/fichier : "read_editor_content" (focalise et extrait Ctrl+A/Ctrl+C).
    - Onglet/page : "accessibility_shortcut": "close_tab" (jamais "close_app" pour un onglet).
 4bis. RÈGLES DE LIENS INTERACTIFS & MACRO [link="cible"]label[/link] (CHAT & FENÊTRES VOLANTES) :
@@ -3417,10 +3689,14 @@ Règles principales :
      * Liens Web & Articles : `[link="https://..."]🌐 Nom du site[/link]`.
      * Actions & Clics système : `[link="action:Valider le panier"]⚡ Valider le panier[/link]`.
      * Suggestions de choix : `[link="action:Consigne suggérée"]💡 Option recommandée[/link]`.
-5. Audio & Volume :
-   - "focus_address_bar" pour cibler/sélectionner universellement la barre d'adresse du navigateur.
-   - "mute_audio" coupe sons tiers sans altérer la voix Libertide (à utiliser en urgence ou demande mute).
-   - "set_volume" ("down"|"up"|"min"|"mute") pour régler le volume.
+5. Audio, Volume & Paramètres système (RÈGLE ABSOLUE ANTI-TERMINAL) :
+   - INTERDICTION STRICTE d'utiliser "run_command" avec "explorer.exe", "start ms-settings:sound", "cmd" ou toute commande console pour le son ou les réglages. L'invite de commande ne doit JAMAIS s'ouvrir pour gérer le son !
+   - Actions dédiées pour l'audio et les paramètres :
+     * Réglage natif du volume : action "set_volume" ("up"|"down"|"mute"|"unmute"|"min") ou "mute_audio".
+     * Panneau des réglages audio et choix de sortie (casque/haut-parleur) : action "accessibility_shortcut": "action_center" (ou "sound_settings", simule Win+A sans aucune invite de commande) ou "open_settings" (Win+I).
+     * Raccourcis multimédia universels : "accessibility_shortcut": "volume_up" | "volume_down" | "mute_volume".
+     * Lecteurs vidéo & musique (YouTube, Deezer, Spotify) : utilise directement "click_button" avec le libellé observé (ex: "Désactiver le son (m)", "Pause (k)") ou "accessibility_shortcut": "m" / "k" / "space". Ne quitte jamais la page pour régler un média web !
+   - "focus_address_bar" pour cibler la barre d'adresse du navigateur.
 6. Navigation & Web :
    - "navigate_to_url" ouvre par défaut un nouvel onglet ("target": "new_tab").
    - Achat : panier -> valider panier -> AVANT paiement stopper avec "actions": [] et demander confirmation.
@@ -3461,14 +3737,14 @@ Format JSON obligatoire :
     {{"action": "run_command", "command": "..."}},
     {{"action": "kill_process", "pid": null, "name": null}},
     {{"action": "navigate_to_url", "url": "...", "target": "new_tab"|"current_tab"|"new_window"}},
-    {{"action": "accessibility_shortcut", "shortcut": "ctrl+shift+b"|"enter"|"close_tab"|"refresh_page"|"copy"|"undo"|"<combinaison_touches>"}},
+    {{"action": "accessibility_shortcut", "shortcut": "action_center"|"open_settings"|"sound_settings"|"volume_up"|"volume_down"|"mute_volume"|"enter"|"escape"|"space"|"close_tab"|"refresh_page"|"ctrl+shift+b"|"<combinaison_touches>"}},
     {{"action": "deactivate_immersion"}},
     {{"action": "set_reasoning_passes", "passes": 5, "reason": null}},
     {{"action": "schedule_prompt", "delay_seconds": 10, "prompt": "..."}},
     {{"action": "schedule_prompts", "tasks": [{{"delay_seconds": 10, "prompt": "..."}}]}},
     {{"action": "cancel_scheduled_tasks"}},
     {{"action": "mute_audio"}},
-    {{"action": "set_volume", "command": "mute"|"down"|"up"|"min"}},
+    {{"action": "set_volume", "command": "mute"|"unmute"|"down"|"up"|"min"}},
     {{"action": "open_file", "path": "chemin/vers/image_ou_doc.png"}},
     {{"action": "show_floating_card", "id": "stats_1", "title": "Tableau comparatif", "card_type": "markdown", "data": {{"text": "| Modèle | Lien / Action | Prix |\n| --- | --- | --- |\n| Produit A | [link=\"action:Commander Produit A\"]⚡ Commander[/link] | 49€ |\n| Produit B | [link=\"action:Commander Produit B\"]⚡ Commander[/link] | 59€ |"}}}},
     {{"action": "show_floating_card", "id": "vol_search", "title": "Filtres Billet d'Avion", "card_type": "form", "data": {{"submit_label": "Rechercher les vols", "prompt_prefix": "Recherche de vol avec les critères suivants :", "fields": [{{"id": "depart", "label": "Ville de départ", "type": "text", "value": "Paris"}}, {{"id": "destination", "label": "Destination", "type": "text", "value": "Tokyo"}}, {{"id": "prix_max", "label": "Budget maximum", "type": "number_slider", "min": 200, "max": 3000, "step": 50, "value": 900, "unit": "€"}}, {{"id": "classe", "label": "Classe", "type": "select", "options": ["Économique", "Premium", "Affaires"], "selected": "Économique"}}, {{"id": "direct", "label": "Vols directs seulement", "type": "checkbox", "checked": true}}, {{"id": "bagage", "label": "Bagages", "type": "radio", "options": ["Cabine seul", "1 bagage en soute", "2 bagages en soute"], "selected": "1 bagage en soute"}}]}}}},
@@ -3524,6 +3800,13 @@ async fn call_llm_prompt(
     request_id: u64,
 ) {
     if is_request_cancelled(request_id) {
+        return;
+    }
+
+    // Si la consigne est vide ou composée uniquement de bruits/symboles parasites, ne pas solliciter le LLM
+    if user_instruction.trim().is_empty() || !user_instruction.chars().any(|c| c.is_alphanumeric()) {
+        println!("[LLM] Instruction vide ou bruit parasite ignoré, aucune requête LLM envoyée.");
+        let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
         return;
     }
 
@@ -3753,8 +4036,11 @@ async fn call_llm_prompt(
             println!("[Agent] Quota de raisonnement mis à jour via next_passes : {max_agent_passes} passe(s) max");
         }
 
-        if payload.invalid_request || payload.narration.trim().eq_ignore_ascii_case("invalid_request") {
-            println!("[Agent] Requête incomplète ou incomprise : mode silencieux activé (aucun affichage ni TTS).");
+        if payload.invalid_request
+            || payload.narration.trim().eq_ignore_ascii_case("invalid_request")
+            || (payload.narration.trim().is_empty() && payload.actions.is_empty())
+        {
+            println!("[Agent] Requête incomplète, bruit parasite ou incomprise (narration vide sans action) : mode silencieux activé (aucun affichage, TTS ni requête LLM supplémentaire).");
             history.lock().await.pop();
             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
             let _ = event_tx.send(AgentEvent::RequestIgnored);
@@ -3762,6 +4048,11 @@ async fn call_llm_prompt(
         }
 
         // 2. Dispatch immédiat dès réception du message pour les fenêtres volantes
+        let shown_card_ids: Vec<String> = payload.actions.iter().filter_map(|act| match act {
+            AgentAction::ShowFloatingCard { id: Some(cid), .. } => Some(cid.clone()),
+            _ => None,
+        }).collect();
+
         for act in &payload.actions {
             match act {
                 AgentAction::ShowFloatingCard { id, title, card_type, data } => {
@@ -3769,40 +4060,13 @@ async fn call_llm_prompt(
                     let _ = event_tx.send(AgentEvent::ShowFloatingCard(card));
                 }
                 AgentAction::CloseFloatingCard { id } => {
-                    let _ = event_tx.send(AgentEvent::CloseFloatingCard(id.clone()));
-                }
-                _ => {}
-            }
-        }
-
-        // 3. Mise à jour automatique de repli : Si une fenêtre volante Markdown est affichée et que le LLM produit
-        // une synthèse/narration structurée sans ré-émettre formellement l'action JSON, le contenu de la fenêtre
-        // affichée est synchronisé automatiquement.
-        if let Ok(guard) = OPEN_FLOATING_CARDS.lock() {
-            let has_explicit_card = payload.actions.iter().any(|a| matches!(a, AgentAction::ShowFloatingCard { .. }));
-            if !has_explicit_card {
-                if let Some(open_md) = guard.iter().find(|c| c.card_type == "markdown") {
-                    let text_trim = payload.narration.trim();
-                    let is_structured = text_trim.contains('#')
-                        || text_trim.contains('|')
-                        || text_trim.contains("- ")
-                        || text_trim.contains("* ")
-                        || text_trim.contains("▶ ")
-                        || text_trim.contains("[link")
-                        || text_trim.lines().count() >= 3
-                        || text_trim.len() > 140;
-
-                    if is_structured {
-                        println!("[Agent] Mise à jour automatique de repli de la fenêtre volante Markdown '{}'", open_md.id);
-                        let fallback_card = FloatingCard::from_action_data(
-                            Some(open_md.id.clone()),
-                            open_md.title.clone(),
-                            "markdown",
-                            &serde_json::json!({ "text": text_trim }),
-                        );
-                        let _ = event_tx.send(AgentEvent::ShowFloatingCard(fallback_card));
+                    if shown_card_ids.contains(id) {
+                        println!("[Agent] Ignoré close_floating_card(\"{id}\") car la carte a été mise à jour dans la même passe.");
+                    } else {
+                        let _ = event_tx.send(AgentEvent::CloseFloatingCard(id.clone()));
                     }
                 }
+                _ => {}
             }
         }
 
@@ -3968,14 +4232,19 @@ async fn call_llm_prompt(
                     step_feedback.push_str("\n\n[Fenêtres volantes ouvertes à l'écran] :\n");
                     for c in guard.iter() {
                         step_feedback.push_str(&format!("- ID: \"{}\" | Titre: \"{}\" | Type: \"{}\"\n", c.id, c.title, c.card_type));
+                        if !c.content_preview.is_empty() {
+                            let preview = truncate_with_notice(&c.content_preview, 1500);
+                            step_feedback.push_str(&format!("  [Contenu actuel déjà affiché à conserver/fusionner] :\n\"\"\"\n{}\n\"\"\"\n", preview.trim()));
+                        }
                     }
-                    step_feedback.push_str("Actualise impérativement leur contenu via \"show_floating_card\" dès que de nouvelles informations sont obtenues.");
+                    step_feedback.push_str("RÈGLE DE FUSION IMPÉRATIVE : Conserve et fusionne les éléments déjà présents ci-dessus avec les nouvelles informations dans \"show_floating_card\". Ne ferme JAMAIS la carte (\"close_floating_card\") !");
                 }
             }
 
             step_feedback.push_str(&format!(
                 "\n\n[Consigne étape] : Poursuis : \"{}\".\n\
                 - RÈGLE D'OR : Réponds STRICTEMENT et UNIQUEMENT avec un objet JSON valide (contenant \"narration\", \"next_passes\", \"actions\", \"quick_suggestions\"). Aucun texte libre ou markdown en dehors du JSON.\n\
+                - Audio, son & paramètres OS -> INTERDICTION de faire 'run_command' (cmd/explorer). Utilise 'set_volume', 'mute_audio' ou 'accessibility_shortcut' ('action_center' Win+A, 'open_settings' Win+I, 'm', 'space').\n\
                 - Bannière cookies -> clique automatiquement 'Tout accepter' / 'Accepter'.\n\
                 - Bannière de notification web / push ('Activez les notifications franceinfo...', etc.) -> traite-la immédiatement en cliquant sur la croix 'Fermer (croix ✕)' / 'Fermer' / 'Refuser' / 'Plus tard' ou 'Activer' pour libérer la vue.\n\
                 - Pour lancer ou contrôler une vidéo ou un audio -> clique directement sur l'élément vidéo/audio ou son bouton de lecture ('play' / 'lecture').\n\
@@ -3983,6 +4252,7 @@ async fn call_llm_prompt(
                 - Alerte / modale d'erreur -> lis le message dans ta narration, puis clique impérativement sur 'OK' / 'Fermer' pour la refermer.\n\
                 - Fenêtre volante Markdown -> insère des liens cliquables [link=\"action:...\"]Texte[/link] pour permettre à l'utilisateur de déclencher des suites ou choix en un clic.\n\
                 - Liens interactifs -> Formate SYSTÉMATIQUEMENT vidéos, audios, images, PDF/fichiers et actions en liens cliquables via la macro [link=\"action:...\"]Icône Libellé[/link] ou [link=\"https://...\"]🌐 Web[/link] (y compris dans les cellules de tableaux Markdown). Le clic envoie directement la commande dans le chat de Libertide.\n\
+                - Fenêtre volante (\"show_floating_card\") -> CONSERVE et FUSIONNE impérativement les données précédentes avec les nouvelles (ne supprime pas les éléments déjà trouvés lors des passes précédentes). INTERDICTION d'émettre \"close_floating_card\" pour une carte que tu viens d'ouvrir ou mettre à jour.\n\
                  - Mission approfondie (contact / produit / service) -> définis 'next_passes' (8 à 12), explore méthodiquement (local -> web -> annuaires) et projette les résultats dans 'show_floating_card'. Ne renvoie pas 'actions': [] tant que les résultats ne sont pas trouvés.\n\
                 - Échec/blocage -> pivote immédiatement vers une alternative (app, web, autre fenêtre). Ne renvoie JAMAIS 'actions': [] si l'objectif n'est pas achevé.\n\
                 - Tâche finie ou choix requis -> 'actions': [] + 2 à 4 'quick_suggestions'.",
@@ -4075,6 +4345,11 @@ fn main() -> eframe::Result<()> {
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     AgentCommand::Prompt(prompt) => {
+                        if prompt.trim().is_empty() || !prompt.chars().any(|c| c.is_alphanumeric()) {
+                            println!("[Agent] Commande vide ignorée (bruit parasite), aucune requête LLM.");
+                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                            continue;
+                        }
                         let request_id = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst) + 1;
                         if let Some(handle) = current_task.take() {
                             handle.abort();
@@ -4183,8 +4458,12 @@ fn main() -> eframe::Result<()> {
                                     let mut card_section = String::from("[Fenêtres volantes actuellement ouvertes à l'écran] :\n");
                                     for c in guard.iter() {
                                         card_section.push_str(&format!("- ID: \"{}\" | Titre: \"{}\" | Type: \"{}\"\n", c.id, c.title, c.card_type));
+                                        if !c.content_preview.is_empty() {
+                                            let preview = truncate_with_notice(&c.content_preview, 1500);
+                                            card_section.push_str(&format!("  [Contenu actuel déjà affiché à conserver/fusionner] :\n\"\"\"\n{}\n\"\"\"\n", preview.trim()));
+                                        }
                                     }
-                                    card_section.push_str("Instruction : Ces fenêtres volantes sont déjà affichées à l'écran. Si ta réponse apporte de nouvelles données, une synthèse ou une mise à jour, réémets impérativement l'action \"show_floating_card\" avec le même ID pour synchroniser leur contenu.");
+                                    card_section.push_str("Instruction : Ces fenêtres volantes sont déjà affichées à l'écran. Si ta réponse apporte de nouvelles données, une synthèse ou une mise à jour, réémets impérativement \"show_floating_card\" avec le même ID en FUSIONNANT les données existantes. Ne ferme JAMAIS la carte si tu la mets à jour.");
                                     prompt_sections.push(card_section);
                                 }
                             }

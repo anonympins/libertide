@@ -23,13 +23,24 @@ use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationElement2, IUIAutomationInvokePattern,
-    IUIAutomationScrollItemPattern, IUIAutomationScrollPattern, IUIAutomationTextPattern, IUIAutomationValuePattern,
-    TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_ComboBoxControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
-    UIA_ListControlTypeId,
-    UIA_TabControlTypeId, UIA_TabItemControlTypeId,
-    UIA_HyperlinkControlTypeId, UIA_InvokePatternId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
-    UIA_TextPatternId, UIA_ValuePatternId,
+    CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationElement2,
+    IUIAutomationExpandCollapsePattern, IUIAutomationInvokePattern, IUIAutomationRangeValuePattern,
+    IUIAutomationScrollItemPattern, IUIAutomationScrollPattern, IUIAutomationSelectionItemPattern,
+    IUIAutomationSelectionPattern, IUIAutomationTextPattern, IUIAutomationTogglePattern,
+    IUIAutomationValuePattern, TreeScope_Descendants, UIA_ButtonControlTypeId,
+    UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId, UIA_CustomControlTypeId,
+    UIA_DataGridControlTypeId, UIA_DataItemControlTypeId, UIA_DocumentControlTypeId,
+    UIA_EditControlTypeId, UIA_ExpandCollapsePatternId, UIA_GroupControlTypeId,
+    UIA_HeaderControlTypeId, UIA_HeaderItemControlTypeId, UIA_HyperlinkControlTypeId,
+    UIA_InvokePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
+    UIA_MenuBarControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
+    UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId, UIA_RangeValuePatternId,
+    UIA_ScrollBarControlTypeId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
+    UIA_SelectionItemPatternId, UIA_SelectionPatternId, UIA_SliderControlTypeId,
+    UIA_SpinnerControlTypeId, UIA_TabControlTypeId, UIA_TabItemControlTypeId,
+    UIA_TextPatternId, UIA_ThumbControlTypeId, UIA_TogglePatternId,
+    UIA_ToolBarControlTypeId, UIA_TreeControlTypeId, UIA_TreeItemControlTypeId,
+    UIA_ValuePatternId,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -70,7 +81,7 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
     let elements = list_interactive_elements(active_hwnd);
     elements
         .into_iter()
-        .filter(|e| !e.is_offscreen && (e.is_button || e.is_link || e.is_tab || e.is_edit_or_textarea || e.is_tabindex || e.is_media))
+        .filter(|e| !e.is_offscreen && (e.is_button || e.is_link || e.is_tab || e.is_edit_or_textarea || e.is_tabindex || e.is_media || e.is_slider || e.is_toggle || e.is_option || e.has_action_pattern))
         .take(30)
         .enumerate()
         .map(|(i, e)| NumberedElementTarget {
@@ -1384,6 +1395,8 @@ struct UiaElementInfo {
     is_select: bool,
     is_option: bool,
     is_media: bool,
+    is_slider: bool,
+    is_toggle: bool,
     is_button: bool,
     is_link: bool,
     is_tab: bool,
@@ -1395,6 +1408,7 @@ struct UiaElementInfo {
     click_x: i32,
     click_y: i32,
     rect: RECT,
+    has_action_pattern: bool,
     pattern: Option<IUIAutomationInvokePattern>,
     area: i64,
 }
@@ -1709,7 +1723,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
             false
         };
 
-        let count = elements.Length().unwrap_or(0).clamp(0, 250);
+        let count = elements.Length().unwrap_or(0).clamp(0, 450);
 
         // Délimitation géométrique du document web par rapport à la fenêtre
         let mut doc_rect: Option<RECT> = None;
@@ -1834,7 +1848,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let (aria_label_opt, aria_desc_opt, indications_vec) = extract_aria_details(&aria_properties);
                     let aria_label = aria_label_opt.unwrap_or_default();
                     let aria_description = aria_desc_opt.unwrap_or_default();
-                    let aria_indications = indications_vec.join(", ");
+                    let mut aria_indications = indications_vec.join(", ");
 
                     let is_root_web_area = class_name.contains("rootwebarea")
                         || loc_type.contains("rootwebarea")
@@ -1843,7 +1857,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         continue;
                     }
 
-                    let value_text = item
+                    let mut value_text = item
                         .GetCurrentPattern(UIA_ValuePatternId)
                         .ok()
                         .and_then(|p| p.cast::<IUIAutomationValuePattern>().ok())
@@ -1851,6 +1865,91 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         .map(|b| b.to_string())
                         .unwrap_or_default()
                         .trim().to_string();
+
+                    if value_text.is_empty() {
+                        if let Ok(p) = item.GetCurrentPattern(UIA_RangeValuePatternId) {
+                            if let Ok(rvp) = p.cast::<IUIAutomationRangeValuePattern>() {
+                                if let Ok(val) = rvp.CurrentValue() {
+                                    value_text = format!("{:.0}", val);
+                                }
+                            }
+                        }
+                    }
+
+                    if value_text.is_empty() {
+                        if let Ok(p) = item.GetCurrentPattern(UIA_SelectionPatternId) {
+                            if let Ok(sp) = p.cast::<IUIAutomationSelectionPattern>() {
+                                if let Ok(sel_arr) = sp.GetCurrentSelection() {
+                                    let sel_len = sel_arr.Length().unwrap_or(0);
+                                    let mut sel_names = Vec::new();
+                                    for si in 0..sel_len.min(5) {
+                                        if let Ok(s_elem) = sel_arr.GetElement(si) {
+                                            if let Ok(s_name) = s_elem.CurrentName() {
+                                                let s_str = s_name.to_string();
+                                                if !s_str.trim().is_empty() {
+                                                    sel_names.push(s_str.trim().to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if !sel_names.is_empty() {
+                                        value_text = sel_names.join(", ");
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Ok(p) = item.GetCurrentPattern(UIA_TogglePatternId) {
+                        if let Ok(tp) = p.cast::<IUIAutomationTogglePattern>() {
+                            if let Ok(st) = tp.CurrentToggleState() {
+                                let st_str = match st.0 {
+                                    0 => "désactivé",
+                                    1 => "activé",
+                                    _ => "indéterminé",
+                                };
+                                if !aria_indications.is_empty() {
+                                    aria_indications.push_str(&format!(", état: {st_str}"));
+                                } else {
+                                    aria_indications = format!("état: {st_str}");
+                                }
+                            }
+                        }
+                    }
+
+                    if let Ok(p) = item.GetCurrentPattern(UIA_ExpandCollapsePatternId) {
+                        if let Ok(ecp) = p.cast::<IUIAutomationExpandCollapsePattern>() {
+                            if let Ok(st) = ecp.CurrentExpandCollapseState() {
+                                let exp_str = match st.0 {
+                                    0 => "replié",
+                                    1 => "déroulé",
+                                    2 => "partiellement déroulé",
+                                    _ => "",
+                                };
+                                if !exp_str.is_empty() {
+                                    if !aria_indications.is_empty() {
+                                        aria_indications.push_str(&format!(", {exp_str}"));
+                                    } else {
+                                        aria_indications = exp_str.to_string();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Ok(p) = item.GetCurrentPattern(UIA_SelectionItemPatternId) {
+                        if let Ok(sip) = p.cast::<IUIAutomationSelectionItemPattern>() {
+                            if let Ok(is_sel) = sip.CurrentIsSelected() {
+                                if is_sel.as_bool() {
+                                    if !aria_indications.is_empty() {
+                                        aria_indications.push_str(", sélectionné");
+                                    } else {
+                                        aria_indications = "sélectionné".to_string();
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let is_focusable = item.CurrentIsKeyboardFocusable().map(|b| b.as_bool()).unwrap_or(false);
 
                     let is_explicit_textarea = class_name.contains("textarea")
@@ -1875,6 +1974,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
 
                     let is_select = ctype == UIA_ComboBoxControlTypeId
                         || ctype == UIA_ListControlTypeId
+                        || ctype == UIA_DataGridControlTypeId
                         || loc_type.contains("liste déroulante")
                         || loc_type.contains("combobox")
                         || loc_type.contains("select")
@@ -1886,7 +1986,24 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || class_name.contains("combobox")
                         || automation_id.to_lowercase().contains("select");
 
-                    let is_option = ctype == windows::Win32::UI::Accessibility::UIA_ListItemControlTypeId
+                    let is_slider = ctype == UIA_SliderControlTypeId
+                        || ctype == UIA_ProgressBarControlTypeId
+                        || ctype == UIA_SpinnerControlTypeId
+                        || loc_type.contains("curseur")
+                        || loc_type.contains("slider")
+                        || class_name.contains("slider");
+
+                    let is_toggle = ctype == UIA_CheckBoxControlTypeId
+                        || ctype == UIA_RadioButtonControlTypeId
+                        || loc_type.contains("case à cocher")
+                        || loc_type.contains("bascule")
+                        || loc_type.contains("toggle")
+                        || loc_type.contains("commutateur");
+
+                    let is_option = ctype == UIA_ListItemControlTypeId
+                        || ctype == UIA_TreeItemControlTypeId
+                        || ctype == UIA_MenuItemControlTypeId
+                        || ctype == UIA_DataItemControlTypeId
                         || aria_role == "option"
                         || aria_role == "listitem"
                         || aria_role == "menuitem"
@@ -1946,12 +2063,16 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || aria_label.to_lowercase().contains("close");
 
                     let is_button = ctype == UIA_ButtonControlTypeId
+                        || ctype == UIA_MenuItemControlTypeId
+                        || ctype == UIA_HeaderItemControlTypeId
                         || loc_type.contains("bouton")
                         || loc_type.contains("button")
                         || is_role_button
                         || has_button_data
                         || is_close_or_cross
                         || is_media
+                        || is_slider
+                        || is_toggle
                         || class_name.contains("button")
                         || class_name.contains("btn")
                         || automation_id.to_lowercase().contains("button")
@@ -2066,7 +2187,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
 
                     if name.is_empty() && aria_label.is_empty() && automation_id.is_empty() && help_text.is_empty() && value_text.is_empty()
                         && data_attrs.is_empty() && primary_class.is_empty()
-                        && !is_edit_or_textarea && !is_button && !is_link && !is_tab && !is_focusable && !is_tabindex && !is_media {
+                        && !is_edit_or_textarea && !is_button && !is_link && !is_tab && !is_focusable && !is_tabindex && !is_media && !is_slider && !is_toggle {
                         continue;
                     }
 
@@ -2075,6 +2196,10 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let pattern = item.GetCurrentPattern(UIA_InvokePatternId)
                         .ok()
                         .and_then(|p| p.cast::<IUIAutomationInvokePattern>().ok());
+                    let has_toggle = item.GetCurrentPattern(UIA_TogglePatternId).is_ok();
+                    let has_sel_item = item.GetCurrentPattern(UIA_SelectionItemPatternId).is_ok();
+                    let has_expand = item.GetCurrentPattern(UIA_ExpandCollapsePatternId).is_ok();
+                    let has_action_pattern = pattern.is_some() || has_toggle || has_sel_item || has_expand;
                     let area = (width as i64) * (height as i64);
                     let index = results.len() + 1;
                     results.push(UiaElementInfo {
@@ -2099,6 +2224,8 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         is_select,
                         is_option,
                         is_media,
+                        is_slider,
+                        is_toggle,
                         is_button,
                         is_link,
                         is_tab,
@@ -2110,6 +2237,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         click_x,
                         click_y,
                         rect,
+                        has_action_pattern,
                         pattern,
                         area,
                     });
@@ -2294,6 +2422,22 @@ pub fn run_system_command(command: &str) -> bool {
         return false;
     }
 
+    let lower = trimmed.to_lowercase();
+
+    // Interception des tentatives d'ouverture des paramètres son ou réglages Windows via console
+    if lower.contains("ms-settings:sound") || lower.contains("mmsys.cpl") {
+        const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
+        const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
+        send_hotkey(&[VK_LWIN], VK_A);
+        return true;
+    }
+    if lower.contains("ms-settings:") {
+        const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
+        const VK_I: VIRTUAL_KEY = VIRTUAL_KEY(0x49);
+        send_hotkey(&[VK_LWIN], VK_I);
+        return true;
+    }
+
     let mut process = std::process::Command::new("cmd.exe");
     process.creation_flags(CREATE_NEW_CONSOLE);
 
@@ -2311,6 +2455,12 @@ pub fn run_system_command(command: &str) -> bool {
         cur = cur[9..].trim();
     } else if cur.len() >= 6 && cur[..6].eq_ignore_ascii_case("start ") {
         cur = cur[6..].trim();
+    }
+
+    // Si la commande commence par explorer ou explorer.exe, la lancer avec son chemin complet sans console parasite
+    if cur.to_lowercase().starts_with("explorer.exe") || cur.to_lowercase().starts_with("explorer ") {
+        let _ = open_path_with_default_app(cur.strip_prefix("explorer.exe").or_else(|| cur.strip_prefix("explorer")).unwrap_or(cur).trim());
+        return true;
     }
 
     // 3. Maintien impératif de la console ouverte via /K au lieu de /C
@@ -2664,7 +2814,41 @@ fn click_element(
 
     if let Some(pattern) = invoke_pattern {
         unsafe {
-            let _ = pattern.Invoke();
+            let _ = pattern.Invoke().is_ok();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    } else if let Some(elem) = element {
+        unsafe {
+            let mut action_handled = false;
+            if let Ok(unk) = elem.GetCurrentPattern(UIA_TogglePatternId) {
+                if let Ok(tp) = unk.cast::<IUIAutomationTogglePattern>() {
+                    if tp.Toggle().is_ok() {
+                        action_handled = true;
+                    }
+                }
+            }
+            if !action_handled {
+                if let Ok(unk) = elem.GetCurrentPattern(UIA_SelectionItemPatternId) {
+                    if let Ok(sip) = unk.cast::<IUIAutomationSelectionItemPattern>() {
+                        if sip.Select().is_ok() {
+                            action_handled = true;
+                        }
+                    }
+                }
+            }
+            if !action_handled {
+                if let Ok(unk) = elem.GetCurrentPattern(UIA_ExpandCollapsePatternId) {
+                    if let Ok(ecp) = unk.cast::<IUIAutomationExpandCollapsePattern>() {
+                        if let Ok(state) = ecp.CurrentExpandCollapseState() {
+                            if state.0 == 0 {
+                                let _ = ecp.Expand();
+                            } else {
+                                let _ = ecp.Collapse();
+                            }
+                        }
+                    }
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -2776,6 +2960,10 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
             .or_else(|| tag.strip_prefix("input:"))
             .or_else(|| tag.strip_prefix("textarea:"))
             .or_else(|| tag.strip_prefix("select:"))
+            .or_else(|| tag.strip_prefix("option:"))
+            .or_else(|| tag.strip_prefix("item:"))
+            .or_else(|| tag.strip_prefix("menu:"))
+            .or_else(|| tag.strip_prefix("tree:"))
             .or_else(|| tag.strip_prefix("video:"))
             .or_else(|| tag.strip_prefix("audio:"))
             .or_else(|| tag.strip_prefix("media:"))
@@ -3109,7 +3297,7 @@ fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option
                     final_score += 40.0;
                 } else if elem.is_tabindex {
                     final_score += 35.0;
-                } else if elem.pattern.is_some() {
+                } else if elem.has_action_pattern {
                     final_score += 20.0;
                 }
                 if elem.is_web_content {
@@ -3163,7 +3351,7 @@ fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) ->
                 let mut final_score = score + chrome_bias;
                 if elem.is_button || elem.is_tabindex || elem.is_media {
                     final_score += 100.0;
-                } else if elem.pattern.is_some() {
+                } else if elem.has_action_pattern {
                     final_score += 40.0;
                 } else {
                     final_score -= 60.0;
@@ -3261,7 +3449,30 @@ fn clean_diff_line(line: &str) -> String {
     s.trim().to_string()
 }
 
+fn strip_diff_section(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut in_diff_section = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("=== INFORMATIONS WEB MODIFIÉES") || trimmed.starts_with("=== CHANGEMENTS RÉCENTS") {
+            in_diff_section = true;
+            continue;
+        }
+        if in_diff_section && (trimmed.starts_with("=== ") || trimmed.starts_with("--- Fenêtre")) {
+            in_diff_section = false;
+        }
+        if !in_diff_section {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    result
+}
+
 pub fn compute_screen_diff(old_summary: &str, new_summary: &str) -> String {
+    let clean_old = strip_diff_section(old_summary);
+    let clean_new = strip_diff_section(new_summary);
+
     let is_ignored_diff_meta = |l: &str| -> bool {
         let t = l.trim();
         t.starts_with("===")
@@ -3271,16 +3482,18 @@ pub fn compute_screen_diff(old_summary: &str, new_summary: &str) -> String {
             || t.starts_with("[Consigne prioritaire]")
             || t.starts_with("[Note d'intention")
             || t.starts_with("Fenêtre au premier plan")
+            || t.starts_with("- ~~")
+            || t.starts_with("- **")
     };
 
-    let old_lines: Vec<String> = old_summary
+    let old_lines: Vec<String> = clean_old
         .lines()
         .filter(|l| !is_ignored_diff_meta(l))
         .map(clean_diff_line)
         .filter(|l| !l.is_empty())
         .collect();
 
-    let new_lines: Vec<String> = new_summary
+    let new_lines: Vec<String> = clean_new
         .lines()
         .filter(|l| !is_ignored_diff_meta(l))
         .map(clean_diff_line)
@@ -3304,6 +3517,17 @@ pub fn compute_screen_diff(old_summary: &str, new_summary: &str) -> String {
 
     if added.is_empty() && removed.is_empty() {
         return String::new();
+    }
+
+    if removed.len() > 10 {
+        let count = removed.len();
+        removed.truncate(6);
+        removed.push(format!("... et {count} éléments de la vue précédente masqués"));
+    }
+    if added.len() > 25 {
+        let count = added.len();
+        added.truncate(20);
+        added.push(format!("... et {count} autres nouveaux éléments"));
     }
 
     let mut diff = String::new();
@@ -3771,6 +3995,22 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                     label.push_str(&format!(" ({})", m.aria_indications));
                 }
                 active_window_content.push_str(&format!("  • {} {}\n", tag, label));
+            }
+        }
+
+        // A quater. Curseurs et sliders OS (ex: réglage du volume dans Paramètres)
+        let sliders: Vec<&UiaElementInfo> = elements.iter()
+            .filter(|e| (!has_web_doc || e.is_web_content) && e.is_slider && !e.name.is_empty())
+            .collect();
+        if !sliders.is_empty() {
+            active_window_content.push_str("  [Curseurs / Barres de réglage (Volume / Sliders)] :\n");
+            for s in sliders.iter().take(10) {
+                let val = if !s.value_text.is_empty() {
+                    format!(" (niveau actuel : {})", s.value_text)
+                } else {
+                    String::new()
+                };
+                active_window_content.push_str(&format!("  • [slider] {}{}\n", s.name, val));
             }
         }
 
@@ -5441,6 +5681,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 const VK_F5: VIRTUAL_KEY = VIRTUAL_KEY(0x74);
                 const VK_D: VIRTUAL_KEY = VIRTUAL_KEY(0x44);
                 const VK_L: VIRTUAL_KEY = VIRTUAL_KEY(0x4C);
+                const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
 
                 match shortcut.as_str() {
                     "magnifier_zoom_in" => send_hotkey(&[VK_LWIN], VK_OEM_PLUS),
@@ -5469,6 +5710,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     "open_search" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x53)),
                     "open_run" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x52)),
                     "open_settings" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x49)),
+                    "sound_settings" | "audio_settings" | "volume_mixer" => {
+                        // Win + A ouvre le panneau latéral rapide avec curseur de volume et sélection du périphérique audio
+                        send_hotkey(&[VK_LWIN], VK_A);
+                    }
                     "lock_screen" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x4C)),
                     "emoji_panel" => send_hotkey(&[VK_LWIN], VK_OEM_PERIOD),
                     "minimize_all" => send_hotkey(&[VK_LWIN], VIRTUAL_KEY(0x4D)),
@@ -6329,6 +6574,11 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 feedback.push(format!("Fenêtre volante '{title}' affichée à l'écran."));
             }
             AgentAction::CloseFloatingCard { id } => {
+                let was_just_shown = actions.iter().any(|a| matches!(a, AgentAction::ShowFloatingCard { id: Some(sid), .. } if sid == id));
+                if was_just_shown {
+                    println!("[Actions] Annulation de close_floating_card('{id}') car la carte a été mise à jour dans la même passe.");
+                    continue;
+                }
                 feedback.push(format!("Fenêtre volante '{id}' fermée."));
             }
         }

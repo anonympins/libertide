@@ -6,6 +6,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.2] - 2026-10-19
+
+### 🎨 Accessibility Themes & Visual Ergonomics
+- **Comprehensive Theme Engine (`AppTheme`)**:
+  - Added high-contrast, eye-strain reducing, and colorblind-safe themes:
+    - **Cyber Cyan**: Modern neon dark theme (default).
+    - **Émeraude Menthe**: Calming forest and mint green palette.
+    - **Améthyste Néon**: Synthwave purple and magenta.
+    - **High Contrast Yellow (WCAG AAA)**: Pure black and high-visibility gold for low vision.
+    - **High Contrast White**: Crisp monochrome styling with pure white text and borders.
+    - **Soft Amber**: Warm blue-light reduced palette for night-time comfort.
+    - **Colorblind Friendly**: Cobalt blue and high-visibility yellow optimized for deuteranopia and protanopia.
+  - **Voice & Modal Control**:
+    - Spoken triggers to switch themes on the fly (*"Thème suivant"*, *"Contraste élevé"*, *"Thème sombre"*).
+    - Dedicated "Thèmes & Accessibilité" tab in the settings dialog with live preview palette swatches.
+    - Theme preference persistence in `.env` (`THEME`).
+
+### 📊 Responsive Floating Cards & Viewport Synchronization
+- **Adaptive Table Layouts**:
+  - Dynamic proportional column width estimation (`calculate_proportional_col_widths`) based on cell contents and available viewport width.
+  - Context menus and shortcuts for copying whole tables, individual rows, or single cells.
+- **Floating Window State & Update Pipeline**:
+  - Real-time global card registry (`OPEN_FLOATING_CARDS`) keeping LLM reasoning passes synchronized with active floating HUDs.
+  - Immediate viewport repaint triggering across card creation and updates.
+  - Context preservation preventing cards from accidentally closing when updated within multi-step reasoning chains.
+
+### 🔑 LLM Settings & Window Management
+- **Credential Modal Enhancements**:
+  - Interactive key inspection with visibility toggle (`show_api_key_plain`), clipboard paste, and custom model reset buttons.
+  - Smoothed handling of empty narration responses and silent observation states.
+  - Native clipboard support for copying, pasting and cutting (`Ctrl+V`, `Ctrl+C`, `Ctrl+X`) across the prompt input field and credentials dialog, with accurate selection replacement.
+- **System Settings & Window Focus**:
+  - Direct native shortcuts to open system settings and action center without spawning shell instances.
+  - Refined external focus retention and terminal buffer extraction.
+
+---
+
 ## [0.5.1] - 2026-10-18
 
 ### 🍏 macOS Port & Unix Compatibility

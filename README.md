@@ -12,7 +12,7 @@ Windows : [![https://github.com/anonympins/fingerprint/actions/workflows/rust.ym
   <img src="public/screenshot-2.png" alt="Libertide Overlay Interface" width="350">
 </p>
 
-Libertide is an inclusive voice and visual assistant for autonomous exploration on Windows, macOS, and Unix / Linux (X11). It combines a discreet transparent overlay interface (developed with [egui](https://github.com/emilk/egui)), continuous local voice recognition with **Whisper**, reasoning from the **DeepSeek-Chat** model, advanced accessibility tools (Switch Access, Click by Number, earcons, high-contrast HUD), and graphical interface automation (Windows UI Automation & X11 EWMH tools, window tiling, web navigation, and input).
+Libertide is an inclusive voice and visual assistant for autonomous exploration on Windows, macOS, and Unix / Linux (X11). It combines a discreet transparent overlay interface (developed with [egui](https://github.com/emilk/egui)), continuous local voice recognition with **Whisper**, reasoning powered by the LLM of your choice (**DeepSeek**, **OpenAI**, **Anthropic Claude**, **Mistral AI**, **Zhipu GLM**, or **Groq**), advanced accessibility tools (Switch Access, Click by Number, earcons, high-contrast HUD), and graphical interface automation (Windows UI Automation & X11 EWMH tools, window tiling, web navigation, and input).
 
 ---
 
@@ -23,7 +23,14 @@ Libertide is an inclusive voice and visual assistant for autonomous exploration 
    - **macOS**: macOS 12+ (Apple Silicon / arm64).
    - **Unix / Linux**: Any modern distribution running an X11 / Xorg desktop session (Ubuntu, Debian, Fedora, Arch Linux, etc.).
 2. **Microphone and speakers**: For Whisper dictation and voice feedback (via Windows SAPI, macOS `say`, or Unix `spd-say` / `espeak-ng`).
-3. **DeepSeek API Key**: Obtain it from the [DeepSeek Platform](https://platform.deepseek.com/). Data consumption : 5-10ko per input message, and very low on output messages.
+3. **LLM API Key (at least one provider of your choice)**: You can set it directly from the overlay GUI (click the 🔑 key button or say *"Clé API"* / *"API key"*), or define it in your `.env` file:
+   - **DeepSeek**: `DEEPSEEK_API_KEY` (DeepSeek Platform)
+   - **OpenAI**: `OPENAI_API_KEY` (OpenAI Platform)
+   - **Anthropic**: `ANTHROPIC_API_KEY` (Anthropic Console)
+   - **Mistral AI**: `MISTRAL_API_KEY` (Mistral Console)
+   - **Zhipu GLM**: `GLM_API_KEY` / `ZHIPU_API_KEY` (BigModel Platform)
+   - **Groq**: `GROQ_API_KEY` (Groq Console)
+   *(Optional: set `LLM_PROVIDER=DeepSeek` or `OpenAI`, `Anthropic`, `Mistral`, `Glm`, `Groq` to force a specific provider, or override models via `<PROVIDER>_MODEL`).*
 
 Go to [the current release](https://github.com/anonympins/libertide/releases) and select the executable for your operating system.
 
@@ -49,7 +56,7 @@ On the first launch of voice listening:
 | **Voice Zoom** | Dynamically scale GUI size with voice commands (*"grossis"*, *"zoom plus"*, *"taille normale"*). |
 | **Dragging** | Click and drag the top banner or the bottom bar to anchor the overlay wherever you want. |
 | **Borders & Corners** | Resize the overlay by stretching the edges and corners. |
-| **Assistance tab** | Tracks the dialogue with DeepSeek, automated actions, and clickable quick suggestions. |
+| **Assistance tab** | Tracks the dialogue with the agent, automated actions, and clickable quick suggestions. |
 | **Chat tab** | Connection and monitoring of a Twitch channel with an integrated search bar. |
 
 ---
@@ -106,16 +113,30 @@ Switches directly to text input inside whatever window currently has focus (text
   - *"Delete word"* / *"Efface le mot"*, *"Delete line"* / *"Efface la ligne"*, *"Select all"* / *"Tout sélectionner"*
 
 ### 3. 🌐 Web Browsing, Search & Shopping
-- **Search / Navigation**:
-  - *"Open Google and search for the best noise cancelling headphones"*
-  - *"Go to wikipedia.org"*
-  - *"Open youtube.com in a new tab"*
-- **Interactions & Obstacles**:
-  - *"Click 'Accept all'"* (the agent detects and clicks cookie consent dialogs and GDPR banners automatically)
-  - *"Click the first result"*
-  - *"Scroll down"* / *"Fais défiler vers le bas"*, *"Scroll to the top"*
-- **Assisted Shopping**:
-  - *"Add the item to the cart and proceed to checkout"* (Libertide will automatically stop before payment and ask for spoken confirmation).
+- **✈️ Flights, Trains & Ticket Search (Interactive Forms & Web Navigation)**:
+  - *"Trouve-moi des billets d'avion Paris - Tokyo le mois prochain"* / *"Search for flights to Tokyo"*: Launches web booking search or directly spawns an interactive floating **Search Form** (`card_type: "form"`) with departure/destination inputs, budget range sliders, flight class selector, and direct-flight toggles. Submitting the form instantly instructs the agent.
+  - *"Cherche des billets de train pour Lyon ce week-end"* / *"Find train tickets to Lyon this weekend"*.
+
+- **🎸 Concerts, Festivals & Live Events**:
+  - *"Quels sont les prochains concerts de rock à Paris ?"* / *"Find rock concerts in London next month"*: Explores venues and ticketing portals (Fnac Spectacles, Ticketmaster, Dice, Eventbrite), extracts tour dates and ticket prices, and projects a structured comparison table or card with direct clickable booking actions.
+  - *"Trouve des festivals de jazz près de chez moi cet été"*.
+
+- **📺 YouTube Channels & Video Exploration**:
+  - *"Résume cette chaîne YouTube"* / *"De quoi parle cette chaîne ?"*: Inspects the active channel page, computes subscriber count and video volume, and projects a standalone Markdown card with key themes and clickable video links (`[▶ Titre de la vidéo]`) to play them with a single click or voice prompt.
+  - *"Lance la dernière vidéo de la chaîne"* / *"Play the latest video"*.
+
+- **📄 Articles, Documents & Web Page Summaries**:
+  - *"Fais-moi un résumé de cet article"* / *"Synthèse de la page"* / *"Summarize this page"*: Reads titles, headings, and body content, then generates an independent, high-contrast floating Markdown HUD summarizing key points, numbers, and quotes without losing focus on the original tab.
+
+- **📊 Product, Service & Price Comparisons**:
+  - *"Compare les meilleurs casques à réduction de bruit"* / *"Find the best noise cancelling headphones under 300€"*: Navigates review and e-commerce websites, compares specs and verified ratings, and builds a floating comparison matrix (`card_type: "table"`) with clickable actions (`[⚡ Commander ...]`).
+
+- **🛡️ Automated Consent & Obstacle Dismissal**:
+  - **Cookie & GDPR Banners**: The agent automatically identifies and accepts cookie consent banners (*"Tout accepter"*, *"Accepter tout"*, *"Accept all"*) without prompting the user.
+  - **Push Notification & Newsletter Popups**: Intrusive web banners (*"Activez les notifications"*, *"Ne manquez rien"*) are automatically dismissed or closed (clicking ✕ / *"Fermer"* / *"Plus tard"* / *"Refuser"*) to unlock the page view.
+
+- **🛒 Assisted Shopping & Safe Checkout**:
+  - *"Ajoute au panier et valide la commande"* / *"Add item to cart and proceed to checkout"*: Fills delivery options and navigates through the checkout funnel, then **strictly halts before payment** with `actions: []` to request explicit spoken confirmation from the user.
 
 ### 4. ♿ Accessibility & System Voice Commands
 - **Targeting & Switch**: *"Show numbers"*, *"Badges"*, *"Badge 4"*, *"Activate switch access"*.
@@ -160,6 +181,6 @@ $ git status
 
 ## 🛠️ Troubleshooting
 
-- **Error `DEEPSEEK_API_KEY in the .env file`**: Verify that the `.env` file is correctly placed at the project root without a hidden `.txt` extension.
+- **Error `API key missing`**: Click the 🔑 button in the overlay to select your provider and paste your key, or verify that your `.env` file contains at least one valid key (such as `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `MISTRAL_API_KEY`, `GLM_API_KEY`, or `GROQ_API_KEY`).
 - **C++ / Whisper compilation error**: Make sure you have launched Cargo from the *x64 Native Tools Command Prompt for VS* terminal or that the MSVC compiler is accessible in your `PATH`.
 - **Microphone inactive**: Verify that microphone access is authorized for desktop applications in Windows privacy settings.

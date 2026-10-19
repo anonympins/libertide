@@ -349,8 +349,6 @@ pub fn list_user_windows() -> Vec<(HWND, String)> {
             !t.is_empty()
                 && t != "Libertide overlay"
                 && t != "Program Manager"
-                && t != "Settings"
-                && t != "Paramètres"
         })
         .collect()
 }
@@ -667,6 +665,17 @@ pub fn window_matches_keyword(hwnd: HWND, title: &str, kw: &str) -> bool {
             .and_then(|s| s.to_str())
             .unwrap_or(p_clean);
         let p_norm = strip_spaces_and_symbols(p_stem);
+
+        if p_lower == "paramètres" || p_lower == "parametres" || p_lower == "settings" || p_lower == "reglages" || p_lower == "réglages" {
+            let (_pid, exe) = get_window_process_info(hwnd);
+            let exe_lower = exe.to_lowercase();
+            if exe_lower.contains("systemsettings") || exe_lower.contains("settings") {
+                return true;
+            }
+            if t_lower == "paramètres" || t_lower == "settings" || t_lower.starts_with("paramètres") || t_lower.starts_with("settings") {
+                return true;
+            }
+        }
 
         let is_generic_browser = p_lower == "browser" || p_lower == "navigateur" || p_lower == "web" || p_lower == "internet";
         if is_generic_browser {
