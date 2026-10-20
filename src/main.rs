@@ -4343,7 +4343,7 @@ async fn call_llm_prompt(
                         #[cfg(windows)]
                         { summarize_screen_state(None, true) }
                         #[cfg(not(windows))]
-                        { String::new() }
+                        { summarize_screen_state(None, false) }
                     })
                 };
                 payload.quick_suggestions = generate_fallback_suggestions_from_screen(&screen);
@@ -4409,7 +4409,7 @@ async fn call_llm_prompt(
                 #[cfg(windows)]
                 let sc = summarize_screen_state(None, true);
                 #[cfg(not(windows))]
-                let sc = String::new();
+                let sc = summarize_screen_state(None, false);
                 (rep, sc)
             }));
             match outcome {
@@ -4657,14 +4657,11 @@ fn main() -> eframe::Result<()> {
                                     }
                                     #[cfg(not(windows))]
                                     {
-                                        (None, String::new())
+                                        (get_active_field_content(), summarize_screen_state(None, false))
                                     }
                                 }).await.unwrap_or((None, String::new()));
 
                                 if is_request_cancelled(request_id) { return; }
-                                #[cfg(not(windows))]
-                                let screen_state = summarize_screen_state(None, false);
-
                                 let mut prompt_sections = Vec::new();
 
                                 if !screen_state.trim().is_empty() {

@@ -95,9 +95,219 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
         .collect()
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+#[derive(serde::Deserialize, Debug, Clone)]
+struct MacosAxElementRaw {
+    name: String,
+    role: String,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    #[serde(default)]
+    value: String,
+}
+
+#[cfg(target_os = "macos")]
+fn query_macos_ax_elements() -> Vec<MacosAxElementRaw> {
+    const JXA_SCRIPT: &str = r#"(() => {
+    try {
+        const se = Application("System Events");
+        const procs = se.applicationProcesses.whose({ frontmost: true });
+        if (!procs.length) return "[]";
+        const app = procs[0];
+        let win = null;
+        try {
+            const wins = app.windows();
+            if (wins.length > 0) win = wins[0];
+        } catch(e) {}
+        if (!win) return "[]";
+
+        const targetRoles = [
+            "AXButton", "AXTextField", "AXTextArea", "AXPopUpButton",
+            "AXCheckBox", "AXRadioButton", "AXLink", "AXTab", "AXMenuItem", "AXComboBox"
+        ];
+
+        let elements = [];
+        function walk(elem, depth) {
+            if (depth > 6 || elements.length >= 60) return;
+            try {
+                let role = "";
+                try { role = elem.role(); } catch(e) {}
+                if (targetRoles.indexOf(role) !== -1) {
+                    let pos = [0, 0];
+                    let sz = [0, 0];
+                    try { pos = elem.position(); } catch(e) {}
+                    try { sz = elem.size(); } catch(e) {}
+                    let name = "";
+                    try { name = elem.title(); } catch(e) {}
+                    if (!name) { try { name = elem.name(); } catch(e) {} }
+                    if (!name) { try { name = elem.description(); } catch(e) {} }
+                    let val = "";
+                    try { val = elem.value(); } catch(e) {}
+                    if (sz && sz[0] > 4 && sz[1] > 4) {
+                        elements.push({
+                            name: String(name || "").trim(),
+                            role: role,
+                            x: Math.round(pos[0]),
+                            y: Math.round(pos[1]),
+                            width: Math.round(sz[0]),
+                            height: Math.round(sz[1]),
+                            value: String(val || "").trim()
+                        });
+                    }
+                }
+                let children = [];
+                try { children = elem.uiElements(); } catch(e) {}
+                for (let i = 0; i < children.length; i++) {
+                    walk(children[i], depth + 1);
+                    if (elements.length >= 60) break;
+                }
+            } catch(e) {}
+        }
+        walk(win, 0);
+        return JSON.stringify(elements);
+    } catch(err) {
+        return "[]";
+    }
+})()"#;
+
+    let output = std::process::Command::new("osascript")
+        .args(["-l", "JavaScript", "-e", JXA_SCRIPT])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(&stdout).unwrap_or_default()
+}
+
+#[cfg(target_os = "macos")]
 pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget> {
-    Vec::new()
+    let items = query_macos_ax_elements();
+    items
+        .into_iter()
+        .take(30)
+        .enumerate()
+        .map(|(i, e)| NumberedElementTarget {
+            index: i + 1,
+            click_x: e.x + (e.width / 2),
+            click_y: e.y + (e.height / 2),
+            rect: [e.x, e.y, e.x + e.width, e.y + e.height],
+            name: if !e.name.is_empty() {
+                e.name
+            } else if !e.value.is_empty() {
+                e.value
+            } else {
+                format!("[{}]", e.role.strip_prefix("AX").unwrap_or(&e.role))
+            },
+        })
+        .collect()
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+#[derive(serde::Deserialize, Debug, Clone)]
+struct AtspiElementRaw {
+    name: String,
+    role: String,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    #[serde(default)]
+    value: String,
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn query_atspi_elements() -> Vec<AtspiElementRaw> {
+    // Script Python embarqué utilisant le binding standard Atspi (GObject introspection)
+    // présent nativement sur la quasi-totalité des distributions Linux avec environnement de bureau.
+    const ATSPI_SCRIPT: &str = r#"
+import json, sys
+try:
+    import gi
+    gi.require_version('Atspi', '2.0')
+    from gi.repository import Atspi
+except Exception:
+    sys.exit(0)
+
+elements = []
+desktop = Atspi.get_desktop(0)
+if not desktop:
+    sys.exit(0)
+
+def walk(accessible, depth=0):
+    if depth > 7 or len(elements) >= 120:
+        return
+    try:
+        role = accessible.get_role_name()
+        state = accessible.get_state_set()
+        is_showing = state.contains(Atspi.StateType.SHOWING) if state else True
+        if is_showing and role in ("push-button", "link", "entry", "password-text", "page-tab", "check-box", "radio-button", "combo-box"):
+            comp = accessible.get_component_iface()
+            if comp:
+                bbox = comp.get_extents(Atspi.CoordType.SCREEN)
+                name = accessible.get_name() or ""
+                val_text = ""
+                text_iface = accessible.get_text_iface()
+                if text_iface:
+                    val_text = text_iface.get_text(0, -1) or ""
+                if bbox.width > 5 and bbox.height > 5:
+                    elements.append({
+                        "name": name.strip(),
+                        "role": role,
+                        "x": bbox.x,
+                        "y": bbox.y,
+                        "width": bbox.width,
+                        "height": bbox.height,
+                        "value": val_text.strip()
+                    })
+        for i in range(accessible.get_child_count()):
+            child = accessible.get_child_at_index(i)
+            if child:
+                walk(child, depth + 1)
+    except Exception:
+        pass
+
+walk(desktop)
+print(json.dumps(elements))
+"#;
+
+    let output = std::process::Command::new("python3")
+        .args(["-c", ATSPI_SCRIPT])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(&stdout).unwrap_or_default()
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget> {
+    let items = query_atspi_elements();
+    items
+        .into_iter()
+        .take(30)
+        .enumerate()
+        .map(|(i, e)| NumberedElementTarget {
+            index: i + 1,
+            click_x: e.x + (e.width / 2),
+            click_y: e.y + (e.height / 2),
+            rect: [e.x, e.y, e.x + e.width, e.y + e.height],
+            name: if !e.name.is_empty() {
+                e.name
+            } else if !e.value.is_empty() {
+                e.value
+            } else {
+                format!("[{}]", e.role)
+            },
+        })
+        .collect()
 }
 
 #[cfg(not(windows))]
@@ -2923,8 +3133,76 @@ pub fn get_active_field_content() -> Option<String> {
     None
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 pub fn get_active_field_content() -> Option<String> {
+    const SCRIPT: &str = r#"tell application "System Events"
+        try
+            set frontApp to first application process whose frontmost is true
+            set focusedElem to value of attribute "AXFocusedUIElement" of frontApp
+            if focusedElem is not missing value then
+                try
+                    set v to value of focusedElem
+                    if v is not missing value and (v as text) is not "" then return v as text
+                end try
+                try
+                    set v to value of attribute "AXValue" of focusedElem
+                    if v is not missing value and (v as text) is not "" then return v as text
+                end try
+                try
+                    set v to value of attribute "AXSelectedText" of focusedElem
+                    if v is not missing value and (v as text) is not "" then return v as text
+                end try
+            end if
+        end try
+    end tell"#;
+
+    let output = std::process::Command::new("osascript")
+        .args(["-e", SCRIPT])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+    None
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn get_active_field_content() -> Option<String> {
+    const ATSPI_FOCUSED_SCRIPT: &str = r#"
+import sys
+try:
+    import gi
+    gi.require_version('Atspi', '2.0')
+    from gi.repository import Atspi
+except Exception:
+    sys.exit(0)
+
+desktop = Atspi.get_desktop(0)
+def find_focused(accessible, depth=0):
+    if depth > 8: return None
+    try:
+        state = accessible.get_state_set()
+        if state and state.contains(Atspi.StateType.FOCUSED):
+            t = accessible.get_text_iface()
+            if t: return t.get_text(0, -1)
+        for i in range(accessible.get_child_count()):
+            res = find_focused(accessible.get_child_at_index(i), depth + 1)
+            if res is not None: return res
+    except Exception:
+        pass
+    return None
+
+txt = find_focused(desktop)
+if txt: sys.stdout.write(txt)
+"#;
+    if let Ok(output) = std::process::Command::new("python3").args(["-c", ATSPI_FOCUSED_SCRIPT]).output() {
+        let res = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !res.is_empty() { return Some(res); }
+    }
     None
 }
 
@@ -4658,7 +4936,112 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
     summary
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) -> String {
+    let user_windows = list_user_windows();
+    let active_win = get_active_macos_window();
+    let prev_screen_snapshot = LAST_SCREEN_SUMMARY.lock().ok().and_then(|g| g.clone());
+
+    let mut out = String::new();
+    out.push_str("=== Rapport d'analyse de l'écran (macOS WindowServer / Cocoa) ===\n");
+
+    let active_title = active_win.as_deref().unwrap_or("Fenêtre active");
+    out.push_str(&format!(
+        "Fenêtre au premier plan (contexte actif) : \"{}\"\n\
+         [Note d'intention contextuelle] : Cette fenêtre est le contexte direct de l'utilisateur. Toute instruction relative à une question, recherche, météo, achat ou formulaire doit être résolue prioritairement dans cette fenêtre active.\n\n",
+        active_title
+    ));
+
+    if let Some(content) = get_active_field_content() {
+        let safe_content = truncate_with_notice(content.trim(), 1200);
+        out.push_str(&format!(
+            "  [Champ de saisie focalisé (AXFocusedUIElement)] :\n\"\"\"\n{}\n\"\"\"\n\n",
+            safe_content
+        ));
+    }
+
+    out.push_str("=== Fenêtres macOS détectées ===\n");
+    for (_id, title) in &user_windows {
+        let is_term = is_terminal_window("", title);
+        let is_browser = is_browser_window(title);
+        let kind = if is_term {
+            " [Terminal]"
+        } else if is_browser {
+            " [Navigateur web]"
+        } else {
+            ""
+        };
+        out.push_str(&format!("- Fenêtre \"{}\"{}\n", title, kind));
+    }
+
+    let ax_elements = query_macos_ax_elements();
+    if !ax_elements.is_empty() {
+        out.push_str("\n=== Éléments interactifs accessibles (macOS Accessibility) ===\n");
+
+        let text_fields: Vec<&MacosAxElementRaw> = ax_elements.iter()
+            .filter(|e| e.role == "AXTextField" || e.role == "AXTextArea" || e.role == "AXComboBox")
+            .collect();
+        if !text_fields.is_empty() {
+            out.push_str("  [Champs de saisie (input / textarea)] :\n");
+            for tf in text_fields.iter().take(15) {
+                let val_str = if !tf.value.is_empty() {
+                    format!(" = \"{}\"", truncate_with_notice(&tf.value, 60))
+                } else {
+                    String::new()
+                };
+                let label = if !tf.name.is_empty() { &tf.name } else { "Champ" };
+                out.push_str(&format!("  • [{}] \"{}\"{}\n", tf.role.strip_prefix("AX").unwrap_or(&tf.role), label, val_str));
+            }
+        }
+
+        let buttons: Vec<&MacosAxElementRaw> = ax_elements.iter()
+            .filter(|e| e.role == "AXButton" || e.role == "AXPopUpButton" || e.role == "AXCheckBox" || e.role == "AXRadioButton")
+            .collect();
+        if !buttons.is_empty() {
+            let names: Vec<String> = buttons.iter()
+                .filter(|b| !b.name.is_empty())
+                .map(|b| b.name.clone())
+                .take(30)
+                .collect();
+            if !names.is_empty() {
+                out.push_str(&format!("  [Boutons / contrôles cliquables] : {}\n", names.join(", ")));
+            }
+        }
+
+        let links: Vec<&MacosAxElementRaw> = ax_elements.iter()
+            .filter(|e| e.role == "AXLink")
+            .collect();
+        if !links.is_empty() {
+            let link_names: Vec<String> = links.iter()
+                .filter(|l| !l.name.is_empty())
+                .map(|l| l.name.clone())
+                .take(30)
+                .collect();
+            if !link_names.is_empty() {
+                out.push_str(&format!("  [Liens / résultats cliquables] : {}\n", link_names.join(" | ")));
+            }
+        }
+    }
+
+    if let Some(clip) = clipboard::get_text() {
+        let clip_trim = clip.trim();
+        if !clip_trim.is_empty() {
+            out.push_str(&format!("\n[Contenu presse-papiers macOS (Clipboard)] :\n\"\"\"\n{}\n\"\"\"\n", truncate_with_notice(clip_trim, 600)));
+        }
+    }
+
+    if let Some(ref prev) = prev_screen_snapshot {
+        let diff = compute_screen_diff(prev, &out);
+        if !diff.trim().is_empty() {
+            let changes_hdr = format!("=== CHANGEMENTS RÉCENTS (PRIORITÉ ABSOLUE) ===\n{}\n\n", diff.trim());
+            out = format!("{}{}", changes_hdr, out);
+        }
+    }
+
+    truncate_with_notice(&out, 12000)
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) -> String {
     let user_windows = list_user_windows();
     let active_id = get_active_x11_window();
@@ -4715,6 +5098,21 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
                     ));
                 }
             }
+        }
+    }
+
+    // Injection des éléments interactifs AT-SPI découverts
+    let atspi_elements = query_atspi_elements();
+    if !atspi_elements.is_empty() {
+        out.push_str("\n=== Éléments accessibles détectés (AT-SPI Linux) ===\n");
+        for elem in atspi_elements.iter().take(30) {
+            let val = if !elem.value.is_empty() {
+                format!(" = \"{}\"", truncate_with_notice(&elem.value, 60))
+            } else {
+                String::new()
+            };
+            let label = if !elem.name.is_empty() { &elem.name } else { "(sans nom)" };
+            out.push_str(&format!("  • [{}] \"{}\" [pos: {},{}]{}\n", elem.role, label, elem.x, elem.y, val));
         }
     }
 
