@@ -68,6 +68,39 @@ pub fn clean_words(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Calcule la distance de Damerau-Levenshtein (insertions, suppressions, substitutions et transpositions adjacentes)
+pub fn damerau_levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let la = a_chars.len();
+    let lb = b_chars.len();
+
+    if la == 0 {
+        return lb;
+    }
+    if lb == 0 {
+        return la;
+    }
+
+    let mut d = vec![vec![0usize; lb + 1]; la + 1];
+    for i in 0..=la { d[i][0] = i; }
+    for j in 0..=lb { d[0][j] = j; }
+
+    for i in 1..=la {
+        for j in 1..=lb {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            d[i][j] = (d[i - 1][j] + 1)
+                .min(d[i][j - 1] + 1)
+                .min(d[i - 1][j - 1] + cost);
+
+            if i > 1 && j > 1 && a_chars[i - 1] == b_chars[j - 2] && a_chars[i - 2] == b_chars[j - 1] {
+                d[i][j] = d[i][j].min(d[i - 2][j - 2] + 1);
+            }
+        }
+    }
+    d[la][lb]
+}
+
 pub fn split_propositions(input: &str) -> Vec<String> {
     let mut results = Vec::new();
     let mut current = String::new();

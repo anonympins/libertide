@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -61,6 +62,205 @@ pub fn read_env_var_from_file(file_path: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Collecte et met en cache l'ensemble des exécutables disponibles dans le PATH et le système
+pub fn get_available_applications() -> &'static [String] {
+    static APPS: OnceLock<Vec<String>> = OnceLock::new();
+    APPS.get_or_init(|| {
+        let mut apps = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // Applications système et utilitaires courants indispensables
+        let builtins = [
+            "calc", "notepad", "chrome", "firefox", "edge", "brave", "explorer",
+            "cmd", "powershell", "wt", "code", "spotify", "discord", "vlc",
+            "steam", "taskmgr", "settings", "mspaint", "terminal", "obs",
+        ];
+        for b in builtins {
+            if seen.insert(b.to_lowercase()) {
+                apps.push(b.to_string());
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            let dirs = get_system_search_dirs();
+            for dir in dirs {
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() {
+                            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                                if ext.eq_ignore_ascii_case("exe")
+                                    || ext.eq_ignore_ascii_case("cmd")
+                                    || ext.eq_ignore_ascii_case("bat")
+                                {
+                                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                                        let clean = stem.trim();
+                                        let lower = clean.to_lowercase();
+                                        if clean.len() >= 2
+                                            && !clean.starts_with('.')
+                                            && !clean.starts_with('_')
+                                            && !lower.contains("uninstall")
+                                            && !lower.starts_with("vcruntime")
+                                            && !lower.starts_with("d3dcompiler")
+                                            && seen.insert(lower)
+                                        {
+                                            apps.push(clean.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Découverte des raccourcis du menu Démarrer (.lnk)
+            let mut start_menu_dirs = Vec::new();
+            if let Ok(program_data) = std::env::var("ProgramData") {
+                start_menu_dirs.push(PathBuf::from(program_data).join(r"Microsoft\Windows\Start Menu\Programs"));
+            }
+            if let Ok(app_data) = std::env::var("APPDATA") {
+                start_menu_dirs.push(PathBuf::from(app_data).join(r"Microsoft\Windows\Start Menu\Programs"));
+            }
+
+            for start_dir in start_menu_dirs {
+                if let Ok(entries) = std::fs::read_dir(&start_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() {
+                            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                                if ext.eq_ignore_ascii_case("lnk") {
+                                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                                        let clean = stem.trim();
+                                        let lower = clean.to_lowercase();
+                                        if clean.len() >= 2 && !lower.contains("uninstall") && seen.insert(lower) {
+                                            apps.push(clean.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        } else if path.is_dir() {
+                            if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                                for sub in sub_entries.flatten() {
+                                    let sub_p = sub.path();
+                                    if let Some(ext) = sub_p.extension().and_then(|e| e.to_str()) {
+                                        if ext.eq_ignore_ascii_case("lnk") {
+                                            if let Some(stem) = sub_p.file_stem().and_then(|s| s.to_str()) {
+                                                let clean = stem.trim();
+                                                let lower = clean.to_lowercase();
+                                                if clean.len() >= 2 && !lower.contains("uninstall") && seen.insert(lower) {
+                                                    apps.push(clean.to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(windows))]
+        {
+            if let Some(path_var) = std::env::var_os("PATH") {
+                for dir in std::env::split_paths(&path_var) {
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_file() {
+                                if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
+                                    let clean = fname.trim();
+                                    let lower = clean.to_lowercase();
+                                    if clean.len() >= 2 && !clean.starts_with('.') && seen.insert(lower) {
+                                        apps.push(clean.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        apps
+    })
+}
+
+/// Recherche les suggestions d'applications correspondant au texte saisi avec distance de Damerau-Levenshtein
+pub fn find_matching_applications(input: &str, limit: usize) -> Vec<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let lower_trimmed = trimmed.to_lowercase();
+    let prefixes = ["ouvre ", "ouvrir ", "lance ", "lancer ", "open ", "run ", "demarre ", "démarre "];
+    let mut query = lower_trimmed.as_str();
+    for p in prefixes {
+        if query.starts_with(p) {
+            query = &query[p.len()..];
+            break;
+        }
+    }
+    let q = query.trim();
+    if q.len() < 2 {
+        return Vec::new();
+    }
+
+    let all_apps = get_available_applications();
+    let mut scored: Vec<(f32, &String)> = Vec::new();
+
+    for app in all_apps {
+        let app_lower = app.to_lowercase();
+        if app_lower == q {
+            scored.push((1000.0, app));
+        } else if app_lower.starts_with(q) {
+            let score = 500.0 + (q.len() as f32 / app_lower.len() as f32) * 50.0;
+            scored.push((score, app));
+        } else if app_lower.contains(q) {
+            let score = 300.0 + (q.len() as f32 / app_lower.len() as f32) * 30.0;
+            scored.push((score, app));
+        } else if q.len() >= 3 {
+            let dist = crate::pattern::damerau_levenshtein_distance(q, &app_lower);
+            let max_len = q.chars().count().max(app_lower.chars().count());
+            let sim = 1.0 - (dist as f32 / max_len as f32);
+
+            let prefix_sim = if app_lower.chars().count() > q.chars().count() {
+                let prefix: String = app_lower.chars().take(q.chars().count()).collect();
+                let p_dist = crate::pattern::damerau_levenshtein_distance(q, &prefix);
+                1.0 - (p_dist as f32 / q.chars().count() as f32)
+            } else {
+                0.0
+            };
+
+            if sim >= 0.60 {
+                let score = 200.0 * sim;
+                scored.push((score, app));
+            } else if prefix_sim >= 0.70 && q.len() >= 4 {
+                let score = 150.0 * prefix_sim;
+                scored.push((score, app));
+            }
+        }
+    }
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut result = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (_, app) in scored {
+        if seen.insert(app.to_lowercase()) {
+            result.push(app.clone());
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    result
 }
 
 /// Met à jour ou ajoute une variable d'environnement dans un fichier texte (ex: `.env`).

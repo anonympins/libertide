@@ -175,7 +175,9 @@ fn query_macos_ax_elements() -> Vec<MacosAxElementRaw> {
     let output = std::process::Command::new("osascript")
         .args(["-l", "JavaScript", "-e", JXA_SCRIPT])
         .output()
-        .ok()?;
+    else {
+        return Vec::new();
+    };
 
     if !output.status.success() {
         return Vec::new();
@@ -278,7 +280,9 @@ print(json.dumps(elements))
     let output = std::process::Command::new("python3")
         .args(["-c", ATSPI_SCRIPT])
         .output()
-        .ok()?;
+    else {
+        return Vec::new();
+    };
 
     if !output.status.success() {
         return Vec::new();

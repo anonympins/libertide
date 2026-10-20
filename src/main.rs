@@ -184,6 +184,10 @@ pub struct OverlayApp {
     show_api_key_plain: bool,
     selected_provider_modal: LlmProvider,
     api_key_error: Option<String>,
+
+    // Suggestions d'applications en direct (PATH & Levenshtein)
+    input_suggestions: Vec<String>,
+    last_suggestion_query: String,
 }
 
 #[cfg(windows)]
@@ -214,7 +218,6 @@ fn normalize_for_command_match(text: &str) -> String {
         .collect::<Vec<&str>>()
         .join(" ")
 }
-
 fn is_emergency_stop_command(text: &str) -> bool {
     let norm = normalize_for_command_match(text);
     if norm == "stop" || norm == "stopp" || norm == "стоп" || norm == "停止" || norm == "ストップ" {
@@ -903,6 +906,8 @@ impl OverlayApp {
             selected_provider_modal: llm_config.provider,
             show_api_key_plain: false,
             api_key_error: None,
+            input_suggestions: Vec::new(),
+            last_suggestion_query: String::new(),
         };
         app.sync_modal_inputs_for_provider(llm_config.provider);
         update_open_floating_cards(&app.floating_cards);
@@ -1261,8 +1266,19 @@ impl eframe::App for OverlayApp {
         let win_w: f32 = inner_rect_opt.map_or(self.current_win_w, |r| r.width().max(min_win_w));
         self.current_win_w = win_w;
 
+        let trimmed_input = self.input_text.trim();
+        if trimmed_input != self.last_suggestion_query {
+            self.last_suggestion_query = trimmed_input.to_string();
+            self.input_suggestions = if trimmed_input.len() >= 2 {
+                find_matching_applications(trimmed_input, 5)
+            } else {
+                Vec::new()
+            };
+        }
+
         let padding: f32 = 2.0;
-        let control_h: f32 = 102.0;
+        let has_suggestions = !self.input_suggestions.is_empty();
+        let control_h: f32 = if has_suggestions { 128.0 } else { 102.0 };
 
         let max_chat_h = (work_h - control_h - 60.0).clamp(180.0, 560.0);
         let min_chat_h: f32 = 50.0;
@@ -2166,6 +2182,46 @@ impl eframe::App for OverlayApp {
 
                                     ui.add_space(4.0);
 
+                                    // Barre de suggestions d'applications (PATH / Levenshtein)
+                                    let mut clicked_app_suggestion: Option<String> = None;
+                                    let mut autocomplete_input_to: Option<String> = None;
+
+                                    if !self.input_suggestions.is_empty() {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 4.0;
+                                            ui.label(
+                                                egui::RichText::new("💡 Suggestions :")
+                                                    .size(10.5)
+                                                    .color(theme.accent)
+                                                    .strong(),
+                                            );
+                                            for sug in &self.input_suggestions {
+                                                let chip = egui::Button::new(
+                                                    egui::RichText::new(format!("🚀 {sug}"))
+                                                        .size(10.5)
+                                                        .color(egui::Color32::from_rgb(220, 240, 255)),
+                                                )
+                                                .fill(egui::Color32::from_rgba_unmultiplied(0, 180, 255, 30))
+                                                .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                                .corner_radius(egui::CornerRadius::same(6))
+                                                .small();
+
+                                                let resp = ui.add(chip)
+                                                    .on_hover_text(format!("Lancer '{}' (Clic gauche)\nTab : compléter dans le champ", sug));
+                                                if resp.clicked() {
+                                                    clicked_app_suggestion = Some(format!("Ouvrir {sug}"));
+                                                }
+                                                resp.context_menu(|ui| {
+                                                    if ui.button("Compléter dans le champ").clicked() {
+                                                        autocomplete_input_to = Some(format!("Ouvrir {sug}"));
+                                                        ui.close();
+                                                    }
+                                                });
+                                            }
+                                        });
+                                        ui.add_space(2.0);
+                                    }
+
                                     // 1ère rangée : Champ de saisie occupant tout l'espace disponible + bouton Envoyer
                                     ui.horizontal(|ui| {
                                         let send_btn_w = 64.0;
@@ -2177,6 +2233,14 @@ impl eframe::App for OverlayApp {
                                             m.has_focus(egui::Id::new("api_key_input_field"))
                                                 || m.has_focus(egui::Id::new("model_input_field"))
                                         });
+
+                                        // Autocomplétion de la première suggestion via la touche Tab
+                                        if let Some(top_sug) = self.input_suggestions.first() {
+                                            if is_input_focused && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
+                                                autocomplete_input_to = Some(format!("Ouvrir {top_sug}"));
+                                                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+                                            }
+                                        }
 
                                         let paste_hit = ctx.input(|i| {
                                             i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
@@ -2302,6 +2366,35 @@ impl eframe::App for OverlayApp {
                                             self.stop_speaking();
                                         }
 
+                                        if let Some(completed) = autocomplete_input_to {
+                                            self.input_text = completed;
+                                            self.last_suggestion_query = self.input_text.trim().to_string();
+                                            self.input_suggestions = find_matching_applications(&self.input_text, 5);
+                                            ctx.memory_mut(|m| m.request_focus(input_id));
+                                            ctx.request_repaint();
+                                        }
+
+                                        if let Some(prompt) = clicked_app_suggestion {
+                                            self.stop_speaking();
+                                            if self.is_recording {
+                                                self.stop_recording();
+                                            }
+                                            self.continuous_mode = true;
+                                            self.input_text.clear();
+                                            self.input_suggestions.clear();
+                                            self.last_suggestion_query.clear();
+                                            self.live_transcript.clear();
+                                            self.chat_history.push(ChatEntry {
+                                                role: ChatRole::User,
+                                                text: prompt.clone(),
+                                                timestamp: current_time_str(),
+                                                quick_suggestions: Vec::new(),
+                                                screen_size_kb: None,
+                                            });
+                                            self.status = AgentStatus::Thinking;
+                                            let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
+                                        }
+
                                         let enter_hit = (response.lost_focus() || response.has_focus())
                                             && ctx.input(|i| i.key_pressed(egui::Key::Enter));
                                         let send_btn = ui.add_sized(
@@ -2318,6 +2411,8 @@ impl eframe::App for OverlayApp {
                                                 self.stop_recording();
                                             }
                                             self.continuous_mode = true;
+                                            self.input_suggestions.clear();
+                                            self.last_suggestion_query.clear();
                                             let prompt = std::mem::take(&mut self.input_text).trim().to_string();
                                             self.live_transcript.clear();
                                             self.chat_history.push(ChatEntry {
