@@ -11,6 +11,8 @@ mod tts;
 mod twitch;
 mod types;
 mod window_util;
+mod commands;
+mod ui;
 
 use audio::spawn_audio_worker;
 use floating_window::{update_open_floating_cards, FloatingCard, OPEN_FLOATING_CARDS};
@@ -70,6 +72,44 @@ pub fn play_earcon(earcon: Earcon) {
                     Beep(800, 60);
                 }
             }
+        }
+    });
+    #[cfg(target_os = "macos")]
+    std::thread::spawn(move || {
+        let sound_name = match earcon {
+            Earcon::MicOpen => "Pop.aiff",
+            Earcon::MicClose => "Tink.aiff",
+            Earcon::Success => "Glass.aiff",
+            Earcon::Emergency => "Sosumi.aiff",
+        };
+        let sound_path = format!("/System/Library/Sounds/{}", sound_name);
+        if std::path::Path::new(&sound_path).exists() {
+            let _ = std::process::Command::new("afplay").arg(&sound_path).status();
+        } else {
+            print!("\x07");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+        }
+    });
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    std::thread::spawn(move || {
+        let sound_id = match earcon {
+            Earcon::MicOpen => "audio-volume-change",
+            Earcon::MicClose => "dialog-information",
+            Earcon::Success => "complete",
+            Earcon::Emergency => "dialog-warning",
+        };
+        let played = std::process::Command::new("canberra-gtk-play")
+            .args(["-i", sound_id])
+            .status()
+            .map_or(false, |s| s.success());
+        if !played {
+            let _ = std::process::Command::new("paplay")
+                .arg("/usr/share/sounds/freedesktop/stereo/complete.oga")
+                .status();
+            print!("\x07");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
         }
     });
 }
@@ -144,6 +184,10 @@ pub struct OverlayApp {
     show_api_key_plain: bool,
     selected_provider_modal: LlmProvider,
     api_key_error: Option<String>,
+
+    // Suggestions d'applications en direct (PATH & Levenshtein)
+    input_suggestions: Vec<String>,
+    last_suggestion_query: String,
 }
 
 #[cfg(windows)]
@@ -174,7 +218,6 @@ fn normalize_for_command_match(text: &str) -> String {
         .collect::<Vec<&str>>()
         .join(" ")
 }
-
 fn is_emergency_stop_command(text: &str) -> bool {
     let norm = normalize_for_command_match(text);
     if norm == "stop" || norm == "stopp" || norm == "стоп" || norm == "停止" || norm == "ストップ" {
@@ -246,6 +289,16 @@ fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
                     windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTUP, 0, 0, 0, 0,
                 );
             }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", "tell application \"System Events\" to click"])
+                    .status();
+            }
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            {
+                let _ = std::process::Command::new("xdotool").args(["click", "1"]).status();
+            }
             Some("Clic gauche.")
         }
         "clic droit" | "right click" => {
@@ -259,6 +312,16 @@ fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
                     windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0,
                 );
             }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", "tell application \"System Events\" to click using control down"])
+                    .status();
+            }
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            {
+                let _ = std::process::Command::new("xdotool").args(["click", "3"]).status();
+            }
             Some("Clic droit.")
         }
         "double clic" | "double click" => {
@@ -271,57 +334,176 @@ fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
             }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("osascript")
+                    .args([
+                        "-e",
+                        "tell application \"System Events\" to repeat 2 times\nclick\ndelay 0.05\nend repeat",
+                    ])
+                    .status();
+            }
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            {
+                let _ = std::process::Command::new("xdotool")
+                    .args(["click", "--repeat", "2", "1"])
+                    .status();
+            }
             Some("Double clic.")
         }
         "enregistre" | "enregistrer" | "sauvegarde" | "sauvegarder" | "save" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x53)); // Ctrl + S
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to keystroke \"s\" using command down"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "ctrl+s"]).status();
             Some("Sauvegardé (Ctrl+S).")
         }
         "annule" | "annuler" | "undo" => {
-            #[cfg(windows)]
-            send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x5A)); // Ctrl + Z
-            Some("Annulé (Ctrl+Z).")
+            if let Some(msg) = undo_last_system_action() {
+                println!("[Undo] Action compensatoire exécutée : {msg}");
+            } else {
+                #[cfg(windows)]
+                send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x5A)); // Ctrl + Z
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to keystroke \"z\" using command down"]).status();
+                #[cfg(all(not(windows), not(target_os = "macos")))]
+                let _ = std::process::Command::new("xdotool").args(["key", "ctrl+z"]).status();
+            }
+            Some("Annulé.")
         }
         "selectionne tout" | "sélectionne tout" | "select all" | "tout selectionner" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x41)); // Ctrl + A
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to keystroke \"a\" using command down"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "ctrl+a"]).status();
             Some("Tout sélectionné.")
         }
         "entree" | "entrée" | "valide" | "valider" | "enter" => {
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x0D));
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to key code 36"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "Return"]).status();
             Some("Touche Entrée validée.")
         }
         "tab" | "tabulation" | "suivant" | "champ suivant" => {
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x09));
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to key code 48"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "Tab"]).status();
             Some("Tabulation.")
         }
         "precedent" | "précédent" | "champ precedent" | "champ précédent" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x10)], VIRTUAL_KEY(0x09));
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to key code 48 using shift down"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "shift+Tab"]).status();
             Some("Champ précédent.")
         }
         "descends" | "descendre" | "page suivante" | "scroll down" => {
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x22)); // VK_NEXT (Page Down)
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to key code 121"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "Page_Down"]).status();
             Some("Défilement vers le bas.")
         }
         "monte" | "monter" | "page precedente" | "page précédente" | "scroll up" => {
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x21)); // VK_PRIOR (Page Up)
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to key code 116"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "Page_Up"]).status();
             Some("Défilement vers le haut.")
         }
         "copie" | "copier" | "copy" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x43)); // Ctrl + C
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to keystroke \"c\" using command down"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "ctrl+c"]).status();
             Some("Copié.")
         }
         "colle" | "coller" | "paste" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x56)); // Ctrl + V
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to keystroke \"v\" using command down"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "ctrl+v"]).status();
             Some("Collé.")
+        }
+        "retour" | "retour arriere" | "retour arrière" | "reculer" | "back" | "browser back" => {
+            #[cfg(windows)]
+            send_hotkey(&[VIRTUAL_KEY(0x12)], VIRTUAL_KEY(0x25)); // Alt + Gauche
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to keystroke \"[\" using command down"]).status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "alt+Left"]).status();
+            Some("Page précédente (Retour arrière).")
+        }
+        "avance" | "avancer" | "forward" | "browser forward" => {
+            #[cfg(windows)]
+            send_hotkey(&[VIRTUAL_KEY(0x12)], VIRTUAL_KEY(0x27)); // Alt + Droite
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to keystroke \"]\" using command down"]).status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "alt+Right"]).status();
+            Some("Page suivante.")
+        }
+        "omnibox" | "l omnibox" | "omnibar" | "l omnibar" | "barre d adresse" | "barre adresse" | "barre de recherche" | "adresse" | "address bar"
+        | "ouvre l omnibox" | "ouvrir l omnibox" | "va sur l omnibox" | "selectionne l omnibox" | "selectionner l omnibox"
+        | "focus omnibox" | "focus barre d adresse" => {
+            #[cfg(windows)]
+            {
+                let user_windows = list_user_windows();
+                if let Some(hwnd) = find_best_browser_window(&user_windows, None) {
+                    focus_browser_address_bar(hwnd);
+                    Some("Barre d'adresse (omnibox) sélectionnée.")
+                } else {
+                    launch_browser_new_window("https://www.google.com");
+                    Some("Navigateur ouvert avec focus sur l'omnibox.")
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", "tell application \"System Events\" to keystroke \"l\" using command down"]).status();
+                #[cfg(all(not(windows), not(target_os = "macos")))]
+                let _ = std::process::Command::new("xdotool").args(["key", "ctrl+l"]).status();
+                Some("Barre d'adresse (omnibox) sélectionnée.")
+            }
         }
         _ => None,
     }
@@ -724,6 +906,8 @@ impl OverlayApp {
             selected_provider_modal: llm_config.provider,
             show_api_key_plain: false,
             api_key_error: None,
+            input_suggestions: Vec::new(),
+            last_suggestion_query: String::new(),
         };
         app.sync_modal_inputs_for_provider(llm_config.provider);
         update_open_floating_cards(&app.floating_cards);
@@ -1082,8 +1266,19 @@ impl eframe::App for OverlayApp {
         let win_w: f32 = inner_rect_opt.map_or(self.current_win_w, |r| r.width().max(min_win_w));
         self.current_win_w = win_w;
 
+        let trimmed_input = self.input_text.trim();
+        if trimmed_input != self.last_suggestion_query {
+            self.last_suggestion_query = trimmed_input.to_string();
+            self.input_suggestions = if trimmed_input.len() >= 2 {
+                find_matching_applications(trimmed_input, 5)
+            } else {
+                Vec::new()
+            };
+        }
+
         let padding: f32 = 2.0;
-        let control_h: f32 = 102.0;
+        let has_suggestions = !self.input_suggestions.is_empty();
+        let control_h: f32 = if has_suggestions { 128.0 } else { 102.0 };
 
         let max_chat_h = (work_h - control_h - 60.0).clamp(180.0, 560.0);
         let min_chat_h: f32 = 50.0;
@@ -1393,6 +1588,20 @@ impl eframe::App for OverlayApp {
                                         windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTUP, 0, 0, 0, 0,
                                     );
                                 }
+                                #[cfg(target_os = "macos")]
+                                {
+                                    let script = format!(
+                                        r#"tell application "System Events" to click at {{{}, {}}}"#,
+                                        target.click_x, target.click_y
+                                    );
+                                    let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+                                }
+                                #[cfg(all(not(windows), not(target_os = "macos")))]
+                                {
+                                    let _ = std::process::Command::new("xdotool")
+                                        .args(["mousemove", &target.click_x.to_string(), &target.click_y.to_string(), "click", "1"])
+                                        .status();
+                                }
                                 play_earcon(Earcon::Success);
                                 self.show_numbered_targets = false;
                                 self.numbered_targets.clear();
@@ -1451,6 +1660,38 @@ impl eframe::App for OverlayApp {
                         }
                         return;
                     }
+
+                // Détection vocale d'annulation prioritaire (Arrêt du job en cours + Rollback)
+                if norm_prompt == "annule" || norm_prompt == "annuler" || norm_prompt == "undo" || norm_prompt == "reviens en arriere" || norm_prompt == "reviens en arrière" {
+                    let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
+                    let undo_feedback = if let Some(fb) = undo_last_system_action() {
+                        fb
+                    } else {
+                        #[cfg(windows)]
+                        send_hotkey(&[windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x11)], windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x5A));
+                        #[cfg(not(windows))]
+                        let _ = std::process::Command::new("xdotool").args(["key", "ctrl+z"]).status();
+                        "Dernière action annulée.".to_string()
+                    };
+                    play_earcon(Earcon::Success);
+                    self.chat_history.push(ChatEntry {
+                        role: ChatRole::User,
+                        text: prompt,
+                        timestamp: current_time_str(),
+                        quick_suggestions: Vec::new(),
+                        screen_size_kb: None,
+                    });
+                    self.chat_history.push(ChatEntry {
+                        role: ChatRole::Agent,
+                        text: undo_feedback.clone(),
+                        timestamp: current_time_str(),
+                        quick_suggestions: Vec::new(),
+                        screen_size_kb: None,
+                    });
+                    let _ = self.tts_sender.send(TtsCommand::Speak(undo_feedback));
+                    self.status = AgentStatus::Idle;
+                    return;
+                }
 
                     // 2. Sortie déterministe immédiate du mode dictée
                     if self.dictation_mode && is_stop_dictation_command(&prompt) {
@@ -1941,6 +2182,46 @@ impl eframe::App for OverlayApp {
 
                                     ui.add_space(4.0);
 
+                                    // Barre de suggestions d'applications (PATH / Levenshtein)
+                                    let mut clicked_app_suggestion: Option<String> = None;
+                                    let mut autocomplete_input_to: Option<String> = None;
+
+                                    if !self.input_suggestions.is_empty() {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 4.0;
+                                            ui.label(
+                                                egui::RichText::new("💡 Suggestions :")
+                                                    .size(10.5)
+                                                    .color(theme.accent)
+                                                    .strong(),
+                                            );
+                                            for sug in &self.input_suggestions {
+                                                let chip = egui::Button::new(
+                                                    egui::RichText::new(format!("🚀 {sug}"))
+                                                        .size(10.5)
+                                                        .color(egui::Color32::from_rgb(220, 240, 255)),
+                                                )
+                                                .fill(egui::Color32::from_rgba_unmultiplied(0, 180, 255, 30))
+                                                .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                                .corner_radius(egui::CornerRadius::same(6))
+                                                .small();
+
+                                                let resp = ui.add(chip)
+                                                    .on_hover_text(format!("Lancer '{}' (Clic gauche)\nTab : compléter dans le champ", sug));
+                                                if resp.clicked() {
+                                                    clicked_app_suggestion = Some(format!("Ouvrir {sug}"));
+                                                }
+                                                resp.context_menu(|ui| {
+                                                    if ui.button("Compléter dans le champ").clicked() {
+                                                        autocomplete_input_to = Some(format!("Ouvrir {sug}"));
+                                                        ui.close();
+                                                    }
+                                                });
+                                            }
+                                        });
+                                        ui.add_space(2.0);
+                                    }
+
                                     // 1ère rangée : Champ de saisie occupant tout l'espace disponible + bouton Envoyer
                                     ui.horizontal(|ui| {
                                         let send_btn_w = 64.0;
@@ -1952,6 +2233,14 @@ impl eframe::App for OverlayApp {
                                             m.has_focus(egui::Id::new("api_key_input_field"))
                                                 || m.has_focus(egui::Id::new("model_input_field"))
                                         });
+
+                                        // Autocomplétion de la première suggestion via la touche Tab
+                                        if let Some(top_sug) = self.input_suggestions.first() {
+                                            if is_input_focused && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
+                                                autocomplete_input_to = Some(format!("Ouvrir {top_sug}"));
+                                                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+                                            }
+                                        }
 
                                         let paste_hit = ctx.input(|i| {
                                             i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
@@ -2077,6 +2366,35 @@ impl eframe::App for OverlayApp {
                                             self.stop_speaking();
                                         }
 
+                                        if let Some(completed) = autocomplete_input_to {
+                                            self.input_text = completed;
+                                            self.last_suggestion_query = self.input_text.trim().to_string();
+                                            self.input_suggestions = find_matching_applications(&self.input_text, 5);
+                                            ctx.memory_mut(|m| m.request_focus(input_id));
+                                            ctx.request_repaint();
+                                        }
+
+                                        if let Some(prompt) = clicked_app_suggestion {
+                                            self.stop_speaking();
+                                            if self.is_recording {
+                                                self.stop_recording();
+                                            }
+                                            self.continuous_mode = true;
+                                            self.input_text.clear();
+                                            self.input_suggestions.clear();
+                                            self.last_suggestion_query.clear();
+                                            self.live_transcript.clear();
+                                            self.chat_history.push(ChatEntry {
+                                                role: ChatRole::User,
+                                                text: prompt.clone(),
+                                                timestamp: current_time_str(),
+                                                quick_suggestions: Vec::new(),
+                                                screen_size_kb: None,
+                                            });
+                                            self.status = AgentStatus::Thinking;
+                                            let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
+                                        }
+
                                         let enter_hit = (response.lost_focus() || response.has_focus())
                                             && ctx.input(|i| i.key_pressed(egui::Key::Enter));
                                         let send_btn = ui.add_sized(
@@ -2093,6 +2411,8 @@ impl eframe::App for OverlayApp {
                                                 self.stop_recording();
                                             }
                                             self.continuous_mode = true;
+                                            self.input_suggestions.clear();
+                                            self.last_suggestion_query.clear();
                                             let prompt = std::mem::take(&mut self.input_text).trim().to_string();
                                             self.live_transcript.clear();
                                             self.chat_history.push(ChatEntry {
@@ -3676,6 +3996,9 @@ Règles principales :
    - Raccourcis clavier & touches : utilise OBLIGATOIREMENT "accessibility_shortcut" avec le nom ou la combinaison de touches exacte (ex: "action_center", "open_settings", "ctrl+shift+b", "ctrl+t", "enter", "close_tab", "copy", "undo", "space"). Ne JAMAIS envoyer "run_command" pour simuler des touches ou des raccourcis système !
    - Lecture code/fichier : "read_editor_content" (focalise et extrait Ctrl+A/Ctrl+C).
    - Onglet/page : "accessibility_shortcut": "close_tab" (jamais "close_app" pour un onglet).
+   - DISTINCTION ABSOLUE ENTRE "open_search" ET "open_search_browser" (2 COMMANDES DISTINCTES) :
+     * "open_search" (ou accessibility_shortcut: "open_search") : Recherche SYSTÈME / OS locale (Win+S). Sert STRICTEMENT ET UNIQUEMENT à rechercher un fichier local, une application installée ou un paramètre Windows sur l'ordinateur. INTERDICTION FORMELLE d'utiliser "open_search" pour chercher sur internet ou sur le web !
+     * "open_search_browser" (ou "focus_address_bar" / accessibility_shortcut: "open_search_browser") : Recherche WEB / NAVIGATEUR. Sert SYSTÉMATIQUEMENT pour chercher sur le web, aller sur internet, ou saisir une requête dans l'omnibox/barre d'adresse du navigateur. Si l'utilisateur demande de chercher sur le web, Google, YouTube, la météo, un produit, etc., utilise TOUJOURS "open_search_browser" (ou "focus_address_bar" / "navigate_to_url").
 4bis. RÈGLES DE LIENS INTERACTIFS & MACRO [link="cible"]label[/link] (CHAT & FENÊTRES VOLANTES) :
    - RÈGLE D'OR : Tout élément multimédia, ressource, fichier, page web, action ou suggestion mentionné dans "narration" ou dans une fenêtre volante ("show_floating_card") DOIT IMPÉRATIVEMENT être formaté sous forme de lien cliquable, prioritairement avec la macro robuste `[link="cible"]Icône Libellé[/link]` (ou en Markdown `Icône Libellé`).
    - LIENS DANS LES TABLEAUX MARKDOWN : Tu PEUX et DOIS insérer des liens `[link="..."]...[/link]` à l'intérieur des cellules de tableaux Markdown ou de fenêtres volantes (ex: `| Produit | Action | Prix |\n| --- | --- | --- |\n| Drone Pro | [link="action:Commander Drone Pro"]⚡ Commander[/link] | 299€ |`).
@@ -3701,6 +4024,7 @@ Règles principales :
    - "navigate_to_url" ouvre par défaut un nouvel onglet ("target": "new_tab").
    - Achat : panier -> valider panier -> AVANT paiement stopper avec "actions": [] et demander confirmation.
    - "scroll" ("down"|"up"|"bottom"|"top", amount: 1..2) pour explorer.
+   - RETOUR EN ARRIÈRE & UNDO NAVIGATION : "navigate_back" (ou "accessibility_shortcut": "browser_back", Alt+Gauche) pour revenir immédiatement à la page ou aux résultats précédents si une navigation s'est trompée de page, mène à une impasse ou à un tag erroné. "navigate_forward" pour avancer.
 7. Autres actions :
    - Dictée : "activate_dictation", "deactivate_dictation", "toggle_dictation", "dictate".
    - Démarrage : "enable_autostart", "disable_autostart", "check_autostart", "set_autostart".
@@ -3718,6 +4042,12 @@ Format JSON obligatoire :
   "next_passes": 5,
   "actions": [
     {{"action": "open_app", "name": "nom_executable"}},
+    {{"action": "open_search"}},
+    {{"action": "open_search_browser"}},
+    {{"action": "navigate_back"}},
+    {{"action": "navigate_forward"}},
+    {{"action": "undo"}},
+    {{"action": "redo"}},
     {{"action": "close_app", "name": "nom_ou_titre"}},
     {{"action": "click_element", "window": null, "target_name": "nom"}},
     {{"action": "click_button", "window": null, "button_name": "nom"}},
@@ -3737,7 +4067,7 @@ Format JSON obligatoire :
     {{"action": "run_command", "command": "..."}},
     {{"action": "kill_process", "pid": null, "name": null}},
     {{"action": "navigate_to_url", "url": "...", "target": "new_tab"|"current_tab"|"new_window"}},
-    {{"action": "accessibility_shortcut", "shortcut": "action_center"|"open_settings"|"sound_settings"|"volume_up"|"volume_down"|"mute_volume"|"enter"|"escape"|"space"|"close_tab"|"refresh_page"|"ctrl+shift+b"|"<combinaison_touches>"}},
+    {{"action": "accessibility_shortcut", "shortcut": "browser_back"|"browser_forward"|"open_search"|"open_search_browser"|"action_center"|"open_settings"|"sound_settings"|"volume_up"|"volume_down"|"mute_volume"|"enter"|"escape"|"space"|"close_tab"|"refresh_page"|"ctrl+shift+b"|"<combinaison_touches>"}},
     {{"action": "deactivate_immersion"}},
     {{"action": "set_reasoning_passes", "passes": 5, "reason": null}},
     {{"action": "schedule_prompt", "delay_seconds": 10, "prompt": "..."}},
@@ -4108,7 +4438,7 @@ async fn call_llm_prompt(
                         #[cfg(windows)]
                         { summarize_screen_state(None, true) }
                         #[cfg(not(windows))]
-                        { String::new() }
+                        { summarize_screen_state(None, false) }
                     })
                 };
                 payload.quick_suggestions = generate_fallback_suggestions_from_screen(&screen);
@@ -4174,7 +4504,7 @@ async fn call_llm_prompt(
                 #[cfg(windows)]
                 let sc = summarize_screen_state(None, true);
                 #[cfg(not(windows))]
-                let sc = String::new();
+                let sc = summarize_screen_state(None, false);
                 (rep, sc)
             }));
             match outcome {
@@ -4188,6 +4518,15 @@ async fn call_llm_prompt(
 
         if is_request_cancelled(request_id) {
             return;
+        }
+
+        // Stratégie de Rollback / Undo automatique si l'action a échoué pendant une passe d'exploration
+        let action_failed = report.contains("introuvable")
+            || report.contains("non réactive")
+            || report.contains("Ciblage rejeté");
+        if action_failed && pass > 1 {
+            println!("[Résilience Agent] Échec d'action détecté dans la passe {pass}. Déclenchement de l'undo automatique.");
+            let _ = undo_last_system_action();
         }
 
         // Re-synchronisation du quota de passes si l'action SetReasoningPasses a été invoquée
@@ -4413,14 +4752,11 @@ fn main() -> eframe::Result<()> {
                                     }
                                     #[cfg(not(windows))]
                                     {
-                                        (None, String::new())
+                                        (get_active_field_content(), summarize_screen_state(None, false))
                                     }
                                 }).await.unwrap_or((None, String::new()));
 
                                 if is_request_cancelled(request_id) { return; }
-                                #[cfg(not(windows))]
-                                let screen_state = summarize_screen_state(None, false);
-
                                 let mut prompt_sections = Vec::new();
 
                                 if !screen_state.trim().is_empty() {
@@ -4615,6 +4951,28 @@ fn main() -> eframe::Result<()> {
                             }
                         }
                         }));
+                    }
+                    AgentCommand::UndoLastAction => {
+                        let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
+                        if let Some(handle) = current_task.take() {
+                            handle.abort();
+                        }
+                        let _ = bg_tts_tx.send(TtsCommand::Stop);
+                        let feedback = if let Some(fb) = undo_last_system_action() {
+                            fb
+                        } else {
+                            #[cfg(windows)]
+                            send_hotkey(&[windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x11)], windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x5A));
+                            #[cfg(not(windows))]
+                            let _ = std::process::Command::new("xdotool").args(["key", "ctrl+z"]).status();
+                            "Dernière action annulée.".to_string()
+                        };
+                        let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                            text: feedback.clone(),
+                            quick_suggestions: Vec::new(),
+                        });
+                        let _ = bg_tts_tx.send(TtsCommand::Speak(feedback));
+                        let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                     }
                 }
             }

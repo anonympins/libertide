@@ -6,7 +6,6 @@ on:
     tags:
       - "*"
   pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
 
 env:
@@ -74,17 +73,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: libertide-linux-x64
-          path: |
-            libertide-linux-x64.tar.gz
-            target/release/libertide
+          path: libertide-linux-x64.tar.gz
           if-no-files-found: error
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            libertide-linux-x64.tar.gz
-            target/release/libertide
+          files: libertide-linux-x64.tar.gz
           fail_on_unmatched_files: false
           token: ${{ secrets.GITHUB_TOKEN }}

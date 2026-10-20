@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Native clipboard support for copying, pasting and cutting (`Ctrl+V`, `Ctrl+C`, `Ctrl+X`) across the prompt input field and credentials dialog, with accurate selection replacement.
 - **System Settings & Window Focus**:
   - Direct native shortcuts to open system settings and action center without spawning shell instances.
+  - Fixed Omnibox vs Windows Search disambiguation: talking about *"omnibox"* or *"barre d'adresse"* now strictly targets the browser address bar (`focus_address_bar`) with instant zero-latency shortcuts, preventing Windows Search (`Win+S`) from opening.
   - Refined external focus retention and terminal buffer extraction.
 
 ---
