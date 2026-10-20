@@ -2607,13 +2607,31 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 feedback.push(format!("Fenêtre volante '{id}' fermée."));
             }
             AgentAction::ClickElement { target_name, .. } => {
-                feedback.push(format!("Clic sur l'élément '{target_name}'."));
+                let elements = list_interactive_elements("");
+                if let Some(elem) = find_best_element(&elements, target_name) {
+                    click_element(elem.click_x, elem.click_y, None, None);
+                    feedback.push(format!("Clic effectué sur l'élément '{target_name}'."));
+                } else {
+                    feedback.push(format!("Élément '{target_name}' introuvable à l'écran."));
+                }
             }
             AgentAction::ClickButton { button_name, .. } => {
-                feedback.push(format!("Clic sur le bouton '{button_name}'."));
+                let elements = list_interactive_elements("");
+                if let Some(elem) = find_best_button_element(&elements, button_name) {
+                    click_element(elem.click_x, elem.click_y, None, None);
+                    feedback.push(format!("Clic effectué sur le bouton '{button_name}'."));
+                } else {
+                    feedback.push(format!("Bouton '{button_name}' introuvable à l'écran."));
+                }
             }
             AgentAction::FocusElement { target_name, .. } => {
-                feedback.push(format!("Focus sur l'élément '{target_name}'."));
+                let elements = list_interactive_elements("");
+                if let Some(elem) = find_best_input_element(&elements, target_name).or_else(|| find_best_element(&elements, target_name)) {
+                    click_element(elem.click_x, elem.click_y, None, None);
+                    feedback.push(format!("Focus positionné sur '{target_name}'."));
+                } else {
+                    feedback.push(format!("Focus demandé sur '{target_name}'."));
+                }
             }
             AgentAction::SetAutostart { enabled } => {
                 feedback.push(set_autostart(*enabled).unwrap_or_else(|e| e));

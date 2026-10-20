@@ -98,8 +98,27 @@ pub struct UiaElementInfo {
 }
 
 #[cfg(not(windows))]
-#[derive(Clone, Default)]
-pub struct UiaElementInfo;
+#[derive(Clone, Default, Debug)]
+pub struct UiaElementInfo {
+    pub index: usize,
+    pub name: String,
+    pub automation_id: String,
+    pub class_name: String,
+    pub localized_type: String,
+    pub aria_role: String,
+    pub aria_label: String,
+    pub click_x: i32,
+    pub click_y: i32,
+    pub rect: [i32; 4],
+    pub is_button: bool,
+    pub is_link: bool,
+    pub is_edit_or_textarea: bool,
+    pub is_input: bool,
+    pub is_select: bool,
+    pub is_tab: bool,
+    pub is_focusable: bool,
+    pub area: i64,
+}
 
 #[cfg(windows)]
 pub fn click_element(
@@ -246,7 +265,22 @@ pub fn click_element(
 }
 
 #[cfg(not(windows))]
-pub fn click_element(_x: i32, _y: i32, _element: Option<&()>, _invoke_pattern: Option<&()>) {}
+pub fn click_element(x: i32, y: i32, _element: Option<&()>, _invoke_pattern: Option<&()>) {
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            r#"tell application "System Events" to click at {{{}, {}}}"#,
+            x, y
+        );
+        let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdotool")
+            .args(["mousemove", &x.to_string(), &y.to_string(), "click", "1"])
+            .status();
+    }
+}
 
 #[cfg(windows)]
 pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
@@ -714,8 +748,39 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
 }
 
 #[cfg(not(windows))]
-pub fn list_interactive_elements(_hwnd: impl AsWindowTarget) -> Vec<UiaElementInfo> {
-    Vec::new()
+pub fn list_interactive_elements(_target: impl AsWindowTarget) -> Vec<UiaElementInfo> {
+    let targets = crate::automation::collect_numbered_targets_for_active_window();
+    targets
+        .into_iter()
+        .map(|t| {
+            let lower = t.name.to_lowercase();
+            let is_btn = lower.contains("button") || lower.contains("bouton");
+            let is_lnk = lower.contains("link") || lower.contains("lien");
+            let is_input = lower.contains("text") || lower.contains("entry") || lower.contains("champ");
+            let w = (t.rect[2] - t.rect[0]).max(1) as i64;
+            let h = (t.rect[3] - t.rect[1]).max(1) as i64;
+            UiaElementInfo {
+                index: t.index,
+                name: t.name.clone(),
+                automation_id: String::new(),
+                class_name: String::new(),
+                localized_type: String::new(),
+                aria_role: String::new(),
+                aria_label: t.name,
+                click_x: t.click_x,
+                click_y: t.click_y,
+                rect: t.rect,
+                is_button: is_btn,
+                is_link: is_lnk,
+                is_edit_or_textarea: is_input,
+                is_input,
+                is_select: false,
+                is_tab: false,
+                is_focusable: true,
+                area: w * h,
+            }
+        })
+        .collect()
 }
 
 #[cfg(windows)]
@@ -759,8 +824,8 @@ pub fn has_focused_textarea(_hwnd: HWND) -> bool {
 }
 
 #[cfg(not(windows))]
-pub fn has_focused_textarea(_hwnd: impl AsWindowTarget) -> bool {
-    false
+pub fn has_focused_textarea(_target: impl AsWindowTarget) -> bool {
+    crate::automation::get_active_field_content().is_some()
 }
 
 #[cfg(windows)]
@@ -811,7 +876,16 @@ pub fn refocus_largest_textarea_or_fallback(hwnd: HWND) -> bool {
 }
 
 #[cfg(not(windows))]
-pub fn refocus_largest_textarea_or_fallback(_hwnd: impl AsWindowTarget) -> bool {
+pub fn refocus_largest_textarea_or_fallback(target: impl AsWindowTarget) -> bool {
+    let elements = list_interactive_elements(target);
+    let textareas: Vec<&UiaElementInfo> = elements
+        .iter()
+        .filter(|e| e.is_edit_or_textarea || e.is_input)
+        .collect();
+    if let Some(first) = textareas.first() {
+        click_element(first.click_x, first.click_y, None, None);
+        return true;
+    }
     false
 }
 
@@ -860,8 +934,26 @@ pub fn find_best_input_element<'a>(elements: &'a [UiaElementInfo], target: &str)
 }
 
 #[cfg(not(windows))]
-pub fn find_best_input_element<'a>(_elements: &'a [UiaElementInfo], _target: &str) -> Option<&'a UiaElementInfo> {
-    None
+pub fn find_best_input_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option<&'a UiaElementInfo> {
+    let target_words = clean_words(target);
+    elements
+        .iter()
+        .filter(|e| e.is_edit_or_textarea || e.is_input)
+        .max_by_key(|e| {
+            let name_lower = e.name.to_lowercase();
+            let mut score = 0usize;
+            if name_lower == target.to_lowercase() {
+                score += 100;
+            } else if name_lower.contains(&target.to_lowercase()) {
+                score += 50;
+            }
+            for w in &target_words {
+                if name_lower.contains(w) {
+                    score += 10;
+                }
+            }
+            score
+        })
 }
 
 #[cfg(windows)]
@@ -1263,7 +1355,22 @@ pub unsafe fn mute_other_audio_sessions() -> usize {
 
 #[cfg(not(windows))]
 pub unsafe fn mute_other_audio_sessions() -> usize {
-    0
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", "set volume output muted true"])
+            .spawn();
+        1
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("playerctl").arg("pause").spawn();
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("pactl list sink-inputs short | awk '{print $1}' | xargs -r -I{} pactl set-sink-input-mute {} 1")
+            .spawn();
+        1
+    }
 }
 // --- Fonctions et helpers internes de calcul UIA ---
 
@@ -1299,8 +1406,12 @@ pub fn find_largest_textarea(hwnd: HWND) -> Option<UiaElementInfo> {
 }
 
 #[cfg(not(windows))]
-pub fn find_largest_textarea(_hwnd: impl AsWindowTarget) -> Option<UiaElementInfo> {
-    None
+pub fn find_largest_textarea(target: impl AsWindowTarget) -> Option<UiaElementInfo> {
+    let elements = list_interactive_elements(target);
+    elements
+        .into_iter()
+        .filter(|e| e.is_edit_or_textarea || e.is_input)
+        .max_by_key(|e| e.area)
 }
 
 #[cfg(windows)]
@@ -1398,8 +1509,26 @@ pub fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Op
 }
 
 #[cfg(not(windows))]
-pub fn find_best_element<'a>(_elements: &'a [UiaElementInfo], _target: &str) -> Option<&'a UiaElementInfo> {
-    None
+pub fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option<&'a UiaElementInfo> {
+    let target_clean = target.trim().to_lowercase();
+    let target_words = clean_words(target);
+    elements
+        .iter()
+        .max_by_key(|e| {
+            let name_lower = e.name.to_lowercase();
+            let mut score = 0usize;
+            if name_lower == target_clean {
+                score += 100;
+            } else if name_lower.contains(&target_clean) {
+                score += 50;
+            }
+            for w in &target_words {
+                if name_lower.contains(w) {
+                    score += 10;
+                }
+            }
+            score
+        })
 }
 
 #[cfg(windows)]
@@ -1452,8 +1581,27 @@ pub fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str
 }
 
 #[cfg(not(windows))]
-pub fn find_best_button_element<'a>(_elements: &'a [UiaElementInfo], _target: &str) -> Option<&'a UiaElementInfo> {
-    None
+pub fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option<&'a UiaElementInfo> {
+    let target_clean = target.trim().to_lowercase();
+    let target_words = clean_words(target);
+    elements
+        .iter()
+        .filter(|e| e.is_button || !e.name.is_empty())
+        .max_by_key(|e| {
+            let name_lower = e.name.to_lowercase();
+            let mut score = if e.is_button { 20 } else { 0 };
+            if name_lower == target_clean {
+                score += 100;
+            } else if name_lower.contains(&target_clean) {
+                score += 50;
+            }
+            for w in &target_words {
+                if name_lower.contains(w) {
+                    score += 10;
+                }
+            }
+            score
+        })
 }
 
 #[cfg(windows)]

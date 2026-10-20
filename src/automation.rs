@@ -3024,8 +3024,16 @@ pub fn run_system_command(command: &str) -> bool {
 }
 
 #[cfg(not(windows))]
-pub fn run_system_command(_command: &str) -> bool {
-    false
+pub fn run_system_command(command: &str) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(trimmed)
+        .spawn()
+        .is_ok()
 }
 
 #[cfg(windows)]
@@ -3386,7 +3394,6 @@ pub fn try_execute_direct_cli(prompt: &str) -> Option<String> {
         return None;
     }
 
-    #[cfg(windows)]
     if is_forced || find_executable_in_path(first_token).is_some() {
         if run_system_command(cmd_str) {
             return Some(format!("Commande exécutée : {cmd_str}"));
