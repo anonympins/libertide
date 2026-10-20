@@ -297,6 +297,7 @@ pub enum AgentCommand {
     ClearHistory,
     SearchTwitch(String),
     PeriodicScreenCheck,
+    UndoLastAction,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -321,6 +322,10 @@ pub enum AgentAction {
     NavigateBack,
     #[serde(alias = "browser_forward", alias = "history_forward", alias = "forward", alias = "avance")]
     NavigateForward,
+    #[serde(alias = "undo_action", alias = "revert_action")]
+    Undo,
+    #[serde(alias = "redo_action")]
+    Redo,
     CloseApp {
         name: String,
     },

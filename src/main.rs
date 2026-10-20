@@ -11,6 +11,8 @@ mod tts;
 mod twitch;
 mod types;
 mod window_util;
+mod commands;
+mod ui;
 
 use audio::spawn_audio_worker;
 use floating_window::{update_open_floating_cards, FloatingCard, OPEN_FLOATING_CARDS};
@@ -279,9 +281,15 @@ fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
             Some("Sauvegardé (Ctrl+S).")
         }
         "annule" | "annuler" | "undo" => {
-            #[cfg(windows)]
-            send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x5A)); // Ctrl + Z
-            Some("Annulé (Ctrl+Z).")
+            if let Some(msg) = undo_last_system_action() {
+                println!("[Undo] Action compensatoire exécutée : {msg}");
+            } else {
+                #[cfg(windows)]
+                send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x5A)); // Ctrl + Z
+                #[cfg(not(windows))]
+                let _ = std::process::Command::new("xdotool").args(["key", "ctrl+z"]).status();
+            }
+            Some("Annulé.")
         }
         "selectionne tout" | "sélectionne tout" | "select all" | "tout selectionner" => {
             #[cfg(windows)]
@@ -1484,6 +1492,38 @@ impl eframe::App for OverlayApp {
                         }
                         return;
                     }
+
+                // Détection vocale d'annulation prioritaire (Arrêt du job en cours + Rollback)
+                if norm_prompt == "annule" || norm_prompt == "annuler" || norm_prompt == "undo" || norm_prompt == "reviens en arriere" || norm_prompt == "reviens en arrière" {
+                    let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
+                    let undo_feedback = if let Some(fb) = undo_last_system_action() {
+                        fb
+                    } else {
+                        #[cfg(windows)]
+                        send_hotkey(&[windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x11)], windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x5A));
+                        #[cfg(not(windows))]
+                        let _ = std::process::Command::new("xdotool").args(["key", "ctrl+z"]).status();
+                        "Dernière action annulée.".to_string()
+                    };
+                    play_earcon(Earcon::Success);
+                    self.chat_history.push(ChatEntry {
+                        role: ChatRole::User,
+                        text: prompt,
+                        timestamp: current_time_str(),
+                        quick_suggestions: Vec::new(),
+                        screen_size_kb: None,
+                    });
+                    self.chat_history.push(ChatEntry {
+                        role: ChatRole::Agent,
+                        text: undo_feedback.clone(),
+                        timestamp: current_time_str(),
+                        quick_suggestions: Vec::new(),
+                        screen_size_kb: None,
+                    });
+                    let _ = self.tts_sender.send(TtsCommand::Speak(undo_feedback));
+                    self.status = AgentStatus::Idle;
+                    return;
+                }
 
                     // 2. Sortie déterministe immédiate du mode dictée
                     if self.dictation_mode && is_stop_dictation_command(&prompt) {
@@ -3759,6 +3799,8 @@ Format JSON obligatoire :
     {{"action": "open_search_browser"}},
     {{"action": "navigate_back"}},
     {{"action": "navigate_forward"}},
+    {{"action": "undo"}},
+    {{"action": "redo"}},
     {{"action": "close_app", "name": "nom_ou_titre"}},
     {{"action": "click_element", "window": null, "target_name": "nom"}},
     {{"action": "click_button", "window": null, "button_name": "nom"}},
@@ -4231,6 +4273,15 @@ async fn call_llm_prompt(
             return;
         }
 
+        // Stratégie de Rollback / Undo automatique si l'action a échoué pendant une passe d'exploration
+        let action_failed = report.contains("introuvable")
+            || report.contains("non réactive")
+            || report.contains("Ciblage rejeté");
+        if action_failed && pass > 1 {
+            println!("[Résilience Agent] Échec d'action détecté dans la passe {pass}. Déclenchement de l'undo automatique.");
+            let _ = undo_last_system_action();
+        }
+
         // Re-synchronisation du quota de passes si l'action SetReasoningPasses a été invoquée
         let synced_passes = TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, 15);
         if synced_passes != max_agent_passes {
@@ -4656,6 +4707,28 @@ fn main() -> eframe::Result<()> {
                             }
                         }
                         }));
+                    }
+                    AgentCommand::UndoLastAction => {
+                        let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
+                        if let Some(handle) = current_task.take() {
+                            handle.abort();
+                        }
+                        let _ = bg_tts_tx.send(TtsCommand::Stop);
+                        let feedback = if let Some(fb) = undo_last_system_action() {
+                            fb
+                        } else {
+                            #[cfg(windows)]
+                            send_hotkey(&[windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x11)], windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x5A));
+                            #[cfg(not(windows))]
+                            let _ = std::process::Command::new("xdotool").args(["key", "ctrl+z"]).status();
+                            "Dernière action annulée.".to_string()
+                        };
+                        let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                            text: feedback.clone(),
+                            quick_suggestions: Vec::new(),
+                        });
+                        let _ = bg_tts_tx.send(TtsCommand::Speak(feedback));
+                        let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                     }
                 }
             }
