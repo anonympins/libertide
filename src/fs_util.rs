@@ -381,6 +381,31 @@ pub fn find_executable_in_path(name: &str) -> Option<PathBuf> {
 }
 
 #[cfg(not(windows))]
-pub fn find_executable_in_path(_name: &str) -> Option<PathBuf> {
+pub fn find_executable_in_path(name: &str) -> Option<PathBuf> {
+    let name_trimmed = name.trim();
+    if name_trimmed.is_empty() {
+        return None;
+    }
+    let p = Path::new(name_trimmed);
+    if p.is_absolute() && p.is_file() {
+        return Some(p.to_path_buf());
+    }
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name_trimmed);
+        if candidate.is_file() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = candidate.metadata() {
+                    if meta.permissions().mode() & 0o111 != 0 {
+                        return Some(candidate);
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            return Some(candidate);
+        }
+    }
     None
 }

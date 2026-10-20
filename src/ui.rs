@@ -34,6 +34,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
     VIRTUAL_KEY,
 };
+#[cfg(not(windows))]
+pub use crate::automation::{AsWindowTarget, VIRTUAL_KEY};
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetClassNameW, SetCursorPos};
 
@@ -872,7 +874,13 @@ pub fn open_browser_new_tab(hwnd: HWND, url: &str) {
 }
 
 #[cfg(not(windows))]
-pub fn open_browser_new_tab(_hwnd: (), _url: &str) {}
+pub fn open_browser_new_tab(_hwnd: impl AsWindowTarget, url: &str) {
+    let formatted_url = format_url_for_navigation(url);
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(&formatted_url).spawn();
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(&formatted_url).spawn();
+}
 
 #[cfg(windows)]
 pub fn replace_active_field_text(new_text: &str) -> String {
@@ -908,7 +916,9 @@ pub fn replace_active_field_text(new_text: &str) -> String {
 
 #[cfg(not(windows))]
 pub fn replace_active_field_text(text: &str) -> String {
-    write_to_browser_or_txt(text)
+    set_clipboard_text(text);
+    send_paste();
+    "Texte mis à jour dans le champ actif.".to_string()
 }
 
 #[cfg(windows)]
@@ -927,7 +937,21 @@ pub fn clear_window_text(hwnd: HWND) {
 }
 
 #[cfg(not(windows))]
-pub fn clear_window_text(_hwnd: ()) {}
+pub fn clear_window_text(target: impl AsWindowTarget) {
+    force_foreground_window(target);
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", "tell application \"System Events\" to keystroke \"a\" using command down\ntell application \"System Events\" to key code 51"])
+            .status();
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdotool")
+            .args(["key", "--clearmodifiers", "ctrl+a", "BackSpace"])
+            .status();
+    }
+}
 
 #[cfg(windows)]
 pub fn navigate_browser_address_bar(hwnd: HWND, url: &str) {
@@ -947,7 +971,18 @@ pub fn navigate_browser_address_bar(hwnd: HWND, url: &str) {
 }
 
 #[cfg(not(windows))]
-pub fn navigate_browser_address_bar(_hwnd: (), _url: &str) {}
+pub fn navigate_browser_address_bar(target: impl AsWindowTarget, url: &str) {
+    let formatted_url = format_url_for_navigation(url);
+    focus_browser_address_bar(target);
+    std::thread::sleep(Duration::from_millis(50));
+    set_clipboard_text(&formatted_url);
+    std::thread::sleep(Duration::from_millis(50));
+    send_paste();
+    std::thread::sleep(Duration::from_millis(100));
+    const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
+    send_hotkey(&[], VK_RETURN);
+    println!("[Actions] Navigation vers {} effectuée avec succès via barre d'adresse", formatted_url);
+}
 
 #[cfg(windows)]
 pub fn send_char_unicode(c: char) {
@@ -985,7 +1020,19 @@ pub fn send_char_unicode(c: char) {
 }
 
 #[cfg(not(windows))]
-pub fn send_char_unicode(_c: char) {}
+pub fn send_char_unicode(c: char) {
+    #[cfg(target_os = "macos")]
+    {
+        let s = c.to_string();
+        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!("tell application \"System Events\" to keystroke \"{escaped}\"");
+        let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdotool").args(["type", "--delay", "5", &c.to_string()]).status();
+    }
+}
 
 #[cfg(windows)]
 pub fn send_terminal_input(hwnd: HWND, text: &str, auto_enter: bool) {
@@ -1030,7 +1077,34 @@ pub fn send_terminal_input(hwnd: HWND, text: &str, auto_enter: bool) {
 }
 
 #[cfg(not(windows))]
-pub fn send_terminal_input(_hwnd: (), _text: &str, _auto_enter: bool) {}
+pub fn send_terminal_input(_hwnd: impl AsWindowTarget, text: &str, auto_enter: bool) {
+    const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
+    let trimmed = text.trim_end_matches(['\r', '\n']);
+    let has_trailing_newline = text.ends_with('\n') || text.ends_with('\r');
+    let should_press_enter = auto_enter || has_trailing_newline;
+
+    if trimmed.chars().count() <= 1200 {
+        for c in trimmed.chars() {
+            if c == '\n' || c == '\r' {
+                send_hotkey(&[], VK_RETURN);
+                std::thread::sleep(Duration::from_millis(20));
+            } else {
+                send_char_unicode(c);
+                std::thread::sleep(Duration::from_millis(3));
+            }
+        }
+    } else {
+        set_clipboard_text(trimmed);
+        std::thread::sleep(Duration::from_millis(40));
+        send_paste();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    if should_press_enter {
+        std::thread::sleep(Duration::from_millis(40));
+        send_hotkey(&[], VK_RETURN);
+    }
+}
 
 #[cfg(windows)]
 pub unsafe fn mute_other_audio_sessions() -> usize {

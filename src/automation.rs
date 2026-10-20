@@ -100,6 +100,105 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
     Vec::new()
 }
 
+#[cfg(not(windows))]
+pub trait AsWindowTarget {
+    fn to_window_target(&self) -> String;
+}
+
+#[cfg(not(windows))]
+impl AsWindowTarget for &str {
+    fn to_window_target(&self) -> String {
+        self.to_string()
+    }
+}
+
+#[cfg(not(windows))]
+impl AsWindowTarget for String {
+    fn to_window_target(&self) -> String {
+        self.clone()
+    }
+}
+
+#[cfg(not(windows))]
+impl AsWindowTarget for &String {
+    fn to_window_target(&self) -> String {
+        (*self).clone()
+    }
+}
+
+#[cfg(not(windows))]
+impl AsWindowTarget for () {
+    fn to_window_target(&self) -> String {
+        String::new()
+    }
+}
+
+#[cfg(not(windows))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct VIRTUAL_KEY(pub u16);
+
+#[cfg(not(windows))]
+pub fn force_foreground_window(target: impl AsWindowTarget) -> bool {
+    let t = target.to_window_target();
+    #[cfg(target_os = "macos")]
+    {
+        if !t.is_empty() {
+            let script = format!(
+                "tell application \"System Events\" to set frontmost of (first process whose name contains \"{t}\") to true"
+            );
+            return std::process::Command::new("osascript")
+                .args(["-e", &script])
+                .status()
+                .map_or(false, |s| s.success());
+        }
+        true
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        if !t.is_empty() {
+            if t.starts_with("0x") || t.starts_with("0X") {
+                let status = std::process::Command::new("wmctrl")
+                    .args(["-i", "-a", &t])
+                    .status();
+                if status.map_or(false, |s| s.success()) {
+                    return true;
+                }
+            }
+            let status = std::process::Command::new("wmctrl")
+                .args(["-a", &t])
+                .status();
+            if status.map_or(false, |s| s.success()) {
+                return true;
+            }
+        }
+        let status = std::process::Command::new("xdotool")
+            .args(["getactivewindow", "windowactivate"])
+            .status();
+        status.map_or(false, |s| s.success())
+    }
+}
+
+#[cfg(not(windows))]
+pub fn focus_browser_address_bar(target: impl AsWindowTarget) {
+    let t = target.to_window_target();
+    if !t.is_empty() {
+        force_foreground_window(&t);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", "tell application \"System Events\" to keystroke \"l\" using command down"])
+            .status();
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdotool")
+            .args(["key", "--clearmodifiers", "ctrl+l"])
+            .status();
+    }
+}
+
 #[cfg(windows)]
 pub fn restore_if_iconic(hwnd: HWND) {
     if !hwnd.0.is_null() && !is_window_hung(hwnd) {
@@ -112,7 +211,23 @@ pub fn restore_if_iconic(hwnd: HWND) {
 }
 
 #[cfg(not(windows))]
-pub fn restore_if_iconic(_hwnd: ()) {}
+pub fn restore_if_iconic(target: impl AsWindowTarget) {
+    let t = target.to_window_target();
+    if !t.is_empty() {
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        {
+            if t.starts_with("0x") || t.starts_with("0X") {
+                let _ = std::process::Command::new("wmctrl")
+                    .args(["-i", "-R", &t])
+                    .status();
+            } else {
+                let _ = std::process::Command::new("wmctrl")
+                    .args(["-R", &t])
+                    .status();
+            }
+        }
+    }
+}
 
 #[cfg(windows)]
 static LAST_TXT_HWND: Mutex<Option<isize>> = Mutex::new(None);
@@ -1000,7 +1115,7 @@ fn send_key_event(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) {
 }
 
 #[cfg(windows)]
-pub(crate) fn send_paste() {
+pub fn send_paste() {
     const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
     const VK_V: VIRTUAL_KEY = VIRTUAL_KEY(0x56);
 
@@ -1011,6 +1126,22 @@ pub(crate) fn send_paste() {
     send_key_event(VK_V, KEYEVENTF_KEYUP);
     std::thread::sleep(Duration::from_millis(20));
     send_key_event(VK_CONTROL, KEYEVENTF_KEYUP);
+}
+
+#[cfg(not(windows))]
+pub fn send_paste() {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", "tell application \"System Events\" to keystroke \"v\" using command down"])
+            .status();
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdotool")
+            .args(["key", "--clearmodifiers", "ctrl+v"])
+            .status();
+    }
 }
 
 #[cfg(windows)]
@@ -1111,6 +1242,108 @@ pub fn send_hotkey(modifiers: &[VIRTUAL_KEY], key: VIRTUAL_KEY) {
     for &m in modifiers.iter().rev() {
         send_key_event(m, KEYEVENTF_KEYUP);
         std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+#[cfg(not(windows))]
+pub fn send_hotkey(modifiers: &[VIRTUAL_KEY], key: VIRTUAL_KEY) {
+    let mut mod_strs = Vec::new();
+    for m in modifiers {
+        match m.0 {
+            0x11 => mod_strs.push("ctrl"),
+            0x10 => mod_strs.push("shift"),
+            0x12 => mod_strs.push("alt"),
+            0x5B | 0x5C => mod_strs.push("super"),
+            _ => {}
+        }
+    }
+    let key_str = match key.0 {
+        0x0D => "Return",
+        0x1B => "Escape",
+        0x09 => "Tab",
+        0x20 => "space",
+        0x08 => "BackSpace",
+        0x25 => "Left",
+        0x26 => "Up",
+        0x27 => "Right",
+        0x28 => "Down",
+        0x21 => "Page_Up",
+        0x22 => "Page_Down",
+        0x24 => "Home",
+        0x23 => "End",
+        0x54 => "t",
+        0x41 => "a",
+        0x43 => "c",
+        0x56 => "v",
+        0x57 => "w",
+        0x53 => "s",
+        0x5A => "z",
+        0x4C => "l",
+        0x44 => "d",
+        0x74 => "F5",
+        c if (0x41..=0x5A).contains(&c) => {
+            match (b'a' + (c as u8 - 0x41)) as char {
+                'a' => "a", 'b' => "b", 'c' => "c", 'd' => "d", 'e' => "e", 'f' => "f",
+                'g' => "g", 'h' => "h", 'i' => "i", 'j' => "j", 'k' => "k", 'l' => "l",
+                'm' => "m", 'n' => "n", 'o' => "o", 'p' => "p", 'q' => "q", 'r' => "r",
+                's' => "s", 't' => "t", 'u' => "u", 'v' => "v", 'w' => "w", 'x' => "x",
+                'y' => "y", 'z' => "z", _ => "",
+            }
+        }
+        _ => "",
+    };
+
+    if key_str.is_empty() && mod_strs.is_empty() {
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let using_clause = if !mod_strs.is_empty() {
+            let mac_mods: Vec<&str> = mod_strs.iter().map(|&m| match m {
+                "ctrl" => "command down",
+                "shift" => "shift down",
+                "alt" => "option down",
+                "super" => "control down",
+                _ => "",
+            }).filter(|s| !s.is_empty()).collect();
+            if !mac_mods.is_empty() {
+                format!(" using {{{}}}", mac_mods.join(", "))
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        let script = if key_str == "Return" {
+            format!("tell application \"System Events\" to key code 36{using_clause}")
+        } else if key_str == "Tab" {
+            format!("tell application \"System Events\" to key code 48{using_clause}")
+        } else if key_str == "Escape" {
+            format!("tell application \"System Events\" to key code 53{using_clause}")
+        } else if key_str == "BackSpace" {
+            format!("tell application \"System Events\" to key code 51{using_clause}")
+        } else if key_str == "space" {
+            format!("tell application \"System Events\" to key code 49{using_clause}")
+        } else if key_str == "Left" {
+            format!("tell application \"System Events\" to key code 123{using_clause}")
+        } else if key_str == "Right" {
+            format!("tell application \"System Events\" to key code 124{using_clause}")
+        } else {
+            format!("tell application \"System Events\" to keystroke \"{key_str}\"{using_clause}")
+        };
+        let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+    }
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let combo = if mod_strs.is_empty() {
+            key_str.to_string()
+        } else {
+            format!("{}+{}", mod_strs.join("+"), key_str)
+        };
+        let _ = std::process::Command::new("xdotool").args(["key", "--clearmodifiers", &combo]).status();
     }
 }
 

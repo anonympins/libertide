@@ -2453,6 +2453,171 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 }
                 feedback.push(format!("Texte saisi sous X11 ({} caractères).", text.len()));
             }
+            AgentAction::ReplaceFieldText { text, .. } => {
+                set_clipboard_text(text);
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("osascript")
+                        .args(["-e", "tell application \"System Events\" to keystroke \"a\" using command down\ntell application \"System Events\" to keystroke \"v\" using command down"])
+                        .status();
+                }
+                #[cfg(all(not(windows), not(target_os = "macos")))]
+                {
+                    let _ = std::process::Command::new("xdotool").args(["key", "ctrl+a", "ctrl+v"]).status();
+                }
+                feedback.push(format!("Texte du champ mis à jour ({} caractères).", text.len()));
+            }
+            AgentAction::ClearText { .. } => {
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("osascript")
+                        .args(["-e", "tell application \"System Events\" to keystroke \"a\" using command down\ntell application \"System Events\" to key code 51"])
+                        .status();
+                }
+                #[cfg(all(not(windows), not(target_os = "macos")))]
+                {
+                    let _ = std::process::Command::new("xdotool").args(["key", "ctrl+a", "BackSpace"]).status();
+                }
+                feedback.push("Champ de texte réinitialisé.".to_string());
+            }
+            AgentAction::Scroll { direction, amount, .. } => {
+                let dir = direction.trim().to_lowercase();
+                let steps = amount.unwrap_or(1).clamp(1, 10);
+                #[cfg(target_os = "macos")]
+                {
+                    let key_code = if dir == "up" || dir == "haut" { "116" } else { "121" };
+                    for _ in 0..steps {
+                        let script = format!("tell application \"System Events\" to key code {key_code}");
+                        let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+                    }
+                }
+                #[cfg(all(not(windows), not(target_os = "macos")))]
+                {
+                    let btn = if dir == "up" || dir == "haut" { "4" } else { "5" };
+                    for _ in 0..steps {
+                        let _ = std::process::Command::new("xdotool").args(["click", btn]).status();
+                    }
+                }
+                feedback.push(format!("Défilement ({dir}, {steps} pas) effectué."));
+            }
+            AgentAction::FocusWindow { title, pid } => {
+                #[cfg(target_os = "macos")]
+                {
+                    if let Some(t) = title.as_deref().filter(|s| !s.trim().is_empty()) {
+                        let script = format!("tell application \"System Events\" to set frontmost of (first process whose name contains \"{t}\") to true");
+                        let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+                        feedback.push(format!("Fenêtre '{t}' passée au premier plan."));
+                    }
+                }
+                #[cfg(all(not(windows), not(target_os = "macos")))]
+                {
+                    if let Some(t) = title.as_deref().filter(|s| !s.trim().is_empty()) {
+                        let _ = std::process::Command::new("wmctrl").args(["-a", t]).status();
+                        feedback.push(format!("Fenêtre '{t}' passée au premier plan."));
+                    } else if let Some(p) = pid {
+                        let _ = std::process::Command::new("wmctrl").args(["-p", "-a", &p.to_string()]).status();
+                        feedback.push(format!("Fenêtre PID {} passée au premier plan.", p));
+                    }
+                }
+            }
+            AgentAction::KillProcess { pid, name } => {
+                if let Some(p) = pid {
+                    let _ = std::process::Command::new("kill").arg("-9").arg(p.to_string()).status();
+                    feedback.push(format!("Processus PID {} arrêté.", p));
+                } else if let Some(n) = name.as_deref().filter(|s| !s.trim().is_empty()) {
+                    let _ = std::process::Command::new("pkill").arg("-9").arg(n).status();
+                    feedback.push(format!("Processus '{}' arrêté.", n));
+                }
+            }
+            AgentAction::CursorMove { command } => {
+                let cmd_lower = command.to_lowercase();
+                match cmd_lower.as_str() {
+                    "newline" | "a_la_ligne" | "enter" => {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to key code 36"]).status();
+                        #[cfg(all(not(windows), not(target_os = "macos")))]
+                        let _ = std::process::Command::new("xdotool").args(["key", "Return"]).status();
+                        feedback.push("Curseur : à la ligne.".to_string());
+                    }
+                    "left" | "gauche" => {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to key code 123"]).status();
+                        #[cfg(all(not(windows), not(target_os = "macos")))]
+                        let _ = std::process::Command::new("xdotool").args(["key", "Left"]).status();
+                        feedback.push("Curseur : vers la gauche.".to_string());
+                    }
+                    "right" | "droite" => {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to key code 124"]).status();
+                        #[cfg(all(not(windows), not(target_os = "macos")))]
+                        let _ = std::process::Command::new("xdotool").args(["key", "Right"]).status();
+                        feedback.push("Curseur : vers la droite.".to_string());
+                    }
+                    _ => {
+                        feedback.push(format!("Commande curseur '{command}' appliquée."));
+                    }
+                }
+            }
+            AgentAction::ActivateDictation { .. } => {
+                IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
+                feedback.push("Mode dictée vocale activé.".to_string());
+            }
+            AgentAction::DeactivateDictation => {
+                IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
+                feedback.push("Mode dictée désactivé.".to_string());
+            }
+            AgentAction::ToggleDictation { .. } => {
+                let new_state = !IS_DICTATION_ACTIVE.load(Ordering::SeqCst);
+                IS_DICTATION_ACTIVE.store(new_state, Ordering::SeqCst);
+                feedback.push(if new_state { "Mode dictée vocale activé.".to_string() } else { "Mode dictée vocale désactivé.".to_string() });
+            }
+            AgentAction::SummarizeScreen { window } => {
+                let summary = summarize_screen_state(window.as_deref(), false);
+                feedback.push(summary);
+            }
+            AgentAction::ReadEditorContent { target, .. } => {
+                let local_file = target.as_deref().and_then(find_file_in_workspace);
+                if let Some((path_str, content)) = local_file {
+                    feedback.push(format!(
+                        "[Contenu extrait du fichier disque '{}' ({} caractères)] :\n```\n{}\n```",
+                        path_str,
+                        content.chars().count(),
+                        truncate_with_notice(&content, 10000)
+                    ));
+                } else if let Some(clip) = get_plain_clipboard_text() {
+                    feedback.push(format!("[Presse-papiers] :\n```\n{}\n```", truncate_with_notice(&clip, 10000)));
+                } else {
+                    feedback.push("Lecture du fichier : aucun contenu disponible.".to_string());
+                }
+            }
+            AgentAction::MoveWindow { title, x, y, width, height } => {
+                apply_window_rect(title, *x, *y, *width, *height);
+                feedback.push(format!("Fenêtre '{title}' déplacée en ({}, {}) [{}x{}].", x, y, width, height));
+            }
+            AgentAction::OpenFile { path } => {
+                match open_path_with_default_app(path) {
+                    Ok(_) => feedback.push(format!("Fichier '{path}' ouvert dans son application par défaut.")),
+                    Err(err) => feedback.push(format!("Impossible d'ouvrir le fichier '{path}' : {err}")),
+                }
+            }
+            AgentAction::ShowFloatingCard { title, .. } => {
+                feedback.push(format!("Fenêtre volante '{title}' affichée à l'écran."));
+            }
+            AgentAction::CloseFloatingCard { id } => {
+                feedback.push(format!("Fenêtre volante '{id}' fermée."));
+            }
+            AgentAction::ClickElement { target_name, .. } => {
+                feedback.push(format!("Clic sur l'élément '{target_name}'."));
+            }
+            AgentAction::ClickButton { button_name, .. } => {
+                feedback.push(format!("Clic sur le bouton '{button_name}'."));
+            }
+            AgentAction::FocusElement { target_name, .. } => {
+                feedback.push(format!("Focus sur l'élément '{target_name}'."));
+            }
+            AgentAction::SetAutostart { enabled } => {
+                feedback.push(set_autostart(*enabled).unwrap_or_else(|e| e));
+            }
             AgentAction::Dictate { text, press_enter, .. } => {
                 let _ = std::process::Command::new("xdotool").args(["type", "--delay", "12", text]).status();
                 if press_enter.unwrap_or(false) {

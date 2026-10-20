@@ -74,6 +74,44 @@ pub fn play_earcon(earcon: Earcon) {
             }
         }
     });
+    #[cfg(target_os = "macos")]
+    std::thread::spawn(move || {
+        let sound_name = match earcon {
+            Earcon::MicOpen => "Pop.aiff",
+            Earcon::MicClose => "Tink.aiff",
+            Earcon::Success => "Glass.aiff",
+            Earcon::Emergency => "Sosumi.aiff",
+        };
+        let sound_path = format!("/System/Library/Sounds/{}", sound_name);
+        if std::path::Path::new(&sound_path).exists() {
+            let _ = std::process::Command::new("afplay").arg(&sound_path).status();
+        } else {
+            print!("\x07");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+        }
+    });
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    std::thread::spawn(move || {
+        let sound_id = match earcon {
+            Earcon::MicOpen => "audio-volume-change",
+            Earcon::MicClose => "dialog-information",
+            Earcon::Success => "complete",
+            Earcon::Emergency => "dialog-warning",
+        };
+        let played = std::process::Command::new("canberra-gtk-play")
+            .args(["-i", sound_id])
+            .status()
+            .map_or(false, |s| s.success());
+        if !played {
+            let _ = std::process::Command::new("paplay")
+                .arg("/usr/share/sounds/freedesktop/stereo/complete.oga")
+                .status();
+            print!("\x07");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+        }
+    });
 }
 
 static TTS_AUDIO_LEVEL: AtomicU32 = AtomicU32::new(0);
@@ -248,6 +286,16 @@ fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
                     windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTUP, 0, 0, 0, 0,
                 );
             }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", "tell application \"System Events\" to click"])
+                    .status();
+            }
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            {
+                let _ = std::process::Command::new("xdotool").args(["click", "1"]).status();
+            }
             Some("Clic gauche.")
         }
         "clic droit" | "right click" => {
@@ -261,6 +309,16 @@ fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
                     windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0,
                 );
             }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", "tell application \"System Events\" to click using control down"])
+                    .status();
+            }
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            {
+                let _ = std::process::Command::new("xdotool").args(["click", "3"]).status();
+            }
             Some("Clic droit.")
         }
         "double clic" | "double click" => {
@@ -273,11 +331,32 @@ fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
             }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("osascript")
+                    .args([
+                        "-e",
+                        "tell application \"System Events\" to repeat 2 times\nclick\ndelay 0.05\nend repeat",
+                    ])
+                    .status();
+            }
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            {
+                let _ = std::process::Command::new("xdotool")
+                    .args(["click", "--repeat", "2", "1"])
+                    .status();
+            }
             Some("Double clic.")
         }
         "enregistre" | "enregistrer" | "sauvegarde" | "sauvegarder" | "save" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x53)); // Ctrl + S
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to keystroke \"s\" using command down"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "ctrl+s"]).status();
             Some("Sauvegardé (Ctrl+S).")
         }
         "annule" | "annuler" | "undo" => {
@@ -286,7 +365,9 @@ fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
             } else {
                 #[cfg(windows)]
                 send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x5A)); // Ctrl + Z
-                #[cfg(not(windows))]
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to keystroke \"z\" using command down"]).status();
+                #[cfg(all(not(windows), not(target_os = "macos")))]
                 let _ = std::process::Command::new("xdotool").args(["key", "ctrl+z"]).status();
             }
             Some("Annulé.")
@@ -294,54 +375,106 @@ fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
         "selectionne tout" | "sélectionne tout" | "select all" | "tout selectionner" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x41)); // Ctrl + A
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to keystroke \"a\" using command down"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "ctrl+a"]).status();
             Some("Tout sélectionné.")
         }
         "entree" | "entrée" | "valide" | "valider" | "enter" => {
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x0D));
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to key code 36"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "Return"]).status();
             Some("Touche Entrée validée.")
         }
         "tab" | "tabulation" | "suivant" | "champ suivant" => {
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x09));
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to key code 48"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "Tab"]).status();
             Some("Tabulation.")
         }
         "precedent" | "précédent" | "champ precedent" | "champ précédent" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x10)], VIRTUAL_KEY(0x09));
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to key code 48 using shift down"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "shift+Tab"]).status();
             Some("Champ précédent.")
         }
         "descends" | "descendre" | "page suivante" | "scroll down" => {
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x22)); // VK_NEXT (Page Down)
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to key code 121"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "Page_Down"]).status();
             Some("Défilement vers le bas.")
         }
         "monte" | "monter" | "page precedente" | "page précédente" | "scroll up" => {
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x21)); // VK_PRIOR (Page Up)
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to key code 116"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "Page_Up"]).status();
             Some("Défilement vers le haut.")
         }
         "copie" | "copier" | "copy" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x43)); // Ctrl + C
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to keystroke \"c\" using command down"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "ctrl+c"]).status();
             Some("Copié.")
         }
         "colle" | "coller" | "paste" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x56)); // Ctrl + V
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", "tell application \"System Events\" to keystroke \"v\" using command down"])
+                .status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            let _ = std::process::Command::new("xdotool").args(["key", "ctrl+v"]).status();
             Some("Collé.")
         }
         "retour" | "retour arriere" | "retour arrière" | "reculer" | "back" | "browser back" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x12)], VIRTUAL_KEY(0x25)); // Alt + Gauche
-            #[cfg(not(windows))]
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to keystroke \"[\" using command down"]).status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
             let _ = std::process::Command::new("xdotool").args(["key", "alt+Left"]).status();
             Some("Page précédente (Retour arrière).")
         }
         "avance" | "avancer" | "forward" | "browser forward" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x12)], VIRTUAL_KEY(0x27)); // Alt + Droite
-            #[cfg(not(windows))]
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to keystroke \"]\" using command down"]).status();
+            #[cfg(all(not(windows), not(target_os = "macos")))]
             let _ = std::process::Command::new("xdotool").args(["key", "alt+Right"]).status();
             Some("Page suivante.")
         }
@@ -361,6 +494,11 @@ fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
             }
             #[cfg(not(windows))]
             {
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", "tell application \"System Events\" to keystroke \"l\" using command down"]).status();
+                #[cfg(all(not(windows), not(target_os = "macos")))]
+                let _ = std::process::Command::new("xdotool").args(["key", "ctrl+l"]).status();
                 Some("Barre d'adresse (omnibox) sélectionnée.")
             }
         }
@@ -1433,6 +1571,20 @@ impl eframe::App for OverlayApp {
                                     windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
                                         windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTUP, 0, 0, 0, 0,
                                     );
+                                }
+                                #[cfg(target_os = "macos")]
+                                {
+                                    let script = format!(
+                                        r#"tell application "System Events" to click at {{{}, {}}}"#,
+                                        target.click_x, target.click_y
+                                    );
+                                    let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+                                }
+                                #[cfg(all(not(windows), not(target_os = "macos")))]
+                                {
+                                    let _ = std::process::Command::new("xdotool")
+                                        .args(["mousemove", &target.click_x.to_string(), &target.click_y.to_string(), "click", "1"])
+                                        .status();
                                 }
                                 play_earcon(Earcon::Success);
                                 self.show_numbered_targets = false;

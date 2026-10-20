@@ -223,7 +223,12 @@ pub fn is_editor_window(_hwnd: HWND, title: &str, exe_name: &str) -> bool {
 pub fn is_editor_window(_hwnd: (), title: &str, exe_name: &str) -> bool {
     let exe_lower = exe_name.to_lowercase();
     let title_lower = title.to_lowercase();
-    exe_lower.contains("code") || title_lower.contains("code") || extract_filename_from_title(title).is_some()
+    exe_lower.contains("code")
+        || exe_lower.contains("cursor")
+        || exe_lower.contains("sublime")
+        || exe_lower.contains("zed")
+        || title_lower.contains("code")
+        || extract_filename_from_title(title).is_some()
 }
 
 #[cfg(not(windows))]
@@ -249,6 +254,11 @@ pub fn is_browser_window(title: &str) -> bool {
         || t.contains("edge")
         || t.contains("opera")
         || t.contains("vivaldi")
+        || t.contains("safari")
+        || t.contains("arc")
+        || t.contains("zen")
+        || t.contains("waterfox")
+        || t.contains("librewolf")
 }
 
 #[cfg(not(windows))]
@@ -353,7 +363,38 @@ pub fn list_user_windows() -> Vec<(HWND, String)> {
         .collect()
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn list_user_windows() -> Vec<(String, String)> {
+    let script = r#"tell application "System Events"
+        set winList to {}
+        repeat with proc in (every process whose background only is false and visible is true)
+            set procName to name of proc
+            repeat with w in (every window of proc)
+                set wTitle to name of w
+                if wTitle is not "" then
+                    set end of winList to (procName & " - " & wTitle)
+                else
+                    set end of winList to procName
+                end if
+            end repeat
+        end repeat
+        set AppleScript's text item delimiters to linefeed
+        return winList as text
+    end tell"#;
+    let mut list = Vec::new();
+    if let Ok(output) = std::process::Command::new("osascript").args(["-e", script]).output() {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for (i, line) in text.lines().enumerate() {
+            let t = line.trim();
+            if !t.is_empty() && !t.contains("Libertide") {
+                list.push((format!("mac_win_{i}"), t.to_string()));
+            }
+        }
+    }
+    list
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn list_user_windows() -> Vec<(String, String)> {
     // Utilisation de wmctrl pour lister les fenêtres X11 gérées par le Window Manager EWMH
     let output = std::process::Command::new("wmctrl")
@@ -422,8 +463,39 @@ pub fn get_x11_window_properties(win_id: &str) -> (String, String) {
     (class_name, pid_str)
 }
 
+#[cfg(target_os = "macos")]
+pub fn get_active_macos_window() -> Option<String> {
+    let script = r#"tell application "System Events"
+        set p to first process whose frontmost is true
+        set pName to name of p
+        try
+            set wTitle to name of front window of p
+            return pName & " - " & wTitle
+        on error
+            return pName
+        end try
+    end tell"#;
+    let output = std::process::Command::new("osascript").args(["-e", script]).output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 #[cfg(not(windows))]
 pub fn get_active_or_best_window(user_windows: &[(String, String)]) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(active) = get_active_macos_window() {
+            if let Some((id, _)) = user_windows.iter().find(|(_, title)| title.contains(&active) || active.contains(title)) {
+                return Some(id.clone());
+            }
+            return Some(active);
+        }
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     if let Some(active) = get_active_x11_window() {
         // Normaliser l'ID décimal / hexadécimal si nécessaire
         if let Ok(dec_id) = active.parse::<u64>() {
@@ -1024,7 +1096,23 @@ pub fn launch_browser_new_window(url: &str) -> Option<HWND> {
     None
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn apply_window_rect(win_title_or_id: &str, x: i32, y: i32, width: i32, height: i32) {
+    let proc_name = win_title_or_id.split(" - ").next().unwrap_or(win_title_or_id).trim();
+    let script = format!(
+        r#"tell application "System Events"
+            tell process "{proc_name}"
+                if (count of windows) > 0 then
+                    set position of window 1 to {{{x}, {y}}}
+                    set size of window 1 to {{{width}, {height}}}
+                end if
+            end tell
+        end tell"#
+    );
+    let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn apply_window_rect(win_id: &str, x: i32, y: i32, width: i32, height: i32) {
     // wmctrl -i -r <WIN_ID> -e 0,X,Y,W,H
     let geom = format!("0,{},{},{},{}", x.max(0), y.max(0), width.max(100), height.max(100));
@@ -1033,7 +1121,31 @@ pub fn apply_window_rect(win_id: &str, x: i32, y: i32, width: i32, height: i32) 
         .status();
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn launch_browser_new_window(url: &str) -> Option<String> {
+    let mac_browsers = [
+        "Google Chrome",
+        "Brave Browser",
+        "Firefox",
+        "Microsoft Edge",
+        "Safari",
+    ];
+    for b in mac_browsers {
+        if std::process::Command::new("open")
+            .args(["-na", b, "--args", "--new-window", url])
+            .status()
+            .map_or(false, |s| s.success())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            return get_active_macos_window();
+        }
+    }
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    get_active_macos_window()
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn launch_browser_new_window(url: &str) -> Option<String> {
     let browsers = ["google-chrome", "chromium", "firefox", "brave-browser", "xdg-open"];
     for b in &browsers {
