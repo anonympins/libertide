@@ -35,13 +35,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VIRTUAL_KEY,
 };
 #[cfg(not(windows))]
-pub use crate::automation::{AsWindowTarget, VIRTUAL_KEY};
+pub use crate::automation::{AsWindowTarget, NumberedElementTarget, VIRTUAL_KEY};
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetClassNameW, SetCursorPos};
 
-use crate::automation::{
+pub use crate::automation::{
     ActionHistoryManager, UndoOperation, ACTION_HISTORY,
     execute_undo_operation, undo_last_system_action, redo_last_system_action,
+};
+use crate::automation::{
     focus_browser_address_bar, force_foreground_window, format_url_for_navigation,
     is_browser_chrome_target, restore_if_iconic, send_hotkey, send_paste, set_clipboard_text,
     write_to_browser_or_txt,
@@ -52,11 +54,6 @@ use crate::window_util::*;
 #[cfg(windows)]
 #[derive(Clone, Default)]
 pub struct UiaElementInfoNonWindows;
-
-#[cfg(not(windows))]
-pub use crate::automation::NumberedElementTarget;
-
-pub use crate::automation::{ActionHistoryManager, UndoOperation, ACTION_HISTORY, execute_undo_operation, undo_last_system_action, redo_last_system_action};
 
 #[cfg(windows)]
 #[derive(Clone)]
@@ -2045,12 +2042,6 @@ fn score_element(elem: &UiaElementInfo, query: &str) -> Option<f32> {
     max_score
 }
 
-pub fn is_poor_or_redundant_link(text: &str) -> bool {
-    let lower = text.trim().to_lowercase();
-    lower.len() < 2
-}
-
-#[cfg(windows)]
 pub fn is_poor_or_redundant_link(text: &str) -> bool {
     let lower = text.trim().to_lowercase();
     lower.len() < 2
