@@ -40,12 +40,23 @@ pub use crate::automation::{AsWindowTarget, VIRTUAL_KEY};
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetClassNameW, SetCursorPos};
 
 use crate::automation::{
+    ActionHistoryManager, UndoOperation, ACTION_HISTORY,
+    execute_undo_operation, undo_last_system_action, redo_last_system_action,
     focus_browser_address_bar, force_foreground_window, format_url_for_navigation,
     is_browser_chrome_target, restore_if_iconic, send_hotkey, send_paste, set_clipboard_text,
     write_to_browser_or_txt,
 };
 use crate::pattern::{clean_words, extract_target_propositions, matches_pattern};
 use crate::window_util::*;
+
+#[cfg(windows)]
+#[derive(Clone, Default)]
+pub struct UiaElementInfoNonWindows;
+
+#[cfg(not(windows))]
+pub use crate::automation::NumberedElementTarget;
+
+pub use crate::automation::{ActionHistoryManager, UndoOperation, ACTION_HISTORY, execute_undo_operation, undo_last_system_action, redo_last_system_action};
 
 #[cfg(windows)]
 #[derive(Clone)]
@@ -706,7 +717,7 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
 }
 
 #[cfg(not(windows))]
-pub fn list_interactive_elements(_hwnd: ()) -> Vec<UiaElementInfo> {
+pub fn list_interactive_elements(_hwnd: impl AsWindowTarget) -> Vec<UiaElementInfo> {
     Vec::new()
 }
 
@@ -751,7 +762,7 @@ pub fn has_focused_textarea(_hwnd: HWND) -> bool {
 }
 
 #[cfg(not(windows))]
-pub fn has_focused_textarea(_hwnd: ()) -> bool {
+pub fn has_focused_textarea(_hwnd: impl AsWindowTarget) -> bool {
     false
 }
 
@@ -803,7 +814,7 @@ pub fn refocus_largest_textarea_or_fallback(hwnd: HWND) -> bool {
 }
 
 #[cfg(not(windows))]
-pub fn refocus_largest_textarea_or_fallback(_hwnd: ()) -> bool {
+pub fn refocus_largest_textarea_or_fallback(_hwnd: impl AsWindowTarget) -> bool {
     false
 }
 
@@ -849,6 +860,11 @@ pub fn find_best_input_element<'a>(elements: &'a [UiaElementInfo], target: &str)
     });
 
     scored.first().map(|(_, elem)| *elem)
+}
+
+#[cfg(not(windows))]
+pub fn find_best_input_element<'a>(_elements: &'a [UiaElementInfo], _target: &str) -> Option<&'a UiaElementInfo> {
+    None
 }
 
 #[cfg(windows)]
@@ -1285,6 +1301,11 @@ pub fn find_largest_textarea(hwnd: HWND) -> Option<UiaElementInfo> {
     textareas.into_iter().next()
 }
 
+#[cfg(not(windows))]
+pub fn find_largest_textarea(_hwnd: impl AsWindowTarget) -> Option<UiaElementInfo> {
+    None
+}
+
 #[cfg(windows)]
 pub fn find_largest_textarea_on_screen(
     user_windows: &[(HWND, String)],
@@ -1309,12 +1330,23 @@ pub fn find_largest_textarea_on_screen(
     None
 }
 
+#[cfg(not(windows))]
+pub fn find_largest_textarea_on_screen(
+    _user_windows: &[(impl AsWindowTarget, String)],
+    _preferred_hwnd: Option<impl AsWindowTarget>,
+) -> Option<(String, UiaElementInfo)> {
+    None
+}
+
 #[cfg(windows)]
 pub fn ensure_window_textarea_focus(hwnd: HWND) {
     if !has_focused_textarea(hwnd) {
         refocus_largest_textarea_or_fallback(hwnd);
     }
 }
+
+#[cfg(not(windows))]
+pub fn ensure_window_textarea_focus(_hwnd: impl AsWindowTarget) {}
 
 #[cfg(windows)]
 pub fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option<&'a UiaElementInfo> {
@@ -1368,6 +1400,11 @@ pub fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Op
     scored.first().map(|(_, elem)| *elem)
 }
 
+#[cfg(not(windows))]
+pub fn find_best_element<'a>(_elements: &'a [UiaElementInfo], _target: &str) -> Option<&'a UiaElementInfo> {
+    None
+}
+
 #[cfg(windows)]
 pub fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option<&'a UiaElementInfo> {
     let is_chrome_target = is_browser_chrome_target(target);
@@ -1415,6 +1452,11 @@ pub fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str
     });
 
     scored.first().map(|(_, elem)| *elem)
+}
+
+#[cfg(not(windows))]
+pub fn find_best_button_element<'a>(_elements: &'a [UiaElementInfo], _target: &str) -> Option<&'a UiaElementInfo> {
+    None
 }
 
 #[cfg(windows)]
@@ -2003,6 +2045,11 @@ fn score_element(elem: &UiaElementInfo, query: &str) -> Option<f32> {
     max_score
 }
 
+pub fn is_poor_or_redundant_link(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    lower.len() < 2
+}
+
 #[cfg(windows)]
 pub fn is_poor_or_redundant_link(text: &str) -> bool {
     let lower = text.trim().to_lowercase();
@@ -2088,6 +2135,16 @@ pub fn score_enriched_button(text: &str) -> f32 {
     }
 
     score
+}
+
+#[cfg(not(windows))]
+pub fn score_enriched_link(_text: &str) -> f32 {
+    10.0
+}
+
+#[cfg(not(windows))]
+pub fn score_enriched_button(_text: &str) -> f32 {
+    10.0
 }
 
 #[cfg(windows)]

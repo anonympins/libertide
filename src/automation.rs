@@ -64,6 +64,10 @@ const CREATE_NEW_CONSOLE: u32 = 0x00000010;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+#[cfg(not(windows))]
+#[derive(Clone, Default)]
+pub struct UiaElementInfo;
+
 #[derive(Clone, Debug)]
 pub struct NumberedElementTarget {
     pub index: usize,
@@ -1343,6 +1347,39 @@ pub fn send_paste() {
 }
 
 #[cfg(not(windows))]
+pub fn send_char_unicode(c: char) {
+    #[cfg(target_os = "macos")]
+    {
+        let s = c.to_string();
+        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!("tell application \"System Events\" to keystroke \"{escaped}\"");
+        let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdotool").args(["type", "--delay", "5", &c.to_string()]).status();
+    }
+}
+
+#[cfg(not(windows))]
+pub fn send_terminal_input(_hwnd: impl AsWindowTarget, text: &str, auto_enter: bool) {
+    const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
+    let trimmed = text.trim_end_matches(['\r', '\n']);
+    let has_trailing_newline = text.ends_with('\n') || text.ends_with('\r');
+    let should_press_enter = auto_enter || has_trailing_newline;
+
+    clipboard::set_text(trimmed);
+    std::thread::sleep(Duration::from_millis(40));
+    send_paste();
+    std::thread::sleep(Duration::from_millis(50));
+
+    if should_press_enter {
+        std::thread::sleep(Duration::from_millis(40));
+        send_hotkey(&[], VK_RETURN);
+    }
+}
+
+#[cfg(not(windows))]
 pub fn send_paste() {
     #[cfg(target_os = "macos")]
     {
@@ -1561,7 +1598,6 @@ pub fn send_hotkey(modifiers: &[VIRTUAL_KEY], key: VIRTUAL_KEY) {
     }
 }
 
-#[cfg(windows)]
 pub fn try_send_key_combination(combo: &str) -> bool {
     let clean = combo.trim().to_lowercase();
     if clean.is_empty() {
@@ -1830,6 +1866,29 @@ fn open_browser_new_tab(hwnd: HWND, url: &str) {
     std::thread::sleep(Duration::from_millis(120));
     send_hotkey(&[], VK_RETURN);
     std::thread::sleep(Duration::from_millis(80));
+}
+
+#[cfg(not(windows))]
+pub fn open_browser_new_tab(_hwnd: impl AsWindowTarget, url: &str) {
+    let formatted_url = format_url_for_navigation(url);
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(&formatted_url).spawn();
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(&formatted_url).spawn();
+}
+
+#[cfg(not(windows))]
+pub fn navigate_browser_address_bar(target: impl AsWindowTarget, url: &str) {
+    let formatted_url = format_url_for_navigation(url);
+    focus_browser_address_bar(target);
+    std::thread::sleep(Duration::from_millis(50));
+    set_clipboard_text(&formatted_url);
+    std::thread::sleep(Duration::from_millis(50));
+    send_paste();
+    std::thread::sleep(Duration::from_millis(100));
+    const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
+    send_hotkey(&[], VK_RETURN);
+    println!("[Actions] Navigation vers {} effectuée avec succès via barre d'adresse", formatted_url);
 }
 
 #[cfg(windows)]
@@ -2890,6 +2949,23 @@ fn clear_window_text(hwnd: HWND) {
     send_hotkey(&[VK_CONTROL], VK_A);
     std::thread::sleep(Duration::from_millis(40));
     send_hotkey(&[], VK_BACK);
+}
+
+#[cfg(not(windows))]
+pub fn clear_window_text(target: impl AsWindowTarget) {
+    force_foreground_window(target);
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", "tell application \"System Events\" to keystroke \"a\" using command down\ntell application \"System Events\" to key code 51"])
+            .status();
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdotool")
+            .args(["key", "--clearmodifiers", "ctrl+a", "BackSpace"])
+            .status();
+    }
 }
 
 #[cfg(windows)]
