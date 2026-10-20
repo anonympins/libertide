@@ -49,9 +49,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: libertide-macos-arm64
-          path: |
-            libertide-macos-arm64.tar.gz
-            target/release/libertide
+          path: libertide-macos-arm64.tar.gz
           if-no-files-found: error
 
       - name: Create GitHub Release
