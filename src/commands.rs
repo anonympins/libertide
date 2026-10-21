@@ -2445,11 +2445,16 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 feedback.push(format!("Navigation vers '{}'.", formatted));
             }
             AgentAction::WriteText { text, press_enter, .. } => {
-                let _ = std::process::Command::new("xdotool").args(["key", "ctrl+a"]).status();
+                const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+                const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
+                const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
+                send_hotkey(&[VK_CONTROL], VK_A);
                 std::thread::sleep(Duration::from_millis(30));
-                let _ = std::process::Command::new("xdotool").args(["type", "--delay", "12", text]).status();
+                for c in text.chars() {
+                    send_char_unicode(c);
+                }
                 if press_enter.unwrap_or(false) {
-                    let _ = std::process::Command::new("xdotool").args(["key", "Return"]).status();
+                    send_hotkey(&[], VK_RETURN);
                 }
                 feedback.push(format!("Texte saisi sous X11 ({} caractères).", text.len()));
             }
@@ -2476,7 +2481,12 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 }
                 #[cfg(all(not(windows), not(target_os = "macos")))]
                 {
-                    let _ = std::process::Command::new("xdotool").args(["key", "ctrl+a", "BackSpace"]).status();
+                    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+                    const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
+                    const VK_BACK: VIRTUAL_KEY = VIRTUAL_KEY(0x08);
+                    send_hotkey(&[VK_CONTROL], VK_A);
+                    std::thread::sleep(Duration::from_millis(20));
+                    send_hotkey(&[], VK_BACK);
                 }
                 feedback.push("Champ de texte réinitialisé.".to_string());
             }
@@ -2657,6 +2667,18 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 match shortcut.as_str() {
                     "enter" | "press_enter" => { let _ = std::process::Command::new("xdotool").args(["key", "Return"]).status(); }
                     "open_search" => { let _ = std::process::Command::new("xdotool").args(["key", "Super"]).status(); }
+                    "narrator_toggle" => {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to key code 96 using command down"]).status();
+                        #[cfg(not(target_os = "macos"))]
+                        let _ = std::process::Command::new("sh").arg("-c").arg("pgrep -x orca > /dev/null && pkill -x orca || orca &").spawn();
+                    }
+                    "magnifier_zoom_in" => {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to key code 24 using {command down, option down}"]).status();
+                        #[cfg(not(target_os = "macos"))]
+                        let _ = std::process::Command::new("gsettings").args(["set", "org.gnome.desktop.a11y.magnifier", "mag-factor", "2.0"]).status();
+                    }
                     "open_search_browser" | "browser_search" => {
                         #[cfg(target_os = "macos")]
                         let _ = std::process::Command::new("osascript")

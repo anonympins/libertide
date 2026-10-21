@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 pub use crate::floating_window::FloatingCard;
+pub use crate::automation::{NavigationZone, NumberedElementTarget, SwitchAccessStep};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchKeyEvent {
+    Select,
+    Next,
+    Prev,
+    Escape,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LlmProvider {
@@ -276,6 +285,10 @@ pub enum AgentEvent {
     RequestApiKey,
     ShowFloatingCard(FloatingCard),
     CloseFloatingCard(String),
+    NavigationZonesReady {
+        window_title: String,
+        zones: Vec<NavigationZone>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -298,6 +311,10 @@ pub enum AgentCommand {
     SearchTwitch(String),
     PeriodicScreenCheck,
     UndoLastAction,
+    AnalyzeNavigationZones {
+        window_title: String,
+        targets: Vec<NumberedElementTarget>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

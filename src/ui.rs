@@ -27,6 +27,7 @@ use windows::Win32::UI::Accessibility::{
     UIA_SliderControlTypeId, UIA_SpinnerControlTypeId, UIA_TabControlTypeId,
     UIA_TabItemControlTypeId, UIA_TextPatternId, UIA_TogglePatternId,
     UIA_ToolBarControlTypeId, UIA_TreeItemControlTypeId, UIA_ValuePatternId,
+    UIA_GroupControlTypeId, UIA_SeparatorControlTypeId,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -37,7 +38,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 #[cfg(not(windows))]
 pub use crate::automation::{AsWindowTarget, NumberedElementTarget, VIRTUAL_KEY};
 #[cfg(windows)]
-use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetClassNameW, SetCursorPos};
+use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetClassNameW, GetWindowRect, SetCursorPos};
 
 pub use crate::automation::{
     ActionHistoryManager, UndoOperation, ACTION_HISTORY,
@@ -50,10 +51,6 @@ use crate::automation::{
 };
 use crate::pattern::{clean_words, extract_target_propositions, matches_pattern};
 use crate::window_util::*;
-
-#[cfg(windows)]
-#[derive(Clone, Default)]
-pub struct UiaElementInfoNonWindows;
 
 #[cfg(windows)]
 #[derive(Clone)]
@@ -103,20 +100,35 @@ pub struct UiaElementInfo {
     pub index: usize,
     pub name: String,
     pub automation_id: String,
+    pub help_text: String,
+    pub value_text: String,
     pub class_name: String,
+    pub primary_class: String,
     pub localized_type: String,
     pub aria_role: String,
     pub aria_label: String,
+    pub aria_description: String,
+    pub aria_indications: String,
     pub click_x: i32,
     pub click_y: i32,
     pub rect: [i32; 4],
     pub is_button: bool,
     pub is_link: bool,
     pub is_edit_or_textarea: bool,
+    pub is_explicit_textarea: bool,
     pub is_input: bool,
     pub is_select: bool,
+    pub is_option: bool,
+    pub is_media: bool,
+    pub is_slider: bool,
+    pub is_toggle: bool,
     pub is_tab: bool,
     pub is_focusable: bool,
+    pub is_tabindex: bool,
+    pub is_web_content: bool,
+    pub is_browser_chrome: bool,
+    pub is_offscreen: bool,
+    pub has_action_pattern: bool,
     pub area: i64,
 }
 
@@ -276,6 +288,20 @@ pub fn click_element(x: i32, y: i32, _element: Option<&()>, _invoke_pattern: Opt
     }
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
+        if crate::automation::is_wayland_session() {
+            let moved = std::process::Command::new("ydotool")
+                .args(["mousemove", "--absolute", "-x", &x.to_string(), "-y", &y.to_string()])
+                .status()
+                .map_or(false, |s| s.success());
+            if moved {
+                std::thread::sleep(Duration::from_millis(25));
+                let clicked = std::process::Command::new("ydotool")
+                    .args(["click", "0xC0"])
+                    .status()
+                    .map_or(false, |s| s.success());
+                if clicked { return; }
+            }
+        }
         let _ = std::process::Command::new("xdotool")
             .args(["mousemove", &x.to_string(), &y.to_string(), "click", "1"])
             .status();
@@ -359,9 +385,119 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let ctype = item.CurrentControlType().unwrap_or_default();
                     let class_name = item.CurrentClassName().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
                     let loc_type = item.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+
+                    // Exclusion stricte des barres de défilement, curseurs d'ascenseur et boutons associés
+                    if ctype == UIA_ScrollBarControlTypeId
+                        || class_name.contains("scrollbar")
+                        || loc_type.contains("scrollbar")
+                        || loc_type.contains("défilement")
+                        || loc_type.contains("ascenseur")
+                    {
+                        continue;
+                    }
+
                     let raw_name = item.CurrentName().map(|b| b.to_string()).unwrap_or_default();
                     let mut name = raw_name.trim().to_string();
                     let automation_id = item.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default();
+                    let auto_id_lower = automation_id.to_lowercase();
+                    let help_text = item.CurrentHelpText().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
+                    let item_type = item.CurrentItemType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+                    let item_status_raw = item.CurrentItemStatus().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
+                    let item_status = item_status_raw.to_lowercase();
+
+                    let primary_class = class_name.split_whitespace().next().unwrap_or("").to_string();
+
+                    let (aria_role, aria_properties) = if let Ok(e2) = item.cast::<IUIAutomationElement2>() {
+                        let r = e2.CurrentAriaRole().ok().map(|b| b.to_string()).unwrap_or_default();
+                        let p = e2.CurrentAriaProperties().ok().map(|b| b.to_string()).unwrap_or_default();
+                        (r, p)
+                    } else {
+                        (String::new(), String::new())
+                    };
+
+                    let (data_attrs, json_metadata) = parse_data_attributes_and_json(&aria_properties, &item_status_raw, &help_text);
+                    let (aria_label_opt, aria_desc_opt, indications_vec) = extract_aria_details(&aria_properties);
+                    let aria_label = aria_label_opt.unwrap_or_default();
+                    let aria_description = aria_desc_opt.unwrap_or_default();
+                    let mut aria_indications = indications_vec.join(", ");
+
+                    // Exclusion stricte des séparateurs de menu / barres d'outils
+                    let is_separator = ctype == UIA_SeparatorControlTypeId
+                        || loc_type.contains("séparateur")
+                        || loc_type.contains("separator")
+                        || class_name.contains("separator")
+                        || auto_id_lower.contains("separator")
+                        || name.eq_ignore_ascii_case("séparateur")
+                        || name.eq_ignore_ascii_case("separateur")
+                        || name.eq_ignore_ascii_case("separator");
+
+                    if is_separator {
+                        continue;
+                    }
+
+                    // Exclusion des conteneurs de groupement statiques ("Groupe")
+                    let is_group = (ctype == UIA_GroupControlTypeId
+                        || loc_type == "groupe"
+                        || loc_type == "group"
+                        || class_name.contains("groupbox")
+                        || auto_id_lower.contains("groupbox")
+                        || name.eq_ignore_ascii_case("groupe")
+                        || name.eq_ignore_ascii_case("group"))
+                        && ctype != UIA_ButtonControlTypeId
+                        && ctype != UIA_MenuItemControlTypeId
+                        && ctype != UIA_HyperlinkControlTypeId;
+
+                    if is_group {
+                        continue;
+                    }
+
+                    let is_sys_name = name.eq_ignore_ascii_case("système") || name.eq_ignore_ascii_case("system");
+
+                    // Résolution sémantique et explicite des boutons système (Close, Maximize, Minimize, Restore, SystemMenu)
+                    if is_sys_name
+                        || auto_id_lower.contains("close")
+                        || auto_id_lower.contains("maximize")
+                        || auto_id_lower.contains("minimize")
+                        || auto_id_lower.contains("restore")
+                        || auto_id_lower.contains("systemmenu")
+                    {
+                        if auto_id_lower.contains("close") || class_name.contains("close") {
+                            name = "Fermer la fenêtre (✕)".to_string();
+                        } else if auto_id_lower.contains("maximize") || class_name.contains("maximize") {
+                            name = "Agrandir la fenêtre (□)".to_string();
+                        } else if auto_id_lower.contains("restore") || class_name.contains("restore") {
+                            name = "Restaurer la fenêtre (⧉)".to_string();
+                        } else if auto_id_lower.contains("minimize") || class_name.contains("minimize") {
+                            name = "Réduire la fenêtre (—)".to_string();
+                        } else if auto_id_lower.contains("systemmenu") || auto_id_lower == "systemmenubar" || class_name.contains("systemmenu") {
+                            name = "Menu Système de la fenêtre".to_string();
+                        } else if is_sys_name {
+                            if !help_text.is_empty() {
+                                name = help_text.clone();
+                            } else if !aria_label.is_empty() {
+                                name = aria_label.clone();
+                            } else {
+                                let mut win_r = RECT::default();
+                                if unsafe { GetWindowRect(hwnd, &mut win_r).is_ok() } {
+                                    let dist_from_right = (win_r.right - rect.right).max(0);
+                                    let dist_from_left = (rect.left - win_r.left).max(0);
+                                    if rect.top <= win_r.top + 70 {
+                                        if dist_from_right < 60 {
+                                            name = "Fermer la fenêtre (✕)".to_string();
+                                        } else if dist_from_right < 115 {
+                                            name = "Agrandir / Restaurer (□)".to_string();
+                                        } else if dist_from_right < 170 {
+                                            name = "Réduire la fenêtre (—)".to_string();
+                                        } else if dist_from_left < 70 {
+                                            name = "Menu Système (icône)".to_string();
+                                        } else {
+                                            name = format!("Contrôle fenêtre ({})", if !loc_type.is_empty() { &loc_type } else { "Système" });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     let is_devtools = class_name.contains("devtools")
                         || automation_id.to_lowercase().contains("devtools")
@@ -416,26 +552,6 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         continue;
                     }
                     let is_edit_type = ctype == UIA_EditControlTypeId || ctype == UIA_DocumentControlTypeId;
-                    let help_text = item.CurrentHelpText().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
-                    let item_type = item.CurrentItemType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
-                    let item_status_raw = item.CurrentItemStatus().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
-                    let item_status = item_status_raw.to_lowercase();
-
-                    let primary_class = class_name.split_whitespace().next().unwrap_or("").to_string();
-
-                    let (aria_role, aria_properties) = if let Ok(e2) = item.cast::<IUIAutomationElement2>() {
-                        let r = e2.CurrentAriaRole().ok().map(|b| b.to_string()).unwrap_or_default();
-                        let p = e2.CurrentAriaProperties().ok().map(|b| b.to_string()).unwrap_or_default();
-                        (r, p)
-                    } else {
-                        (String::new(), String::new())
-                    };
-
-                    let (data_attrs, json_metadata) = parse_data_attributes_and_json(&aria_properties, &item_status_raw, &help_text);
-                    let (aria_label_opt, aria_desc_opt, indications_vec) = extract_aria_details(&aria_properties);
-                    let aria_label = aria_label_opt.unwrap_or_default();
-                    let aria_description = aria_desc_opt.unwrap_or_default();
-                    let mut aria_indications = indications_vec.join(", ");
 
                     let is_root_web_area = class_name.contains("rootwebarea")
                         || loc_type.contains("rootwebarea")
@@ -579,6 +695,7 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || name == "⨯"
                         || name == "x"
                         || name == "X"
+                        || name.contains("Fermer")
                         || class_name.contains("close")
                         || class_name.contains("dismiss")
                         || class_name.contains("cross")
@@ -696,7 +813,12 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let has_toggle = item.GetCurrentPattern(UIA_TogglePatternId).is_ok();
                     let has_sel_item = item.GetCurrentPattern(UIA_SelectionItemPatternId).is_ok();
                     let has_expand = item.GetCurrentPattern(UIA_ExpandCollapsePatternId).is_ok();
-                    let has_legacy = item.GetCurrentPattern(UIA_LegacyIAccessiblePatternId).is_ok();
+                    let has_legacy = item.GetCurrentPattern(UIA_LegacyIAccessiblePatternId)
+                        .ok()
+                        .and_then(|p| p.cast::<IUIAutomationLegacyIAccessiblePattern>().ok())
+                        .and_then(|l| l.CurrentDefaultAction().ok())
+                        .map(|b| !b.to_string().trim().is_empty())
+                        .unwrap_or(false);
                     let has_action_pattern = pattern.is_some() || has_toggle || has_sel_item || has_expand || has_legacy;
                     let area = (width as i64) * (height as i64);
                     let index = results.len() + 1;
@@ -763,20 +885,35 @@ pub fn list_interactive_elements(_target: impl AsWindowTarget) -> Vec<UiaElement
                 index: t.index,
                 name: t.name.clone(),
                 automation_id: String::new(),
+                help_text: String::new(),
+                value_text: String::new(),
                 class_name: String::new(),
+                primary_class: String::new(),
                 localized_type: String::new(),
                 aria_role: String::new(),
                 aria_label: t.name,
+                aria_description: String::new(),
+                aria_indications: String::new(),
                 click_x: t.click_x,
                 click_y: t.click_y,
                 rect: t.rect,
                 is_button: is_btn,
                 is_link: is_lnk,
                 is_edit_or_textarea: is_input,
+                is_explicit_textarea: is_input,
                 is_input,
                 is_select: false,
+                is_option: false,
+                is_media: false,
+                is_slider: false,
+                is_toggle: false,
                 is_tab: false,
                 is_focusable: true,
+                is_tabindex: false,
+                is_web_content: false,
+                is_browser_chrome: false,
+                is_offscreen: false,
+                has_action_pattern: is_btn || is_lnk,
                 area: w * h,
             }
         })
@@ -1439,10 +1576,23 @@ pub fn find_largest_textarea_on_screen(
 }
 
 #[cfg(not(windows))]
-pub fn find_largest_textarea_on_screen(
-    _user_windows: &[(impl AsWindowTarget, String)],
-    _preferred_hwnd: Option<impl AsWindowTarget>,
-) -> Option<(String, UiaElementInfo)> {
+pub fn find_largest_textarea_on_screen<T: AsWindowTarget + Clone>(
+    user_windows: &[(T, String)],
+    preferred_target: Option<T>,
+) -> Option<(T, UiaElementInfo)> {
+    let mut ordered: Vec<T> = Vec::new();
+    if let Some(pref) = preferred_target {
+        ordered.push(pref);
+    }
+    for (target, _) in user_windows {
+        ordered.push(target.clone());
+    }
+
+    for target in ordered.into_iter().take(3) {
+        if let Some(elem) = find_largest_textarea(target.clone()) {
+            return Some((target, elem));
+        }
+    }
     None
 }
 
@@ -1454,7 +1604,11 @@ pub fn ensure_window_textarea_focus(hwnd: HWND) {
 }
 
 #[cfg(not(windows))]
-pub fn ensure_window_textarea_focus(_hwnd: impl AsWindowTarget) {}
+pub fn ensure_window_textarea_focus(target: impl AsWindowTarget + Copy) {
+    if !has_focused_textarea(target) {
+        refocus_largest_textarea_or_fallback(target);
+    }
+}
 
 #[cfg(windows)]
 pub fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option<&'a UiaElementInfo> {
@@ -1506,6 +1660,21 @@ pub fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Op
     });
 
     scored.first().map(|(_, elem)| *elem)
+}
+
+#[cfg(not(windows))]
+pub fn extract_inner_text(_element: &impl AsWindowTarget, _max_chars: usize) -> Option<String> {
+    crate::automation::get_active_field_content()
+}
+
+#[cfg(not(windows))]
+pub fn extract_web_document_text(_element: &impl AsWindowTarget, _max_chars: usize) -> Option<String> {
+    crate::automation::get_active_field_content()
+}
+
+#[cfg(not(windows))]
+pub fn extract_scrollable_viewports_content(_target: impl AsWindowTarget) -> String {
+    String::new()
 }
 
 #[cfg(not(windows))]
@@ -2195,7 +2364,6 @@ pub fn is_poor_or_redundant_link(text: &str) -> bool {
     lower.len() < 2
 }
 
-#[cfg(windows)]
 pub fn score_enriched_link(text: &str) -> f32 {
     let clean = text.trim();
     let char_count = clean.chars().count();
@@ -2237,7 +2405,6 @@ pub fn score_enriched_link(text: &str) -> f32 {
     score
 }
 
-#[cfg(windows)]
 pub fn score_enriched_button(text: &str) -> f32 {
     let clean = text.trim();
     let lower = clean.to_lowercase();
@@ -2274,16 +2441,6 @@ pub fn score_enriched_button(text: &str) -> f32 {
     }
 
     score
-}
-
-#[cfg(not(windows))]
-pub fn score_enriched_link(_text: &str) -> f32 {
-    10.0
-}
-
-#[cfg(not(windows))]
-pub fn score_enriched_button(_text: &str) -> f32 {
-    10.0
 }
 
 #[cfg(windows)]

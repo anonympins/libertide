@@ -544,6 +544,51 @@ pub fn get_desktop_work_area() -> RECT {
 }
 
 #[cfg(windows)]
+pub fn draw_screen_orange_border(rect: [i32; 4]) {
+    use std::ffi::c_void;
+    extern "system" {
+        fn CreatePen(iStyle: i32, cWidth: i32, color: u32) -> *mut c_void;
+        fn SelectObject(hdc: *mut c_void, hgdiobj: *mut c_void) -> *mut c_void;
+        fn DeleteObject(ho: *mut c_void) -> i32;
+        fn MoveToEx(hdc: *mut c_void, x: i32, y: i32, lppt: *mut c_void) -> i32;
+        fn LineTo(hdc: *mut c_void, x: i32, y: i32) -> i32;
+        fn GetDC(hwnd: *mut c_void) -> *mut c_void;
+        fn ReleaseDC(hwnd: *mut c_void, hdc: *mut c_void) -> i32;
+    }
+
+    unsafe {
+        let hdc = GetDC(std::ptr::null_mut());
+        if !hdc.is_null() {
+            // Orange vif haute visibilité RGB(255, 140, 0) -> BGR: 0x00008CFF
+            let orange_pen = CreatePen(0 /* PS_SOLID */, 5, 0x00008CFF);
+            let old_pen = SelectObject(hdc, orange_pen);
+
+            let [x1, y1, x2, y2] = rect;
+            // 1. Grand cadre orange vif autour de la fenêtre
+            let _ = MoveToEx(hdc, x1, y1, std::ptr::null_mut());
+            let _ = LineTo(hdc, x2, y1);
+            let _ = LineTo(hdc, x2, y2);
+            let _ = LineTo(hdc, x1, y2);
+            let _ = LineTo(hdc, x1, y1);
+
+            // 2. Encadré d'accentuation orange autour de l'icône de la fenêtre (en-tête supérieur gauche)
+            let icon_w = 48.min((x2 - x1).max(10));
+            let icon_h = 36.min((y2 - y1).max(10));
+            let _ = MoveToEx(hdc, x1, y1 + icon_h, std::ptr::null_mut());
+            let _ = LineTo(hdc, x1 + icon_w, y1 + icon_h);
+            let _ = LineTo(hdc, x1 + icon_w, y1);
+
+            let _ = SelectObject(hdc, old_pen);
+            let _ = DeleteObject(orange_pen);
+            let _ = ReleaseDC(std::ptr::null_mut(), hdc);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn draw_screen_orange_border(_rect: [i32; 4]) {}
+
+#[cfg(windows)]
 pub fn get_window_process_info(hwnd: HWND) -> (u32, String) {
     extern "system" {
         fn GetWindowThreadProcessId(hwnd: HWND, lpdwprocessid: *mut u32) -> u32;
