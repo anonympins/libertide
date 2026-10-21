@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 pub use crate::floating_window::FloatingCard;
 pub use crate::automation::{NavigationZone, NumberedElementTarget, SwitchAccessStep};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchKeyEvent {
+    Select,
+    Next,
+    Prev,
+    Escape,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LlmProvider {
     DeepSeek,

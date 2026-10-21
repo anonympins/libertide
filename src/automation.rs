@@ -33,7 +33,7 @@ use windows::Win32::UI::Accessibility::{
     IUIAutomationValuePattern, TreeScope_Descendants, UIA_ButtonControlTypeId,
     UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId, UIA_CustomControlTypeId,
     UIA_DataGridControlTypeId, UIA_DataItemControlTypeId, UIA_DocumentControlTypeId,
-    UIA_EditControlTypeId, UIA_ExpandCollapsePatternId,
+    UIA_EditControlTypeId, UIA_ExpandCollapsePatternId, UIA_GroupControlTypeId,
     UIA_HeaderItemControlTypeId, UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId,
     UIA_InvokePatternId, UIA_LegacyIAccessiblePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
     UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
@@ -43,7 +43,7 @@ use windows::Win32::UI::Accessibility::{
     UIA_SpinnerControlTypeId, UIA_TabControlTypeId, UIA_TabItemControlTypeId,
     UIA_TextPatternId, UIA_TogglePatternId, UIA_ToolBarControlTypeId,
     UIA_TreeItemControlTypeId,
-    UIA_ValuePatternId,
+    UIA_ValuePatternId, UIA_SeparatorControlTypeId,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -205,7 +205,31 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
     let elements = list_interactive_elements(hwnd);
     elements
         .into_iter()
-        .filter(|e| !e.is_offscreen && (e.is_button || e.is_link || e.is_tab || e.is_edit_or_textarea || e.is_tabindex || e.is_media || e.is_slider || e.is_toggle || e.is_option || e.has_action_pattern))
+        .filter(|e| {
+            if e.is_offscreen {
+                return false;
+            }
+            let n_low = e.name.trim().to_lowercase();
+            let loc_low = e.localized_type.trim().to_lowercase();
+            if n_low == "groupe" || n_low == "group" || loc_low == "groupe" || loc_low == "group" {
+                return false;
+            }
+            if n_low == "séparateur" || n_low == "separateur" || n_low == "separator"
+                || loc_low.contains("séparateur") || loc_low.contains("separateur") || loc_low.contains("separator")
+            {
+                return false;
+            }
+            e.is_button
+                || e.is_link
+                || e.is_tab
+                || e.is_edit_or_textarea
+                || e.is_tabindex
+                || e.is_media
+                || e.is_slider
+                || e.is_toggle
+                || e.is_option
+                || e.has_action_pattern
+        })
         .take(50)
         .enumerate()
         .map(|(i, e)| {
@@ -213,7 +237,7 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
                 e.name
             } else if !e.aria_label.is_empty() {
                 e.aria_label
-            } else if !e.localized_type.is_empty() {
+            } else if !e.localized_type.is_empty() && !e.localized_type.eq_ignore_ascii_case("groupe") && !e.localized_type.eq_ignore_ascii_case("group") && !e.localized_type.eq_ignore_ascii_case("séparateur") {
                 e.localized_type
             } else if e.is_button {
                 "Bouton".to_string()
@@ -2465,9 +2489,109 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let ctype = item.CurrentControlType().unwrap_or_default();
                     let class_name = item.CurrentClassName().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
                     let loc_type = item.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+
+                    // Exclusion stricte des ascenseurs, séparateurs et conteneurs de groupement
+                    if ctype == UIA_ScrollBarControlTypeId
+                        || class_name.contains("scrollbar")
+                        || loc_type.contains("scrollbar")
+                        || loc_type.contains("défilement")
+                        || loc_type.contains("ascenseur")
+                        || ctype == UIA_SeparatorControlTypeId
+                        || loc_type.contains("séparateur")
+                        || loc_type.contains("separator")
+                        || class_name.contains("separator")
+                    {
+                        continue;
+                    }
+
+                    let is_grp = (ctype == UIA_GroupControlTypeId
+                        || loc_type == "groupe"
+                        || loc_type == "group"
+                        || class_name.contains("groupbox"))
+                        && ctype != UIA_ButtonControlTypeId
+                        && ctype != UIA_MenuItemControlTypeId
+                        && ctype != UIA_HyperlinkControlTypeId;
+
+                    if is_grp {
+                        continue;
+                    }
+
                     let raw_name = item.CurrentName().map(|b| b.to_string()).unwrap_or_default();
                     let mut name = raw_name.trim().to_string();
                     let automation_id = item.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default();
+                    let help_text = item.CurrentHelpText().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
+                    let item_type = item.CurrentItemType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+                    let item_status_raw = item.CurrentItemStatus().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
+                    let item_status = item_status_raw.to_lowercase();
+
+                    let primary_class = class_name
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
+
+                    let (aria_role, aria_properties) = if let Ok(e2) = item.cast::<IUIAutomationElement2>() {
+                        let r = e2.CurrentAriaRole().ok().map(|b| b.to_string()).unwrap_or_default();
+                        let p = e2.CurrentAriaProperties().ok().map(|b| b.to_string()).unwrap_or_default();
+                        (r, p)
+                    } else {
+                        (String::new(), String::new())
+                    };
+
+                    let (data_attrs, json_metadata) = parse_data_attributes_and_json(&aria_properties, &item_status_raw, &help_text);
+                    let (aria_label_opt, aria_desc_opt, indications_vec) = extract_aria_details(&aria_properties);
+                    let aria_label = aria_label_opt.unwrap_or_default();
+                    let aria_description = aria_desc_opt.unwrap_or_default();
+                    let mut aria_indications = indications_vec.join(", ");
+
+                    let auto_id_lower = automation_id.to_lowercase();
+                    let is_sys_name = name.eq_ignore_ascii_case("système") || name.eq_ignore_ascii_case("system");
+
+                    // Résolution sémantique et explicite des boutons système (Close, Maximize, Minimize, Restore, SystemMenu)
+                    if is_sys_name
+                        || auto_id_lower.contains("close")
+                        || auto_id_lower.contains("maximize")
+                        || auto_id_lower.contains("minimize")
+                        || auto_id_lower.contains("restore")
+                        || auto_id_lower.contains("systemmenu")
+                    {
+                        if auto_id_lower.contains("close") || class_name.contains("close") {
+                            name = "Fermer la fenêtre (✕)".to_string();
+                        } else if auto_id_lower.contains("maximize") || class_name.contains("maximize") {
+                            name = "Agrandir la fenêtre (□)".to_string();
+                        } else if auto_id_lower.contains("restore") || class_name.contains("restore") {
+                            name = "Restaurer la fenêtre (⧉)".to_string();
+                        } else if auto_id_lower.contains("minimize") || class_name.contains("minimize") {
+                            name = "Réduire la fenêtre (—)".to_string();
+                        } else if auto_id_lower.contains("systemmenu") || auto_id_lower == "systemmenubar" || class_name.contains("systemmenu") {
+                            name = "Menu Système de la fenêtre".to_string();
+                        } else if is_sys_name {
+                            if !help_text.is_empty() {
+                                name = help_text.clone();
+                            } else if !aria_label.is_empty() {
+                                name = aria_label.clone();
+                            } else {
+                                let mut win_r = RECT::default();
+                                if unsafe { GetWindowRect(hwnd, &mut win_r).is_ok() } {
+                                    let dist_from_right = (win_r.right - rect.right).max(0);
+                                    let dist_from_left = (rect.left - win_r.left).max(0);
+                                    if rect.top <= win_r.top + 70 {
+                                        if dist_from_right < 60 {
+                                            name = "Fermer la fenêtre (✕)".to_string();
+                                        } else if dist_from_right < 115 {
+                                            name = "Agrandir / Restaurer (□)".to_string();
+                                        } else if dist_from_right < 170 {
+                                            name = "Réduire la fenêtre (—)".to_string();
+                                        } else if dist_from_left < 70 {
+                                            name = "Menu Système (icône)".to_string();
+                                        } else {
+                                            name = format!("Contrôle fenêtre ({})", if !loc_type.is_empty() { &loc_type } else { "Système" });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     // Filtrage des éléments techniques générés par les Chrome DevTools (F12)
                     let is_devtools = class_name.contains("devtools")
@@ -2525,34 +2649,6 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     }
                     let ctype = item.CurrentControlType().unwrap_or_default();
                     let is_edit_type = ctype == UIA_EditControlTypeId || ctype == UIA_DocumentControlTypeId;
-                    let help_text = item.CurrentHelpText().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
-                    let item_type = item.CurrentItemType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
-                    let item_status_raw = item.CurrentItemStatus().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
-                    let item_status = item_status_raw.to_lowercase();
-
-                    let primary_class = class_name
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or("")
-                        .to_string();
-
-                    let (aria_role, aria_properties) = if let Ok(e2) = item.cast::<IUIAutomationElement2>() {
-                        let r = e2.CurrentAriaRole().ok()
-                            .map(|b| b.to_string())
-                            .unwrap_or_default();
-                        let p = e2.CurrentAriaProperties().ok()
-                            .map(|b| b.to_string())
-                            .unwrap_or_default();
-                        (r, p)
-                    } else {
-                        (String::new(), String::new())
-                    };
-
-                    let (data_attrs, json_metadata) = parse_data_attributes_and_json(&aria_properties, &item_status_raw, &help_text);
-                    let (aria_label_opt, aria_desc_opt, indications_vec) = extract_aria_details(&aria_properties);
-                    let aria_label = aria_label_opt.unwrap_or_default();
-                    let aria_description = aria_desc_opt.unwrap_or_default();
-                    let mut aria_indications = indications_vec.join(", ");
 
                     let is_root_web_area = class_name.contains("rootwebarea")
                         || loc_type.contains("rootwebarea")
@@ -2773,6 +2869,7 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || name == "⨯"
                         || name == "x"
                         || name == "X"
+                        || name.contains("Fermer")
                         || class_name.contains("close")
                         || class_name.contains("dismiss")
                         || class_name.contains("cross")
@@ -2920,7 +3017,12 @@ fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let has_toggle = item.GetCurrentPattern(UIA_TogglePatternId).is_ok();
                     let has_sel_item = item.GetCurrentPattern(UIA_SelectionItemPatternId).is_ok();
                     let has_expand = item.GetCurrentPattern(UIA_ExpandCollapsePatternId).is_ok();
-                    let has_legacy = item.GetCurrentPattern(UIA_LegacyIAccessiblePatternId).is_ok();
+                    let has_legacy = item.GetCurrentPattern(UIA_LegacyIAccessiblePatternId)
+                        .ok()
+                        .and_then(|p| p.cast::<IUIAutomationLegacyIAccessiblePattern>().ok())
+                        .and_then(|l| l.CurrentDefaultAction().ok())
+                        .map(|b| !b.to_string().trim().is_empty())
+                        .unwrap_or(false);
                     let has_action_pattern = pattern.is_some() || has_toggle || has_sel_item || has_expand || has_legacy;
                     let area = (width as i64) * (height as i64);
                     let index = results.len() + 1;

@@ -158,6 +158,7 @@ pub struct OverlayApp {
     switch_windows: Vec<SwitchWindowTarget>,
     switch_zones: Vec<NavigationZone>,
     last_switch_input: Instant,
+    switch_auto_scroll: bool,
     switch_focus_index: usize,
     switch_last_tick: Instant,
 
@@ -912,6 +913,7 @@ impl OverlayApp {
             switch_windows: Vec::new(),
             switch_zones: Vec::new(),
             last_switch_input: Instant::now() - Duration::from_secs(1),
+            switch_auto_scroll: false,
             switch_focus_index: 0,
             switch_last_tick: Instant::now(),
 
@@ -1197,6 +1199,7 @@ impl OverlayApp {
         if self.switch_access_mode {
             self.switch_step = SwitchAccessStep::Windows;
             self.switch_windows = collect_switch_candidate_windows();
+            self.switch_auto_scroll = false;
             self.numbered_targets.clear();
             self.switch_focus_index = 0;
             self.switch_last_tick = Instant::now() - Duration::from_millis(1500);
@@ -1205,7 +1208,7 @@ impl OverlayApp {
             let msg = if count > 0 {
                 localized_speech(
                     lang_prefix,
-                    &format!("Mode contacteur hiérarchique activé. Étape 1 : {} fenêtres détectées. Appuyez sur Entrée ou Espace pour sélectionner.", count),
+                    &format!("Mode contacteur activé. {} fenêtres détectées. Utilisez Tab ou 4 et 6 pour naviguer, Entrée ou Espace pour sélectionner.", count),
                     &format!("Hierarchical switch access enabled. Step 1: {} windows detected. Press Enter or Space to select.", count),
                     &format!("Acceso por conmutador jerárquico activado. Paso 1: {} ventanas detectadas. Presione Entrar o Espacio para seleccionar.", count),
                     &format!("Hierarchischer Schalterzugriff aktiviert. Schritt 1: {} Fenster erkannt. Drücken Sie Eingabe oder Leertaste zur Auswahl.", count),
@@ -1242,6 +1245,7 @@ impl OverlayApp {
             self.switch_windows.clear();
             self.switch_zones.clear();
             self.switch_step = SwitchAccessStep::Windows;
+            self.switch_auto_scroll = false;
             play_earcon(Earcon::MicClose);
             let msg = localized_speech(
                 lang_prefix,
@@ -2085,6 +2089,7 @@ impl eframe::App for OverlayApp {
                     if !self.switch_zones.is_empty() {
                         self.switch_step = SwitchAccessStep::Zones;
                         self.switch_focus_index = 0;
+                        self.switch_auto_scroll = false;
                         self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
                         let _ = self.tts_sender.send(TtsCommand::Stop);
                         let cur_zone = &self.switch_zones[0];
@@ -2095,6 +2100,7 @@ impl eframe::App for OverlayApp {
                         self.switch_step = SwitchAccessStep::Windows;
                         self.numbered_targets.clear();
                         self.switch_windows = collect_switch_candidate_windows();
+                        self.switch_auto_scroll = false;
                         self.switch_focus_index = 0;
                         let _ = self.tts_sender.send(TtsCommand::Stop);
                         let (locale, _) = get_system_locale_language();
@@ -2124,6 +2130,7 @@ impl eframe::App for OverlayApp {
                     self.numbered_targets.clear();
                     self.switch_zones.clear();
                     self.switch_windows = collect_switch_candidate_windows();
+                    self.switch_auto_scroll = false;
                     self.switch_focus_index = 0;
                     let _ = self.tts_sender.send(TtsCommand::Stop);
                     let (locale, _) = get_system_locale_language();
@@ -2158,47 +2165,43 @@ impl eframe::App for OverlayApp {
         // Gestion du Switch Access & Survol : défilement séquentiel périodique et validation sur Entrée / Espace
         if self.switch_access_mode && !is_typing {
             #[cfg(windows)]
-            let global_enter = unsafe { (GetAsyncKeyState(0x0D) as u16 & 0x8000) != 0 };
-            #[cfg(not(windows))]
-            let global_enter = false;
+            let (global_enter, global_space, global_nav_next, global_nav_prev) = unsafe {
+                let is_shift = (GetAsyncKeyState(0x10) as u16 & 0x8000) != 0;
+                let enter = (GetAsyncKeyState(0x0D) as u16 & 0x8000) != 0;
+                let space = (GetAsyncKeyState(0x20) as u16 & 0x8000) != 0;
+                let tab = (GetAsyncKeyState(0x09) as u16 & 0x8000) != 0;
 
-            #[cfg(windows)]
-            let global_space = unsafe { (GetAsyncKeyState(0x20) as u16 & 0x8000) != 0 };
-            #[cfg(not(windows))]
-            let global_space = false;
-
-            #[cfg(windows)]
-            let global_nav_next = unsafe {
-                (GetAsyncKeyState(0x27) as u16 & 0x8000) != 0 // Flèche droite
+                let right_down_6 = (GetAsyncKeyState(0x27) as u16 & 0x8000) != 0 // Flèche droite
                     || (GetAsyncKeyState(0x28) as u16 & 0x8000) != 0 // Flèche bas
                     || (GetAsyncKeyState(0x66) as u16 & 0x8000) != 0 // Pavé numérique 6
-                    || (GetAsyncKeyState(0x36) as u16 & 0x8000) != 0 // Touche 6
-            };
-            #[cfg(not(windows))]
-            let global_nav_next = false;
+                    || (GetAsyncKeyState(0x36) as u16 & 0x8000) != 0; // Touche 6
 
-            #[cfg(windows)]
-            let global_nav_prev = unsafe {
-                (GetAsyncKeyState(0x25) as u16 & 0x8000) != 0 // Flèche gauche
+                let left_up_4 = (GetAsyncKeyState(0x25) as u16 & 0x8000) != 0 // Flèche gauche
                     || (GetAsyncKeyState(0x26) as u16 & 0x8000) != 0 // Flèche haut
                     || (GetAsyncKeyState(0x64) as u16 & 0x8000) != 0 // Pavé numérique 4
-                    || (GetAsyncKeyState(0x34) as u16 & 0x8000) != 0 // Touche 4
+                    || (GetAsyncKeyState(0x34) as u16 & 0x8000) != 0; // Touche 4
+
+                let next = right_down_6 || (tab && !is_shift);
+                let prev = left_up_4 || (tab && is_shift);
+                (enter, space, next, prev)
             };
             #[cfg(not(windows))]
-            let global_nav_prev = false;
+            let (global_enter, global_space, global_nav_next, global_nav_prev) = (false, false, false, false);
 
+            let is_shift = ctx.input(|i| i.modifiers.shift);
             let egui_enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
             let egui_space = ctx.input(|i| i.key_pressed(egui::Key::Space));
+            let egui_tab = ctx.input(|i| i.key_pressed(egui::Key::Tab));
             let egui_nav_next = ctx.input(|i| {
                 i.key_pressed(egui::Key::ArrowRight)
                     || i.key_pressed(egui::Key::ArrowDown)
                     || i.key_pressed(egui::Key::Num6)
-            });
+            }) || (egui_tab && !is_shift);
             let egui_nav_prev = ctx.input(|i| {
                 i.key_pressed(egui::Key::ArrowLeft)
                     || i.key_pressed(egui::Key::ArrowUp)
                     || i.key_pressed(egui::Key::Num4)
-            });
+            }) || (egui_tab && is_shift);
 
             let switch_input_hit = (egui_enter || egui_space || global_enter || global_space)
                 && self.last_switch_input.elapsed() >= Duration::from_millis(300);
@@ -2208,10 +2211,12 @@ impl eframe::App for OverlayApp {
             let nav_prev_hit = (egui_nav_prev || global_nav_prev)
                 && self.last_switch_input.elapsed() >= Duration::from_millis(220);
 
-            if egui_enter || egui_space || egui_nav_next || egui_nav_prev {
+            if egui_enter || egui_space || egui_tab || egui_nav_next || egui_nav_prev {
                 ctx.input_mut(|i| {
                     i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
                     i.consume_key(egui::Modifiers::NONE, egui::Key::Space);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                    i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
                     i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight);
                     i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
                     i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft);
@@ -2228,8 +2233,7 @@ impl eframe::App for OverlayApp {
                     }
                     let num_windows = self.switch_windows.len();
                     if num_windows > 0 {
-                        let auto_tick = self.switch_last_tick.elapsed() >= Duration::from_millis(1500);
-                        let step_next = nav_next_hit || auto_tick;
+                        let step_next = nav_next_hit;
                         let step_prev = nav_prev_hit;
 
                         if step_next || step_prev {
@@ -2245,12 +2249,16 @@ impl eframe::App for OverlayApp {
                             self.switch_last_tick = Instant::now();
                             if nav_next_hit || nav_prev_hit {
                                 self.last_switch_input = Instant::now();
+                                self.switch_auto_scroll = false;
                             }
 
                             let cur_win = &self.switch_windows[self.switch_focus_index];
                             #[cfg(windows)]
                             unsafe {
-                                let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(
+                                let target_hwnd = windows::Win32::Foundation::HWND(cur_win.id as _);
+                                force_foreground_window(target_hwnd);
+                                restore_if_iconic(target_hwnd);
+                                windows::Win32::UI::WindowsAndMessaging::SetCursorPos(
                                     cur_win.click_x,
                                     cur_win.click_y,
                                 );
@@ -2269,6 +2277,11 @@ impl eframe::App for OverlayApp {
                                     .args(["mousemove", &cur_win.click_x.to_string(), &cur_win.click_y.to_string()])
                                     .status();
                             }
+                            #[cfg(windows)]
+                            {
+                                draw_screen_orange_border(cur_win.rect);
+                            }
+
                             // Le narrateur lit le nom de la fenêtre activement ciblée
                             let _ = self.tts_sender.send(TtsCommand::Stop);
                             let _ = self.tts_sender.send(TtsCommand::Speak(cur_win.title.clone()));
@@ -2277,6 +2290,7 @@ impl eframe::App for OverlayApp {
 
                         if switch_input_hit {
                             self.last_switch_input = Instant::now();
+                            self.switch_auto_scroll = false;
                             play_earcon(Earcon::Success);
 
                             let cur_win = &self.switch_windows[self.switch_focus_index % num_windows];
@@ -2315,8 +2329,7 @@ impl eframe::App for OverlayApp {
                 SwitchAccessStep::Zones => {
                     let num_zones = self.switch_zones.len();
                     if num_zones > 0 {
-                        let auto_tick = self.switch_last_tick.elapsed() >= Duration::from_millis(2200);
-                        let step_next = nav_next_hit || auto_tick;
+                        let step_next = nav_next_hit;
                         let step_prev = nav_prev_hit;
 
                         if step_next || step_prev {
@@ -2332,6 +2345,7 @@ impl eframe::App for OverlayApp {
                             self.switch_last_tick = Instant::now();
                             if nav_next_hit || nav_prev_hit {
                                 self.last_switch_input = Instant::now();
+                                self.switch_auto_scroll = false;
                             }
 
                             let cur_zone = &self.switch_zones[self.switch_focus_index];
@@ -2357,13 +2371,7 @@ impl eframe::App for OverlayApp {
                                     .status();
                             }
                             let vocal_label = if !cur_zone.title.trim().is_empty() {
-                                if !cur_zone.description.trim().is_empty() {
-                                    format!("{}, {}", cur_zone.title.trim(), cur_zone.description.trim())
-                                } else {
-                                    cur_zone.title.trim().to_string()
-                                }
-                            } else if !cur_zone.description.trim().is_empty() {
-                                cur_zone.description.trim().to_string()
+                                cur_zone.title.trim().to_string()
                             } else {
                                 format!("Zone {} sur {}", self.switch_focus_index + 1, num_zones)
                             };
@@ -2374,12 +2382,31 @@ impl eframe::App for OverlayApp {
 
                         if switch_input_hit {
                             self.last_switch_input = Instant::now();
+                            self.switch_auto_scroll = false;
                             play_earcon(Earcon::Success);
 
                             let cur_zone = &self.switch_zones[self.switch_focus_index % num_zones];
                             self.numbered_targets = cur_zone.targets.clone();
                             self.switch_step = SwitchAccessStep::Elements;
                             self.switch_focus_index = 0;
+
+                            if let Some(first_target) = self.numbered_targets.first() {
+                                #[cfg(windows)]
+                                unsafe {
+                                    let pt = windows::Win32::Foundation::POINT { x: first_target.click_x, y: first_target.click_y };
+                                    let target_child = windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt);
+                                    if !target_child.is_invalid() {
+                                        let root = windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+                                            target_child,
+                                            windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+                                        );
+                                        let top_hwnd = if !root.is_invalid() { root } else { target_child };
+                                        force_foreground_window(top_hwnd);
+                                    }
+                                    let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(first_target.click_x, first_target.click_y);
+                                }
+                            }
+
                             self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
 
                             let count = self.numbered_targets.len();
@@ -2393,9 +2420,7 @@ impl eframe::App for OverlayApp {
                 SwitchAccessStep::Elements => {
                     let num_targets = self.numbered_targets.len();
                     if num_targets > 0 {
-                        // Défilement automatique périodique avec déplacement physique de la souris
-                        let auto_tick = self.switch_last_tick.elapsed() >= Duration::from_millis(1300);
-                        let step_next = nav_next_hit || auto_tick;
+                        let step_next = nav_next_hit;
                         let step_prev = nav_prev_hit;
 
                         if step_next || step_prev {
@@ -2411,11 +2436,23 @@ impl eframe::App for OverlayApp {
                             self.switch_last_tick = Instant::now();
                             if nav_next_hit || nav_prev_hit {
                                 self.last_switch_input = Instant::now();
+                                self.switch_auto_scroll = false;
                             }
 
                             let cur_target = &self.numbered_targets[self.switch_focus_index];
                             #[cfg(windows)]
                             unsafe {
+                                let pt = windows::Win32::Foundation::POINT { x: cur_target.click_x, y: cur_target.click_y };
+                                let target_child = windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt);
+                                if !target_child.is_invalid() {
+                                    let root = windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+                                        target_child,
+                                        windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+                                    );
+                                    let top_hwnd = if !root.is_invalid() { root } else { target_child };
+                                    force_foreground_window(top_hwnd);
+                                }
+
                                 let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(
                                     cur_target.click_x,
                                     cur_target.click_y,
@@ -2457,20 +2494,33 @@ impl eframe::App for OverlayApp {
 
                         if switch_input_hit {
                             self.last_switch_input = Instant::now();
+                            self.switch_auto_scroll = false;
                             play_earcon(Earcon::Success);
 
                             let cur_target = &self.numbered_targets[self.switch_focus_index % num_targets];
                             let click_x = cur_target.click_x;
                             let click_y = cur_target.click_y;
+                            let target_name = cur_target.name.clone();
 
                             #[cfg(windows)]
                             unsafe {
+                                let pt = windows::Win32::Foundation::POINT { x: click_x, y: click_y };
+                                let target_child = windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt);
+                                if !target_child.is_invalid() {
+                                    let root = windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+                                        target_child,
+                                        windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+                                    );
+                                    let top_hwnd = if !root.is_invalid() { root } else { target_child };
+                                    force_foreground_window(top_hwnd);
+                                    restore_if_iconic(top_hwnd);
+                                }
                                 let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(click_x, click_y);
-                                std::thread::sleep(Duration::from_millis(25));
+                                std::thread::sleep(Duration::from_millis(50));
                                 windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
                                     windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0,
                                 );
-                                std::thread::sleep(Duration::from_millis(30));
+                                std::thread::sleep(Duration::from_millis(40));
                                 windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
                                     windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTUP, 0, 0, 0, 0,
                                 );
@@ -2490,15 +2540,20 @@ impl eframe::App for OverlayApp {
                                     .status();
                             }
 
+                            let vocal_feedback = if !target_name.trim().is_empty() {
+                                format!("Validé : {}", target_name.trim())
+                            } else {
+                                "Contrôle validé.".to_string()
+                            };
+                            let _ = self.tts_sender.send(TtsCommand::Stop);
+                            let _ = self.tts_sender.send(TtsCommand::Speak(vocal_feedback));
                             self.switch_last_tick = Instant::now() + Duration::from_millis(300);
-                            self.numbered_targets.clear();
                             ctx.request_repaint();
                         }
                     } else if let Some(last_entry) = self.chat_history.last() {
                         let sug_count = last_entry.quick_suggestions.len();
                         if sug_count > 0 {
-                            let auto_tick = self.switch_last_tick.elapsed() >= Duration::from_millis(1500);
-                            let step_next = nav_next_hit || auto_tick;
+                            let step_next = nav_next_hit;
                             let step_prev = nav_prev_hit;
 
                             if step_next || step_prev {
@@ -2514,6 +2569,7 @@ impl eframe::App for OverlayApp {
                                 self.switch_last_tick = Instant::now();
                                 if nav_next_hit || nav_prev_hit {
                                     self.last_switch_input = Instant::now();
+                                    self.switch_auto_scroll = false;
                                 }
                                 if let Some(text) = last_entry.quick_suggestions[self.switch_focus_index % sug_count].to_display_string() {
                                     let _ = self.tts_sender.send(TtsCommand::Stop);
@@ -2524,6 +2580,7 @@ impl eframe::App for OverlayApp {
 
                             if switch_input_hit {
                                 self.last_switch_input = Instant::now();
+                                self.switch_auto_scroll = false;
                                 play_earcon(Earcon::Success);
                                 let idx = self.switch_focus_index % sug_count;
                                 if let Some(text) = last_entry.quick_suggestions[idx].to_display_string() {
@@ -2793,7 +2850,7 @@ impl eframe::App for OverlayApp {
                                     let badge_color = if self.dictation_mode {
                                         egui::Color32::from_rgb(255, 205, 70)
                                     } else if self.switch_access_mode {
-                                        egui::Color32::from_rgb(0, 255, 200)
+                                        egui::Color32::from_rgb(255, 140, 0)
                                     } else if self.status == AgentStatus::Listening {
                                         egui::Color32::from_rgb(255, 80, 80)
                                     } else {
@@ -3192,7 +3249,7 @@ impl eframe::App for OverlayApp {
 
                                         let switch_text = if self.switch_access_mode {
                                             egui::RichText::new("🎯 Survol ON")
-                                                .color(egui::Color32::from_rgb(0, 255, 200))
+                                                .color(egui::Color32::from_rgb(255, 140, 0))
                                                 .strong()
                                         } else {
                                             egui::RichText::new("🎯 Survol")
@@ -3739,24 +3796,33 @@ impl eframe::App for OverlayApp {
                         egui::pos2(cur_zone.rect[0] as f32 / ppp, cur_zone.rect[1] as f32 / ppp),
                         egui::pos2(cur_zone.rect[2] as f32 / ppp, cur_zone.rect[3] as f32 / ppp),
                     );
-                    let pulse = ((time * 4.0).sin().abs() as f32) * 0.3 + 0.7;
                     painter.rect_stroke(
                         z_rect.expand(6.0),
                         egui::CornerRadius::same(8),
-                        egui::Stroke::new(2.5, egui::Color32::from_rgba_unmultiplied(0, (220.0 * pulse) as u8, 255, 230)),
+                            egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 200, 255)),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+
+                // Cadre net délimitant le contrôle ciblé en mode Switch Access
+                if self.switch_access_mode && self.switch_step == SwitchAccessStep::Elements && !self.numbered_targets.is_empty() {
+                    let cur_target = &self.numbered_targets[self.switch_focus_index % self.numbered_targets.len()];
+                    let ppp = ctx.pixels_per_point().max(0.5);
+                    let t_rect = egui::Rect::from_min_max(
+                        egui::pos2(cur_target.rect[0] as f32 / ppp, cur_target.rect[1] as f32 / ppp),
+                        egui::pos2(cur_target.rect[2] as f32 / ppp, cur_target.rect[3] as f32 / ppp),
+                    );
+                    painter.rect_stroke(
+                        t_rect.expand(3.0),
+                        egui::CornerRadius::same(6),
+                        egui::Stroke::new(2.5, egui::Color32::from_rgb(255, 140, 0)),
                         egui::StrokeKind::Outside,
                     );
                 }
 
                 // Indicateur visuel du mode Switch Access
                 if self.switch_access_mode {
-                    let pulse = ((time * 4.0).sin().abs() as f32) * 0.4 + 0.6;
-                    let stroke_color = egui::Color32::from_rgba_unmultiplied(
-                        (0.0 * pulse) as u8,
-                        (255.0 * pulse) as u8,
-                        (200.0 * pulse) as u8,
-                        255,
-                    );
+                        let stroke_color = egui::Color32::from_rgb(255, 140, 0);
                     painter.rect_stroke(
                         control_rect.expand(2.0),
                         egui::CornerRadius::same(12),
@@ -5343,6 +5409,52 @@ async fn call_llm_prompt(
     }
 }
 
+pub fn build_fallback_navigation_zones(window_title: &str, targets: &[NumberedElementTarget]) -> Vec<NavigationZone> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let mut top_targets = Vec::new();
+    let mut main_targets = Vec::new();
+    for t in targets {
+        if t.rect[1] < 65 {
+            top_targets.push(t.clone());
+        } else {
+            main_targets.push(t.clone());
+        }
+    }
+
+    let mut fallback_zones = Vec::new();
+    if !top_targets.is_empty() {
+        let min_x = top_targets.iter().map(|t| t.rect[0]).min().unwrap_or(0);
+        let min_y = top_targets.iter().map(|t| t.rect[1]).min().unwrap_or(0);
+        let max_x = top_targets.iter().map(|t| t.rect[2]).max().unwrap_or(0);
+        let max_y = top_targets.iter().map(|t| t.rect[3]).max().unwrap_or(0);
+        fallback_zones.push(NavigationZone {
+            title: "Barre supérieure et commandes".to_string(),
+            description: format!("Boutons d'en-tête de {}", window_title),
+            click_x: min_x + (max_x - min_x) / 2,
+            click_y: min_y + (max_y - min_y) / 2,
+            rect: [min_x, min_y, max_x, max_y],
+            targets: top_targets,
+        });
+    }
+    if !main_targets.is_empty() {
+        let min_x = main_targets.iter().map(|t| t.rect[0]).min().unwrap_or(0);
+        let min_y = main_targets.iter().map(|t| t.rect[1]).min().unwrap_or(0);
+        let max_x = main_targets.iter().map(|t| t.rect[2]).max().unwrap_or(0);
+        let max_y = main_targets.iter().map(|t| t.rect[3]).max().unwrap_or(0);
+        fallback_zones.push(NavigationZone {
+            title: "Corps et zone principale".to_string(),
+            description: format!("Contrôles et champs de {}", window_title),
+            click_x: min_x + (max_x - min_x) / 2,
+            click_y: min_y + (max_y - min_y) / 2,
+            rect: [min_x, min_y, max_x, max_y],
+            targets: main_targets,
+        });
+    }
+    fallback_zones
+}
+
 async fn analyze_navigation_zones_with_llm(
     client: &reqwest::Client,
     config: &LlmConfig,
@@ -5445,47 +5557,7 @@ Réponds STRICTEMENT en JSON :
         }
     }
 
-    // Repli géométrique robuste si pas de réseau ou absence de clé LLM
-    let mut top_targets = Vec::new();
-    let mut main_targets = Vec::new();
-    for t in targets {
-        if t.rect[1] < 55 {
-            top_targets.push(t.clone());
-        } else {
-            main_targets.push(t.clone());
-        }
-    }
-
-    let mut fallback_zones = Vec::new();
-    if !top_targets.is_empty() {
-        let min_x = top_targets.iter().map(|t| t.rect[0]).min().unwrap_or(0);
-        let min_y = top_targets.iter().map(|t| t.rect[1]).min().unwrap_or(0);
-        let max_x = top_targets.iter().map(|t| t.rect[2]).max().unwrap_or(0);
-        let max_y = top_targets.iter().map(|t| t.rect[3]).max().unwrap_or(0);
-        fallback_zones.push(NavigationZone {
-            title: "Barre supérieure et commandes".to_string(),
-            description: "Boutons de fenêtre et en-tête".to_string(),
-            click_x: min_x + (max_x - min_x) / 2,
-            click_y: min_y + (max_y - min_y) / 2,
-            rect: [min_x, min_y, max_x, max_y],
-            targets: top_targets,
-        });
-    }
-    if !main_targets.is_empty() {
-        let min_x = main_targets.iter().map(|t| t.rect[0]).min().unwrap_or(0);
-        let min_y = main_targets.iter().map(|t| t.rect[1]).min().unwrap_or(0);
-        let max_x = main_targets.iter().map(|t| t.rect[2]).max().unwrap_or(0);
-        let max_y = main_targets.iter().map(|t| t.rect[3]).max().unwrap_or(0);
-        fallback_zones.push(NavigationZone {
-            title: "Corps et zone principale".to_string(),
-            description: "Contenu interactif et champs".to_string(),
-            click_x: min_x + (max_x - min_x) / 2,
-            click_y: min_y + (max_y - min_y) / 2,
-            rect: [min_x, min_y, max_x, max_y],
-            targets: main_targets,
-        });
-    }
-    fallback_zones
+    build_fallback_navigation_zones(window_title, targets)
 }
 
 fn main() -> eframe::Result<()> {

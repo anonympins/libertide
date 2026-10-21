@@ -27,6 +27,7 @@ use windows::Win32::UI::Accessibility::{
     UIA_SliderControlTypeId, UIA_SpinnerControlTypeId, UIA_TabControlTypeId,
     UIA_TabItemControlTypeId, UIA_TextPatternId, UIA_TogglePatternId,
     UIA_ToolBarControlTypeId, UIA_TreeItemControlTypeId, UIA_ValuePatternId,
+    UIA_GroupControlTypeId, UIA_SeparatorControlTypeId,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -37,7 +38,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 #[cfg(not(windows))]
 pub use crate::automation::{AsWindowTarget, NumberedElementTarget, VIRTUAL_KEY};
 #[cfg(windows)]
-use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetClassNameW, SetCursorPos};
+use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetClassNameW, GetWindowRect, SetCursorPos};
 
 pub use crate::automation::{
     ActionHistoryManager, UndoOperation, ACTION_HISTORY,
@@ -394,9 +395,109 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     {
                         continue;
                     }
+
                     let raw_name = item.CurrentName().map(|b| b.to_string()).unwrap_or_default();
                     let mut name = raw_name.trim().to_string();
                     let automation_id = item.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default();
+                    let auto_id_lower = automation_id.to_lowercase();
+                    let help_text = item.CurrentHelpText().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
+                    let item_type = item.CurrentItemType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+                    let item_status_raw = item.CurrentItemStatus().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
+                    let item_status = item_status_raw.to_lowercase();
+
+                    let primary_class = class_name.split_whitespace().next().unwrap_or("").to_string();
+
+                    let (aria_role, aria_properties) = if let Ok(e2) = item.cast::<IUIAutomationElement2>() {
+                        let r = e2.CurrentAriaRole().ok().map(|b| b.to_string()).unwrap_or_default();
+                        let p = e2.CurrentAriaProperties().ok().map(|b| b.to_string()).unwrap_or_default();
+                        (r, p)
+                    } else {
+                        (String::new(), String::new())
+                    };
+
+                    let (data_attrs, json_metadata) = parse_data_attributes_and_json(&aria_properties, &item_status_raw, &help_text);
+                    let (aria_label_opt, aria_desc_opt, indications_vec) = extract_aria_details(&aria_properties);
+                    let aria_label = aria_label_opt.unwrap_or_default();
+                    let aria_description = aria_desc_opt.unwrap_or_default();
+                    let mut aria_indications = indications_vec.join(", ");
+
+                    // Exclusion stricte des séparateurs de menu / barres d'outils
+                    let is_separator = ctype == UIA_SeparatorControlTypeId
+                        || loc_type.contains("séparateur")
+                        || loc_type.contains("separator")
+                        || class_name.contains("separator")
+                        || auto_id_lower.contains("separator")
+                        || name.eq_ignore_ascii_case("séparateur")
+                        || name.eq_ignore_ascii_case("separateur")
+                        || name.eq_ignore_ascii_case("separator");
+
+                    if is_separator {
+                        continue;
+                    }
+
+                    // Exclusion des conteneurs de groupement statiques ("Groupe")
+                    let is_group = (ctype == UIA_GroupControlTypeId
+                        || loc_type == "groupe"
+                        || loc_type == "group"
+                        || class_name.contains("groupbox")
+                        || auto_id_lower.contains("groupbox")
+                        || name.eq_ignore_ascii_case("groupe")
+                        || name.eq_ignore_ascii_case("group"))
+                        && ctype != UIA_ButtonControlTypeId
+                        && ctype != UIA_MenuItemControlTypeId
+                        && ctype != UIA_HyperlinkControlTypeId;
+
+                    if is_group {
+                        continue;
+                    }
+
+                    let is_sys_name = name.eq_ignore_ascii_case("système") || name.eq_ignore_ascii_case("system");
+
+                    // Résolution sémantique et explicite des boutons système (Close, Maximize, Minimize, Restore, SystemMenu)
+                    if is_sys_name
+                        || auto_id_lower.contains("close")
+                        || auto_id_lower.contains("maximize")
+                        || auto_id_lower.contains("minimize")
+                        || auto_id_lower.contains("restore")
+                        || auto_id_lower.contains("systemmenu")
+                    {
+                        if auto_id_lower.contains("close") || class_name.contains("close") {
+                            name = "Fermer la fenêtre (✕)".to_string();
+                        } else if auto_id_lower.contains("maximize") || class_name.contains("maximize") {
+                            name = "Agrandir la fenêtre (□)".to_string();
+                        } else if auto_id_lower.contains("restore") || class_name.contains("restore") {
+                            name = "Restaurer la fenêtre (⧉)".to_string();
+                        } else if auto_id_lower.contains("minimize") || class_name.contains("minimize") {
+                            name = "Réduire la fenêtre (—)".to_string();
+                        } else if auto_id_lower.contains("systemmenu") || auto_id_lower == "systemmenubar" || class_name.contains("systemmenu") {
+                            name = "Menu Système de la fenêtre".to_string();
+                        } else if is_sys_name {
+                            if !help_text.is_empty() {
+                                name = help_text.clone();
+                            } else if !aria_label.is_empty() {
+                                name = aria_label.clone();
+                            } else {
+                                let mut win_r = RECT::default();
+                                if unsafe { GetWindowRect(hwnd, &mut win_r).is_ok() } {
+                                    let dist_from_right = (win_r.right - rect.right).max(0);
+                                    let dist_from_left = (rect.left - win_r.left).max(0);
+                                    if rect.top <= win_r.top + 70 {
+                                        if dist_from_right < 60 {
+                                            name = "Fermer la fenêtre (✕)".to_string();
+                                        } else if dist_from_right < 115 {
+                                            name = "Agrandir / Restaurer (□)".to_string();
+                                        } else if dist_from_right < 170 {
+                                            name = "Réduire la fenêtre (—)".to_string();
+                                        } else if dist_from_left < 70 {
+                                            name = "Menu Système (icône)".to_string();
+                                        } else {
+                                            name = format!("Contrôle fenêtre ({})", if !loc_type.is_empty() { &loc_type } else { "Système" });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     let is_devtools = class_name.contains("devtools")
                         || automation_id.to_lowercase().contains("devtools")
@@ -451,26 +552,6 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         continue;
                     }
                     let is_edit_type = ctype == UIA_EditControlTypeId || ctype == UIA_DocumentControlTypeId;
-                    let help_text = item.CurrentHelpText().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
-                    let item_type = item.CurrentItemType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
-                    let item_status_raw = item.CurrentItemStatus().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
-                    let item_status = item_status_raw.to_lowercase();
-
-                    let primary_class = class_name.split_whitespace().next().unwrap_or("").to_string();
-
-                    let (aria_role, aria_properties) = if let Ok(e2) = item.cast::<IUIAutomationElement2>() {
-                        let r = e2.CurrentAriaRole().ok().map(|b| b.to_string()).unwrap_or_default();
-                        let p = e2.CurrentAriaProperties().ok().map(|b| b.to_string()).unwrap_or_default();
-                        (r, p)
-                    } else {
-                        (String::new(), String::new())
-                    };
-
-                    let (data_attrs, json_metadata) = parse_data_attributes_and_json(&aria_properties, &item_status_raw, &help_text);
-                    let (aria_label_opt, aria_desc_opt, indications_vec) = extract_aria_details(&aria_properties);
-                    let aria_label = aria_label_opt.unwrap_or_default();
-                    let aria_description = aria_desc_opt.unwrap_or_default();
-                    let mut aria_indications = indications_vec.join(", ");
 
                     let is_root_web_area = class_name.contains("rootwebarea")
                         || loc_type.contains("rootwebarea")
@@ -614,6 +695,7 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || name == "⨯"
                         || name == "x"
                         || name == "X"
+                        || name.contains("Fermer")
                         || class_name.contains("close")
                         || class_name.contains("dismiss")
                         || class_name.contains("cross")
@@ -731,7 +813,12 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let has_toggle = item.GetCurrentPattern(UIA_TogglePatternId).is_ok();
                     let has_sel_item = item.GetCurrentPattern(UIA_SelectionItemPatternId).is_ok();
                     let has_expand = item.GetCurrentPattern(UIA_ExpandCollapsePatternId).is_ok();
-                    let has_legacy = item.GetCurrentPattern(UIA_LegacyIAccessiblePatternId).is_ok();
+                    let has_legacy = item.GetCurrentPattern(UIA_LegacyIAccessiblePatternId)
+                        .ok()
+                        .and_then(|p| p.cast::<IUIAutomationLegacyIAccessiblePattern>().ok())
+                        .and_then(|l| l.CurrentDefaultAction().ok())
+                        .map(|b| !b.to_string().trim().is_empty())
+                        .unwrap_or(false);
                     let has_action_pattern = pattern.is_some() || has_toggle || has_sel_item || has_expand || has_legacy;
                     let area = (width as i64) * (height as i64);
                     let index = results.len() + 1;
