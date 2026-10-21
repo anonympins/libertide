@@ -93,6 +93,10 @@ pub struct NumberedElementTarget {
     pub click_y: i32,
     pub rect: [i32; 4],
     pub name: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub shortcut: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -234,11 +238,11 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
         .enumerate()
         .map(|(i, e)| {
             let display_name = if !e.name.is_empty() {
-                e.name
+                e.name.clone()
             } else if !e.aria_label.is_empty() {
-                e.aria_label
+                e.aria_label.clone()
             } else if !e.localized_type.is_empty() && !e.localized_type.eq_ignore_ascii_case("groupe") && !e.localized_type.eq_ignore_ascii_case("group") && !e.localized_type.eq_ignore_ascii_case("séparateur") {
-                e.localized_type
+                e.localized_type.clone()
             } else if e.is_button {
                 "Bouton".to_string()
             } else if e.is_link {
@@ -250,8 +254,52 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
             } else {
                 format!("Élément {}", i + 1)
             };
+
+            let role = if e.is_button {
+                "bouton".to_string()
+            } else if e.is_link {
+                "lien".to_string()
+            } else if e.is_tab {
+                "onglet".to_string()
+            } else if e.is_explicit_textarea {
+                "zone de texte".to_string()
+            } else if e.is_input {
+                "champ de saisie".to_string()
+            } else if e.is_select {
+                "liste déroulante".to_string()
+            } else if e.is_slider {
+                "curseur".to_string()
+            } else if e.is_toggle {
+                "case à cocher".to_string()
+            } else if e.is_media {
+                "lecteur multimédia".to_string()
+            } else if !e.localized_type.is_empty() {
+                e.localized_type.clone()
+            } else {
+                "contrôle".to_string()
+            };
+
+            let mut shortcut = String::new();
+            unsafe {
+                if let Ok(acc) = e.element.CurrentAcceleratorKey() {
+                    let s = acc.to_string();
+                    if !s.trim().is_empty() {
+                        shortcut = s.trim().to_string();
+                    }
+                }
+            }
+            if shortcut.is_empty() {
+                if let Some(pos) = e.aria_indications.find("raccourci: ") {
+                    let rest = &e.aria_indications[pos + 11..];
+                    let end = rest.find(',').unwrap_or(rest.len());
+                    shortcut = rest[..end].trim().to_string();
+                }
+            }
+
             NumberedElementTarget {
                 index: i + 1,
+                role,
+                shortcut,
                 click_x: e.click_x,
                 click_y: e.click_y,
                 rect: [e.rect.left, e.rect.top, e.rect.right, e.rect.bottom],
@@ -385,6 +433,8 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
             } else {
                 format!("[{}]", e.role.strip_prefix("AX").unwrap_or(&e.role))
             },
+            role: e.role.strip_prefix("AX").unwrap_or(&e.role).to_lowercase(),
+            shortcut: String::new(),
         })
         .collect()
 }
@@ -490,6 +540,8 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
             } else {
                 format!("[{}]", e.role)
             },
+            role: e.role.clone(),
+            shortcut: String::new(),
         })
         .collect()
 }
@@ -535,6 +587,93 @@ pub struct VIRTUAL_KEY(pub u16);
 pub fn is_wayland_session() -> bool {
     std::env::var("WAYLAND_DISPLAY").map(|v| !v.trim().is_empty()).unwrap_or(false)
         || std::env::var("XDG_SESSION_TYPE").map(|v| v.trim().eq_ignore_ascii_case("wayland")).unwrap_or(false)
+}
+
+pub fn format_plural_control_type(targets: &[NumberedElementTarget]) -> String {
+    let count = targets.len();
+    if count == 0 {
+        return "contrôles".to_string();
+    }
+    let btn_count = targets.iter().filter(|t| t.role == "bouton").count();
+    let link_count = targets.iter().filter(|t| t.role == "lien").count();
+    let tab_count = targets.iter().filter(|t| t.role == "onglet").count();
+    let input_count = targets.iter().filter(|t| t.role == "champ de saisie" || t.role == "zone de texte").count();
+
+    if btn_count * 2 >= count {
+        format!("{count} bouton{}", if count > 1 { "s" } else { "" })
+    } else if link_count * 2 >= count {
+        format!("{count} lien{}", if count > 1 { "s" } else { "" })
+    } else if tab_count * 2 >= count {
+        format!("{count} onglet{}", if count > 1 { "s" } else { "" })
+    } else if input_count * 2 >= count {
+        format!("{count} champ{}", if count > 1 { "s" } else { "" })
+    } else {
+        format!("{count} élément{}", if count > 1 { "s" } else { "" })
+    }
+}
+
+pub fn build_targeted_hover_speech(
+    macro_zone_title: Option<&str>,
+    zone_targets: &[NumberedElementTarget],
+    index_in_zone: Option<usize>,
+    target_name: &str,
+    target_role: &str,
+    target_shortcut: &str,
+    is_same_zone_as_last: bool,
+) -> String {
+    let clean_name = target_name.trim();
+    let clean_role = target_role.trim().to_lowercase();
+    let clean_shortcut = target_shortcut.trim();
+
+    let mut micro_desc = if !clean_name.is_empty() {
+        format!("Survol : {clean_name}")
+    } else if !clean_role.is_empty() {
+        format!("Survol : {clean_role}")
+    } else {
+        "Survol : élément".to_string()
+    };
+
+    let name_lower = clean_name.to_lowercase();
+    let role_needed = !clean_role.is_empty()
+        && !name_lower.contains(&clean_role)
+        && clean_role != "contrôle"
+        && clean_role != "élément";
+
+    if role_needed {
+        micro_desc.push_str(&format!(", {clean_role}"));
+    }
+
+    if !clean_shortcut.is_empty() {
+        if role_needed {
+            micro_desc.push_str(&format!(" raccourci {clean_shortcut}"));
+        } else {
+            micro_desc.push_str(&format!(", raccourci {clean_shortcut}"));
+        }
+    }
+
+    let position_str = match (index_in_zone, zone_targets.len()) {
+        (Some(idx), total) if total > 1 => Some(format!("{idx} sur {total}")),
+        _ => None,
+    };
+
+    if is_same_zone_as_last {
+        if let Some(pos) = position_str {
+            format!("{pos}. {micro_desc}.")
+        } else {
+            format!("{micro_desc}.")
+        }
+    } else if let Some(zone) = macro_zone_title.filter(|z| !z.trim().is_empty()) {
+        let plural_type = format_plural_control_type(zone_targets);
+        if let Some(pos) = position_str {
+            format!("{zone}, {plural_type} ({pos}). {micro_desc}.")
+        } else {
+            format!("{zone}, {plural_type}. {micro_desc}.")
+        }
+    } else if let Some(pos) = position_str {
+        format!("{micro_desc} ({pos}).")
+    } else {
+        format!("{micro_desc}.")
+    }
 }
 
 #[cfg(not(windows))]
