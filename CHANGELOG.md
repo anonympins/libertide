@@ -6,6 +6,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.4] - 2026-10-22
+
+### 🎯 Hover Mode & Hierarchical Switch Access
+- **Pointer Detection & Anti-Jitter Debounce (200 ms)**:
+  - Automatic physical pointer stillness detection to trigger vocal narration without auditory overload during rapid movements.
+  - 180 ms announcement queue window with seamless preemption (`hover_speech_deadline`).
+- **Adaptive Speech Hierarchy (`build_targeted_hover_speech`)**:
+  - Detailed control announcement: accessible label, semantic role, associated keyboard shortcut, and relative position (*e.g., "1 of 4"*).
+  - Context deduplication: suppresses redundant parent macro-zone names when hovering within the same interaction block.
+- **AI-Assisted Semantic Zoning (`analyze_navigation_zones_with_llm`)**:
+  - Automatic decomposition of complex windows into 2 to 4 logical macro-zones for streamlined navigation.
+  - Contextual rewrites of cryptic, truncated, or symbolic labels (*"✕"* ➔ *"Close window"*, *"⚙"* ➔ *"Settings"*) tailored for screen readers and low-vision users.
+- **3-Step Hierarchical Navigation (`SwitchAccessStep`)**:
+  - Cascading navigation flow: Window selection ➔ Zone/block selection ➔ Individual control interaction.
+  - Dynamic discovery of popped menus, context menus, and dropdown controls post-interaction (`new_popped_targets`).
+- **High-Visibility Visual Feedback**:
+  - Bold high-visibility orange borders around target windows and active controls (`draw_screen_orange_border`).
+  - Pulsing cyan halo outlining active macro-zones.
+- **Multimodal Control & Universal Shortcuts**:
+  - Voice control activation and deactivation (*"hover mode"*, *"switch access"*, *"switch mode"*, *"mode survol"*).
+  - Full hardware switch and keyboard support (`Space`, `Enter`, `Tab`, arrow keys, numpad `4`/`6`).
+  - Contextual `Escape` key for smooth step-by-step upward traversal through the navigation hierarchy.
+  - Interactive `🎯 Survol` HUD toggle button with real-time target status badge.
+
+---
+
 ## [0.5.3] - 2026-10-21
 
 ### 🚀 Cross-Platform Automation Parity
