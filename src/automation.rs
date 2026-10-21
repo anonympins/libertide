@@ -13,6 +13,8 @@ use crate::pattern::{clean_words, extract_target_propositions, matches_pattern};
 use crate::types::{AgentAction, QuickSuggestionItem};
 use crate::window_util::*;
 
+use crate::ui::*;
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 #[cfg(windows)]
@@ -68,7 +70,23 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 #[derive(Clone, Default)]
 pub struct UiaElementInfo;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwitchAccessStep {
+    Windows,
+    Zones,
+    Elements,
+}
+
 #[derive(Clone, Debug)]
+pub struct SwitchWindowTarget {
+    pub id: isize,
+    pub title: String,
+    pub click_x: i32,
+    pub click_y: i32,
+    pub rect: [i32; 4],
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NumberedElementTarget {
     pub index: usize,
     pub click_x: i32,
@@ -77,26 +95,160 @@ pub struct NumberedElementTarget {
     pub name: String,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct NavigationZone {
+    pub title: String,
+    pub description: String,
+    pub click_x: i32,
+    pub click_y: i32,
+    pub rect: [i32; 4],
+    pub targets: Vec<NumberedElementTarget>,
+}
+
+#[cfg(windows)]
+pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
+    let user_windows = list_user_windows();
+    let overlay_hwnd = unsafe {
+        FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()))
+    };
+    let current_pid = std::process::id();
+
+    let mut candidates = Vec::new();
+
+    for (hwnd, title) in user_windows {
+        if hwnd.0.is_null() || hwnd == overlay_hwnd {
+            continue;
+        }
+        let (pid, exe_name) = get_window_process_info(hwnd);
+        if pid == current_pid || is_window_hung(hwnd) {
+            continue;
+        }
+
+        unsafe {
+            if IsIconic(hwnd).as_bool() {
+                continue;
+            }
+        }
+
+        let t_clean = title.trim();
+        let t_lower = t_clean.to_lowercase();
+        let exe_lower = exe_name.to_lowercase();
+
+        // Filtrage drastique des fenêtres parasites et widgets
+        let is_parasite = t_clean.is_empty()
+            || t_lower == "program manager"
+            || t_lower.contains("volet")
+            || t_lower.contains("widget")
+            || t_lower.contains("windows input experience")
+            || t_lower.contains("shellexperiencehost")
+            || t_lower.contains("taskbar")
+            || t_lower.contains("barre des tâches")
+            || (t_lower == "paramètres" && exe_lower.contains("applicationframehost") && t_clean.len() <= 2)
+            || exe_lower.contains("widget")
+            || exe_lower.contains("searchapp")
+            || exe_lower.contains("startmenuexperiencehost");
+
+        if is_parasite {
+            continue;
+        }
+
+        let mut r = RECT::default();
+        let rect_ok = unsafe { GetWindowRect(hwnd, &mut r).is_ok() };
+        if !rect_ok {
+            continue;
+        }
+        let width = r.right - r.left;
+        let height = r.bottom - r.top;
+        if width < 120 || height < 80 {
+            continue;
+        }
+
+        let click_x = r.left + (width / 2);
+        let click_y = (r.top + 30).min(r.bottom - 10);
+
+        candidates.push(SwitchWindowTarget {
+            id: hwnd.0 as isize,
+            title: t_clean.to_string(),
+            click_x,
+            click_y,
+            rect: [r.left, r.top, r.right, r.bottom],
+        });
+    }
+
+    candidates
+}
+
+#[cfg(not(windows))]
+pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
+    let user_windows = list_user_windows();
+    user_windows
+        .into_iter()
+        .enumerate()
+        .map(|(i, (id, title))| {
+            let hash = id.as_bytes().iter().fold(0isize, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as isize));
+            SwitchWindowTarget {
+                id: hash.abs().max(1),
+                title,
+                click_x: 200 + (i as i32 * 50) % 500,
+                click_y: 150 + (i as i32 * 40) % 400,
+                rect: [100, 100, 800, 600],
+            }
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTarget> {
+    if hwnd.0.is_null() || is_window_hung(hwnd) {
+        return Vec::new();
+    }
+    let elements = list_interactive_elements(hwnd);
+    elements
+        .into_iter()
+        .filter(|e| !e.is_offscreen && (e.is_button || e.is_link || e.is_tab || e.is_edit_or_textarea || e.is_tabindex || e.is_media || e.is_slider || e.is_toggle || e.is_option || e.has_action_pattern))
+        .take(50)
+        .enumerate()
+        .map(|(i, e)| {
+            let display_name = if !e.name.is_empty() {
+                e.name
+            } else if !e.aria_label.is_empty() {
+                e.aria_label
+            } else if !e.localized_type.is_empty() {
+                e.localized_type
+            } else if e.is_button {
+                "Bouton".to_string()
+            } else if e.is_link {
+                "Lien".to_string()
+            } else if e.is_edit_or_textarea {
+                "Champ de saisie".to_string()
+            } else if e.is_tab {
+                "Onglet".to_string()
+            } else {
+                format!("Élément {}", i + 1)
+            };
+            NumberedElementTarget {
+                index: i + 1,
+                click_x: e.click_x,
+                click_y: e.click_y,
+                rect: [e.rect.left, e.rect.top, e.rect.right, e.rect.bottom],
+                name: display_name,
+            }
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+pub fn collect_numbered_targets_for_window(_target: impl AsWindowTarget) -> Vec<NumberedElementTarget> {
+    collect_numbered_targets_for_active_window()
+}
+
 #[cfg(windows)]
 pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget> {
     let user_windows = list_user_windows();
     let Some(active_hwnd) = get_active_or_best_window(&user_windows) else {
         return Vec::new();
     };
-    let elements = list_interactive_elements(active_hwnd);
-    elements
-        .into_iter()
-        .filter(|e| !e.is_offscreen && (e.is_button || e.is_link || e.is_tab || e.is_edit_or_textarea || e.is_tabindex || e.is_media || e.is_slider || e.is_toggle || e.is_option || e.has_action_pattern))
-        .take(30)
-        .enumerate()
-        .map(|(i, e)| NumberedElementTarget {
-            index: i + 1,
-            click_x: e.click_x,
-            click_y: e.click_y,
-            rect: [e.rect.left, e.rect.top, e.rect.right, e.rect.bottom],
-            name: e.name,
-        })
-        .collect()
+    collect_numbered_targets_for_window(active_hwnd)
 }
 
 #[cfg(target_os = "macos")]
@@ -355,6 +507,12 @@ impl AsWindowTarget for () {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct VIRTUAL_KEY(pub u16);
 
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn is_wayland_session() -> bool {
+    std::env::var("WAYLAND_DISPLAY").map(|v| !v.trim().is_empty()).unwrap_or(false)
+        || std::env::var("XDG_SESSION_TYPE").map(|v| v.trim().eq_ignore_ascii_case("wayland")).unwrap_or(false)
+}
+
 #[cfg(not(windows))]
 pub fn force_foreground_window(target: impl AsWindowTarget) -> bool {
     let t = target.to_window_target();
@@ -403,18 +561,9 @@ pub fn focus_browser_address_bar(target: impl AsWindowTarget) {
         force_foreground_window(&t);
         std::thread::sleep(Duration::from_millis(50));
     }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", "tell application \"System Events\" to keystroke \"l\" using command down"])
-            .status();
-    }
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    {
-        let _ = std::process::Command::new("xdotool")
-            .args(["key", "--clearmodifiers", "ctrl+l"])
-            .status();
-    }
+    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+    const VK_L: VIRTUAL_KEY = VIRTUAL_KEY(0x4C);
+    send_hotkey(&[VK_CONTROL], VK_L);
 }
 
 #[cfg(windows)]
@@ -517,7 +666,38 @@ pub fn update_last_external_focus() {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn update_last_external_focus() {
+    const SCRIPT: &str = r#"tell application "System Events"
+        try
+            set frontApp to first application process whose frontmost is true
+            set focusedElem to value of attribute "AXFocusedUIElement" of frontApp
+            if focusedElem is not missing value then
+                set p to position of focusedElem
+                set s to size of focusedElem
+                return (item 1 of p as text) & "," & (item 2 of p as text) & "," & ((item 1 of p) + (item 1 of s) as text) & "," & ((item 2 of p) + (item 2 of s) as text)
+            end if
+        end try
+    end tell"#;
+
+    if let Ok(output) = std::process::Command::new("osascript").args(["-e", SCRIPT]).output() {
+        let out_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let parts: Vec<i32> = out_str.split(',').filter_map(|s| s.parse().ok()).collect();
+        if parts.len() == 4 {
+            if let Ok(mut rlock) = LAST_FOCUSED_RECT.lock() {
+                *rlock = Some([parts[0], parts[1], parts[2], parts[3]]);
+            }
+        }
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn update_last_external_focus() {
+    // Intégration via AT-SPI pour récupérer le composant ayant State.FOCUSED
+    // et mettre à jour LAST_FOCUSED_RECT avec bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn update_last_external_focus() {}
 
 #[cfg(windows)]
@@ -668,11 +848,9 @@ mod clipboard {
     use std::io::Write;
     use super::html_to_advanced_markdown;
 
-    pub fn set_text(text: &str) -> bool {
-        let html_payload = super::convert_markdown_and_links_to_html(text);
-        let has_links = text.contains("[link") || text.contains("](");
-        let mut child = match std::process::Command::new("xclip")
-            .args(["-selection", "clipboard", "-t", "text/plain;charset=utf-8"])
+    fn copy_via_wl(text: &str, mime: &str) -> bool {
+        let mut child = match std::process::Command::new("wl-copy")
+            .args(["-t", mime])
             .stdin(std::process::Stdio::piped())
             .spawn()
         {
@@ -682,30 +860,82 @@ mod clipboard {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(text.as_bytes());
         }
-        let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+        child.wait().map(|s| s.success()).unwrap_or(false)
+    }
+
+    fn copy_via_xclip(text: &str, mime: &str) -> bool {
+        let mut child = match std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", mime])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        child.wait().map(|s| s.success()).unwrap_or(false)
+    }
+
+    pub fn set_text(text: &str) -> bool {
+        let html_payload = super::convert_markdown_and_links_to_html(text);
+        let has_links = text.contains("[link") || text.contains("](");
+        let is_wayland = super::is_wayland_session();
+
+        let ok = if is_wayland {
+            copy_via_wl(text, "text/plain;charset=utf-8") || copy_via_xclip(text, "text/plain;charset=utf-8")
+        } else {
+            copy_via_xclip(text, "text/plain;charset=utf-8") || copy_via_wl(text, "text/plain;charset=utf-8")
+        };
 
         if has_links {
-            if let Ok(mut h_child) = std::process::Command::new("xclip")
-                .args(["-selection", "clipboard", "-t", "text/html"])
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-            {
-                if let Some(mut stdin) = h_child.stdin.take() {
-                    let _ = stdin.write_all(html_payload.as_bytes());
+            if is_wayland {
+                if !copy_via_wl(&html_payload, "text/html") {
+                    let _ = copy_via_xclip(&html_payload, "text/html");
                 }
-                let _ = h_child.wait();
+            } else if !copy_via_xclip(&html_payload, "text/html") {
+                let _ = copy_via_wl(&html_payload, "text/html");
             }
         }
         ok
     }
 
+    fn paste_format(mime: &str) -> Option<String> {
+        let try_wl = || -> Option<String> {
+            let output = std::process::Command::new("wl-paste")
+                .args(["-t", mime])
+                .output()
+                .ok()?;
+            if output.status.success() {
+                let s = String::from_utf8_lossy(&output.stdout).to_string();
+                if !s.is_empty() { return Some(s); }
+            }
+            None
+        };
+
+        let try_xclip = || -> Option<String> {
+            let output = std::process::Command::new("xclip")
+                .args(["-selection", "clipboard", "-t", mime, "-o"])
+                .output()
+                .ok()?;
+            if output.status.success() {
+                let s = String::from_utf8_lossy(&output.stdout).to_string();
+                if !s.is_empty() { return Some(s); }
+            }
+            None
+        };
+
+        if super::is_wayland_session() {
+            try_wl().or_else(try_xclip)
+        } else {
+            try_xclip().or_else(try_wl)
+        }
+    }
+
     pub fn get_advanced_text() -> Option<String> {
         // 1. Détection des fichiers (text/uri-list)
-        if let Ok(output) = std::process::Command::new("xclip")
-            .args(["-selection", "clipboard", "-t", "text/uri-list", "-o"])
-            .output()
-        {
-            let uris = String::from_utf8_lossy(&output.stdout);
+        if let Some(uris) = paste_format("text/uri-list") {
             let mut spans = Vec::new();
             for line in uris.lines() {
                 let trimmed = line.trim();
@@ -728,11 +958,7 @@ mod clipboard {
         }
 
         // 2. Détection du format HTML avec liens
-        if let Ok(output) = std::process::Command::new("xclip")
-            .args(["-selection", "clipboard", "-t", "text/html", "-o"])
-            .output()
-        {
-            let html = String::from_utf8_lossy(&output.stdout);
+        if let Some(html) = paste_format("text/html") {
             let md = html_to_advanced_markdown(&html);
             if !md.trim().is_empty() {
                 return Some(md);
@@ -743,20 +969,41 @@ mod clipboard {
     }
 
     pub fn get_text() -> Option<String> {
-        let output = std::process::Command::new("xclip")
-            .args(["-selection", "clipboard", "-o"])
-            .output()
-            .ok()?;
-        Some(String::from_utf8_lossy(&output.stdout).to_string())
+        get_plain_text()
     }
 
     pub fn get_plain_text() -> Option<String> {
-        get_text()
-    }
-}
+        let try_wl = || -> Option<String> {
+            let output = std::process::Command::new("wl-paste")
+                .args(["-t", "text/plain;charset=utf-8"])
+                .output()
+                .or_else(|_| std::process::Command::new("wl-paste").arg("--no-newline").output())
+                .ok()?;
+            if output.status.success() {
+                let s = String::from_utf8_lossy(&output.stdout).to_string();
+                if !s.is_empty() { return Some(s); }
+            }
+            None
+        };
 
-pub fn get_advanced_clipboard_text() -> Option<String> {
-    clipboard::get_advanced_text()
+        let try_xclip = || -> Option<String> {
+            let output = std::process::Command::new("xclip")
+                .args(["-selection", "clipboard", "-o"])
+                .output()
+                .ok()?;
+            if output.status.success() {
+                let s = String::from_utf8_lossy(&output.stdout).to_string();
+                if !s.is_empty() { return Some(s); }
+            }
+            None
+        };
+
+        if super::is_wayland_session() {
+            try_wl().or_else(try_xclip)
+        } else {
+            try_xclip().or_else(try_wl)
+        }
+    }
 }
 
 pub fn get_clipboard_text() -> Option<String> {
@@ -1347,21 +1594,6 @@ pub fn send_paste() {
 }
 
 #[cfg(not(windows))]
-pub fn send_char_unicode(c: char) {
-    #[cfg(target_os = "macos")]
-    {
-        let s = c.to_string();
-        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-        let script = format!("tell application \"System Events\" to keystroke \"{escaped}\"");
-        let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
-    }
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    {
-        let _ = std::process::Command::new("xdotool").args(["type", "--delay", "5", &c.to_string()]).status();
-    }
-}
-
-#[cfg(not(windows))]
 pub fn send_terminal_input(_hwnd: impl AsWindowTarget, text: &str, auto_enter: bool) {
     const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
     let trimmed = text.trim_end_matches(['\r', '\n']);
@@ -1389,44 +1621,9 @@ pub fn send_paste() {
     }
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
-        let _ = std::process::Command::new("xdotool")
-            .args(["key", "--clearmodifiers", "ctrl+v"])
-            .status();
-    }
-}
-
-#[cfg(windows)]
-fn send_char_unicode(c: char) {
-    let mut utf16_buf = [0u16; 2];
-    let encoded = c.encode_utf16(&mut utf16_buf);
-    for &mut u in encoded {
-        let down = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(0),
-                    wScan: u,
-                    dwFlags: KEYEVENTF_UNICODE,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        let up = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(0),
-                    wScan: u,
-                    dwFlags: KEYBD_EVENT_FLAGS(KEYEVENTF_UNICODE.0 | KEYEVENTF_KEYUP.0),
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        unsafe {
-            SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
-        }
+        const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+        const VK_V: VIRTUAL_KEY = VIRTUAL_KEY(0x56);
+        send_hotkey(&[VK_CONTROL], VK_V);
     }
 }
 
@@ -1589,12 +1786,64 @@ pub fn send_hotkey(modifiers: &[VIRTUAL_KEY], key: VIRTUAL_KEY) {
 
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
+        let try_wtype = || -> bool {
+            let mut args = Vec::new();
+            for &m in &mod_strs {
+                let wm = match m {
+                    "ctrl" => "ctrl",
+                    "shift" => "shift",
+                    "alt" => "alt",
+                    "super" => "logo",
+                    other => other,
+                };
+                args.push("-M");
+                args.push(wm);
+            }
+            if !key_str.is_empty() {
+                args.push("-k");
+                args.push(key_str);
+            }
+            for &m in mod_strs.iter().rev() {
+                let wm = match m {
+                    "ctrl" => "ctrl",
+                    "shift" => "shift",
+                    "alt" => "alt",
+                    "super" => "logo",
+                    other => other,
+                };
+                args.push("-m");
+                args.push(wm);
+            }
+            std::process::Command::new("wtype").args(&args).status().map_or(false, |s| s.success())
+        };
+
         let combo = if mod_strs.is_empty() {
             key_str.to_string()
         } else {
             format!("{}+{}", mod_strs.join("+"), key_str)
         };
-        let _ = std::process::Command::new("xdotool").args(["key", "--clearmodifiers", &combo]).status();
+
+        let try_ydotool = || -> bool {
+            std::process::Command::new("ydotool")
+                .args(["key", &combo])
+                .status()
+                .map_or(false, |s| s.success())
+        };
+
+        let try_xdotool = || -> bool {
+            std::process::Command::new("xdotool")
+                .args(["key", "--clearmodifiers", &combo])
+                .status()
+                .map_or(false, |s| s.success())
+        };
+
+        if is_wayland_session() {
+            if try_wtype() || try_ydotool() || try_xdotool() {
+                return;
+            }
+        } else if try_xdotool() || try_wtype() || try_ydotool() {
+            return;
+        }
     }
 }
 
@@ -1825,71 +2074,6 @@ pub fn focus_browser_address_bar(hwnd: HWND) {
     }
 }
 
-#[cfg(windows)]
-fn navigate_browser_address_bar(hwnd: HWND, url: &str) {
-    let formatted_url = format_url_for_navigation(url);
-    focus_browser_address_bar(hwnd);
-
-    const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
-
-    // 3. Écriture de l'URL via le presse-papiers
-    clipboard::set_text(&formatted_url);
-    std::thread::sleep(Duration::from_millis(60));
-    send_paste();
-    std::thread::sleep(Duration::from_millis(180));
-
-    // 4. Validation par la touche Entrée avec un délai de maintien suffisant
-    send_hotkey(&[], VK_RETURN);
-    std::thread::sleep(Duration::from_millis(100));
-    println!("[Actions] Navigation vers {} effectuée avec succès via barre d'adresse", formatted_url);
-}
-
-#[cfg(windows)]
-fn open_browser_new_tab(hwnd: HWND, url: &str) {
-    let formatted_url = format_url_for_navigation(url);
-    force_foreground_window(hwnd);
-    restore_if_iconic(hwnd);
-    std::thread::sleep(Duration::from_millis(100));
-
-    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
-    const VK_T: VIRTUAL_KEY = VIRTUAL_KEY(0x54);
-    const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
-
-    // 1. Ouverture d'un nouvel onglet via Ctrl+T
-    send_hotkey(&[VK_CONTROL], VK_T);
-    std::thread::sleep(Duration::from_millis(150));
-
-    // 2. Écriture de l'URL dans la barre d'adresse automatiquement focalisée
-    clipboard::set_text(&formatted_url);
-    std::thread::sleep(Duration::from_millis(50));
-    send_paste();
-    std::thread::sleep(Duration::from_millis(120));
-    send_hotkey(&[], VK_RETURN);
-    std::thread::sleep(Duration::from_millis(80));
-}
-
-#[cfg(not(windows))]
-pub fn open_browser_new_tab(_hwnd: impl AsWindowTarget, url: &str) {
-    let formatted_url = format_url_for_navigation(url);
-    #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(&formatted_url).spawn();
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    let _ = std::process::Command::new("xdg-open").arg(&formatted_url).spawn();
-}
-
-#[cfg(not(windows))]
-pub fn navigate_browser_address_bar(target: impl AsWindowTarget, url: &str) {
-    let formatted_url = format_url_for_navigation(url);
-    focus_browser_address_bar(target);
-    std::thread::sleep(Duration::from_millis(50));
-    set_clipboard_text(&formatted_url);
-    std::thread::sleep(Duration::from_millis(50));
-    send_paste();
-    std::thread::sleep(Duration::from_millis(100));
-    const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
-    send_hotkey(&[], VK_RETURN);
-    println!("[Actions] Navigation vers {} effectuée avec succès via barre d'adresse", formatted_url);
-}
 
 #[cfg(windows)]
 #[derive(Clone)]
@@ -2906,69 +3090,6 @@ fn find_largest_textarea(hwnd: HWND) -> Option<UiaElementInfo> {
 }
 
 #[cfg(windows)]
-fn find_largest_textarea_on_screen(
-    user_windows: &[(HWND, String)],
-    preferred_hwnd: Option<HWND>,
-) -> Option<(HWND, UiaElementInfo)> {
-    let mut ordered: Vec<HWND> = Vec::new();
-    if let Some(pref) = preferred_hwnd {
-        ordered.push(pref);
-    }
-    for &(h, _) in user_windows {
-        if !ordered.contains(&h) {
-            ordered.push(h);
-        }
-    }
-
-    for hwnd in ordered.into_iter().take(3) {
-        if let Some(target) = find_largest_textarea(hwnd) {
-            return Some((hwnd, target));
-        }
-    }
-
-    None
-}
-
-#[cfg(windows)]
-fn ensure_window_textarea_focus(hwnd: HWND) {
-    if !has_focused_textarea(hwnd) {
-        refocus_largest_textarea_or_fallback(hwnd);
-    }
-}
-
-#[cfg(windows)]
-fn clear_window_text(hwnd: HWND) {
-    force_foreground_window(hwnd);
-    restore_if_iconic(hwnd);
-    std::thread::sleep(Duration::from_millis(60));
-    ensure_window_textarea_focus(hwnd);
-    std::thread::sleep(Duration::from_millis(40));
-    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
-    const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
-    const VK_BACK: VIRTUAL_KEY = VIRTUAL_KEY(0x08);
-    send_hotkey(&[VK_CONTROL], VK_A);
-    std::thread::sleep(Duration::from_millis(40));
-    send_hotkey(&[], VK_BACK);
-}
-
-#[cfg(not(windows))]
-pub fn clear_window_text(target: impl AsWindowTarget) {
-    force_foreground_window(target);
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", "tell application \"System Events\" to keystroke \"a\" using command down\ntell application \"System Events\" to key code 51"])
-            .status();
-    }
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    {
-        let _ = std::process::Command::new("xdotool")
-            .args(["key", "--clearmodifiers", "ctrl+a", "BackSpace"])
-            .status();
-    }
-}
-
-#[cfg(windows)]
 pub fn run_system_command(command: &str) -> bool {
     let trimmed = command.trim();
     if trimmed.is_empty() {
@@ -3294,43 +3415,6 @@ if txt: sys.stdout.write(txt)
     None
 }
 
-#[cfg(windows)]
-fn replace_active_field_text(new_text: &str) -> String {
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let _uia: Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
-        let user_windows = list_user_windows();
-        let target_hwnd = get_active_or_best_window(&user_windows);
-
-        if let Some(hwnd) = target_hwnd {
-            force_foreground_window(hwnd);
-            restore_if_iconic(hwnd);
-            std::thread::sleep(Duration::from_millis(80));
-
-            ensure_window_textarea_focus(hwnd);
-            std::thread::sleep(Duration::from_millis(50));
-
-            const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
-            const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
-            send_hotkey(&[VK_CONTROL], VK_A);
-            std::thread::sleep(Duration::from_millis(40));
-
-            clipboard::set_text(new_text);
-            std::thread::sleep(Duration::from_millis(40));
-            send_paste();
-
-            return "Texte mis à jour dans le champ actif.".to_string();
-        }
-    }
-
-    write_to_browser_or_txt(new_text)
-}
-
-#[cfg(not(windows))]
-fn replace_active_field_text(text: &str) -> String {
-    write_to_browser_or_txt(text)
-}
-
 pub fn parse_write_command(prompt: &str) -> Option<String> {
     let trimmed = prompt.trim();
     let lower = trimmed.to_lowercase();
@@ -3551,554 +3635,6 @@ fn click_element(
     }
 }
 
-#[cfg(windows)]
-fn is_ecommerce_action_term(term: &str) -> bool {
-    let t = term.to_lowercase();
-    t.contains("commande")
-        || t.contains("panier")
-        || t.contains("cart")
-        || t.contains("checkout")
-        || t.contains("valider")
-        || t.contains("payer")
-        || t.contains("commander")
-}
-
-#[cfg(windows)]
-fn ecommerce_match_bonus(prop: &str, target_text: &str) -> f32 {
-    let p = prop.to_lowercase();
-    let t = target_text.to_lowercase();
-
-    if is_ecommerce_action_term(&p) {
-        const CART_KEYWORDS: &[&str] = &[
-            "panier", "cart", "commander", "commande", "valider", "passer la commande",
-            "finaliser", "checkout", "payer", "achat", "payer maintenant", "voir le panier",
-        ];
-        let p_has = CART_KEYWORDS.iter().any(|k| p.contains(k));
-        let t_has = CART_KEYWORDS.iter().any(|k| t.contains(k));
-        if p_has && t_has {
-            // Bonus significatif pour relier "valide la commande" à "panier" / "commander"
-            let exact = if (p.contains("valide") || p.contains("commande"))
-                && (t.contains("panier") || t.contains("commander") || t.contains("checkout") || t.contains("valider"))
-            {
-                75.0
-            } else {
-                45.0
-            };
-            return exact;
-        }
-    }
-    0.0
-}
-
-#[cfg(windows)]
-fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
-    let prop_clean = prop.trim();
-    let prop_lower = prop_clean.to_lowercase();
-
-    // 1. Détection des sélecteurs d'ID directs (ex: "#submit-btn")
-    if let Some(id_part) = prop_clean.strip_prefix('#') {
-        let id_clean = id_part.trim();
-        if !id_clean.is_empty() {
-            if elem.automation_id.eq_ignore_ascii_case(id_clean) {
-                return Some(500.0);
-            }
-            for (k, v) in &elem.data_attributes {
-                if (k == "id" || k == "testid" || k.ends_with("id")) && v.eq_ignore_ascii_case(id_clean) {
-                    return Some(480.0);
-                }
-            }
-            if elem.name.eq_ignore_ascii_case(id_clean) {
-                return Some(420.0);
-            }
-        }
-    }
-
-    // 2. Détection des sélecteurs macro indexés (ex: "@btn:12", "@link:15", "@input:3", "@12")
-    if prop_clean.starts_with('@') && !prop_clean.starts_with("[@") {
-        let tag = prop_clean.trim_start_matches('@');
-        let num_str = tag
-            .strip_prefix("btn:")
-            .or_else(|| tag.strip_prefix("link:"))
-            .or_else(|| tag.strip_prefix("input:"))
-            .or_else(|| tag.strip_prefix("textarea:"))
-            .or_else(|| tag.strip_prefix("select:"))
-            .or_else(|| tag.strip_prefix("option:"))
-            .or_else(|| tag.strip_prefix("item:"))
-            .or_else(|| tag.strip_prefix("menu:"))
-            .or_else(|| tag.strip_prefix("tree:"))
-            .or_else(|| tag.strip_prefix("video:"))
-            .or_else(|| tag.strip_prefix("audio:"))
-            .or_else(|| tag.strip_prefix("media:"))
-            .unwrap_or(tag);
-
-        if let Ok(target_idx) = num_str.trim().parse::<usize>() {
-            if elem.index == target_idx {
-                return Some(500.0);
-            }
-        }
-    }
-
-    // 3. Détection des macros complètes (ex: [@btn:12 id="submit-btn" text="Valider"])
-    if prop_clean.starts_with("[@") && prop_clean.ends_with(']') {
-        let inner = &prop_clean[2..prop_clean.len() - 1];
-
-        let tag_part = inner.split_whitespace().next().unwrap_or("");
-        if let Some((_, idx_str)) = tag_part.split_once(':') {
-            if let Ok(idx) = idx_str.parse::<usize>() {
-                if elem.index == idx {
-                    return Some(520.0);
-                }
-            }
-        }
-
-        if let Some(id_val) = crate::html_util::extract_attribute(inner, "id") {
-            if !id_val.is_empty() && elem.automation_id.eq_ignore_ascii_case(id_val) {
-                return Some(500.0);
-            }
-        }
-        if let Some(testid_val) = crate::html_util::extract_attribute(inner, "data-testid") {
-            if !testid_val.is_empty() && (elem.automation_id.eq_ignore_ascii_case(testid_val)
-                || elem.data_attributes.iter().any(|(_, v)| v.eq_ignore_ascii_case(testid_val)))
-            {
-                return Some(490.0);
-            }
-        }
-        if let Some(name_val) = crate::html_util::extract_attribute(inner, "name") {
-            if !name_val.is_empty() && (elem.automation_id.eq_ignore_ascii_case(name_val) || elem.name.eq_ignore_ascii_case(name_val)) {
-                return Some(460.0);
-            }
-        }
-        if let Some(text_val) = crate::html_util::extract_attribute(inner, "text") {
-            if !text_val.is_empty() && (elem.name.eq_ignore_ascii_case(text_val) || elem.aria_label.eq_ignore_ascii_case(text_val)) {
-                return Some(450.0);
-            }
-        }
-    }
-
-    let name_trim = elem.name.trim();
-    let name_lower = name_trim.to_lowercase();
-    let aria_label_trim = elem.aria_label.trim();
-    let aria_label_lower = aria_label_trim.to_lowercase();
-
-    if (!name_lower.is_empty() && name_lower == prop_lower)
-        || (!aria_label_lower.is_empty() && aria_label_lower == prop_lower)
-    {
-        return Some(600.0);
-    }
-
-    // Correspondance exacte au début du libellé
-    if name_lower.starts_with(&prop_lower) || aria_label_lower.starts_with(&prop_lower) {
-        let leftover_words = name_words_count(&name_lower).saturating_sub(name_words_count(&prop_lower));
-        let penalty = (leftover_words as f32) * 15.0;
-        return Some((500.0 - penalty).max(300.0));
-    }
-
-    // Correspondance dédiée pour les éléments multimédia (vidéo / audio / play)
-    if elem.is_media {
-        let is_media_query = prop_lower.contains("video")
-            || prop_lower.contains("vidéo")
-            || prop_lower.contains("audio")
-            || prop_lower.contains("lecteur")
-            || prop_lower.contains("player")
-            || prop_lower.contains("play")
-            || prop_lower.contains("lecture")
-            || prop_lower.contains("jouer")
-            || prop_lower.contains("lancer")
-            || prop_lower.contains("regarder")
-            || prop_lower.contains("ecouter")
-            || prop_lower.contains("écouter");
-        if is_media_query {
-            return Some(540.0);
-        }
-    }
-
-    // Correspondance dédiée pour les icônes de croix / fermeture
-    let is_elem_cross = elem.name.contains("croix")
-        || elem.name.contains('✕')
-        || elem.name.contains('×')
-        || elem.name.eq_ignore_ascii_case("fermer")
-        || elem.name.eq_ignore_ascii_case("close")
-        || elem.class_name.contains("close")
-        || elem.automation_id.to_lowercase().contains("close");
-    let is_prop_cross = prop_lower.contains("croix")
-        || prop_lower == "fermer"
-        || prop_lower == "close"
-        || prop_lower == "x"
-        || prop_lower.contains("fermer la notification")
-        || prop_lower.contains("fermer le bandeau");
-    if is_elem_cross && is_prop_cross {
-        return Some(550.0);
-    }
-
-    let ecom_bonus = ecommerce_match_bonus(prop_clean, &elem.name)
-        .max(ecommerce_match_bonus(prop_clean, &elem.aria_label));
-    let mut best_score: Option<f32> = None;
-
-    let mut regex_score = 0.0f32;
-    if matches_pattern(prop, &elem.name) {
-        regex_score = regex_score.max(180.0);
-    }
-    if !elem.aria_label.is_empty() && matches_pattern(prop, &elem.aria_label) {
-        regex_score = regex_score.max(190.0);
-    }
-    if !elem.aria_description.is_empty() && matches_pattern(prop, &elem.aria_description) {
-        regex_score = regex_score.max(150.0);
-    }
-    if !elem.aria_indications.is_empty() && matches_pattern(prop, &elem.aria_indications) {
-        regex_score = regex_score.max(130.0);
-    }
-    if matches_pattern(prop, &elem.help_text) {
-        regex_score = regex_score.max(160.0);
-    }
-    if matches_pattern(prop, &elem.automation_id) {
-        regex_score = regex_score.max(150.0);
-    }
-    if matches_pattern(prop, &elem.value_text) {
-        regex_score = regex_score.max(140.0);
-    }
-    if matches_pattern(prop, &elem.localized_type) {
-        regex_score = regex_score.max(110.0);
-    }
-    if matches_pattern(prop, &elem.aria_role) {
-        regex_score = regex_score.max(120.0);
-    }
-    if matches_pattern(prop, &elem.class_name) {
-        regex_score = regex_score.max(90.0);
-    }
-    if !elem.primary_class.is_empty() && matches_pattern(prop, &elem.primary_class) {
-        regex_score = regex_score.max(140.0);
-    }
-    for (k, v) in &elem.data_attributes {
-        if matches_pattern(prop, v) {
-            regex_score = regex_score.max(170.0);
-        } else if matches_pattern(prop, k) {
-            regex_score = regex_score.max(120.0);
-        }
-    }
-
-    if regex_score > 0.0 {
-        regex_score += ecom_bonus;
-        if !elem.name.is_empty() && prop_clean.len() >= 3 {
-            let ratio = (elem.name.len() as f32) / (prop_clean.len() as f32);
-            if ratio > 3.0 {
-                let len_penalty = ((ratio - 3.0) * 4.0).min(120.0);
-                regex_score = (regex_score - len_penalty).max(10.0);
-            }
-        }
-        best_score = Some(regex_score);
-    }
-
-    let q_words = clean_words(prop);
-    if q_words.is_empty() {
-        return best_score;
-    }
-
-    let id_lower = elem.automation_id.to_lowercase();
-    let help_lower = elem.help_text.to_lowercase();
-    let val_lower = elem.value_text.to_lowercase();
-    let class_lower = elem.class_name.to_lowercase();
-    let type_lower = elem.localized_type.to_lowercase();
-    let aria_lower = elem.aria_role.to_lowercase();
-    let aria_desc_lower = elem.aria_description.to_lowercase();
-    let aria_ind_lower = elem.aria_indications.to_lowercase();
-
-    let name_words = clean_words(&name_lower);
-    let aria_label_words = clean_words(&aria_label_lower);
-    let aria_desc_words = clean_words(&aria_desc_lower);
-    let aria_ind_words = clean_words(&aria_ind_lower);
-    let id_words = clean_words(&id_lower);
-    let help_words = clean_words(&help_lower);
-    let val_words = clean_words(&val_lower);
-    let class_words = clean_words(&class_lower);
-    let type_words = clean_words(&type_lower);
-    let aria_words = clean_words(&aria_lower);
-
-    let mut total_score = 0.0f32;
-    let mut matched_words_count = 0usize;
-
-    for qw in &q_words {
-        let weight = (qw.len() as f32).max(1.0);
-
-        let check_attr = |attr_full: &str, attr_words: &[String], mult: f32| -> f32 {
-            if attr_words.iter().any(|w| w == qw) {
-                10.0 * mult
-            } else if attr_full.contains(qw) {
-                6.0 * mult
-            } else if attr_words.iter().any(|w| (w.starts_with(qw) || qw.starts_with(w)) && qw.len() >= 3 && w.len() >= 3) {
-                4.0 * mult
-            } else {
-                0.0
-            }
-        };
-
-        let s_name = check_attr(&name_lower, &name_words, 3.2);
-        let s_aria_label = check_attr(&aria_label_lower, &aria_label_words, 3.4);
-        let s_aria_desc = check_attr(&aria_desc_lower, &aria_desc_words, 2.8);
-        let s_aria_ind = check_attr(&aria_ind_lower, &aria_ind_words, 2.2);
-        let s_help = check_attr(&help_lower, &help_words, 3.0);
-        let s_id = check_attr(&id_lower, &id_words, 2.5);
-        let s_val = check_attr(&val_lower, &val_words, 2.0);
-        let s_type = check_attr(&type_lower, &type_words, 1.8);
-        let s_class = check_attr(&class_lower, &class_words, 1.2);
-        let s_aria = check_attr(&aria_lower, &aria_words, 2.2);
-        let s_primary_class = check_attr(&elem.primary_class, &clean_words(&elem.primary_class), 2.2);
-        let mut s_data = 0.0f32;
-        for (k, v) in &elem.data_attributes {
-            let v_words = clean_words(v);
-            let s_val = check_attr(v, &v_words, 2.6);
-            let k_words = clean_words(k);
-            let s_k = check_attr(k, &k_words, 1.5);
-            s_data = s_data.max(s_val).max(s_k);
-        }
-
-        let best_match = s_name
-            .max(s_aria_label)
-            .max(s_aria_desc)
-            .max(s_aria_ind)
-            .max(s_help)
-            .max(s_id)
-            .max(s_val)
-            .max(s_type)
-            .max(s_class)
-            .max(s_primary_class)
-            .max(s_data)
-            .max(s_aria);
-        if best_match > 0.0 {
-            matched_words_count += 1;
-            total_score += best_match * weight;
-        }
-    }
-
-    if matched_words_count == 0 {
-        return best_score;
-    }
-
-    // Rejet des correspondances trop partielles :
-    // Si la requête comporte 3 mots ou plus, au moins 2 mots doivent obligatoirement correspondre.
-    if q_words.len() >= 3 && matched_words_count < 2 {
-        return None;
-    }
-
-    if matched_words_count == q_words.len() {
-        total_score += 50.0 * (q_words.len() as f32);
-        if !name_words.is_empty() && name_words.len() == q_words.len() {
-            total_score += 80.0;
-        }
-    } else {
-        total_score *= (matched_words_count as f32) / (q_words.len() as f32);
-    }
-
-    // Pénalité stricte pour les mots parasites présents dans le nom mais absents de la recherche
-    // (Évite que "Niagara Falls, État de New York" concurrence "New York, État de New York")
-    let mut unexpected_words_penalty = 0.0f32;
-    for nw in &name_words {
-        if !q_words.iter().any(|qw| qw == nw || nw.contains(qw) || qw.contains(nw)) {
-            unexpected_words_penalty += 35.0;
-        }
-    }
-    total_score = (total_score - unexpected_words_penalty).max(1.0);
-
-    if !name_words.is_empty() && name_words.len() > q_words.len() * 4 {
-        let excess = (name_words.len() - q_words.len() * 4) as f32;
-        total_score = (total_score - excess * 2.0).max(5.0);
-    }
-
-    // Neutralisation du bonus e-commerce si le score de base est trop faible
-    if total_score >= 15.0 {
-        total_score += ecom_bonus;
-    }
-
-    Some(best_score.map_or(total_score, |s| s.max(total_score)))
-}
-
-#[cfg(windows)]
-fn score_element(elem: &UiaElementInfo, query: &str) -> Option<f32> {
-    let propositions = extract_target_propositions(query);
-    let mut max_score: Option<f32> = None;
-
-    for (idx, prop) in propositions.iter().enumerate() {
-        if let Some(score) = score_single_proposition(elem, prop) {
-            let line_priority_penalty = (idx as f32) * 1.5;
-            let adjusted = (score - line_priority_penalty).max(1.0);
-            max_score = Some(max_score.map_or(adjusted, |s| s.max(adjusted)));
-        }
-    }
-
-    max_score
-}
-
-#[cfg(windows)]
-fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option<&'a UiaElementInfo> {
-    let target_words = clean_words(target);
-    let is_target_short = target_words.len() <= 5 && target.len() <= 40;
-    let is_chrome_target = is_browser_chrome_target(target);
-    let has_web_content = elements.iter().any(|e| e.is_web_content);
-    const MIN_CONFIDENCE_SCORE: f32 = 35.0;
-
-    let mut scored: Vec<(f32, &'a UiaElementInfo)> = elements
-        .iter()
-        .filter_map(|elem| {
-            let mut chrome_bias = 0.0f32;
-            if has_web_content {
-                if is_chrome_target {
-                    if elem.is_browser_chrome {
-                        chrome_bias += 50.0;
-                    } else {
-                        chrome_bias -= 40.0;
-                    }
-                } else if elem.is_browser_chrome {
-                    chrome_bias -= 45.0;
-                }
-            }
-
-            let word_count = elem.name.split_whitespace().count();
-            if !elem.is_media && is_target_short && (word_count > 12 || elem.name.len() > 90) {
-                return None;
-            }
-
-            score_element(elem, target).map(|score| {
-                let mut final_score = score + chrome_bias;
-                if elem.is_tab {
-                    final_score += 80.0;
-                } else if elem.is_media {
-                    final_score += 75.0;
-                } else if elem.is_option {
-                    final_score += 65.0;
-                } else if elem.is_link {
-                    final_score += 40.0;
-                } else if elem.is_tabindex {
-                    final_score += 35.0;
-                } else if elem.has_action_pattern {
-                    final_score += 20.0;
-                }
-                if elem.is_web_content {
-                    final_score += 35.0;
-                }
-                if !elem.is_offscreen {
-                    final_score += 20.0;
-                }
-                (final_score, elem)
-            })
-        })
-        .collect();
-
-    scored.retain(|(s, _)| *s >= MIN_CONFIDENCE_SCORE);
-    scored.sort_by(|(score_a, elem_a), (score_b, elem_b)| {
-        if (score_a - score_b).abs() < 0.5 {
-            elem_a.area.cmp(&elem_b.area)
-        } else {
-            score_b.partial_cmp(score_a).unwrap_or(std::cmp::Ordering::Equal)
-        }
-    });
-
-    scored.first().map(|(_, elem)| *elem)
-}
-
-#[cfg(windows)]
-fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option<&'a UiaElementInfo> {
-    let is_chrome_target = is_browser_chrome_target(target);
-    let has_web_content = elements.iter().any(|e| e.is_web_content);
-    const MIN_CONFIDENCE_SCORE: f32 = 40.0;
-    let mut scored: Vec<(f32, &'a UiaElementInfo)> = elements
-        .iter()
-        .filter_map(|elem| {
-            // Un bouton ne peut pas être un paragraphe explicatif
-            let word_count = elem.name.split_whitespace().count();
-            if !elem.is_media && (word_count > 15 || elem.name.len() > 120) {
-                return None;
-            }
-            let mut chrome_bias = 0.0f32;
-            if has_web_content {
-                if is_chrome_target {
-                    if elem.is_browser_chrome {
-                        chrome_bias += 50.0;
-                    } else {
-                        chrome_bias -= 40.0;
-                    }
-                } else if elem.is_browser_chrome {
-                    chrome_bias -= 45.0;
-                }
-            }
-
-            score_element(elem, target).map(|score| {
-                let mut final_score = score + chrome_bias;
-                if elem.is_button || elem.is_tabindex || elem.is_media {
-                    final_score += 100.0;
-                } else if elem.has_action_pattern {
-                    final_score += 40.0;
-                } else {
-                    final_score -= 60.0;
-                }
-                if elem.is_web_content {
-                    final_score += 40.0;
-                }
-                if elem.area > 150_000 && !elem.is_media {
-                    final_score -= 100.0;
-                }
-                (final_score, elem)
-            })
-        })
-        .collect();
-
-    scored.retain(|(s, _)| *s >= MIN_CONFIDENCE_SCORE);
-    scored.sort_by(|(score_a, elem_a), (score_b, elem_b)| {
-        if (score_a - score_b).abs() < 0.5 {
-            elem_a.area.cmp(&elem_b.area)
-        } else {
-            score_b.partial_cmp(score_a).unwrap_or(std::cmp::Ordering::Equal)
-        }
-    });
-
-    scored.first().map(|(_, elem)| *elem)
-}
-
-#[cfg(windows)]
-fn find_best_input_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option<&'a UiaElementInfo> {
-    let is_chrome_target = is_browser_chrome_target(target);
-    let has_web_content = elements.iter().any(|e| e.is_web_content);
-    const MIN_CONFIDENCE_SCORE: f32 = 30.0;
-    let mut scored: Vec<(f32, &'a UiaElementInfo)> = elements
-        .iter()
-        .filter_map(|elem| {
-            let mut chrome_bias = 0.0f32;
-            if has_web_content {
-                if is_chrome_target {
-                    if elem.is_browser_chrome {
-                        chrome_bias += 50.0;
-                    } else {
-                        chrome_bias -= 40.0;
-                    }
-                } else if elem.is_browser_chrome {
-                    chrome_bias -= 45.0;
-                }
-            }
-
-            score_element(elem, target).map(|score| {
-                let mut final_score = score + chrome_bias;
-                if elem.is_edit_or_textarea || elem.is_input || elem.is_select {
-                    final_score += 40.0;
-                } else if elem.is_focusable {
-                    final_score += 15.0;
-                }
-                if elem.is_web_content {
-                    final_score += 50.0;
-                }
-                (final_score, elem)
-            })
-        })
-        .collect();
-
-    scored.retain(|(s, _)| *s >= MIN_CONFIDENCE_SCORE);
-    scored.sort_by(|(score_a, elem_a), (score_b, elem_b)| {
-        if (score_a - score_b).abs() < 0.5 {
-            elem_b.area.cmp(&elem_a.area)
-        } else {
-            score_b.partial_cmp(score_a).unwrap_or(std::cmp::Ordering::Equal)
-        }
-    });
-
-    scored.first().map(|(_, elem)| *elem)
-}
 
 fn clean_diff_line(line: &str) -> String {
     let mut s = line.trim();
@@ -4276,114 +3812,6 @@ pub fn generate_fallback_suggestions_from_screen(screen_summary: &str) -> Vec<Qu
     }
 
     suggestions
-}
-
-#[cfg(windows)]
-fn is_poor_or_redundant_link(text: &str) -> bool {
-    let lower = text.trim().to_lowercase();
-    if lower.len() < 2 {
-        return true;
-    }
-    const BLACKLIST: &[&str] = &[
-
-    ];
-    BLACKLIST.iter().any(|&b| lower == b)
-}
-
-#[cfg(windows)]
-fn score_enriched_link(text: &str) -> f32 {
-    let clean = text.trim();
-    let char_count = clean.chars().count();
-    let lower = clean.to_lowercase();
-
-    let mut score = 10.0f32;
-
-    if (18..=95).contains(&char_count) {
-        score += 15.0;
-    } else if char_count < 10 {
-        score -= 8.0;
-    } else if char_count > 120 {
-        score -= 5.0;
-    }
-
-    if clean.contains("[aria:") {
-        score += 25.0;
-    }
-    if clean.contains("[desc:") {
-        score += 15.0;
-    }
-    if clean.contains("[data:") || clean.contains("testid:") {
-        score += 20.0;
-    }
-
-    const TECH_KEYWORDS: &[&str] = &[
-        "go", "gb", "to", "tb", "ram", "pro", "max", "ultra", "plus", "lite",
-        "mini", "ghz", "core", "ssd", "oled", "led", "4k", "5g", "wifi",
-        "intel", "amd", "ryzen", "rtx", "gtx", "apple", "samsung", "asus",
-        "sony", "dell", "hp", "lenovo",
-    ];
-    for &kw in TECH_KEYWORDS {
-        if lower.split(|c: char| !c.is_alphanumeric()).any(|w| w == kw) {
-            score += 8.0;
-        }
-    }
-
-    if clean.contains('€') || clean.contains('$') || lower.contains("eur") || lower.contains("usd") {
-        score += 20.0;
-    }
-
-    if clean.contains('★') || clean.contains('☆') || lower.contains("avis") || lower.contains("étoile") || lower.contains("etoile") {
-        score += 15.0;
-    }
-
-    score
-}
-
-#[cfg(windows)]
-fn score_enriched_button(text: &str) -> f32 {
-    let clean = text.trim();
-    let lower = clean.to_lowercase();
-    let mut score = 10.0f32;
-
-    // Boutons cruciaux de parcours utilisateur (panier, validation, notifications/cookies, fermeture)
-    const HIGH_VALUE_BUTTONS: &[&str] = &[
-        "panier", "cart", "commander", "commande", "valider", "passer la commande",
-        "voir le panier", "payer", "checkout", "finaliser", "confirmer", "continuer",
-        "suivant", "ajouter", "soumettre", "submit", "acheter", "terminer", "accepter",
-        "activer", "autoriser", "fermer", "plus tard", "refuser", "bloquer", "croix", "close", "dismiss",
-        "non merci", "ne plus afficher", "ignorer", "pas maintenant",
-        "play", "lecture", "jouer", "pause", "vidéo", "video", "audio", "écouter", "regarder",
-    ];
-
-    for &kw in HIGH_VALUE_BUTTONS {
-        if lower.contains(kw) {
-            score += 60.0;
-            break;
-        }
-    }
-
-    if clean.contains('€') || clean.contains('$') || lower.contains("eur") || lower.contains("usd") {
-        score += 30.0;
-    }
-
-    if clean.contains("[aria:") {
-        score += 15.0;
-    }
-    if clean.contains("[desc:") {
-        score += 15.0;
-    }
-    if clean.contains("[data:") || clean.contains("testid:") || clean.contains("action:") {
-        score += 20.0;
-    }
-
-    let words = clean.split_whitespace().count();
-    if (1..=4).contains(&words) {
-        score += 10.0;
-    } else if words > 8 {
-        score -= 15.0;
-    }
-
-    score
 }
 
 #[cfg(windows)]
@@ -5577,149 +5005,6 @@ pub fn redo_last_system_action() -> Option<String> {
 }
 
 pub use crate::commands::execute_system_actions;
-
-#[cfg(windows)]
-unsafe fn mute_other_audio_sessions() -> usize {
-    use std::ffi::c_void;
-    use windows::core::GUID;
-
-    type HRESULT = i32;
-    const S_OK: HRESULT = 0;
-    const CLSCTX_ALL: u32 = 23;
-
-    extern "system" {
-        fn CoCreateInstance(
-            rclsid: *const GUID,
-            p_unk_outer: *mut c_void,
-            dw_cls_context: u32,
-            riid: *const GUID,
-            ppv: *mut *mut c_void,
-        ) -> HRESULT;
-    }
-
-    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-
-    let clsid_mm_device_enumerator = GUID::from_u128(0xBCDE0395_E52F_467C_8E3D_C4579291692E);
-    let iid_imm_device_enumerator = GUID::from_u128(0xA95664D2_9614_4D35_A746_DE8DB63617E6);
-    let iid_audio_session_manager2 = GUID::from_u128(0x77AA99A0_1BD6_484F_8BC7_2C654C9A9B6F);
-    let iid_audio_session_control2 = GUID::from_u128(0xBFB7FF88_7239_4FC9_8FA8_880C73E2E7EC);
-    let iid_simple_audio_volume = GUID::from_u128(0x87CE5498_68D6_44E5_AC21_AB2709778022);
-
-    let mut enumerator: *mut c_void = std::ptr::null_mut();
-    if CoCreateInstance(
-        &clsid_mm_device_enumerator,
-        std::ptr::null_mut(),
-        CLSCTX_ALL,
-        &iid_imm_device_enumerator,
-        &mut enumerator,
-    ) != S_OK || enumerator.is_null() {
-        return 0;
-    }
-
-    let vtable_enum = *(enumerator as *const *const usize);
-    let get_default_endpoint: unsafe extern "system" fn(*mut c_void, i32, i32, *mut *mut c_void) -> HRESULT =
-        std::mem::transmute(*vtable_enum.add(4));
-    let release_enum: unsafe extern "system" fn(*mut c_void) -> u32 =
-        std::mem::transmute(*vtable_enum.add(2));
-
-    let mut device: *mut c_void = std::ptr::null_mut();
-    let hr = get_default_endpoint(enumerator, 0, 1, &mut device); // eRender, eMultimedia
-    release_enum(enumerator);
-
-    if hr != S_OK || device.is_null() {
-        return 0;
-    }
-
-    let vtable_dev = *(device as *const *const usize);
-    let activate: unsafe extern "system" fn(*mut c_void, *const GUID, u32, *mut c_void, *mut *mut c_void) -> HRESULT =
-        std::mem::transmute(*vtable_dev.add(3));
-    let release_dev: unsafe extern "system" fn(*mut c_void) -> u32 =
-        std::mem::transmute(*vtable_dev.add(2));
-
-    let mut session_mgr: *mut c_void = std::ptr::null_mut();
-    let hr = activate(device, &iid_audio_session_manager2, CLSCTX_ALL, std::ptr::null_mut(), &mut session_mgr);
-    release_dev(device);
-
-    if hr != S_OK || session_mgr.is_null() {
-        return 0;
-    }
-
-    let vtable_mgr = *(session_mgr as *const *const usize);
-    let get_session_enum: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT =
-        std::mem::transmute(*vtable_mgr.add(5));
-    let release_mgr: unsafe extern "system" fn(*mut c_void) -> u32 =
-        std::mem::transmute(*vtable_mgr.add(2));
-
-    let mut session_enumerator: *mut c_void = std::ptr::null_mut();
-    let hr = get_session_enum(session_mgr, &mut session_enumerator);
-    release_mgr(session_mgr);
-
-    if hr != S_OK || session_enumerator.is_null() {
-        return 0;
-    }
-
-    let vtable_s_enum = *(session_enumerator as *const *const usize);
-    let get_count: unsafe extern "system" fn(*mut c_void, *mut i32) -> HRESULT =
-        std::mem::transmute(*vtable_s_enum.add(3));
-    let get_session: unsafe extern "system" fn(*mut c_void, i32, *mut *mut c_void) -> HRESULT =
-        std::mem::transmute(*vtable_s_enum.add(4));
-    let release_s_enum: unsafe extern "system" fn(*mut c_void) -> u32 =
-        std::mem::transmute(*vtable_s_enum.add(2));
-
-    let mut count = 0i32;
-    let _ = get_count(session_enumerator, &mut count);
-
-    let my_pid = std::process::id();
-    let mut muted_count = 0usize;
-
-    for i in 0..count {
-        let mut session_control: *mut c_void = std::ptr::null_mut();
-        if get_session(session_enumerator, i, &mut session_control) != S_OK || session_control.is_null() {
-            continue;
-        }
-
-        let vtable_sc = *(session_control as *const *const usize);
-        let query_interface_sc: unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT =
-            std::mem::transmute(*vtable_sc.add(0));
-        let release_sc: unsafe extern "system" fn(*mut c_void) -> u32 =
-            std::mem::transmute(*vtable_sc.add(2));
-
-        let mut session_pid = 0u32;
-        let mut session_control2: *mut c_void = std::ptr::null_mut();
-        if query_interface_sc(session_control, &iid_audio_session_control2, &mut session_control2) == S_OK && !session_control2.is_null() {
-            let vtable_sc2 = *(session_control2 as *const *const usize);
-            let get_pid: unsafe extern "system" fn(*mut c_void, *mut u32) -> HRESULT =
-                std::mem::transmute(*vtable_sc2.add(14));
-            let release_sc2: unsafe extern "system" fn(*mut c_void) -> u32 =
-                std::mem::transmute(*vtable_sc2.add(2));
-            let _ = get_pid(session_control2, &mut session_pid);
-            release_sc2(session_control2);
-        }
-
-        let mut simple_volume: *mut c_void = std::ptr::null_mut();
-        if query_interface_sc(session_control, &iid_simple_audio_volume, &mut simple_volume) == S_OK && !simple_volume.is_null() {
-            let vtable_vol = *(simple_volume as *const *const usize);
-            let set_mute: unsafe extern "system" fn(*mut c_void, i32, *mut c_void) -> HRESULT =
-                std::mem::transmute(*vtable_vol.add(5));
-            let release_vol: unsafe extern "system" fn(*mut c_void) -> u32 =
-                std::mem::transmute(*vtable_vol.add(2));
-
-            if session_pid != my_pid {
-                if set_mute(simple_volume, 1, std::ptr::null_mut()) == S_OK {
-                    muted_count += 1;
-                }
-            } else {
-                let _ = set_mute(simple_volume, 0, std::ptr::null_mut());
-            }
-            release_vol(simple_volume);
-        }
-        release_sc(session_control);
-    }
-
-    release_s_enum(session_enumerator);
-    muted_count
-}
-
 #[cfg(windows)]
 fn name_words_count(s: &str) -> usize {
     s.split_whitespace().count()

@@ -43,6 +43,7 @@ jobs:
             xdotool \
             wmctrl \
             xclip \
+            wl-clipboard \
             speech-dispatcher \
             espeak-ng
 

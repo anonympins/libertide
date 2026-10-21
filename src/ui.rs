@@ -52,10 +52,6 @@ use crate::pattern::{clean_words, extract_target_propositions, matches_pattern};
 use crate::window_util::*;
 
 #[cfg(windows)]
-#[derive(Clone, Default)]
-pub struct UiaElementInfoNonWindows;
-
-#[cfg(windows)]
 #[derive(Clone)]
 pub struct UiaElementInfo {
     pub index: usize,
@@ -103,20 +99,35 @@ pub struct UiaElementInfo {
     pub index: usize,
     pub name: String,
     pub automation_id: String,
+    pub help_text: String,
+    pub value_text: String,
     pub class_name: String,
+    pub primary_class: String,
     pub localized_type: String,
     pub aria_role: String,
     pub aria_label: String,
+    pub aria_description: String,
+    pub aria_indications: String,
     pub click_x: i32,
     pub click_y: i32,
     pub rect: [i32; 4],
     pub is_button: bool,
     pub is_link: bool,
     pub is_edit_or_textarea: bool,
+    pub is_explicit_textarea: bool,
     pub is_input: bool,
     pub is_select: bool,
+    pub is_option: bool,
+    pub is_media: bool,
+    pub is_slider: bool,
+    pub is_toggle: bool,
     pub is_tab: bool,
     pub is_focusable: bool,
+    pub is_tabindex: bool,
+    pub is_web_content: bool,
+    pub is_browser_chrome: bool,
+    pub is_offscreen: bool,
+    pub has_action_pattern: bool,
     pub area: i64,
 }
 
@@ -276,6 +287,20 @@ pub fn click_element(x: i32, y: i32, _element: Option<&()>, _invoke_pattern: Opt
     }
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
+        if crate::automation::is_wayland_session() {
+            let moved = std::process::Command::new("ydotool")
+                .args(["mousemove", "--absolute", "-x", &x.to_string(), "-y", &y.to_string()])
+                .status()
+                .map_or(false, |s| s.success());
+            if moved {
+                std::thread::sleep(Duration::from_millis(25));
+                let clicked = std::process::Command::new("ydotool")
+                    .args(["click", "0xC0"])
+                    .status()
+                    .map_or(false, |s| s.success());
+                if clicked { return; }
+            }
+        }
         let _ = std::process::Command::new("xdotool")
             .args(["mousemove", &x.to_string(), &y.to_string(), "click", "1"])
             .status();
@@ -359,6 +384,16 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let ctype = item.CurrentControlType().unwrap_or_default();
                     let class_name = item.CurrentClassName().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
                     let loc_type = item.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+
+                    // Exclusion stricte des barres de défilement, curseurs d'ascenseur et boutons associés
+                    if ctype == UIA_ScrollBarControlTypeId
+                        || class_name.contains("scrollbar")
+                        || loc_type.contains("scrollbar")
+                        || loc_type.contains("défilement")
+                        || loc_type.contains("ascenseur")
+                    {
+                        continue;
+                    }
                     let raw_name = item.CurrentName().map(|b| b.to_string()).unwrap_or_default();
                     let mut name = raw_name.trim().to_string();
                     let automation_id = item.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default();
@@ -763,20 +798,35 @@ pub fn list_interactive_elements(_target: impl AsWindowTarget) -> Vec<UiaElement
                 index: t.index,
                 name: t.name.clone(),
                 automation_id: String::new(),
+                help_text: String::new(),
+                value_text: String::new(),
                 class_name: String::new(),
+                primary_class: String::new(),
                 localized_type: String::new(),
                 aria_role: String::new(),
                 aria_label: t.name,
+                aria_description: String::new(),
+                aria_indications: String::new(),
                 click_x: t.click_x,
                 click_y: t.click_y,
                 rect: t.rect,
                 is_button: is_btn,
                 is_link: is_lnk,
                 is_edit_or_textarea: is_input,
+                is_explicit_textarea: is_input,
                 is_input,
                 is_select: false,
+                is_option: false,
+                is_media: false,
+                is_slider: false,
+                is_toggle: false,
                 is_tab: false,
                 is_focusable: true,
+                is_tabindex: false,
+                is_web_content: false,
+                is_browser_chrome: false,
+                is_offscreen: false,
+                has_action_pattern: is_btn || is_lnk,
                 area: w * h,
             }
         })
@@ -1439,10 +1489,23 @@ pub fn find_largest_textarea_on_screen(
 }
 
 #[cfg(not(windows))]
-pub fn find_largest_textarea_on_screen(
-    _user_windows: &[(impl AsWindowTarget, String)],
-    _preferred_hwnd: Option<impl AsWindowTarget>,
-) -> Option<(String, UiaElementInfo)> {
+pub fn find_largest_textarea_on_screen<T: AsWindowTarget + Clone>(
+    user_windows: &[(T, String)],
+    preferred_target: Option<T>,
+) -> Option<(T, UiaElementInfo)> {
+    let mut ordered: Vec<T> = Vec::new();
+    if let Some(pref) = preferred_target {
+        ordered.push(pref);
+    }
+    for (target, _) in user_windows {
+        ordered.push(target.clone());
+    }
+
+    for target in ordered.into_iter().take(3) {
+        if let Some(elem) = find_largest_textarea(target.clone()) {
+            return Some((target, elem));
+        }
+    }
     None
 }
 
@@ -1454,7 +1517,11 @@ pub fn ensure_window_textarea_focus(hwnd: HWND) {
 }
 
 #[cfg(not(windows))]
-pub fn ensure_window_textarea_focus(_hwnd: impl AsWindowTarget) {}
+pub fn ensure_window_textarea_focus(target: impl AsWindowTarget + Copy) {
+    if !has_focused_textarea(target) {
+        refocus_largest_textarea_or_fallback(target);
+    }
+}
 
 #[cfg(windows)]
 pub fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option<&'a UiaElementInfo> {
@@ -1506,6 +1573,21 @@ pub fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Op
     });
 
     scored.first().map(|(_, elem)| *elem)
+}
+
+#[cfg(not(windows))]
+pub fn extract_inner_text(_element: &impl AsWindowTarget, _max_chars: usize) -> Option<String> {
+    crate::automation::get_active_field_content()
+}
+
+#[cfg(not(windows))]
+pub fn extract_web_document_text(_element: &impl AsWindowTarget, _max_chars: usize) -> Option<String> {
+    crate::automation::get_active_field_content()
+}
+
+#[cfg(not(windows))]
+pub fn extract_scrollable_viewports_content(_target: impl AsWindowTarget) -> String {
+    String::new()
 }
 
 #[cfg(not(windows))]
@@ -2195,7 +2277,6 @@ pub fn is_poor_or_redundant_link(text: &str) -> bool {
     lower.len() < 2
 }
 
-#[cfg(windows)]
 pub fn score_enriched_link(text: &str) -> f32 {
     let clean = text.trim();
     let char_count = clean.chars().count();
@@ -2237,7 +2318,6 @@ pub fn score_enriched_link(text: &str) -> f32 {
     score
 }
 
-#[cfg(windows)]
 pub fn score_enriched_button(text: &str) -> f32 {
     let clean = text.trim();
     let lower = clean.to_lowercase();
@@ -2274,16 +2354,6 @@ pub fn score_enriched_button(text: &str) -> f32 {
     }
 
     score
-}
-
-#[cfg(not(windows))]
-pub fn score_enriched_link(_text: &str) -> f32 {
-    10.0
-}
-
-#[cfg(not(windows))]
-pub fn score_enriched_button(_text: &str) -> f32 {
-    10.0
 }
 
 #[cfg(windows)]

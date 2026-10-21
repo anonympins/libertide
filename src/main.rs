@@ -154,6 +154,10 @@ pub struct OverlayApp {
     numbered_targets: Vec<NumberedElementTarget>,
     show_numbered_targets: bool,
     switch_access_mode: bool,
+    switch_step: SwitchAccessStep,
+    switch_windows: Vec<SwitchWindowTarget>,
+    switch_zones: Vec<NavigationZone>,
+    last_switch_input: Instant,
     switch_focus_index: usize,
     switch_last_tick: Instant,
 
@@ -268,6 +272,31 @@ fn is_stop_dictation_command(text: &str) -> bool {
         "停止听写", "退出听写", "结束听写", "关闭听写",
         // JA
         "ディクテーション終了", "ディクテーション停止", "入力終了", "音声入力停止",
+    ];
+    TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig))
+}
+
+fn is_switch_access_command(text: &str) -> bool {
+    let norm = normalize_for_command_match(text);
+    const TRIGGERS: &[&str] = &[
+        // FR
+        "mode contacteur", "switch access", "mode survol", "survol contacteur", "contacteur", "survol",
+        // EN
+        "switch mode", "hover mode", "switch navigation",
+        // ES
+        "acceso por conmutador", "modo conmutador", "modo sobrevuelo", "conmutador",
+        // DE
+        "schalterzugriff", "schalter modus", "hover modus", "schalter",
+        // IT
+        "accesso a interruttori", "modalita cursore", "modalita interruttore", "interruttore",
+        // PT
+        "acesso por interruptor", "modo comutador", "comutador", "interruptor",
+        // RU
+        "переключатель", "режим переключателя",
+        // ZH
+        "切换控制", "开关控制", "悬停控制",
+        // JA
+        "スイッチアクセス", "スイッチ操作", "ホバーモード",
     ];
     TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig))
 }
@@ -879,6 +908,10 @@ impl OverlayApp {
             numbered_targets: Vec::new(),
             show_numbered_targets: false,
             switch_access_mode: false,
+            switch_step: SwitchAccessStep::Windows,
+            switch_windows: Vec::new(),
+            switch_zones: Vec::new(),
+            last_switch_input: Instant::now() - Duration::from_secs(1),
             switch_focus_index: 0,
             switch_last_tick: Instant::now(),
 
@@ -1154,6 +1187,83 @@ impl OverlayApp {
             screen_size_kb: None,
         });
         let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+    }
+
+    pub fn toggle_switch_access_mode(&mut self) {
+        self.switch_access_mode = !self.switch_access_mode;
+        let (locale, _) = get_system_locale_language();
+        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+
+        if self.switch_access_mode {
+            self.switch_step = SwitchAccessStep::Windows;
+            self.switch_windows = collect_switch_candidate_windows();
+            self.numbered_targets.clear();
+            self.switch_focus_index = 0;
+            self.switch_last_tick = Instant::now() - Duration::from_millis(1500);
+            play_earcon(Earcon::Success);
+            let count = self.switch_windows.len();
+            let msg = if count > 0 {
+                localized_speech(
+                    lang_prefix,
+                    &format!("Mode contacteur hiérarchique activé. Étape 1 : {} fenêtres détectées. Appuyez sur Entrée ou Espace pour sélectionner.", count),
+                    &format!("Hierarchical switch access enabled. Step 1: {} windows detected. Press Enter or Space to select.", count),
+                    &format!("Acceso por conmutador jerárquico activado. Paso 1: {} ventanas detectadas. Presione Entrar o Espacio para seleccionar.", count),
+                    &format!("Hierarchischer Schalterzugriff aktiviert. Schritt 1: {} Fenster erkannt. Drücken Sie Eingabe oder Leertaste zur Auswahl.", count),
+                    &format!("Accesso a interruttori gerarchico attivato. Passaggio 1: {} finestre rilevate. Premi Invio o Spazio per selezionare.", count),
+                    &format!("Acesso por interruptor hierárquico ativado. Etapa 1: {} janelas detectadas. Pressione Enter ou Espaço para selecionar.", count),
+                    &format!("Иерархический режим переключателя включен. Шаг 1: обнаружено окон: {}. Нажмите Enter или Пробел для выбора.", count),
+                    &format!("分层开关控制已启用。第1步：检测到 {} 个窗口。按 Enter 或空格键选择。", count),
+                    &format!("階層スイッチアクセスが有効になりました。ステップ1：{}個のウィンドウを検出。EnterまたはSpaceで選択。", count),
+                )
+            } else {
+                localized_speech(
+                    lang_prefix,
+                    "Mode contacteur hiérarchique activé. Aucune fenêtre candidate détectée.",
+                    "Hierarchical switch access enabled. No candidate windows detected.",
+                    "Acceso por conmutador jerárquico activado. No se detectaron ventanas candidatas.",
+                    "Hierarchischer Schalterzugriff aktiviert. Keine Zielfenster erkannt.",
+                    "Accesso a interruttori gerarchico attivato. Nessuna finestra rilevata.",
+                    "Acesso por interruptor hierárquico ativado. Nenhuma janela detectada.",
+                    "Иерархический режим переключателя включен. Подходящих окон не найдено.",
+                    "分层开关控制已启用。未检测到候选窗口。",
+                    "階層スイッチアクセスが有効になりました。対象ウィンドウが見つかりません。",
+                )
+            };
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: msg.clone(),
+                timestamp: current_time_str(),
+                quick_suggestions: Vec::new(),
+                screen_size_kb: None,
+            });
+            let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+        } else {
+            self.numbered_targets.clear();
+            self.switch_windows.clear();
+            self.switch_zones.clear();
+            self.switch_step = SwitchAccessStep::Windows;
+            play_earcon(Earcon::MicClose);
+            let msg = localized_speech(
+                lang_prefix,
+                "Mode survol et contacteur désactivé.",
+                "Hover and switch access mode disabled.",
+                "Modo sobrevuelo y conmutador desactivado.",
+                "Hover- und Schalterzugriffsmodus deaktiviert.",
+                "Modalità cursore e interruttore disattivata.",
+                "Modo de sobrevoo e interruptor desativado.",
+                "Режим наведения и переключателя отключен.",
+                "悬停与开关控制模式已停用。",
+                "ホバーおよびスイッチアクセスモードを解除しました。",
+            );
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: msg.clone(),
+                timestamp: current_time_str(),
+                quick_suggestions: Vec::new(),
+                screen_size_kb: None,
+            });
+            let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+        }
     }
 
     fn start_recording(&mut self, _ctx: &egui::Context, play_sound: bool) {
@@ -1613,9 +1723,8 @@ impl eframe::App for OverlayApp {
                         }
                     }
 
-                    if norm_prompt.contains("mode contacteur") || norm_prompt.contains("switch access") {
-                        self.switch_access_mode = !self.switch_access_mode;
-                        play_earcon(Earcon::Success);
+                    if is_switch_access_command(&prompt) {
+                        self.toggle_switch_access_mode();
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx, false);
                         }
@@ -1912,6 +2021,39 @@ impl eframe::App for OverlayApp {
                     update_open_floating_cards(&self.floating_cards);
                     ctx.request_repaint();
                     ctx.request_repaint_of(vp_id);
+                }   
+                AgentEvent::NavigationZonesReady { window_title, zones } => {
+                    if self.switch_access_mode {
+                        self.switch_zones = zones;
+                        self.switch_step = SwitchAccessStep::Zones;
+                        self.switch_focus_index = 0;
+                        self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
+
+                        let count = self.switch_zones.len();
+                        let msg = if count > 0 {
+                            let first = &self.switch_zones[0];
+                            #[cfg(windows)]
+                            unsafe {
+                                let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(
+                                    first.click_x,
+                                    first.click_y,
+                                );
+                            }
+                            format!("{} zones détectées pour {}. {}. Entrée pour explorer.", count, window_title, first.title)
+                        } else {
+                            format!("Navigation directe activée pour {}.", window_title)
+                        };
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: msg.clone(),
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Stop);
+                        let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+                        ctx.request_repaint();
+                    }
                 }
             }
         }
@@ -1922,46 +2064,476 @@ impl eframe::App for OverlayApp {
                 || m.has_focus(egui::Id::new("model_input_field"))
         });
 
-        // Gestion du Switch Access : défilement séquentiel périodique et validation sur Espace
-        if self.switch_access_mode && !is_typing {
-            if self.switch_last_tick.elapsed() >= Duration::from_millis(1500) {
-                self.switch_focus_index = self.switch_focus_index.saturating_add(1);
-                self.switch_last_tick = Instant::now();
-            }
-
-            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-                play_earcon(Earcon::Success);
-                // Si des suggestions rapides sont affichées, exécuter celle sous le focus
-                if let Some(last_entry) = self.chat_history.last() {
-                    if !last_entry.quick_suggestions.is_empty() {
-                        let idx = self.switch_focus_index % last_entry.quick_suggestions.len();
-                        if let Some(text) = last_entry.quick_suggestions[idx].to_display_string() {
-                            let _ = self.command_sender.send(AgentCommand::Prompt(text));
-                        }
-                    } else {
-                        self.toggle_recording(&ctx);
-                    }
-                }
-                self.switch_last_tick = Instant::now();
-            }
-        }
-
-        // Gestion de la touche Échap : quitte le mode dictée si actif, sinon arrêt d'urgence global
-        let egui_escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        // Gestion de la touche Échap globale et locale
         #[cfg(windows)]
-        let global_escape = self.dictation_mode && unsafe {
-            (GetAsyncKeyState(0x1B) as u16 & 0x8000) != 0
-        };
+        let global_escape_hit = unsafe { (GetAsyncKeyState(0x1B) as u16 & 0x8000) != 0 };
         #[cfg(not(windows))]
-        let global_escape = false;
+        let global_escape_hit = false;
 
-        if egui_escape || global_escape {
+        let egui_escape_hit = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let escape_triggered = (egui_escape_hit || (global_escape_hit && (self.dictation_mode || self.switch_access_mode)))
+            && self.last_switch_input.elapsed() >= Duration::from_millis(250);
+
+        if escape_triggered {
+            self.last_switch_input = Instant::now();
             if self.status == AgentStatus::Speaking {
                 self.stop_speaking();
             } else if self.dictation_mode {
                 self.exit_dictation_mode();
+            } else if self.switch_access_mode {
+                if self.switch_step == SwitchAccessStep::Elements {
+                    if !self.switch_zones.is_empty() {
+                        self.switch_step = SwitchAccessStep::Zones;
+                        self.switch_focus_index = 0;
+                        self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
+                        let _ = self.tts_sender.send(TtsCommand::Stop);
+                        let cur_zone = &self.switch_zones[0];
+                        let msg = format!("Retour aux blocs. {}", cur_zone.title);
+                        let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+                        play_earcon(Earcon::Success);
+                    } else {
+                        self.switch_step = SwitchAccessStep::Windows;
+                        self.numbered_targets.clear();
+                        self.switch_windows = collect_switch_candidate_windows();
+                        self.switch_focus_index = 0;
+                        let _ = self.tts_sender.send(TtsCommand::Stop);
+                        let (locale, _) = get_system_locale_language();
+                        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+                        let base_msg = localized_speech(
+                            lang_prefix,
+                            "Retour aux fenêtres",
+                            "Back to windows",
+                            "Volver a las ventanas",
+                            "Zurück zu den Fenstern",
+                            "Torna alle finestre",
+                            "Voltar para as janelas",
+                            "Возврат к окнам",
+                            "返回窗口列表",
+                            "ウィンドウ選択に戻る",
+                        );
+                        let msg = if let Some(first_win) = self.switch_windows.first() {
+                            format!("{base_msg} : {}", first_win.title)
+                        } else {
+                            base_msg
+                        };
+                        let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+                        play_earcon(Earcon::Success);
+                    }
+                } else if self.switch_step == SwitchAccessStep::Zones {
+                    self.switch_step = SwitchAccessStep::Windows;
+                    self.numbered_targets.clear();
+                    self.switch_zones.clear();
+                    self.switch_windows = collect_switch_candidate_windows();
+                    self.switch_focus_index = 0;
+                    let _ = self.tts_sender.send(TtsCommand::Stop);
+                    let (locale, _) = get_system_locale_language();
+                    let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+                    let base_msg = localized_speech(
+                        lang_prefix,
+                        "Retour aux fenêtres",
+                        "Back to windows",
+                        "Volver a las ventanas",
+                        "Zurück zu den Fenstern",
+                        "Torna alle finestre",
+                        "Voltar para as janelas",
+                        "Возврат к окнам",
+                        "返回窗口列表",
+                        "ウィンドウ選択に戻る",
+                    );
+                    let msg = if let Some(first_win) = self.switch_windows.first() {
+                        format!("{base_msg} : {}", first_win.title)
+                    } else {
+                        base_msg
+                    };
+                    let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+                    play_earcon(Earcon::Success);
+                } else {
+                    self.toggle_switch_access_mode();
+                }
             } else {
                 self.trigger_emergency_stop(&ctx);
+            }
+        }
+
+        // Gestion du Switch Access & Survol : défilement séquentiel périodique et validation sur Entrée / Espace
+        if self.switch_access_mode && !is_typing {
+            #[cfg(windows)]
+            let global_enter = unsafe { (GetAsyncKeyState(0x0D) as u16 & 0x8000) != 0 };
+            #[cfg(not(windows))]
+            let global_enter = false;
+
+            #[cfg(windows)]
+            let global_space = unsafe { (GetAsyncKeyState(0x20) as u16 & 0x8000) != 0 };
+            #[cfg(not(windows))]
+            let global_space = false;
+
+            #[cfg(windows)]
+            let global_nav_next = unsafe {
+                (GetAsyncKeyState(0x27) as u16 & 0x8000) != 0 // Flèche droite
+                    || (GetAsyncKeyState(0x28) as u16 & 0x8000) != 0 // Flèche bas
+                    || (GetAsyncKeyState(0x66) as u16 & 0x8000) != 0 // Pavé numérique 6
+                    || (GetAsyncKeyState(0x36) as u16 & 0x8000) != 0 // Touche 6
+            };
+            #[cfg(not(windows))]
+            let global_nav_next = false;
+
+            #[cfg(windows)]
+            let global_nav_prev = unsafe {
+                (GetAsyncKeyState(0x25) as u16 & 0x8000) != 0 // Flèche gauche
+                    || (GetAsyncKeyState(0x26) as u16 & 0x8000) != 0 // Flèche haut
+                    || (GetAsyncKeyState(0x64) as u16 & 0x8000) != 0 // Pavé numérique 4
+                    || (GetAsyncKeyState(0x34) as u16 & 0x8000) != 0 // Touche 4
+            };
+            #[cfg(not(windows))]
+            let global_nav_prev = false;
+
+            let egui_enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+            let egui_space = ctx.input(|i| i.key_pressed(egui::Key::Space));
+            let egui_nav_next = ctx.input(|i| {
+                i.key_pressed(egui::Key::ArrowRight)
+                    || i.key_pressed(egui::Key::ArrowDown)
+                    || i.key_pressed(egui::Key::Num6)
+            });
+            let egui_nav_prev = ctx.input(|i| {
+                i.key_pressed(egui::Key::ArrowLeft)
+                    || i.key_pressed(egui::Key::ArrowUp)
+                    || i.key_pressed(egui::Key::Num4)
+            });
+
+            let switch_input_hit = (egui_enter || egui_space || global_enter || global_space)
+                && self.last_switch_input.elapsed() >= Duration::from_millis(300);
+
+            let nav_next_hit = (egui_nav_next || global_nav_next)
+                && self.last_switch_input.elapsed() >= Duration::from_millis(220);
+            let nav_prev_hit = (egui_nav_prev || global_nav_prev)
+                && self.last_switch_input.elapsed() >= Duration::from_millis(220);
+
+            if egui_enter || egui_space || egui_nav_next || egui_nav_prev {
+                ctx.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Space);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Num6);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Num4);
+                });
+            }
+
+            match self.switch_step {
+                SwitchAccessStep::Windows => {
+                    if self.switch_windows.is_empty() {
+                        self.switch_windows = collect_switch_candidate_windows();
+                    }
+                    let num_windows = self.switch_windows.len();
+                    if num_windows > 0 {
+                        let auto_tick = self.switch_last_tick.elapsed() >= Duration::from_millis(1500);
+                        let step_next = nav_next_hit || auto_tick;
+                        let step_prev = nav_prev_hit;
+
+                        if step_next || step_prev {
+                            if step_prev {
+                                self.switch_focus_index = if self.switch_focus_index == 0 {
+                                    num_windows - 1
+                                } else {
+                                    self.switch_focus_index - 1
+                                };
+                            } else {
+                                self.switch_focus_index = (self.switch_focus_index + 1) % num_windows;
+                            }
+                            self.switch_last_tick = Instant::now();
+                            if nav_next_hit || nav_prev_hit {
+                                self.last_switch_input = Instant::now();
+                            }
+
+                            let cur_win = &self.switch_windows[self.switch_focus_index];
+                            #[cfg(windows)]
+                            unsafe {
+                                let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(
+                                    cur_win.click_x,
+                                    cur_win.click_y,
+                                );
+                            }
+                            #[cfg(target_os = "macos")]
+                            {
+                                let script = format!(
+                                    r#"tell application "System Events" to set position of (every process whose frontmost is true) to {{{}, {}}}"#,
+                                    cur_win.click_x, cur_win.click_y
+                                );
+                                let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+                            }
+                            #[cfg(all(not(windows), not(target_os = "macos")))]
+                            {
+                                let _ = std::process::Command::new("xdotool")
+                                    .args(["mousemove", &cur_win.click_x.to_string(), &cur_win.click_y.to_string()])
+                                    .status();
+                            }
+                            // Le narrateur lit le nom de la fenêtre activement ciblée
+                            let _ = self.tts_sender.send(TtsCommand::Stop);
+                            let _ = self.tts_sender.send(TtsCommand::Speak(cur_win.title.clone()));
+                            ctx.request_repaint();
+                        }
+
+                        if switch_input_hit {
+                            self.last_switch_input = Instant::now();
+                            play_earcon(Earcon::Success);
+
+                            let cur_win = &self.switch_windows[self.switch_focus_index % num_windows];
+                            #[cfg(windows)]
+                            let target_hwnd = windows::Win32::Foundation::HWND(cur_win.id as _);
+                            #[cfg(windows)]
+                            {
+                                force_foreground_window(target_hwnd);
+                                restore_if_iconic(target_hwnd);
+                                std::thread::sleep(Duration::from_millis(60));
+                                self.numbered_targets = collect_numbered_targets_for_window(target_hwnd);
+                            }
+                            #[cfg(not(windows))]
+                            {
+                                force_foreground_window(&cur_win.title);
+                                self.numbered_targets = collect_numbered_targets_for_window(&cur_win.title);
+                            }
+
+                            let count = self.numbered_targets.len();
+                            if count > 0 {
+                                let status_text = format!("Analyse intelligente des blocs de la fenêtre {}...", cur_win.title);
+                                let _ = self.tts_sender.send(TtsCommand::Stop);
+                                let _ = self.tts_sender.send(TtsCommand::Speak(status_text.clone()));
+                                let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
+                                    window_title: cur_win.title.clone(),
+                                    targets: self.numbered_targets.clone(),
+                                });
+                            } else {
+                                let msg = format!("Fenêtre sélectionnée : {}. Aucun contrôle interactif direct détecté. Échap pour revenir.", cur_win.title);
+                                let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+                            };
+                            ctx.request_repaint();
+                        }
+                    }
+                }
+                SwitchAccessStep::Zones => {
+                    let num_zones = self.switch_zones.len();
+                    if num_zones > 0 {
+                        let auto_tick = self.switch_last_tick.elapsed() >= Duration::from_millis(2200);
+                        let step_next = nav_next_hit || auto_tick;
+                        let step_prev = nav_prev_hit;
+
+                        if step_next || step_prev {
+                            if step_prev {
+                                self.switch_focus_index = if self.switch_focus_index == 0 {
+                                    num_zones - 1
+                                } else {
+                                    self.switch_focus_index - 1
+                                };
+                            } else {
+                                self.switch_focus_index = (self.switch_focus_index + 1) % num_zones;
+                            }
+                            self.switch_last_tick = Instant::now();
+                            if nav_next_hit || nav_prev_hit {
+                                self.last_switch_input = Instant::now();
+                            }
+
+                            let cur_zone = &self.switch_zones[self.switch_focus_index];
+                            #[cfg(windows)]
+                            unsafe {
+                                let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(
+                                    cur_zone.click_x,
+                                    cur_zone.click_y,
+                                );
+                            }
+                            #[cfg(target_os = "macos")]
+                            {
+                                let script = format!(
+                                    r#"tell application "System Events" to set position of (every process whose frontmost is true) to {{{}, {}}}"#,
+                                    cur_zone.click_x, cur_zone.click_y
+                                );
+                                let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+                            }
+                            #[cfg(all(not(windows), not(target_os = "macos")))]
+                            {
+                                let _ = std::process::Command::new("xdotool")
+                                    .args(["mousemove", &cur_zone.click_x.to_string(), &cur_zone.click_y.to_string()])
+                                    .status();
+                            }
+                            let vocal_label = if !cur_zone.title.trim().is_empty() {
+                                if !cur_zone.description.trim().is_empty() {
+                                    format!("{}, {}", cur_zone.title.trim(), cur_zone.description.trim())
+                                } else {
+                                    cur_zone.title.trim().to_string()
+                                }
+                            } else if !cur_zone.description.trim().is_empty() {
+                                cur_zone.description.trim().to_string()
+                            } else {
+                                format!("Zone {} sur {}", self.switch_focus_index + 1, num_zones)
+                            };
+                            let _ = self.tts_sender.send(TtsCommand::Stop);
+                            let _ = self.tts_sender.send(TtsCommand::Speak(vocal_label));
+                            ctx.request_repaint();
+                        }
+
+                        if switch_input_hit {
+                            self.last_switch_input = Instant::now();
+                            play_earcon(Earcon::Success);
+
+                            let cur_zone = &self.switch_zones[self.switch_focus_index % num_zones];
+                            self.numbered_targets = cur_zone.targets.clone();
+                            self.switch_step = SwitchAccessStep::Elements;
+                            self.switch_focus_index = 0;
+                            self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
+
+                            let count = self.numbered_targets.len();
+                            let msg = format!("{} sélectionné, {} contrôles disponibles. Entrée pour valider.", cur_zone.title, count);
+                            let _ = self.tts_sender.send(TtsCommand::Stop);
+                            let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+                            ctx.request_repaint();
+                        }
+                    }
+                }
+                SwitchAccessStep::Elements => {
+                    let num_targets = self.numbered_targets.len();
+                    if num_targets > 0 {
+                        // Défilement automatique périodique avec déplacement physique de la souris
+                        let auto_tick = self.switch_last_tick.elapsed() >= Duration::from_millis(1300);
+                        let step_next = nav_next_hit || auto_tick;
+                        let step_prev = nav_prev_hit;
+
+                        if step_next || step_prev {
+                            if step_prev {
+                                self.switch_focus_index = if self.switch_focus_index == 0 {
+                                    num_targets - 1
+                                } else {
+                                    self.switch_focus_index - 1
+                                };
+                            } else {
+                                self.switch_focus_index = (self.switch_focus_index + 1) % num_targets;
+                            }
+                            self.switch_last_tick = Instant::now();
+                            if nav_next_hit || nav_prev_hit {
+                                self.last_switch_input = Instant::now();
+                            }
+
+                            let cur_target = &self.numbered_targets[self.switch_focus_index];
+                            #[cfg(windows)]
+                            unsafe {
+                                let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(
+                                    cur_target.click_x,
+                                    cur_target.click_y,
+                                );
+                            }
+                            #[cfg(target_os = "macos")]
+                            {
+                                let script = format!(
+                                    r#"tell application "System Events" to set position of (every process whose frontmost is true) to {{{}, {}}}"#,
+                                    cur_target.click_x, cur_target.click_y
+                                );
+                                let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+                            }
+                            #[cfg(all(not(windows), not(target_os = "macos")))]
+                            {
+                                let _ = std::process::Command::new("xdotool")
+                                    .args(["mousemove", &cur_target.click_x.to_string(), &cur_target.click_y.to_string()])
+                                    .status();
+                            }
+                            let (locale, _) = get_system_locale_language();
+                            let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+                            let fallback_label = localized_speech(
+                                lang_prefix,
+                                "Contrôle",
+                                "Control",
+                                "Control",
+                                "Steuerelement",
+                                "Controllo",
+                                "Controle",
+                                "Элемент",
+                                "控件",
+                                "コントロール",
+                            );
+                            let label = if cur_target.name.is_empty() { &fallback_label } else { &cur_target.name };
+                            let _ = self.tts_sender.send(TtsCommand::Stop);
+                            let _ = self.tts_sender.send(TtsCommand::Speak(label.to_string()));
+                            ctx.request_repaint();
+                        }
+
+                        if switch_input_hit {
+                            self.last_switch_input = Instant::now();
+                            play_earcon(Earcon::Success);
+
+                            let cur_target = &self.numbered_targets[self.switch_focus_index % num_targets];
+                            let click_x = cur_target.click_x;
+                            let click_y = cur_target.click_y;
+
+                            #[cfg(windows)]
+                            unsafe {
+                                let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(click_x, click_y);
+                                std::thread::sleep(Duration::from_millis(25));
+                                windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
+                                    windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0,
+                                );
+                                std::thread::sleep(Duration::from_millis(30));
+                                windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
+                                    windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTUP, 0, 0, 0, 0,
+                                );
+                            }
+                            #[cfg(target_os = "macos")]
+                            {
+                                let script = format!(
+                                    r#"tell application "System Events" to click at {{{}, {}}}"#,
+                                    click_x, click_y
+                                );
+                                let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+                            }
+                            #[cfg(all(not(windows), not(target_os = "macos")))]
+                            {
+                                let _ = std::process::Command::new("xdotool")
+                                    .args(["mousemove", &click_x.to_string(), &click_y.to_string(), "click", "1"])
+                                    .status();
+                            }
+
+                            self.switch_last_tick = Instant::now() + Duration::from_millis(300);
+                            self.numbered_targets.clear();
+                            ctx.request_repaint();
+                        }
+                    } else if let Some(last_entry) = self.chat_history.last() {
+                        let sug_count = last_entry.quick_suggestions.len();
+                        if sug_count > 0 {
+                            let auto_tick = self.switch_last_tick.elapsed() >= Duration::from_millis(1500);
+                            let step_next = nav_next_hit || auto_tick;
+                            let step_prev = nav_prev_hit;
+
+                            if step_next || step_prev {
+                                if step_prev {
+                                    self.switch_focus_index = if self.switch_focus_index == 0 {
+                                        sug_count - 1
+                                    } else {
+                                        self.switch_focus_index - 1
+                                    };
+                                } else {
+                                    self.switch_focus_index = (self.switch_focus_index + 1) % sug_count;
+                                }
+                                self.switch_last_tick = Instant::now();
+                                if nav_next_hit || nav_prev_hit {
+                                    self.last_switch_input = Instant::now();
+                                }
+                                if let Some(text) = last_entry.quick_suggestions[self.switch_focus_index % sug_count].to_display_string() {
+                                    let _ = self.tts_sender.send(TtsCommand::Stop);
+                                    let _ = self.tts_sender.send(TtsCommand::Speak(text));
+                                }
+                                ctx.request_repaint();
+                            }
+
+                            if switch_input_hit {
+                                self.last_switch_input = Instant::now();
+                                play_earcon(Earcon::Success);
+                                let idx = self.switch_focus_index % sug_count;
+                                if let Some(text) = last_entry.quick_suggestions[idx].to_display_string() {
+                                    let _ = self.command_sender.send(AgentCommand::Prompt(text));
+                                }
+                                self.switch_last_tick = Instant::now();
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -2110,8 +2682,104 @@ impl eframe::App for OverlayApp {
                             ui.scope_builder(egui::UiBuilder::new().max_rect(content_area), |ui| {
                                 ui.vertical(|ui| {
                                     let prov_name = self.llm_config.provider.display_name();
+                                    let (locale, _) = get_system_locale_language();
+                                    let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
                                     let status_badge = if self.dictation_mode {
                                         format!("{prov_name} · ✍ Mode dictée actif (Échap pour quitter)")
+                                    } else if self.switch_access_mode {
+                                        if self.switch_step == SwitchAccessStep::Windows {
+                                            if !self.switch_windows.is_empty() {
+                                                let cur = &self.switch_windows[self.switch_focus_index % self.switch_windows.len()];
+                                                let cur_idx = (self.switch_focus_index % self.switch_windows.len()) + 1;
+                                                let total_wins = self.switch_windows.len();
+                                                localized_speech(
+                                                    lang_prefix,
+                                                    &format!("🎯 Fenêtres [{cur_idx}/{total_wins}]: {} (Entrée: choisir)", cur.title),
+                                                    &format!("🎯 Windows [{cur_idx}/{total_wins}]: {} (Enter: select)", cur.title),
+                                                    &format!("🎯 Ventanas [{cur_idx}/{total_wins}]: {} (Entrar: elegir)", cur.title),
+                                                    &format!("🎯 Fenster [{cur_idx}/{total_wins}]: {} (Eingabe: wählen)", cur.title),
+                                                    &format!("🎯 Finestre [{cur_idx}/{total_wins}]: {} (Invio: seleziona)", cur.title),
+                                                    &format!("🎯 Janelas [{cur_idx}/{total_wins}]: {} (Enter: escolher)", cur.title),
+                                                    &format!("🎯 Окна [{cur_idx}/{total_wins}]: {} (Enter: выбрать)", cur.title),
+                                                    &format!("🎯 窗口 [{cur_idx}/{total_wins}]: {} (Enter: 选择)", cur.title),
+                                                    &format!("🎯 ウィンドウ [{cur_idx}/{total_wins}]: {} (Enter: 選択)", cur.title),
+                                                )
+                                            } else {
+                                                localized_speech(
+                                                    lang_prefix,
+                                                    "🎯 Recherche de fenêtres...",
+                                                    "🎯 Searching for windows...",
+                                                    "🎯 Buscando ventanas...",
+                                                    "🎯 Fenster werden gesucht...",
+                                                    "🎯 Ricerca finestre...",
+                                                    "🎯 Procurando janelas...",
+                                                    "🎯 Поиск окон...",
+                                                    "🎯 正在搜索窗口...",
+                                                    "🎯 ウィンドウを検索中...",
+                                                )
+                                            }
+                                        } else if self.switch_step == SwitchAccessStep::Zones {
+                                            if !self.switch_zones.is_empty() {
+                                                let cur = &self.switch_zones[self.switch_focus_index % self.switch_zones.len()];
+                                                let cur_idx = (self.switch_focus_index % self.switch_zones.len()) + 1;
+                                                let total_zones = self.switch_zones.len();
+                                                localized_speech(
+                                                    lang_prefix,
+                                                    &format!("🎯 [{cur_idx}/{total_zones}] {} (Entrée: ouvrir)", cur.title),
+                                                    &format!("🎯 [{cur_idx}/{total_zones}] {} (Enter: open)", cur.title),
+                                                    &format!("🎯 [{cur_idx}/{total_zones}] {} (Entrar: abrir)", cur.title),
+                                                    &format!("🎯 [{cur_idx}/{total_zones}] {} (Eingabe: öffnen)", cur.title),
+                                                    &format!("🎯 [{cur_idx}/{total_zones}] {} (Invio: apri)", cur.title),
+                                                    &format!("🎯 [{cur_idx}/{total_zones}] {} (Enter: abrir)", cur.title),
+                                                    &format!("🎯 [{cur_idx}/{total_zones}] {} (Enter: открыть)", cur.title),
+                                                    &format!("🎯 [{cur_idx}/{total_zones}] {} (Enter: 打开)", cur.title),
+                                                    &format!("🎯 [{cur_idx}/{total_zones}] {} (Enter: 開く)", cur.title),
+                                                )
+                                            } else {
+                                                localized_speech(
+                                                    lang_prefix,
+                                                    "🎯 Analyse des blocs de la fenêtre...",
+                                                    "🎯 Analyzing window zones...",
+                                                    "🎯 Analizando zonas de la ventana...",
+                                                    "🎯 Fensterbereiche werden analysiert...",
+                                                    "🎯 Analisi dei blocchi della finestra...",
+                                                    "🎯 Analisando blocos da janela...",
+                                                    "🎯 Анализ блоков окна...",
+                                                    "🎯 正在分析窗口区域...",
+                                                    "🎯 ウィンドウブロックを解析中...",
+                                                )
+                                            }
+                                        } else if !self.numbered_targets.is_empty() {
+                                            let cur = &self.numbered_targets[self.switch_focus_index % self.numbered_targets.len()];
+                                            let label = if cur.name.is_empty() { "Contrôle" } else { cur.name.as_str() };
+                                            let cur_idx = (self.switch_focus_index % self.numbered_targets.len()) + 1;
+                                            let total_targets = self.numbered_targets.len();
+                                            localized_speech(
+                                                lang_prefix,
+                                                &format!("🎯 Contrôles [{cur_idx}/{total_targets}]: {label} (Entrée: cliquer)"),
+                                                &format!("🎯 Controls [{cur_idx}/{total_targets}]: {label} (Enter: click)"),
+                                                &format!("🎯 Controles [{cur_idx}/{total_targets}]: {label} (Entrar: clic)"),
+                                                &format!("🎯 Steuerelemente [{cur_idx}/{total_targets}]: {label} (Eingabe: Klick)"),
+                                                &format!("🎯 Controlli [{cur_idx}/{total_targets}]: {label} (Invio: clic)"),
+                                                &format!("🎯 Controles [{cur_idx}/{total_targets}]: {label} (Enter: clicar)"),
+                                                &format!("🎯 Элементы [{cur_idx}/{total_targets}]: {label} (Enter: клик)"),
+                                                &format!("🎯 控件 [{cur_idx}/{total_targets}]: {label} (Enter: 点击)"),
+                                                &format!("🎯 コントロール [{cur_idx}/{total_targets}]: {label} (Enter: クリック)"),
+                                            )
+                                        } else {
+                                            localized_speech(
+                                                lang_prefix,
+                                                "🎯 Détection des contrôles...",
+                                                "🎯 Detecting controls...",
+                                                "🎯 Detectando controles...",
+                                                "🎯 Steuerelemente werden erkannt...",
+                                                "🎯 Rilevamento controlli...",
+                                                "🎯 Detectando controles...",
+                                                "🎯 Обнаружение элементов...",
+                                                "🎯 正在检测控件...",
+                                                "🎯 コントロールを検出中...",
+                                            )
+                                        }
                                     } else {
                                         match self.status {
                                             AgentStatus::Idle => format!("{prov_name} · en veille"),
@@ -2124,6 +2792,8 @@ impl eframe::App for OverlayApp {
 
                                     let badge_color = if self.dictation_mode {
                                         egui::Color32::from_rgb(255, 205, 70)
+                                    } else if self.switch_access_mode {
+                                        egui::Color32::from_rgb(0, 255, 200)
                                     } else if self.status == AgentStatus::Listening {
                                         egui::Color32::from_rgb(255, 80, 80)
                                     } else {
@@ -2518,6 +3188,21 @@ impl eframe::App for OverlayApp {
                                                     self.start_recording(ui.ctx(), true);
                                                 }
                                             }
+                                        }
+
+                                        let switch_text = if self.switch_access_mode {
+                                            egui::RichText::new("🎯 Survol ON")
+                                                .color(egui::Color32::from_rgb(0, 255, 200))
+                                                .strong()
+                                        } else {
+                                            egui::RichText::new("🎯 Survol")
+                                                .color(egui::Color32::from_rgb(180, 210, 235))
+                                        };
+                                        let switch_btn = ui.button(switch_text).on_hover_text(
+                                            "Activer ou désactiver le mode survol automatique + contacteur (Entrée pour valider)",
+                                        );
+                                        if switch_btn.clicked() {
+                                            self.toggle_switch_access_mode();
                                         }
 
                                         // Sélecteur visuel de profil vocal étendu
@@ -3045,12 +3730,37 @@ impl eframe::App for OverlayApp {
                     }
                 }
 
+
+                // Halo visuel pulsé entourant la zone de navigation analysée par le LLM
+                if self.switch_access_mode && self.switch_step == SwitchAccessStep::Zones && !self.switch_zones.is_empty() {
+                    let cur_zone = &self.switch_zones[self.switch_focus_index % self.switch_zones.len()];
+                    let ppp = ctx.pixels_per_point().max(0.5);
+                    let z_rect = egui::Rect::from_min_max(
+                        egui::pos2(cur_zone.rect[0] as f32 / ppp, cur_zone.rect[1] as f32 / ppp),
+                        egui::pos2(cur_zone.rect[2] as f32 / ppp, cur_zone.rect[3] as f32 / ppp),
+                    );
+                    let pulse = ((time * 4.0).sin().abs() as f32) * 0.3 + 0.7;
+                    painter.rect_stroke(
+                        z_rect.expand(6.0),
+                        egui::CornerRadius::same(8),
+                        egui::Stroke::new(2.5, egui::Color32::from_rgba_unmultiplied(0, (220.0 * pulse) as u8, 255, 230)),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+
                 // Indicateur visuel du mode Switch Access
                 if self.switch_access_mode {
+                    let pulse = ((time * 4.0).sin().abs() as f32) * 0.4 + 0.6;
+                    let stroke_color = egui::Color32::from_rgba_unmultiplied(
+                        (0.0 * pulse) as u8,
+                        (255.0 * pulse) as u8,
+                        (200.0 * pulse) as u8,
+                        255,
+                    );
                     painter.rect_stroke(
                         control_rect.expand(2.0),
                         egui::CornerRadius::same(12),
-                        egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 255, 200)),
+                        egui::Stroke::new(2.5, stroke_color),
                         egui::StrokeKind::Outside,
                     );
                 }
@@ -4633,6 +5343,151 @@ async fn call_llm_prompt(
     }
 }
 
+async fn analyze_navigation_zones_with_llm(
+    client: &reqwest::Client,
+    config: &LlmConfig,
+    window_title: &str,
+    targets: &[NumberedElementTarget],
+) -> Vec<NavigationZone> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+
+    let mut prompt_content = format!("Fenêtre analysée : \"{}\"\nContrôles interactifs détectés :\n", window_title);
+    for t in targets.iter().take(40) {
+        prompt_content.push_str(&format!("- ID #{}: \"{}\" [x:{}, y:{}, w:{}, h:{}]\n", t.index, t.name, t.rect[0], t.rect[1], t.rect[2] - t.rect[0], t.rect[3] - t.rect[1]));
+    }
+
+    let sys_prompt = r#"Tu es un expert d'ergonomie et d'accessibilité numérique pour moteur Switch Access / Contacteur.
+Reçois la liste des éléments interactifs d'une fenêtre d'ordinateur.
+Découpe et regroupe ces éléments en 2 à 4 blocs d'interaction logiques évidents (ex: "En-tête et commandes de fenêtre", "Barre de navigation et onglets", "Formulaire et recherche", "Contenu principal", "Pied de page et actions").
+RÈGLE ESSENTIELLE : Attribue à chaque zone un "title" court, explicite et naturel qui nomme la fonction de navigation (ex: "Navigation et onglets", "Recherche", "Contenu principal", "Boutons d'action").
+INTERDICTION FORMELLE de nommer les blocs "Bloc 1", "Bloc 2", "Zone 1", "Bloc 1/4" ou similaire : donne toujours le nom réel de la section ou de la navigation.
+Réponds STRICTEMENT en JSON :
+{
+  "zones": [
+    {
+      "title": "Nom explicite du bloc de navigation",
+      "description": "Courte description pour synthèse vocale",
+      "target_indices": [1, 2, 3]
+    }
+  ]
+}"#;
+
+    let messages = vec![ChatMessage {
+        role: "user".to_string(),
+        content: prompt_content,
+    }];
+
+    let response = send_llm_chat_completion(client, config, sys_prompt, &messages, 0.2, 700).await;
+
+    if let Ok(res) = response {
+        if res.status().is_success() {
+            if let Ok(raw) = parse_llm_response_text(res, config.provider).await {
+                let clean = raw.trim();
+                let unquoted = if let Some(start) = clean.find("```") {
+                    let after_ticks = clean[start + 3..].trim_start();
+                    let content_start = if after_ticks.len() >= 4 && after_ticks[..4].eq_ignore_ascii_case("json") {
+                        after_ticks[4..].trim_start()
+                    } else {
+                        after_ticks
+                    };
+                    if let Some(end) = content_start.rfind("```") {
+                        content_start[..end].trim()
+                    } else {
+                        content_start.trim()
+                    }
+                } else {
+                    clean
+                };
+                let json_candidate = if let (Some(s), Some(e)) = (unquoted.find('{'), unquoted.rfind('}')) {
+                    if s <= e { &unquoted[s..=e] } else { unquoted }
+                } else {
+                    unquoted
+                };
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_candidate) {
+                    if let Some(zones_arr) = val.get("zones").and_then(|z| z.as_array()) {
+                        let mut result_zones = Vec::new();
+                        for z in zones_arr {
+                            let title = z.get("title").and_then(|v| v.as_str()).unwrap_or("Zone").trim().to_string();
+                            let desc = z.get("description").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                            let mut zone_targets = Vec::new();
+                            if let Some(indices) = z.get("target_indices").and_then(|v| v.as_array()) {
+                                for idx_val in indices {
+                                    if let Some(idx) = idx_val.as_u64() {
+                                        if let Some(t) = targets.iter().find(|t| t.index == idx as usize) {
+                                            zone_targets.push(t.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            if !zone_targets.is_empty() {
+                                let min_x = zone_targets.iter().map(|t| t.rect[0]).min().unwrap_or(0);
+                                let min_y = zone_targets.iter().map(|t| t.rect[1]).min().unwrap_or(0);
+                                let max_x = zone_targets.iter().map(|t| t.rect[2]).max().unwrap_or(0);
+                                let max_y = zone_targets.iter().map(|t| t.rect[3]).max().unwrap_or(0);
+                                result_zones.push(NavigationZone {
+                                    title,
+                                    description: desc,
+                                    click_x: min_x + (max_x - min_x) / 2,
+                                    click_y: min_y + (max_y - min_y) / 2,
+                                    rect: [min_x, min_y, max_x, max_y],
+                                    targets: zone_targets,
+                                });
+                            }
+                        }
+                        if !result_zones.is_empty() {
+                            return result_zones;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Repli géométrique robuste si pas de réseau ou absence de clé LLM
+    let mut top_targets = Vec::new();
+    let mut main_targets = Vec::new();
+    for t in targets {
+        if t.rect[1] < 55 {
+            top_targets.push(t.clone());
+        } else {
+            main_targets.push(t.clone());
+        }
+    }
+
+    let mut fallback_zones = Vec::new();
+    if !top_targets.is_empty() {
+        let min_x = top_targets.iter().map(|t| t.rect[0]).min().unwrap_or(0);
+        let min_y = top_targets.iter().map(|t| t.rect[1]).min().unwrap_or(0);
+        let max_x = top_targets.iter().map(|t| t.rect[2]).max().unwrap_or(0);
+        let max_y = top_targets.iter().map(|t| t.rect[3]).max().unwrap_or(0);
+        fallback_zones.push(NavigationZone {
+            title: "Barre supérieure et commandes".to_string(),
+            description: "Boutons de fenêtre et en-tête".to_string(),
+            click_x: min_x + (max_x - min_x) / 2,
+            click_y: min_y + (max_y - min_y) / 2,
+            rect: [min_x, min_y, max_x, max_y],
+            targets: top_targets,
+        });
+    }
+    if !main_targets.is_empty() {
+        let min_x = main_targets.iter().map(|t| t.rect[0]).min().unwrap_or(0);
+        let min_y = main_targets.iter().map(|t| t.rect[1]).min().unwrap_or(0);
+        let max_x = main_targets.iter().map(|t| t.rect[2]).max().unwrap_or(0);
+        let max_y = main_targets.iter().map(|t| t.rect[3]).max().unwrap_or(0);
+        fallback_zones.push(NavigationZone {
+            title: "Corps et zone principale".to_string(),
+            description: "Contenu interactif et champs".to_string(),
+            click_x: min_x + (max_x - min_x) / 2,
+            click_y: min_y + (max_y - min_y) / 2,
+            rect: [min_x, min_y, max_x, max_y],
+            targets: main_targets,
+        });
+    }
+    fallback_zones
+}
+
 fn main() -> eframe::Result<()> {
     // Si l'application est lancée au démarrage de Windows (CWD = System32),
     // repositionner le répertoire courant sur le dossier du projet ou de l'exécutable.
@@ -4683,6 +5538,18 @@ fn main() -> eframe::Result<()> {
 
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
+                    AgentCommand::AnalyzeNavigationZones { window_title, targets } => {
+                        let client = reqwest::Client::new();
+                        let current_llm_config = bg_llm_config.clone();
+                        let event_tx = event_tx.clone();
+                        tokio::spawn(async move {
+                            let zones = analyze_navigation_zones_with_llm(&client, &current_llm_config, &window_title, &targets).await;
+                            let _ = event_tx.send(AgentEvent::NavigationZonesReady {
+                                window_title,
+                                zones,
+                            });
+                        });
+                    }
                     AgentCommand::Prompt(prompt) => {
                         if prompt.trim().is_empty() || !prompt.chars().any(|c| c.is_alphanumeric()) {
                             println!("[Agent] Commande vide ignorée (bruit parasite), aucune requête LLM.");
