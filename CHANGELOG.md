@@ -6,6 +6,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.3] - 2026-10-21
+
+### 🚀 Cross-Platform Automation Parity
+- **Linux Accessibility (AT-SPI2)**: Implemented full support for UI element discovery and interaction on Linux desktops (X11/Wayland) via the AT-SPI2 accessibility bridge. This enables `click_element`, `list_interactive_elements`, and semantic element finding (`find_best_button`, etc.) on Linux.
+- **macOS Automation Enhancements**: Added native `osascript` macros for simulated clicks, keyboard input, and system commands, significantly improving automation reliability on macOS.
+- **Unified Command Execution**: The `execute_system_actions` function in `commands.rs` is now fully implemented for non-Windows platforms, translating abstract actions like `ClickButton` into native `xdotool` or `osascript` calls.
+
+### 🧭 Navigation & Command Refinements
+- **Disambiguated Search**: The agent now correctly distinguishes between a system-wide search (`open_search` for apps/files) and a web search (`open_search_browser` for the browser's omnibox).
+- **Browser Navigation**: Added dedicated `navigate_back` and `navigate_forward` actions for seamless history navigation in web browsers.
+- **Direct CLI Execution**: The direct command execution feature (prefix `>`) is now enabled on all platforms (Windows, macOS, Linux).
+
+### 🛠️ Build & CI/CD
+- **Comprehensive Pull Request Validation**: GitHub Actions workflows are now configured to run tests and builds on pull requests targeting *any* branch, ensuring code quality before merges.
+- **Release Safety**: The release creation step in the CI pipeline is now protected to only run on tag pushes, preventing accidental releases from pull requests.
+
+### 🐛 Bug Fixes & Stability
+- **Test Suite Stabilization**: Addressed and fixed multiple unit test failures across Windows, Linux, and macOS environments, ensuring a more stable and reliable build process.
+- **Duplicate Import Fix**: Resolved `E0252` compilation errors caused by duplicate `use` statements in `src/ui.rs`, cleaning up the module's namespace.
+
 ## [0.5.2] - 2026-10-19
 
 ### 🎨 Accessibility Themes & Visual Ergonomics
