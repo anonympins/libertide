@@ -860,9 +860,6 @@ pub fn update_last_external_focus() {
     // et mettre à jour LAST_FOCUSED_RECT avec bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height
 }
 
-#[cfg(all(not(windows), not(target_os = "macos")))]
-pub fn update_last_external_focus() {}
-
 #[cfg(windows)]
 pub fn restore_external_focus_target(target: Option<HWND>) -> bool {
     extern "system" {
@@ -1754,24 +1751,6 @@ pub fn send_paste() {
     send_key_event(VK_V, KEYEVENTF_KEYUP);
     std::thread::sleep(Duration::from_millis(20));
     send_key_event(VK_CONTROL, KEYEVENTF_KEYUP);
-}
-
-#[cfg(not(windows))]
-pub fn send_terminal_input(_hwnd: impl AsWindowTarget, text: &str, auto_enter: bool) {
-    const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
-    let trimmed = text.trim_end_matches(['\r', '\n']);
-    let has_trailing_newline = text.ends_with('\n') || text.ends_with('\r');
-    let should_press_enter = auto_enter || has_trailing_newline;
-
-    clipboard::set_text(trimmed);
-    std::thread::sleep(Duration::from_millis(40));
-    send_paste();
-    std::thread::sleep(Duration::from_millis(50));
-
-    if should_press_enter {
-        std::thread::sleep(Duration::from_millis(40));
-        send_hotkey(&[], VK_RETURN);
-    }
 }
 
 #[cfg(not(windows))]

@@ -6027,8 +6027,6 @@ fn main() -> eframe::Result<()> {
                         let current_llm_config = bg_llm_config.clone();
 
                         current_task = Some(tokio::spawn(async move {
-                        #[cfg(windows)]
-                        {
                             if is_request_cancelled(request_id) { return; }
                             let current_summary = tokio::task::spawn_blocking(|| {
                                 summarize_screen_state(None, false)
@@ -6113,7 +6111,6 @@ fn main() -> eframe::Result<()> {
                             } else {
                                 println!("[Surveillance] Premier instantané d'écran enregistré.");
                             }
-                        }
                         }));
                     }
                     AgentCommand::UndoLastAction => {
