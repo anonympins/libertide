@@ -160,7 +160,9 @@ pub struct OverlayApp {
     switch_step: SwitchAccessStep,
     switch_windows: Vec<SwitchWindowTarget>,
     switch_zones: Vec<NavigationZone>,
+    switch_active_window_id: Option<isize>,
     switch_active_zone_index: Option<usize>,
+    window_analysis_cache: std::collections::HashMap<isize, CachedWindowAnalysis>,
     last_switch_input: Instant,
     switch_auto_scroll: bool,
     switch_focus_index: usize,
@@ -173,6 +175,8 @@ pub struct OverlayApp {
     hover_speech_deadline: Option<Instant>,
     hover_last_announced_target: Option<usize>,
     hover_last_announced_zone: Option<String>,
+    hover_controls_speech_enabled: bool,
+    hover_physical_mouse_moved: bool,
 
     // Canaux de communication asynchrones
     event_receiver: Receiver<AgentEvent>,
@@ -986,7 +990,9 @@ impl OverlayApp {
             switch_step: SwitchAccessStep::Windows,
             switch_windows: Vec::new(),
             switch_zones: Vec::new(),
+            switch_active_window_id: None,
             switch_active_zone_index: None,
+            window_analysis_cache: std::collections::HashMap::new(),
             last_switch_input: Instant::now() - Duration::from_secs(1),
             switch_auto_scroll: false,
             switch_focus_index: 0,
@@ -998,6 +1004,8 @@ impl OverlayApp {
             hover_speech_deadline: None,
             hover_last_announced_target: None,
             hover_last_announced_zone: None,
+            hover_controls_speech_enabled: false,
+            hover_physical_mouse_moved: false,
 
             event_receiver,
             command_sender,
@@ -1297,23 +1305,106 @@ impl OverlayApp {
             self.hover_speech_deadline = None;
             self.hover_last_announced_target = None;
             self.hover_last_announced_zone = None;
+            self.hover_controls_speech_enabled = false;
+            self.hover_physical_mouse_moved = false;
             play_earcon(Earcon::Success);
-            let count = self.switch_windows.len();
-            let msg = if count > 0 {
-                localized_speech(
-                    lang_prefix,
-                    "Mode contacteur activé. Utilisez Tab ou 4 et 6 pour naviguer, Entrée ou Espace pour sélectionner.",
-                    "Switch access enabled. Use Tab or 4 and 6 to navigate, Enter or Space to select.",
-                    "Acceso por conmutador activado. Use Tab o 4 y 6 para navegar, Entrar o Espacio para seleccionar.",
-                    "Schalterzugriff aktiviert. Tab oder 4 und 6 zum Navigieren, Eingabe oder Leertaste zur Auswahl.",
-                    "Accesso a interruttori attivato. Usa Tab o 4 e 6 per navigare, Invio o Spazio per selezionare.",
-                    "Acesso por interruptor ativado. Use Tab ou 4 e 6 para navegar, Enter ou Espaço para selecionar.",
-                    "Режим переключателя включен. Используйте Tab или 4 и 6 для навигации, Enter или Пробел для выбора.",
-                    "开关控制已启用。使用 Tab 或 4 和 6 导航，按 Enter 或空格键选择。",
-                    "スイッチアクセスが有効になりました。Tabまたは4と6で移動、EnterまたはSpaceで選択。",
-                )
+            if !self.switch_windows.is_empty() {
+                #[cfg(windows)]
+                let physical_cursor = {
+                    let mut pt = windows::Win32::Foundation::POINT::default();
+                    if unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt).is_ok() } {
+                        Some((pt.x, pt.y))
+                    } else {
+                        None
+                    }
+                };
+                #[cfg(not(windows))]
+                let physical_cursor: Option<(i32, i32)> = None;
+
+                let hovered_idx = if let Some((cx, cy)) = physical_cursor {
+                    #[cfg(windows)]
+                    {
+                        let pt = windows::Win32::Foundation::POINT { x: cx, y: cy };
+                        let child = unsafe { windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt) };
+                        let root = if !child.is_invalid() {
+                            unsafe { windows::Win32::UI::WindowsAndMessaging::GetAncestor(child, windows::Win32::UI::WindowsAndMessaging::GA_ROOT) }
+                        } else { child };
+                        let top_hwnd = if !root.is_invalid() { root } else { child };
+                        self.switch_windows.iter().position(|w| w.id == top_hwnd.0 as isize)
+                    }
+                    #[cfg(not(windows))]
+                    self.switch_windows.iter().position(|w| {
+                        cx >= w.rect[0] && cx <= w.rect[2] && cy >= w.rect[1] && cy <= w.rect[3]
+                    })
+                } else {
+                    None
+                };
+
+                #[cfg(windows)]
+                let active_idx = hovered_idx.or_else(|| {
+                    let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+                    self.switch_windows.iter().position(|w| w.id == fg.0 as isize)
+                });
+                #[cfg(not(windows))]
+                let active_idx = hovered_idx;
+
+                self.switch_focus_index = active_idx.unwrap_or(0);
+                let cur_win = &self.switch_windows[self.switch_focus_index];
+
+                #[cfg(windows)]
+                {
+                    let target_hwnd = windows::Win32::Foundation::HWND(cur_win.id as _);
+                    force_foreground_window(target_hwnd);
+                    restore_if_iconic(target_hwnd);
+                    draw_screen_orange_border(cur_win.rect);
+                }
+                #[cfg(not(windows))]
+                {
+                    force_foreground_window(&cur_win.title);
+                    restore_if_iconic(&cur_win.title);
+                }
+
+                #[cfg(windows)]
+                let targets = collect_numbered_targets_for_window(windows::Win32::Foundation::HWND(cur_win.id as _));
+                #[cfg(not(windows))]
+                let targets = collect_numbered_targets_for_window(&cur_win.title);
+
+                let (summary, fallback_zones) = build_fallback_navigation_zones(&cur_win.title, &targets);
+                self.window_analysis_cache.insert(cur_win.id, CachedWindowAnalysis {
+                    summary: summary.clone(),
+                    zones: fallback_zones,
+                });
+
+                if !targets.is_empty() {
+                    let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
+                        window_id: cur_win.id,
+                        window_title: cur_win.title.clone(),
+                        targets,
+                    });
+                }
+
+                let speech = if !summary.is_empty() {
+                    summary
+                } else {
+                    format!("Mode survol activé sur {}.", cur_win.title)
+                };
+
+                self.hover_last_announced_target = Some(cur_win.id as usize);
+                self.hover_last_announced_zone = Some(cur_win.title.clone());
+                self.hover_last_cursor_pos = physical_cursor;
+                self.hover_cursor_still_since = Instant::now();
+
+                self.chat_history.push(ChatEntry {
+                    role: ChatRole::Agent,
+                    text: speech.clone(),
+                    timestamp: current_time_str(),
+                    quick_suggestions: Vec::new(),
+                    screen_size_kb: None,
+                });
+                let _ = self.tts_sender.send(TtsCommand::Stop);
+                let _ = self.tts_sender.send(TtsCommand::Speak(speech));
             } else {
-                localized_speech(
+                let msg = localized_speech(
                     lang_prefix,
                     "Mode contacteur hiérarchique activé. Aucune fenêtre candidate détectée.",
                     "Hierarchical switch access enabled. No candidate windows detected.",
@@ -1324,16 +1415,16 @@ impl OverlayApp {
                     "Иерархический режим переключателя включен. Подходящих окон не найдено.",
                     "分层开关控制已启用。未检测到候选窗口。",
                     "階層スイッチアクセスが有効になりました。対象ウィンドウが見つかりません。",
-                )
+                );
+                self.chat_history.push(ChatEntry {
+                    role: ChatRole::Agent,
+                    text: msg.clone(),
+                    timestamp: current_time_str(),
+                    quick_suggestions: Vec::new(),
+                    screen_size_kb: None,
+                });
+                let _ = self.tts_sender.send(TtsCommand::Speak(msg));
             };
-            self.chat_history.push(ChatEntry {
-                role: ChatRole::Agent,
-                text: msg.clone(),
-                timestamp: current_time_str(),
-                quick_suggestions: Vec::new(),
-                screen_size_kb: None,
-            });
-            let _ = self.tts_sender.send(TtsCommand::Speak(msg));
         } else {
             self.numbered_targets.clear();
             self.switch_windows.clear();
@@ -1347,6 +1438,8 @@ impl OverlayApp {
             self.hover_speech_deadline = None;
             self.hover_last_announced_target = None;
             self.hover_last_announced_zone = None;
+            self.hover_controls_speech_enabled = false;
+            self.hover_physical_mouse_moved = false;
             play_earcon(Earcon::MicClose);
             let msg = localized_speech(
                 lang_prefix,
@@ -2151,42 +2244,18 @@ impl eframe::App for OverlayApp {
                     ctx.request_repaint();
                     ctx.request_repaint_of(vp_id);
                 }   
-                AgentEvent::NavigationZonesReady { window_title, zones } => {
-                    if self.switch_access_mode {
-                        let mut zones = zones;
-                        for z in zones.iter_mut() {
-                            inject_text_reader_target(z);
-                        }
-                        self.numbered_targets.clear();
-                        self.switch_zones = zones;
-                        self.switch_step = SwitchAccessStep::Zones;
-                        self.switch_focus_index = 0;
-                        self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
+                AgentEvent::NavigationZonesReady { window_id, window_title, summary, zones } => {
+                    self.window_analysis_cache.insert(window_id, CachedWindowAnalysis {
+                        summary: summary.clone(),
+                        zones: zones.clone(),
+                    });
 
-                        let count = self.switch_zones.len();
-                        let msg = if count > 0 {
-                            let first = &self.switch_zones[0];
-                            #[cfg(windows)]
-                            unsafe {
-                                let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(
-                                    first.click_x,
-                                    first.click_y,
-                                );
-                            }
-                            self.hover_last_cursor_pos = Some((first.click_x, first.click_y));
-                            first.title.clone()
-                        } else {
-                            format!("Navigation directe activée pour {}.", window_title)
-                        };
-                        self.chat_history.push(ChatEntry {
-                            role: ChatRole::Agent,
-                            text: msg.clone(),
-                            timestamp: current_time_str(),
-                            quick_suggestions: Vec::new(),
-                            screen_size_kb: None,
-                        });
-                        let _ = self.tts_sender.send(TtsCommand::Stop);
-                        let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+                    if self.switch_access_mode && self.switch_active_window_id == Some(window_id) {
+                        self.switch_zones = zones;
+                        if !summary.is_empty() && self.hover_controls_speech_enabled {
+                            let _ = self.tts_sender.send(TtsCommand::Stop);
+                            let _ = self.tts_sender.send(TtsCommand::Speak(summary));
+                        }
                         ctx.request_repaint();
                     }
                 }
@@ -2229,6 +2298,7 @@ impl eframe::App for OverlayApp {
                         self.numbered_targets.clear();
                         self.switch_focus_index = 0;
                         self.switch_auto_scroll = false;
+                        self.hover_physical_mouse_moved = false;
                         self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
                         let _ = self.tts_sender.send(TtsCommand::Stop);
                         let cur_zone = &self.switch_zones[0];
@@ -2242,6 +2312,7 @@ impl eframe::App for OverlayApp {
                         self.switch_windows = collect_switch_candidate_windows();
                         self.switch_auto_scroll = false;
                         self.switch_focus_index = 0;
+                        self.hover_physical_mouse_moved = false;
                         let _ = self.tts_sender.send(TtsCommand::Stop);
                         let (locale, _) = get_system_locale_language();
                         let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
@@ -2273,6 +2344,7 @@ impl eframe::App for OverlayApp {
                     self.switch_windows = collect_switch_candidate_windows();
                     self.switch_auto_scroll = false;
                     self.switch_focus_index = 0;
+                    self.hover_physical_mouse_moved = false;
                     let _ = self.tts_sender.send(TtsCommand::Stop);
                     let (locale, _) = get_system_locale_language();
                     let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
@@ -2371,7 +2443,9 @@ impl eframe::App for OverlayApp {
                             self.switch_focus_index %= num_windows;
                             self.switch_last_tick = Instant::now();
                         self.last_switch_input = Instant::now();
+                        self.hover_controls_speech_enabled = false;
                         self.switch_auto_scroll = false;
+                            self.hover_physical_mouse_moved = false;
 
                             let cur_win = &self.switch_windows[self.switch_focus_index % num_windows];
                             #[cfg(windows)]
@@ -2393,46 +2467,139 @@ impl eframe::App for OverlayApp {
                                 restore_if_iconic(&cur_win.title);
                             }
 
-                            // Le narrateur lit le nom de la fenêtre activement ciblée
+                            self.hover_last_cursor_pos = Some((cur_win.click_x, cur_win.click_y));
+                            self.hover_cursor_still_since = Instant::now();
+                            self.hover_last_announced_target = Some(cur_win.id as usize);
+                            self.hover_last_announced_zone = Some(cur_win.title.clone());
+
+                            // Le narrateur lit immédiatement le résumé sémantique de la fenêtre
+                            let speech = if let Some(cached) = self.window_analysis_cache.get(&cur_win.id) {
+                                if !cached.summary.is_empty() {
+                                    cached.summary.clone()
+                                } else {
+                                    cur_win.title.clone()
+                                }
+                            } else {
+                                #[cfg(windows)]
+                                let targets = collect_numbered_targets_for_window(windows::Win32::Foundation::HWND(cur_win.id as _));
+                                #[cfg(not(windows))]
+                                let targets = collect_numbered_targets_for_window(&cur_win.title);
+
+                                let (summary, fallback_zones) = build_fallback_navigation_zones(&cur_win.title, &targets);
+                                self.window_analysis_cache.insert(cur_win.id, CachedWindowAnalysis {
+                                    summary: summary.clone(),
+                                    zones: fallback_zones,
+                                });
+
+                                if !targets.is_empty() {
+                                    let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
+                                        window_id: cur_win.id,
+                                        window_title: cur_win.title.clone(),
+                                        targets,
+                                    });
+                                }
+
+                                if !summary.is_empty() { summary } else { cur_win.title.clone() }
+                            };
+
                             let _ = self.tts_sender.send(TtsCommand::Stop);
-                            let _ = self.tts_sender.send(TtsCommand::Speak(cur_win.title.clone()));
+                            let _ = self.tts_sender.send(TtsCommand::Speak(speech));
+                            self.hover_last_announced_target = Some(cur_win.id as usize);
                             ctx.request_repaint();
                         }
 
                         if switch_input_hit {
                             self.last_switch_input = Instant::now();
                             self.switch_auto_scroll = false;
+                            self.hover_controls_speech_enabled = false;
+                            self.hover_physical_mouse_moved = false;
                             play_earcon(Earcon::Success);
 
                             let win_idx = self.switch_focus_index % num_windows;
                             let cur_win = &self.switch_windows[win_idx];
+                            self.switch_active_window_id = Some(cur_win.id);
                             #[cfg(windows)]
                             let target_hwnd = windows::Win32::Foundation::HWND(cur_win.id as _);
                             #[cfg(windows)]
                             {
                                 force_foreground_window(target_hwnd);
                                 restore_if_iconic(target_hwnd);
-                                std::thread::sleep(Duration::from_millis(60));
-                                self.numbered_targets = collect_numbered_targets_for_window(target_hwnd);
                             }
                             #[cfg(not(windows))]
                             {
                                 force_foreground_window(&cur_win.title);
-                                self.numbered_targets = collect_numbered_targets_for_window(&cur_win.title);
                             }
 
-                            let count = self.numbered_targets.len();
-                            if count > 0 {
-                                let status_text = format!("Analyse intelligente des blocs de la fenêtre {}...", cur_win.title);
-                                let _ = self.tts_sender.send(TtsCommand::Stop);
-                                let _ = self.tts_sender.send(TtsCommand::Speak(status_text.clone()));
-                                let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
-                                    window_title: cur_win.title.clone(),
-                                    targets: self.numbered_targets.clone(),
+                            // Vérification du cache pour ne pas réexécuter l'appel LLM
+                            if let Some(cached) = self.window_analysis_cache.get(&cur_win.id).cloned() {
+                                self.numbered_targets.clear();
+                                self.switch_zones = cached.zones;
+                                self.switch_step = SwitchAccessStep::Zones;
+                                self.switch_focus_index = 0;
+                                self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
+                                let speech = if !cached.summary.is_empty() {
+                                    cached.summary
+                                } else {
+                                    format!("Fenêtre {}.", cur_win.title)
+                                };
+
+                                self.chat_history.push(ChatEntry {
+                                    role: ChatRole::Agent,
+                                    text: speech.clone(),
+                                    timestamp: current_time_str(),
+                                    quick_suggestions: Vec::new(),
+                                    screen_size_kb: None,
                                 });
+                                let _ = self.tts_sender.send(TtsCommand::Stop);
+                                let _ = self.tts_sender.send(TtsCommand::Speak(speech));
                             } else {
-                                let msg = format!("Fenêtre sélectionnée : {}. Aucun contrôle interactif direct détecté. Échap pour revenir.", cur_win.title);
-                                let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+                                #[cfg(windows)]
+                                {
+                                    std::thread::sleep(Duration::from_millis(60));
+                                    self.numbered_targets = collect_numbered_targets_for_window(target_hwnd);
+                                }
+                                #[cfg(not(windows))]
+                                {
+                                    self.numbered_targets = collect_numbered_targets_for_window(&cur_win.title);
+                                }
+
+                                let count = self.numbered_targets.len();
+                                if count > 0 {
+                                    let (summary, fallback_zones) = build_fallback_navigation_zones(&cur_win.title, &self.numbered_targets);
+                                    self.window_analysis_cache.insert(cur_win.id, CachedWindowAnalysis {
+                                        summary: summary.clone(),
+                                        zones: fallback_zones.clone(),
+                                    });
+                                    self.switch_zones = fallback_zones;
+                                    self.switch_step = SwitchAccessStep::Zones;
+                                    self.switch_focus_index = 0;
+                                    self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
+                                    let speech = if !summary.is_empty() {
+                                        summary
+                                    } else {
+                                        format!("Fenêtre {}.", cur_win.title)
+                                    };
+
+                                    self.chat_history.push(ChatEntry {
+                                        role: ChatRole::Agent,
+                                        text: speech.clone(),
+                                        timestamp: current_time_str(),
+                                        quick_suggestions: Vec::new(),
+                                        screen_size_kb: None,
+                                    });
+                                    let _ = self.tts_sender.send(TtsCommand::Stop);
+                                    let _ = self.tts_sender.send(TtsCommand::Speak(speech));
+
+                                    // Lancement en arrière-plan pour enrichissement IA
+                                    let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
+                                        window_id: cur_win.id,
+                                        window_title: cur_win.title.clone(),
+                                        targets: self.numbered_targets.clone(),
+                                    });
+                                } else {
+                                    let msg = format!("Fenêtre sélectionnée : {}. Aucun contrôle interactif direct détecté. Échap pour revenir.", cur_win.title);
+                                    let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+                                }
                             };
                             ctx.request_repaint();
                         }
@@ -2456,10 +2623,22 @@ impl eframe::App for OverlayApp {
                                 self.switch_focus_index = (self.switch_focus_index + 1) % num_zones;
                             }
                             self.switch_focus_index %= num_zones;
+                            self.hover_controls_speech_enabled = true;
                             self.switch_last_tick = Instant::now();
+                            self.hover_physical_mouse_moved = false;
                             if nav_next_hit || nav_prev_hit {
                                 self.last_switch_input = Instant::now();
                                 self.switch_auto_scroll = false;
+                            }
+
+                            #[cfg(windows)]
+                            if let Some(id) = self.switch_active_window_id {
+                                let hwnd = windows::Win32::Foundation::HWND(id as _);
+                                if !is_window_hung(hwnd) {
+                                    force_foreground_window(hwnd);
+                                    restore_if_iconic(hwnd);
+                                    std::thread::sleep(Duration::from_millis(40));
+                                }
                             }
 
                             let cur_zone = &self.switch_zones[self.switch_focus_index % num_zones];
@@ -2486,6 +2665,7 @@ impl eframe::App for OverlayApp {
                         if switch_input_hit {
                             self.last_switch_input = Instant::now();
                             self.switch_auto_scroll = false;
+                            self.hover_physical_mouse_moved = false;
                             play_earcon(Earcon::Success);
 
                             let zone_idx = self.switch_focus_index % num_zones;
@@ -2494,6 +2674,7 @@ impl eframe::App for OverlayApp {
                             self.switch_active_zone_index = Some(zone_idx);
                             self.switch_step = SwitchAccessStep::Elements;
                             self.switch_focus_index = 0;
+                            self.hover_controls_speech_enabled = true;
 
                             if let Some(first_target) = self.numbered_targets.first() {
                                 focus_element_target(first_target);
@@ -2528,7 +2709,9 @@ impl eframe::App for OverlayApp {
                                 self.switch_focus_index = (self.switch_focus_index + 1) % num_targets;
                             }
                             self.switch_focus_index %= num_targets;
+                            self.hover_controls_speech_enabled = true;
                             self.switch_last_tick = Instant::now();
+                            self.hover_physical_mouse_moved = false;
                             if nav_next_hit || nav_prev_hit {
                                 self.last_switch_input = Instant::now();
                                 self.switch_auto_scroll = false;
@@ -2570,6 +2753,7 @@ impl eframe::App for OverlayApp {
                         if switch_input_hit {
                             self.last_switch_input = Instant::now();
                             self.switch_auto_scroll = false;
+                            self.hover_physical_mouse_moved = false;
                             play_earcon(Earcon::Success);
 
                             let cur_target = &self.numbered_targets[self.switch_focus_index % num_targets];
@@ -2772,21 +2956,24 @@ impl eframe::App for OverlayApp {
             if let Some((cur_x, cur_y)) = physical_cursor {
                 let has_moved = match self.hover_last_cursor_pos {
                     Some((lx, ly)) => (lx - cur_x).abs() > 4 || (ly - cur_y).abs() > 4,
-                    None => true,
+                    None => false,
                 };
 
                 let is_recent_switch_nav = self.last_switch_input.elapsed() < Duration::from_millis(500);
 
                 if has_moved {
+                    self.hover_physical_mouse_moved = true;
                     self.hover_cursor_still_since = Instant::now();
                     self.hover_last_cursor_pos = Some((cur_x, cur_y));
                     self.hover_pending_speech = None;
                     self.hover_speech_deadline = None;
-                } else if !is_recent_switch_nav && self.hover_cursor_still_since.elapsed() >= Duration::from_millis(200) {
+                } else if self.hover_physical_mouse_moved
+                    && !is_recent_switch_nav
+                    && self.hover_cursor_still_since.elapsed() >= Duration::from_millis(200) {
                     // Le curseur est immobilisé depuis au moins 200 ms : annonce détaillée selon l'étape
                     match self.switch_step {
                         SwitchAccessStep::Elements => {
-                            if !self.numbered_targets.is_empty() {
+                            if self.hover_controls_speech_enabled && !self.numbered_targets.is_empty() {
                                 let num_targets = self.numbered_targets.len();
                                 let current_contains_cursor = self.numbered_targets
                                     .get(self.switch_focus_index % num_targets)
@@ -2846,13 +3033,14 @@ impl eframe::App for OverlayApp {
                                             self.hover_last_announced_target = Some(target.index);
                                             self.hover_last_announced_zone = zone_title.map(|s| s.to_string());
                                             ctx.request_repaint();
+                                            self.hover_physical_mouse_moved = false;
                                         }
                                     }
                                 }
                             }
                         }
                         SwitchAccessStep::Zones => {
-                            if !self.switch_zones.is_empty() {
+                            if self.hover_controls_speech_enabled && !self.switch_zones.is_empty() {
                                 let num_zones = self.switch_zones.len();
                                 let current_contains_cursor = self.switch_zones
                                     .get(self.switch_focus_index % num_zones)
@@ -2879,6 +3067,15 @@ impl eframe::App for OverlayApp {
                                 if let Some(z_pos) = hovered_z_pos {
                                     if let Some(cur_zone) = self.switch_zones.get(z_pos) {
                                         if self.hover_last_announced_zone.as_deref() != Some(&cur_zone.title) {
+                                            #[cfg(windows)]
+                                            if let Some(id) = self.switch_active_window_id {
+                                                let hwnd = windows::Win32::Foundation::HWND(id as _);
+                                                if !is_window_hung(hwnd) {
+                                                    force_foreground_window(hwnd);
+                                                    restore_if_iconic(hwnd);
+                                                }
+                                            }
+
                                             self.switch_focus_index = z_pos;
                                             #[cfg(windows)]
                                             draw_screen_control_border(cur_zone.rect, true);
@@ -2887,12 +3084,90 @@ impl eframe::App for OverlayApp {
                                             let _ = self.tts_sender.send(TtsCommand::Speak(msg));
                                             self.hover_last_announced_zone = Some(cur_zone.title.clone());
                                             ctx.request_repaint();
+                                            self.hover_physical_mouse_moved = false;
                                         }
                                     }
                                 }
                             }
                         }
-                        SwitchAccessStep::Windows => {}
+                        SwitchAccessStep::Windows => {
+                            if !self.switch_windows.is_empty() {
+                                #[cfg(windows)]
+                                let hovered_win_idx = {
+                                    let pt = windows::Win32::Foundation::POINT { x: cur_x, y: cur_y };
+                                    let child = unsafe { windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt) };
+                                    let root = if !child.is_invalid() {
+                                        unsafe { windows::Win32::UI::WindowsAndMessaging::GetAncestor(child, windows::Win32::UI::WindowsAndMessaging::GA_ROOT) }
+                                    } else { child };
+                                    let top_hwnd = if !root.is_invalid() { root } else { child };
+                                    self.switch_windows.iter().position(|w| w.id == top_hwnd.0 as isize)
+                                };
+                                #[cfg(not(windows))]
+                                let hovered_win_idx = self.switch_windows.iter().position(|w| {
+                                    cur_x >= w.rect[0] && cur_x <= w.rect[2] && cur_y >= w.rect[1] && cur_y <= w.rect[3]
+                                });
+
+                                if let Some(w_idx) = hovered_win_idx {
+                                    let cur_win = &self.switch_windows[w_idx];
+                                    let win_id = cur_win.id;
+
+                                    if self.hover_last_announced_target != Some(win_id as usize) {
+                                        self.switch_focus_index = w_idx;
+
+                                        #[cfg(windows)]
+                                        {
+                                            let hwnd = windows::Win32::Foundation::HWND(win_id as _);
+                                            if !is_window_hung(hwnd) {
+                                                force_foreground_window(hwnd);
+                                                restore_if_iconic(hwnd);
+                                            }
+                                            draw_screen_orange_border(cur_win.rect);
+                                        }
+                                        #[cfg(not(windows))]
+                                        {
+                                            force_foreground_window(&cur_win.title);
+                                            restore_if_iconic(&cur_win.title);
+                                        }
+
+                                        let summary_speech = if let Some(cached) = self.window_analysis_cache.get(&win_id) {
+                                            if !cached.summary.is_empty() {
+                                                cached.summary.clone()
+                                            } else {
+                                                cur_win.title.clone()
+                                            }
+                                        } else {
+                                            #[cfg(windows)]
+                                            let targets = collect_numbered_targets_for_window(windows::Win32::Foundation::HWND(win_id as _));
+                                            #[cfg(not(windows))]
+                                            let targets = collect_numbered_targets_for_window(&cur_win.title);
+
+                                            let (summary, fallback_zones) = build_fallback_navigation_zones(&cur_win.title, &targets);
+                                            self.window_analysis_cache.insert(win_id, CachedWindowAnalysis {
+                                                summary: summary.clone(),
+                                                zones: fallback_zones,
+                                            });
+
+                                            if !targets.is_empty() {
+                                                let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
+                                                    window_id: win_id,
+                                                    window_title: cur_win.title.clone(),
+                                                    targets,
+                                                });
+                                            }
+
+                                            if !summary.is_empty() { summary } else { cur_win.title.clone() }
+                                        };
+
+                                        let _ = self.tts_sender.send(TtsCommand::Stop);
+                                        let _ = self.tts_sender.send(TtsCommand::Speak(summary_speech));
+                                        self.hover_last_announced_target = Some(win_id as usize);
+                                        self.hover_last_announced_zone = Some(cur_win.title.clone());
+                                        ctx.request_repaint();
+                                        self.hover_physical_mouse_moved = false;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3620,6 +3895,7 @@ impl eframe::App for OverlayApp {
                                         if clear_btn.clicked() {
                                             self.command_sender.send(AgentCommand::ClearHistory).ok();
                                             self.chat_history.clear();
+                                            self.window_analysis_cache.clear();
                                             self.chat_history.push(ChatEntry {
                                                 role: ChatRole::Agent,
                                                 text: "Mémoire contextuelle réinitialisée.".to_string(),
@@ -5737,9 +6013,9 @@ async fn call_llm_prompt(
     }
 }
 
-pub fn build_fallback_navigation_zones(window_title: &str, targets: &[NumberedElementTarget]) -> Vec<NavigationZone> {
+pub fn build_fallback_navigation_zones(window_title: &str, targets: &[NumberedElementTarget]) -> (String, Vec<NavigationZone>) {
     if targets.is_empty() {
-        return Vec::new();
+        return (format!("Fenêtre {window_title}. Aucun contrôle interactif direct détecté."), Vec::new());
     }
     let mut top_targets = Vec::new();
     let mut main_targets = Vec::new();
@@ -5783,7 +6059,19 @@ pub fn build_fallback_navigation_zones(window_title: &str, targets: &[NumberedEl
     for z in fallback_zones.iter_mut() {
         inject_text_reader_target(z);
     }
-    fallback_zones
+    let notable_items: Vec<&str> = targets
+        .iter()
+        .filter(|t| !t.name.trim().is_empty() && t.role != "lecture textuelle")
+        .take(3)
+        .map(|t| t.name.trim())
+        .collect();
+
+    let summary = if !notable_items.is_empty() {
+        format!("Fenêtre {}. Contenu disponible : {}.", window_title, notable_items.join(", "))
+    } else {
+        format!("Fenêtre {}.", window_title)
+    };
+    (summary, fallback_zones)
 }
 
 async fn analyze_navigation_zones_with_llm(
@@ -5791,45 +6079,52 @@ async fn analyze_navigation_zones_with_llm(
     config: &LlmConfig,
     window_title: &str,
     targets: &[NumberedElementTarget],
-) -> Vec<NavigationZone> {
+) -> (String, Vec<NavigationZone>) {
     if targets.is_empty() {
-        return Vec::new();
+        return (format!("Fenêtre {window_title}. Aucun contrôle interactif direct détecté."), Vec::new());
     }
 
-    let mut prompt_content = format!("Fenêtre analysée : \"{}\"\nContrôles interactifs détectés :\n", window_title);
-    for t in targets.iter().take(40) {
+    let mut prompt_content = format!("Fenêtre analysée : \"{}\"\nContrôles et éléments de contenu détectés :\n", window_title);
+    for t in targets.iter().take(60) {
         prompt_content.push_str(&format!("- ID #{}: \"{}\" (rôle: {}, raccourci: {}) [x:{}, y:{}, w:{}, h:{}]\n", t.index, t.name, t.role, t.shortcut, t.rect[0], t.rect[1], t.rect[2] - t.rect[0], t.rect[3] - t.rect[1]));
     }
 
-    let sys_prompt = r#"Tu es un expert d'ergonomie et d'accessibilité numérique pour personnes malvoyantes et non-voyantes (Screen Reader & Switch Access).
-Tu reçois la liste des éléments interactifs d'une fenêtre d'ordinateur.
-Ta mission est double :
-1. Découper et regrouper ces éléments en 2 à 4 blocs d'interaction logiques avec un titre court et explicite (ex: "Barre d'onglets", "Navigation principale", "Formulaire de recherche", "Actions et options"). INTERDICTION de nommer les blocs "Zone 1" ou "Bloc 1".
-2. Pour chaque élément interactif, réviser et enrichir son libellé ("revisited_name") afin qu'il soit parfaitement adapté au handicap visuel et à la synthèse vocale :
-   - Concis, percutant et explicite (anti-surcharge cognitive, 1 à 4 mots max).
-   - Remplacer les symboles ésotériques, abréviations cryptiques ou noms tronqués par leur véritable intention d'usage (ex: "✕" -> "Fermer la fenêtre", "gear" / "⚙" -> "Paramètres", "..." -> "Plus d'options", "btn_sv" -> "Enregistrer").
-   - Ne pas répéter le rôle si évident, mais clarifier l'action.
+    let (_, lang_name) = get_system_locale_language();
+    let sys_prompt = format!(r#"Tu es un expert d'ergonomie et d'accessibilité numérique pour personnes malvoyantes et non-voyantes (Screen Reader & Switch Access).
+Tu reçois la liste des éléments interactifs et textuels d'une fenêtre.
+
+RÈGLES IMPÉRATIVES DE SYNTHÈSE SÉMANTIQUE :
+1. "summary" : Présentation vocale (3 à 5 phrases) impérativement en {lang_name} axée EXCLUSIVEMENT sur la SÉMANTIQUE et le CONTENU RÉEL des contrôles :
+   - RÈGLE D'OR : INTERDICTION STRICTE de faire un décompte quantitatif ou statistique (ne JAMAIS dire "la fenêtre contient 15 boutons", "il y a 3 onglets", "4 zones sont disponibles").
+   - INTERDICTION STRICTE des descriptions génériques ou tautologiques sur la fonction générale de l'application (ne PAS dire "cette fenêtre sert à naviguer sur le web", "c'est une application de messagerie").
+   - OBLIGATION SÉMANTIQUE : Exprime la teneur informative réelle portée par les contrôles. Cite explicitement les vrais titres, sujets, vidéos, articles, sélections actives, données clés ou options thématiques présentes (ex: "Vous consultez la page de recherche sur '...', avec les vidéos '...' et '...' prêtes à la lecture, et l'option de filtre '...' activée"). L'utilisateur doit immédiatement entendre la substance de ce qui est affiché.
+2. "zones" : Découper ces éléments en 2 à 4 blocs d'interaction thématiques logiques avec un titre parlant ("title", ex: "Vidéos suggérées", "Filtres et critères", "Navigation principale").
+   - "description" : Explication sémantique claire du contenu concret de ce bloc (ce qu'on y trouve et ce qu'on y consulte).
+3. "revisited_name" : Pour chaque élément interactif, réviser et enrichir son libellé pour la synthèse vocale :
+   - Concis, percutant et explicite (1 à 4 mots max).
+   - Remplacer les symboles ésotériques ou abréviations par leur intention concrète (ex: "✕" -> "Fermer la fenêtre", "gear" / "⚙" -> "Paramètres audio", "..." -> "Plus d'options", "btn_sv" -> "Enregistrer").
 
 Réponds STRICTEMENT en JSON :
-{
+{{
+  "summary": "Synthèse purement sémantique des informations, titres et options concrètement affichés.",
   "zones": [
-    {
-      "title": "Nom explicite du bloc de navigation",
-      "description": "Courte description pour synthèse vocale",
+    {{
+      "title": "Nom thématique du bloc de navigation",
+      "description": "Contenu sémantique concret présent dans ce bloc",
       "controls": [
-        { "index": 1, "revisited_name": "Libellé révisé accessible" },
-        { "index": 2, "revisited_name": "Libellé révisé accessible" }
+        {{ "index": 1, "revisited_name": "Libellé sémantique révisé" }},
+        {{ "index": 2, "revisited_name": "Libellé sémantique révisé" }}
       ]
-    }
+    }}
   ]
-}"#;
+}}"#);
 
     let messages = vec![ChatMessage {
         role: "user".to_string(),
         content: prompt_content,
     }];
 
-    let response = send_llm_chat_completion(client, config, sys_prompt, &messages, 0.2, 700).await;
+    let response = send_llm_chat_completion(client, config, &sys_prompt, &messages, 0.3, 1200).await;
 
     if let Ok(res) = response {
         if res.status().is_success() {
@@ -5856,6 +6151,14 @@ Réponds STRICTEMENT en JSON :
                     unquoted
                 };
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_candidate) {
+                    let summary_val = val.get("summary")
+                        .or_else(|| val.get("narration"))
+                        .or_else(|| val.get("description"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+
                     if let Some(zones_arr) = val.get("zones").and_then(|z| z.as_array()) {
                         let mut result_zones = Vec::new();
                         for z in zones_arr {
@@ -5910,7 +6213,13 @@ Réponds STRICTEMENT en JSON :
                             for z in result_zones.iter_mut() {
                                 inject_text_reader_target(z);
                             }
-                            return result_zones;
+                            let summary = if !summary_val.is_empty() {
+                                summary_val
+                            } else {
+                                let zone_titles: Vec<&str> = result_zones.iter().map(|z| z.title.as_str()).collect();
+                                format!("Fenêtre {}. {} zones disponibles : {}.", window_title, result_zones.len(), zone_titles.join(", "))
+                            };
+                            return (summary, result_zones);
                         }
                     }
                 }
@@ -5974,14 +6283,16 @@ fn main() -> eframe::Result<()> {
 
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    AgentCommand::AnalyzeNavigationZones { window_title, targets } => {
+                    AgentCommand::AnalyzeNavigationZones { window_id, window_title, targets } => {
                         let client = reqwest::Client::new();
                         let current_llm_config = bg_llm_config.clone();
                         let event_tx = event_tx.clone();
                         tokio::spawn(async move {
-                            let zones = analyze_navigation_zones_with_llm(&client, &current_llm_config, &window_title, &targets).await;
+                            let (summary, zones) = analyze_navigation_zones_with_llm(&client, &current_llm_config, &window_title, &targets).await;
                             let _ = event_tx.send(AgentEvent::NavigationZonesReady {
+                                window_id,
                                 window_title,
+                                summary,
                                 zones,
                             });
                         });
