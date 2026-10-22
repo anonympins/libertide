@@ -543,6 +543,99 @@ pub fn get_desktop_work_area() -> RECT {
     RECT { left: 0, top: 0, right: screen_w, bottom: screen_h }
 }
 
+/// Récupère la position absolue du curseur de la souris à l'écran (en pixels physiques)
+#[cfg(windows)]
+pub fn get_global_cursor_pos() -> Option<(i32, i32)> {
+    let mut pt = windows::Win32::Foundation::POINT::default();
+    if unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt).is_ok() } {
+        Some((pt.x, pt.y))
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn get_global_cursor_pos() -> Option<(i32, i32)> {
+    #[repr(C)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+    extern "C" {
+        fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn CGEventGetLocation(event: *mut std::ffi::c_void) -> CGPoint;
+        fn CFRelease(cf: *mut std::ffi::c_void);
+    }
+    unsafe {
+        let event = CGEventCreate(std::ptr::null());
+        if !event.is_null() {
+            let pt = CGEventGetLocation(event);
+            CFRelease(event);
+            return Some((pt.x.round() as i32, pt.y.round() as i32));
+        }
+    }
+    None
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn get_global_cursor_pos() -> Option<(i32, i32)> {
+    if crate::automation::is_wayland_session() {
+        return None;
+    }
+    if let Ok(output) = std::process::Command::new("xdotool").args(["getmouselocation", "--shell"]).output() {
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut x = None;
+        let mut y = None;
+        for line in text.lines() {
+            if let Some(val) = line.strip_prefix("X=") {
+                x = val.trim().parse::<i32>().ok();
+            } else if let Some(val) = line.strip_prefix("Y=") {
+                y = val.trim().parse::<i32>().ok();
+            }
+        }
+        if let (Some(x), Some(y)) = (x, y) {
+            return Some((x, y));
+        }
+    }
+    None
+}
+
+/// Déplace physiquement le curseur de la souris à l'écran
+#[cfg(windows)]
+pub fn set_global_cursor_pos(x: i32, y: i32) {
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(x, y);
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn set_global_cursor_pos(x: i32, y: i32) {
+    #[repr(C)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+    extern "C" {
+        fn CGWarpMouseCursorPosition(new_cursor_position: CGPoint) -> i32;
+    }
+    unsafe {
+        let _ = CGWarpMouseCursorPosition(CGPoint { x: x as f64, y: y as f64 });
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn set_global_cursor_pos(x: i32, y: i32) {
+    if crate::automation::is_wayland_session() {
+        let _ = std::process::Command::new("ydotool")
+            .args(["mousemove", "--absolute", "-x", &x.to_string(), "-y", &y.to_string()])
+            .status();
+    } else {
+        let _ = std::process::Command::new("xdotool")
+            .args(["mousemove", &x.to_string(), &y.to_string()])
+            .status();
+    }
+}
+
 #[cfg(windows)]
 pub fn draw_screen_orange_border(rect: [i32; 4]) {
     use std::ffi::c_void;

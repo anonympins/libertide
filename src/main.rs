@@ -211,23 +211,10 @@ pub struct OverlayApp {
     last_suggestion_query: String,
 }
 
-#[cfg(windows)]
 fn get_screen_cursor_pos(ctx: &egui::Context) -> Option<egui::Pos2> {
-    let mut pt = POINT::default();
-    unsafe {
-        if GetCursorPos(&mut pt).is_ok() {
-            let ppp = ctx.pixels_per_point();
-            if ppp > 0.0 {
-                return Some(egui::pos2(pt.x as f32 / ppp, pt.y as f32 / ppp));
-            }
-        }
-    }
-    None
-}
-
-#[cfg(not(windows))]
-fn get_screen_cursor_pos(ctx: &egui::Context) -> Option<egui::Pos2> {
-    ctx.input(|i| i.pointer.latest_pos())
+    let (x, y) = get_global_cursor_pos()?;
+    let ppp = ctx.pixels_per_point().max(0.5);
+    Some(egui::pos2(x as f32 / ppp, y as f32 / ppp))
 }
 
 fn normalize_for_command_match(text: &str) -> String {
@@ -881,6 +868,8 @@ fn focus_element_target(target: &NumberedElementTarget) {
         *guard = Some(target.rect);
     }
 
+    set_global_cursor_pos(target.click_x, target.click_y);
+
     #[cfg(windows)]
     unsafe {
         let pt = windows::Win32::Foundation::POINT { x: target.click_x, y: target.click_y };
@@ -897,11 +886,6 @@ fn focus_element_target(target: &NumberedElementTarget) {
                 restore_if_iconic(top_hwnd);
             }
         }
-
-        let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(
-            target.click_x,
-            target.click_y,
-        );
 
         let mut uia_focused = false;
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
@@ -920,20 +904,6 @@ fn focus_element_target(target: &NumberedElementTarget) {
         }
         #[cfg(windows)]
         draw_screen_control_border(target.rect, false);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let script = format!(
-            r#"tell application "System Events" to set position of (every process whose frontmost is true) to {{{}, {}}}"#,
-            target.click_x, target.click_y
-        );
-        let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
-    }
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    {
-        let _ = std::process::Command::new("xdotool")
-            .args(["mousemove", &target.click_x.to_string(), &target.click_y.to_string()])
-            .status();
     }
 }
 
@@ -1309,36 +1279,10 @@ impl OverlayApp {
             self.hover_physical_mouse_moved = false;
             play_earcon(Earcon::Success);
             if !self.switch_windows.is_empty() {
-                #[cfg(windows)]
-                let physical_cursor = {
-                    let mut pt = windows::Win32::Foundation::POINT::default();
-                    if unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt).is_ok() } {
-                        Some((pt.x, pt.y))
-                    } else {
-                        None
-                    }
-                };
-                #[cfg(not(windows))]
-                let physical_cursor: Option<(i32, i32)> = None;
-
-                let hovered_idx = if let Some((cx, cy)) = physical_cursor {
-                    #[cfg(windows)]
-                    {
-                        let pt = windows::Win32::Foundation::POINT { x: cx, y: cy };
-                        let child = unsafe { windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt) };
-                        let root = if !child.is_invalid() {
-                            unsafe { windows::Win32::UI::WindowsAndMessaging::GetAncestor(child, windows::Win32::UI::WindowsAndMessaging::GA_ROOT) }
-                        } else { child };
-                        let top_hwnd = if !root.is_invalid() { root } else { child };
-                        self.switch_windows.iter().position(|w| w.id == top_hwnd.0 as isize)
-                    }
-                    #[cfg(not(windows))]
-                    self.switch_windows.iter().position(|w| {
-                        cx >= w.rect[0] && cx <= w.rect[2] && cy >= w.rect[1] && cy <= w.rect[3]
-                    })
-                } else {
-                    None
-                };
+                let physical_cursor = get_global_cursor_pos();
+                let hovered_idx = physical_cursor.and_then(|(cx, cy)| {
+                    find_switch_window_at_point(&self.switch_windows, cx, cy)
+                });
 
                 #[cfg(windows)]
                 let active_idx = hovered_idx.or_else(|| {
@@ -2453,18 +2397,14 @@ impl eframe::App for OverlayApp {
                                 let target_hwnd = windows::Win32::Foundation::HWND(cur_win.id as _);
                                 force_foreground_window(target_hwnd);
                                 restore_if_iconic(target_hwnd);
-                                unsafe {
-                                    let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(
-                                        cur_win.click_x,
-                                        cur_win.click_y,
-                                    );
-                                }
+                                set_global_cursor_pos(cur_win.click_x, cur_win.click_y);
                                 draw_screen_orange_border(cur_win.rect);
                             }
                             #[cfg(not(windows))]
                             {
                                 force_foreground_window(&cur_win.title);
                                 restore_if_iconic(&cur_win.title);
+                                set_global_cursor_pos(cur_win.click_x, cur_win.click_y);
                             }
 
                             self.hover_last_cursor_pos = Some((cur_win.click_x, cur_win.click_y));
@@ -2642,13 +2582,7 @@ impl eframe::App for OverlayApp {
                             }
 
                             let cur_zone = &self.switch_zones[self.switch_focus_index % num_zones];
-                            #[cfg(windows)]
-                            unsafe {
-                                let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(
-                                    cur_zone.click_x,
-                                    cur_zone.click_y,
-                                );
-                            }
+                            set_global_cursor_pos(cur_zone.click_x, cur_zone.click_y);
                             self.hover_last_cursor_pos = Some((cur_zone.click_x, cur_zone.click_y));
                             self.hover_cursor_still_since = Instant::now();
                             #[cfg(windows)]
@@ -2941,17 +2875,7 @@ impl eframe::App for OverlayApp {
             }
 
             // Traitement du survol physique de la souris avec anti-rebond (150-250 ms)
-            #[cfg(windows)]
-            let physical_cursor = {
-                let mut pt = windows::Win32::Foundation::POINT::default();
-                if unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt).is_ok() } {
-                    Some((pt.x, pt.y))
-                } else {
-                    None
-                }
-            };
-            #[cfg(not(windows))]
-            let physical_cursor = get_screen_cursor_pos(&ctx).map(|p| (p.x as i32, p.y as i32));
+            let physical_cursor = get_global_cursor_pos();
 
             if let Some((cur_x, cur_y)) = physical_cursor {
                 let has_moved = match self.hover_last_cursor_pos {
@@ -3092,20 +3016,7 @@ impl eframe::App for OverlayApp {
                         }
                         SwitchAccessStep::Windows => {
                             if !self.switch_windows.is_empty() {
-                                #[cfg(windows)]
-                                let hovered_win_idx = {
-                                    let pt = windows::Win32::Foundation::POINT { x: cur_x, y: cur_y };
-                                    let child = unsafe { windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt) };
-                                    let root = if !child.is_invalid() {
-                                        unsafe { windows::Win32::UI::WindowsAndMessaging::GetAncestor(child, windows::Win32::UI::WindowsAndMessaging::GA_ROOT) }
-                                    } else { child };
-                                    let top_hwnd = if !root.is_invalid() { root } else { child };
-                                    self.switch_windows.iter().position(|w| w.id == top_hwnd.0 as isize)
-                                };
-                                #[cfg(not(windows))]
-                                let hovered_win_idx = self.switch_windows.iter().position(|w| {
-                                    cur_x >= w.rect[0] && cur_x <= w.rect[2] && cur_y >= w.rect[1] && cur_y <= w.rect[3]
-                                });
+                                let hovered_win_idx = find_switch_window_at_point(&self.switch_windows, cur_x, cur_y);
 
                                 if let Some(w_idx) = hovered_win_idx {
                                     let cur_win = &self.switch_windows[w_idx];

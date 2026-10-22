@@ -183,22 +183,137 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
 }
 
 #[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
-    let user_windows = list_user_windows();
-    user_windows
+    const JXA_WINS: &str = r#"(() => {
+        try {
+            const se = Application("System Events");
+            const procs = se.applicationProcesses.whose({ backgroundOnly: false, visible: true });
+            let list = [];
+            for (let i = 0; i < procs.length; i++) {
+                const p = procs[i];
+                const pName = p.name();
+                const wins = p.windows();
+                for (let j = 0; j < wins.length; j++) {
+                    const w = wins[j];
+                    const title = w.name() || pName;
+                    if (!title || title.indexOf("Libertide") !== -1) continue;
+                    let pos = [100, 100];
+                    let sz = [800, 600];
+                    try { pos = w.position(); } catch(e) {}
+                    try { sz = w.size(); } catch(e) {}
+                    list.push({
+                        id: pName + "_" + j,
+                        title: pName + " - " + title,
+                        x: Math.round(pos[0]),
+                        y: Math.round(pos[1]),
+                        width: Math.round(sz[0]),
+                        height: Math.round(sz[1])
+                    });
+                }
+            }
+            return JSON.stringify(list);
+        } catch(e) { return "[]"; }
+    })()"#;
+
+    #[derive(serde::Deserialize)]
+    struct MacWinRaw {
+        id: String,
+        title: String,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    }
+
+    let Ok(output) = std::process::Command::new("osascript")
+        .args(["-l", "JavaScript", "-e", JXA_WINS])
+        .output()
+    else {
+        return Vec::new();
+    };
+
+    let items: Vec<MacWinRaw> = serde_json::from_slice(&output.stdout).unwrap_or_default();
+    items
         .into_iter()
-        .enumerate()
-        .map(|(i, (id, title))| {
-            let hash = id.as_bytes().iter().fold(0isize, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as isize));
+        .filter(|w| w.width >= 100 && w.height >= 60)
+        .map(|w| {
+            let hash = w.id.as_bytes().iter().fold(0isize, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as isize));
             SwitchWindowTarget {
                 id: hash.abs().max(1),
-                title,
-                click_x: 200 + (i as i32 * 50) % 500,
-                click_y: 150 + (i as i32 * 40) % 400,
-                rect: [100, 100, 800, 600],
+                title: w.title,
+                click_x: w.x + (w.width / 2),
+                click_y: (w.y + 30).min(w.y + w.height - 10),
+                rect: [w.x, w.y, w.x + w.width, w.y + w.height],
             }
         })
         .collect()
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
+    let output = std::process::Command::new("wmctrl")
+        .args(["-l", "-G"])
+        .output();
+
+    let mut candidates = Vec::new();
+    if let Ok(out) = output {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 8 {
+                let win_id = parts[0];
+                let title = parts[7..].join(" ");
+                let t_clean = title.trim();
+                if t_clean.is_empty()
+                    || t_clean.contains("Libertide")
+                    || t_clean.eq_ignore_ascii_case("desktop")
+                {
+                    continue;
+                }
+                let x = parts[2].parse::<i32>().unwrap_or(0);
+                let y = parts[3].parse::<i32>().unwrap_or(0);
+                let w = parts[4].parse::<i32>().unwrap_or(0);
+                let h = parts[5].parse::<i32>().unwrap_or(0);
+                if w < 100 || h < 60 {
+                    continue;
+                }
+                let hash = win_id.as_bytes().iter().fold(0isize, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as isize));
+                candidates.push(SwitchWindowTarget {
+                    id: hash.abs().max(1),
+                    title: t_clean.to_string(),
+                    click_x: x + (w / 2),
+                    click_y: (y + 30).min(y + h - 10),
+                    rect: [x, y, x + w, y + h],
+                });
+            }
+        }
+    }
+    candidates
+}
+
+/// Détermine l'index de la fenêtre sous le point de l'écran donné
+pub fn find_switch_window_at_point(windows: &[SwitchWindowTarget], x: i32, y: i32) -> Option<usize> {
+    #[cfg(windows)]
+    {
+        let pt = windows::Win32::Foundation::POINT { x, y };
+        let child = unsafe { windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt) };
+        if !child.is_invalid() {
+            let root = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+                    child,
+                    windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+                )
+            };
+            let top_hwnd = if !root.is_invalid() { root } else { child };
+            if let Some(pos) = windows.iter().position(|w| w.id == top_hwnd.0 as isize) {
+                return Some(pos);
+            }
+        }
+    }
+    windows.iter().position(|w| {
+        x >= w.rect[0] && x <= w.rect[2] && y >= w.rect[1] && y <= w.rect[3]
+    })
 }
 
 #[cfg(windows)]
