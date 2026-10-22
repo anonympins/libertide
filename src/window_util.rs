@@ -585,6 +585,45 @@ pub fn draw_screen_orange_border(rect: [i32; 4]) {
     }
 }
 
+#[cfg(windows)]
+pub fn draw_screen_control_border(rect: [i32; 4], is_cyan: bool) {
+    use std::ffi::c_void;
+    extern "system" {
+        fn CreatePen(iStyle: i32, cWidth: i32, color: u32) -> *mut c_void;
+        fn SelectObject(hdc: *mut c_void, hgdiobj: *mut c_void) -> *mut c_void;
+        fn DeleteObject(ho: *mut c_void) -> i32;
+        fn MoveToEx(hdc: *mut c_void, x: i32, y: i32, lppt: *mut c_void) -> i32;
+        fn LineTo(hdc: *mut c_void, x: i32, y: i32) -> i32;
+        fn GetDC(hwnd: *mut c_void) -> *mut c_void;
+        fn ReleaseDC(hwnd: *mut c_void, hdc: *mut c_void) -> i32;
+    }
+
+    unsafe {
+        let hdc = GetDC(std::ptr::null_mut());
+        if !hdc.is_null() {
+            // Cyan RGB(0, 230, 255) -> BGR: 0x00FFE600 ou Orange vif RGB(255, 140, 0) -> BGR: 0x00008CFF
+            let color = if is_cyan { 0x00FFE600 } else { 0x00008CFF };
+            let pen = CreatePen(0 /* PS_SOLID */, 3, color);
+            let old_pen = SelectObject(hdc, pen);
+
+            let [x1, y1, x2, y2] = rect;
+            let pad = 2;
+            let _ = MoveToEx(hdc, x1 - pad, y1 - pad, std::ptr::null_mut());
+            let _ = LineTo(hdc, x2 + pad, y1 - pad);
+            let _ = LineTo(hdc, x2 + pad, y2 + pad);
+            let _ = LineTo(hdc, x1 - pad, y2 + pad);
+            let _ = LineTo(hdc, x1 - pad, y1 - pad);
+
+            let _ = SelectObject(hdc, old_pen);
+            let _ = DeleteObject(pen);
+            let _ = ReleaseDC(std::ptr::null_mut(), hdc);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn draw_screen_control_border(_rect: [i32; 4], _is_cyan: bool) {}
+
 #[cfg(not(windows))]
 pub fn draw_screen_orange_border(_rect: [i32; 4]) {}
 
