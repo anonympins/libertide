@@ -1,186 +1,189 @@
 
 # <img src="public/favicon-256x256.png" width="64" alt="Libertide Overlay Interface" valign="middle"> Libertide
+> **Empowering everyone to use their computer with complete freedom and autonomy.**  
+> Libertide is a universal assistive overlay (voice, gaze, and switch access) designed to overcome motor, visual, or cognitive challenges without requiring expensive specialized hardware.
+
+[![Version](https://img.shields.io/github/v/release/anonympins/libertide?label=Version)](https://github.com/anonympins/libertide/releases)
+[![License](https://img.shields.io/github/license/anonympins/libertide?label=License)](https://github.com/anonympins/libertide/blob/main/LICENSE)
+[![WCAG Accessibility](https://img.shields.io/badge/Accessibility-WCAG%20AAA-brightgreen)](#-visual-comfort--high-visibility-wcag-aaa)
+[![Platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue)](#-getting-started-in-3-steps)
 
 Windows : [![https://github.com/anonympins/fingerprint/actions/workflows/rust.yml](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust.yml)](https://github.com/anonympins/libertide/actions/workflows/rust.yml) / UNIX : [![https://github.com/anonympins/libertide/actions/workflows/rust-unix.yml](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-unix.yml)](https://github.com/anonympins/libertide/actions/workflows/rust-unix.yml) / macOS : [![https://github.com/anonympins/libertide/actions/workflows/rust-macos.yml](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-macos.yml)](https://github.com/anonympins/libertide/actions/workflows/rust-macos.yml)
 
-[![https://github.com/anonympins/libertide/releases/tag/libertide-0.5.0](https://img.shields.io/github/v/release/anonympins/libertide)](https://github.com/anonympins/libertide/releases)
-[![https://raw.githubusercontent.com/anonympins/libertide/refs/heads/main/LICENSE](https://img.shields.io/github/license/anonympins/libertide)](https://github.com/anonympins/libertide/blob/main/LICENSE)
-[![https://github.com/anonympins/libertide](https://img.shields.io/github/repo-size/anonympins/libertide)](https://github.com/anonympins/libertide)
-
 <p align="center">
-  <img src="public/screenshot-1.png" alt="Libertide Overlay Interface" width="350">
-  <img src="public/screenshot-2.png" alt="Libertide Overlay Interface" width="350">
+  <img src="public/screenshot-1.png" alt="Libertide transparent interface" width="360">
+  <img src="public/screenshot-2.png" alt="Visual guidance and assisted hover" width="360">
 </p>
 
-Libertide is an inclusive voice and visual assistant for autonomous exploration on Windows, macOS, and Unix / Linux (X11). It combines a discreet transparent overlay interface (developed with [egui](https://github.com/emilk/egui)), continuous local voice recognition with **Whisper**, reasoning powered by the LLM of your choice (**DeepSeek**, **OpenAI**, **Anthropic Claude**, **Mistral AI**, **Zhipu GLM**, or **Groq**), advanced accessibility tools (Switch Access, Click by Number, earcons, high-contrast HUD), and graphical interface automation (Windows UI Automation & X11 EWMH tools, window tiling, web navigation, and input).
+---
+
+## 💡 Why Libertide? (The Autonomy Challenge)
+
+Modern operating systems and websites require **surgical precision**: fast double-clicks, targeting tiny close buttons, dismissing invasive cookie banners, and holding complex key combinations.
+
+For millions of people, these ordinary interactions become an exhausting hurdle, causing pain or digital exclusion:
+
+- **Tremors and motor impairments** (*Parkinson's disease, essential tremor, ataxia*): clicking small targets triggers accidental clicks or frustrating misses.
+- **Severely limited mobility or paralysis** (*Tetraplegia, ALS / Lou Gehrig's disease, muscular dystrophies*): standard mouse or keyboard usage is difficult or impossible.
+- **Chronic pain and temporary injuries** (*RSI, acute tendonitis, carpal tunnel syndrome, cast on a limb*): every mouse movement exacerbates discomfort.
+- **Low vision and eye fatigue** (*AMD, low vision, light sensitivity*): difficulty locating the cursor or reading low-contrast gray text.
+- **Cognitive overload and attention disorders**: difficulty navigating pages cluttered with ads and intricate dropdown menus.
+
+> **The Libertide promise:** You no longer need to adapt to the computer. The computer adapts to your abilities, your rhythm, and your movements.
 
 ---
 
-## 📋 Prerequisites
+## 🛡️ The Solution: Compassionate Technology
 
-1. **Operating System**:
-   - **Windows**: Windows 10 / 11 (64-bit).
-   - **macOS**: macOS 12+ (Apple Silicon / arm64).
-   - **Unix / Linux**: Any modern distribution running an X11 / Xorg desktop session (Ubuntu, Debian, Fedora, Arch Linux, etc.).
-2. **Microphone and speakers**: For Whisper dictation and voice feedback (via Windows SAPI, macOS `say`, or Unix `spd-say` / `espeak-ng`).
-3. **LLM API Key (at least one provider of your choice)**: You can set it directly from the overlay GUI (click the 🔑 key button or say *"Clé API"* / *"API key"*), or define it in your `.env` file:
-   - **DeepSeek**: `DEEPSEEK_API_KEY` (DeepSeek Platform)
-   - **OpenAI**: `OPENAI_API_KEY` (OpenAI Platform)
-   - **Anthropic**: `ANTHROPIC_API_KEY` (Anthropic Console)
-   - **Mistral AI**: `MISTRAL_API_KEY` (Mistral Console)
-   - **Zhipu GLM**: `GLM_API_KEY` / `ZHIPU_API_KEY` (BigModel Platform)
-   - **Groq**: `GROQ_API_KEY` (Groq Console)
-   *(Optional: set `LLM_PROVIDER=DeepSeek` or `OpenAI`, `Anthropic`, `Mistral`, `Glm`, `Groq` to force a specific provider, or override models via `<PROVIDER>_MODEL`).*
+Libertide runs as a **transparent, unobtrusive assistive overlay** displayed above your existing desktop apps (Word, web browsers, emails, file explorers). It combines several core innovations:
 
-Go to [the current release](https://github.com/anonympins/libertide/releases) and select the executable for your operating system.
+### 1. 🎯 Stabilized Hover Mode (Anti-Tremor)
+No need to aim with precision or press mouse buttons forcefully:
+- **Smart stabilization**: simply move the cursor near the desired zone. As soon as the pointer pauses briefly (200 ms), Libertide identifies the button or text and reads it aloud clearly.
+- **One-click universal read-out**: a single tap on `Enter` or a click anywhere inside a paragraph reads the entire block aloud.
+- **High-visibility framing**: active windows and hovered targets are highlighted with contrasting borders (orange and cyan) for instant recognition.
+
+### 2. 🔘 Single-Switch Navigation (Switch Access)
+For users who can only produce a single physical movement (muscle twitch, sip-and-puff, foot switch, eye blink, or single key press):
+- **Simplified cascade navigation**: Choose Window ➔ Choose Region ➔ Trigger Action on Element.
+- **Hardware agnostic**: works seamlessly with the `Space` bar, dedicated USB/Bluetooth switches, or numeric keypads.
+
+### 3. 🔢 Click by Number
+- Simply say *"Numbers"* or *"Badges"*: large golden numbers appear on all interactive links and buttons on screen.
+- Speak the target number (*"1"*, *"5"*, *"twelve"*): Libertide clicks it instantly on your behalf.
+
+### 4. 🎙️ Continuous Dictation & Natural Voice Commands
+- **Local continuous dictation**: transcribe letters or messages without touching the keyboard using high-fidelity local speech-to-text (Whisper), keeping your privacy fully intact.
+- **Natural language understanding**: talk naturally like you would to an assistant (*"Summarize this page"*, *"Open my emails"*, *"Remind me to take my medicine in 20 minutes"*).
+
+### 5. 🛡️ Removal of Web Obstacles & Complete Safety
+- **Farewell to intrusive overlays**: Libertide automatically dismisses cookie prompts and newsletter modals blocking your screen.
+- **Ultra-secure transactions**: the assistant can prepare shopping carts or search for train tickets, but **strictly halts before any payment step** to require your explicit manual confirmation.
+
+### 6. 🎨 Visual Comfort & High Visibility (WCAG AAA)
+The interface adapts dynamically to your eyesight:
+- **Continuous voice zoom**: say *"Zoom in"* or *"Enlarge"* to scale the entire interface up to 250%.
+- **Integrated accessibility themes**:
+  - *High-Visibility Yellow & Black* (optimized for low vision and AMD).
+  - *Soft Amber* (maximum blue-light reduction to soothe eye fatigue and headaches).
+  - *Color-blindness Friendly* (cobalt blue and gold high contrast).
+  - *Mint Emerald & Amethyst* for calming, restful reading.
+- **Audio cues (Earcons)**: gentle sound cues confirm application states without requiring you to look at the screen.
 
 ---
 
-## 🎙️ Whisper Voice Model
+## 📖 Everyday Use Cases (Real-World Examples)
 
-On the first launch of voice listening:
-- Libertide checks for the presence of the `models/ggml-base.bin` or `models/ggml-tiny.bin` model.
-- If absent, the application automatically downloads it from Hugging Face (approximately 148 MB) into the `models/` subfolder.
+### ✉️ 1. Drafting an email or document without strain
+1. Open your mail client or word processor.
+2. Say *"Dictation mode"* (or click `✍ Dictation`).
+3. Dictate your thoughts naturally:
+   - *"Hello Doctor comma new line"*
+   - *"I confirm our appointment next Tuesday period"*
+4. Say *"Stop dictation"* or press `Escape`.
+
+### 🌍 2. Browsing the web without struggling against the screen
+- **Read without eye strain**: *"Summarize this article"*  
+  ➔ Libertide inspects the web page and displays a clear summary card in large, readable typography.
+- **Booking trips or transport**: *"Find train tickets to Lyon for Saturday morning"*  
+  ➔ A simplified booking card appears with large, accessible sliders to pick schedules peacefully.
+- **Explore events and activities**: *"What festivals are happening near me this summer?"*
+
+### 🖱️ 3. Clicking without shaking
+- **With gaze or mouse**: turn on `🎯 Hover Mode`. Point at the target area: Libertide reads out the button (e.g., *"Close window"*, *"Print"*) and waits for your confirmation, ensuring tremors never trigger misclicks.
+- **With voice**: say *"Badges"*, then *"Click 4"*.
+
+### 🪟 4. Organizing your workspace
+- *"Put the browser on the left and my notes on the right"*  
+  ➔ Windows snap edge-to-edge automatically.
+- *"Full screen"* / *"Close this tab"*.
+- *"Focus mode"* ➔ Creates a clean, distraction-free virtual desktop so you can focus on a single task.
+
+### ⏱️ 5. Reminders and daily assistance
+- *"Remind me to take my medication in 30 minutes"*
+- *"Mute sound"* / *"Unmute sound"*
+- *"Zoom in"* / *"Normal zoom"*
 
 ---
 
-## ⌨️ Usage and Shortcuts
+## ⌨️ Essential Shortcuts
 
-| Shortcut / Action | Description |
+| Shortcut / Key | Action |
 | :--- | :--- |
-| **`R` key** | Starts or stops instant Whisper voice capture. |
-| **`Space` key** | Validates the highlighted action/suggestion in **Switch Access** mode (contacteur unique). |
-| **`Escape` key** | **Emergency stop**: exits dictation mode or halts any ongoing action, mutes TTS, and immediately gives control back to the user. |
-| **Enter** | Sends the instruction entered in the text field. |
-| **`Ctrl + C`** | Direct copy of the selected message or terminal block without extra mouse clicks. |
-| **Voice Zoom** | Dynamically scale GUI size with voice commands (*"grossis"*, *"zoom plus"*, *"taille normale"*). |
-| **Dragging** | Click and drag the top banner or the bottom bar to anchor the overlay wherever you want. |
-| **Borders & Corners** | Resize the overlay by stretching the edges and corners. |
-| **Assistance tab** | Tracks the dialogue with the agent, automated actions, and clickable quick suggestions. |
-| **Chat tab** | Connection and monitoring of a Twitch channel with an integrated search bar. |
+| **`R` key** | Starts or stops instant speech dictation. |
+| **`Spacebar`** | Activates the currently highlighted element in **Switch Access** mode. |
+| **`Enter` key** | Confirms a command or triggers a click on the selected element. |
+| **`Tab` / Arrows / Numpad `4`-`6`** | Moves selection between regions or items. |
+| **`Escape` key** | **Safety & Emergency stop**: aborts any action immediately, silences text-to-speech, or navigates back one level. |
+| **`🎯 Hover` button** | Toggles stabilized anti-tremor hover mode on or off. |
 
 ---
 
-## ♿ Inclusive Accessibility Features & Ergonomics
+## 🚀 Getting Started in 3 Steps
 
-Libertide natively incorporates tools designed to foster independence for users with motor, visual, cognitive, or temporary impairments:
+### Step 1: Download Libertide
+Download the binary built for your OS from the **Releases** page:
+- **Windows** (`.exe`): Windows 10 and 11.
+- **macOS**: Apple Silicon (M1/M2/M3/M4) or Intel.
+- **Linux**: Modern distributions (Ubuntu, Debian, Fedora, Arch...).
 
-### 1. 🎯 Click by Number Navigation
-- **Activation**: Say *"Numbers"*, *"Badges"*, or *"Click by number"*.
-- **How it works**: The active window is inspected via the UI Automation tree, overlaying high-contrast gold numbered badges on all interactive elements (buttons, links, tabs, input fields).
-- **Selection**: Simply say the number (e.g., *"1"*, *"two"*, *"seven"*) to immediately move the pointer and trigger a click without requiring manual mouse coordination.
+### Step 2: Plug in your existing devices
+Libertide works out of the box with the peripherals you already own:
+- Built-in microphone or a standard headset.
+- Standard speakers or headphones.
+- Mouse, trackball, trackpad, or external adaptive switch.
 
-### 2. 🔘 Single-Switch Access Mode
-- **Activation**: Say *"Switch access mode"* or *"Switch access"*.
-- **How it works**: An automatic sequential scanning loop periodically highlights available actions and suggestions at regular intervals.
-- **Validation**: Pressing the `Space` key (or an external switch device mapped to space) activates the highlighted option or toggles voice recording.
+### Step 3: Configure your AI provider
+To process natural language commands, Libertide connects to your preferred AI provider (DeepSeek, Mistral AI, OpenAI, Claude, Groq...):
+1. Launch the application.
+2. Click the **🔑 API Key** icon in the top bar (or simply say *"API Key"*).
+3. Paste your key: Libertide is ready to assist you right away!
 
-### 3. 🔍 Adaptive Voice Zoom
-- Dynamically adjust the interface scale by voice without touching the keyboard or mouse:
-  - *"Zoom in"* / *"Make it bigger"* / *"Grossis"* (increases GUI scale by 15% steps).
-  - *"Zoom out"* / *"Make it smaller"* / *"Zoom moins"* (decreases GUI scale down to 70%).
-  - *"Normal zoom"* / *"Reset zoom"* / *"Taille normale"* (resets GUI scale back to 100%).
-
-### 4. 🔔 Dedicated Auditory Feedback (*Earcons*)
-- Distinct system audio cues guide users without requiring continuous visual gaze on the screen:
-  - **Microphone opened**: Rising dual beep (600 Hz ➔ 900 Hz).
-  - **Microphone closed**: Falling dual beep (750 Hz ➔ 500 Hz).
-  - **Action confirmed**: High-pitch confirmation chime (1000 Hz).
-  - **Emergency stop**: Rapid alternating alert bursts (1200 Hz / 800 Hz).
-
-### 5. 📊 Floating Analytical HUDs
-- Project statistics tables, metric comparisons, or summary cards into independent OS multi-viewport floating windows (*dark glass* with high contrast), easily readable without obscuring underlying work applications.
+*(During your very first voice recognition session, the lightweight Whisper model will download automatically in the background).*
 
 ---
 
-## 🗣️ Commands Understood by the AI (Human-Friendly Guide)
+## 🤝 For Caregivers, Families, and Occupational Therapists
 
-Libertide understands natural language instructions spoken aloud (via Whisper) or typed into the prompt bar. Below are the primary categories of commands you can give the assistant (multilingual: English, French, Spanish, German, etc.):
+If you are assisting someone with diminishing autonomy, Libertide provides vital design guarantees:
 
-### 1. Overlay Control & Emergency Stop
-- **Hide overlay**: *"Hide yourself"* / *"Cache-toi"*, *"Close overlay"* / *"Ferme l'overlay"*, *"Disappear"*.
-- **Restore overlay**: *"DeepSeek open up"* / *"DeepSeek ouvre-toi"*, *"Show yourself"* / *"Montre-toi"*.
-- **Immediate emergency stop**: Press **`Escape`** or say *"Stop everything"*, *"Arrêt d'urgence"*, *"Stop"*.
-
-### 2. ✍️ Direct Voice Dictation Mode
-Switches directly to text input inside whatever window currently has focus (text editor, IDE, form) without triggering exploratory web or system actions:
-- **Enable**: *"Dictation mode"* / *"Mode dictée"*, *"Take notes on what I say"* (or click the `✍ Dictée` button).
-- **Stop**: Press **`Escape`**, or say *"Stop dictation"* / *"Arrête la dictée"*, *"Exit dictation"*, *"I'm done"*.
-- **Formatting & Caret Navigation while dictating**:
-  - *"New line"* / *"À la ligne"*, *"Next line"*, *"New paragraph"*
-  - *"Cursor left"* / *"Curseur à gauche"*, *"Cursor right"*, *"Up"*, *"Down"*
-  - *"Start of line"* / *"Début de ligne"*, *"End of line"*, *"Start of document"*, *"End of document"*
-  - *"Delete word"* / *"Efface le mot"*, *"Delete line"* / *"Efface la ligne"*, *"Select all"* / *"Tout sélectionner"*
-
-### 3. 🌐 Web Browsing, Search & Shopping
-- **✈️ Flights, Trains & Ticket Search (Interactive Forms & Web Navigation)**:
-  - *"Trouve-moi des billets d'avion Paris - Tokyo le mois prochain"* / *"Search for flights to Tokyo"*: Launches web booking search or directly spawns an interactive floating **Search Form** (`card_type: "form"`) with departure/destination inputs, budget range sliders, flight class selector, and direct-flight toggles. Submitting the form instantly instructs the agent.
-  - *"Cherche des billets de train pour Lyon ce week-end"* / *"Find train tickets to Lyon this weekend"*.
-
-- **🎸 Concerts, Festivals & Live Events**:
-  - *"Quels sont les prochains concerts de rock à Paris ?"* / *"Find rock concerts in London next month"*: Explores venues and ticketing portals (Fnac Spectacles, Ticketmaster, Dice, Eventbrite), extracts tour dates and ticket prices, and projects a structured comparison table or card with direct clickable booking actions.
-  - *"Trouve des festivals de jazz près de chez moi cet été"*.
-
-- **📺 YouTube Channels & Video Exploration**:
-  - *"Résume cette chaîne YouTube"* / *"De quoi parle cette chaîne ?"*: Inspects the active channel page, computes subscriber count and video volume, and projects a standalone Markdown card with key themes and clickable video links (`[▶ Titre de la vidéo]`) to play them with a single click or voice prompt.
-  - *"Lance la dernière vidéo de la chaîne"* / *"Play the latest video"*.
-
-- **📄 Articles, Documents & Web Page Summaries**:
-  - *"Fais-moi un résumé de cet article"* / *"Synthèse de la page"* / *"Summarize this page"*: Reads titles, headings, and body content, then generates an independent, high-contrast floating Markdown HUD summarizing key points, numbers, and quotes without losing focus on the original tab.
-
-- **📊 Product, Service & Price Comparisons**:
-  - *"Compare les meilleurs casques à réduction de bruit"* / *"Find the best noise cancelling headphones under 300€"*: Navigates review and e-commerce websites, compares specs and verified ratings, and builds a floating comparison matrix (`card_type: "table"`) with clickable actions (`[⚡ Commander ...]`).
-
-- **🛡️ Automated Consent & Obstacle Dismissal**:
-  - **Cookie & GDPR Banners**: The agent automatically identifies and accepts cookie consent banners (*"Tout accepter"*, *"Accepter tout"*, *"Accept all"*) without prompting the user.
-  - **Push Notification & Newsletter Popups**: Intrusive web banners (*"Activez les notifications"*, *"Ne manquez rien"*) are automatically dismissed or closed (clicking ✕ / *"Fermer"* / *"Plus tard"* / *"Refuser"*) to unlock the page view.
-
-- **🛒 Assisted Shopping & Safe Checkout**:
-  - *"Ajoute au panier et valide la commande"* / *"Add item to cart and proceed to checkout"*: Fills delivery options and navigates through the checkout funnel, then **strictly halts before payment** with `actions: []` to request explicit spoken confirmation from the user.
-
-### 4. ♿ Accessibility & System Voice Commands
-- **Targeting & Switch**: *"Show numbers"*, *"Badges"*, *"Badge 4"*, *"Activate switch access"*.
-- **Scale & Zoom**: *"Zoom in"*, *"Zoom out"*, *"Normal size"*, *"Reset zoom"*.
-- **Voice Profiles & Engines**: *"Denise voice"*, *"Henri voice"*, *"Hortense voice"*, *"Paul voice"*, *"Canadian French voice"*, *"Next voice"*.
-- **Audio & Isolation**: *"Mute audio"* / *"Coupe le son"* (pauses third-party media players while preserving Libertide's voice feedback), *"Volume down"*, *"Volume up"*.
-- **Native Windows Accessibility Tools**: *"Magnifier"* (Win + `+`/`-`), *"Color filters"*, *"Accessibility settings"*, *"Clipboard history"*.
-
-### 5. 🪟 Window Management & Layouts
-- **Snap & Tiling Layouts**:
-  - *"Put Chrome on the left and VS Code on the right"*
-  - *"Tile my windows"* / *"Arrange in a 2x2 grid"*
-  - *"Fullscreen"* / *"Maximize this window"*, *"Minimize window"*
-  - *"Close the tab"* (closes only the current active tab without terminating the whole application)
-
-### 6. 💻 Code, File & Terminal Inspection
-- **Inspect & Summarize code or documents**:
-  - *"Read the file opened in VS Code and explain what the main function does"*
-  - *"Analyze what is inside my terminal"*
-  - *"Select between 'Hello' and 'Best regards'"* (bounded text selection via UIA/clavier)
-  - *"Open document / image"* (`open_file`) to open any media, image, PDF, spreadsheet, or file directly in its OS default application (based on file extension / MIME type).
-
-### 7. 🧘 Immersion Mode (Virtual Desktop)
-Creates a clean, dedicated Windows virtual desktop configured for focused deep work:
-- **Start**: *"Activate immersion mode to code"* (spawns a new virtual desktop, opens required applications such as VS Code, a terminal, and docs tiled together)
-- **Exit**: *"Exit immersion mode"* / *"Close the virtual desktop"*
-
-### 8. ⚙️ Windows Startup (Autostart)
-- **Enable auto-launch**: *"Start when Windows boots"*, *"Enable autostart"*
-- **Disable auto-launch**: *"Do not start on boot"*, *"Disable autostart"*
-- **Check status**: *"Are you configured to start on boot?"*
-
-### 9. ⚡ Direct CLI Execution
-Prefix your prompt with `>` or `$` to instantly run a system command without invoking the LLM:
-```bash
-> code .
-> calc.exe
-$ git status
-```
+- **Zero vendor lock-in**: users keep their favorite software, web browsers, and routines. Libertide doesn't replace their environment; it makes it accessible.
+- **Adapts over time**: start with simple stabilized hover, introduce voice dictation, and transition to single-switch access whenever condition changes dictate.
+- **Zero proprietary subscriptions required**: Libertide is completely free and open-source.
+- **Safety first**: pressing `Escape` instantly returns full manual control to the user or caregiver.
 
 ---
 
-## 🛠️ Troubleshooting
+## 🗣️ Core Voice Commands Guide
 
-- **Error `API key missing`**: Click the 🔑 button in the overlay to select your provider and paste your key, or verify that your `.env` file contains at least one valid key (such as `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `MISTRAL_API_KEY`, `GLM_API_KEY`, or `GROQ_API_KEY`).
-- **C++ / Whisper compilation error**: Make sure you have launched Cargo from the *x64 Native Tools Command Prompt for VS* terminal or that the MSVC compiler is accessible in your `PATH`.
-- **Microphone inactive**: Verify that microphone access is authorized for desktop applications in Windows privacy settings.
+Libertide understands English, French, and most modern languages:
+
+| Category | What you can say out loud |
+| :--- | :--- |
+| **Interface Control** | *"Hide"* • *"Show up"* • *"Emergency stop"* • *"Stop"* |
+| **Pointing & Clicking Help** | *"Hover mode"* • *"Numbers"* / *"Badges"* • *"Click 3"* • *"Switch mode"* |
+| **Display & Sizing** | *"Zoom in"* • *"Zoom out"* • *"Reset zoom"* • *"High contrast"* |
+| **Dictation & Writing** | *"Dictation mode"* • *"New line"* • *"Delete word"* • *"Stop dictation"* |
+| **Reading & Summaries** | *"Summarize this page"* • *"What is this video about?"* • *"Read this text"* |
+| **Workspace & Comfort** | *"Tile windows side by side"* • *"Mute sound"* • *"Close tab"* |
+| **Reminders & Timers** | *"Remind me to take my medicine in 20 minutes"* |
+
+---
+
+## ❓ Frequently Asked Questions (FAQ)
+
+**Does Libertide work without expensive assistive hardware?**  
+Yes, absolutely. That is the core mission: a standard webcam, any basic microphone, and a regular mouse or keyboard spacebar are all you need.
+
+**Do my voice and private data remain private?**  
+Speech recognition for continuous dictation runs directly on your local machine via Whisper. Your speech is not sent to external servers for continuous transcription.
+
+**Can I use Libertide at school or at work?**  
+Yes. Libertide acts as a non-intrusive transparent desktop overlay without modifying core operating system files or requiring elevated administrative rights for daily tasks.
+
+---
+
+<p align="center">
+  <b>Libertide — Crafted with passion for autonomy and digital inclusion for all.</b><br>
+  Distributed under a free, open-source license.
+</p>
