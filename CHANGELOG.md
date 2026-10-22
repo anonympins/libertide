@@ -6,29 +6,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.5] - 2026-10-24
+
+### 🎯 Hover Mode & Accessibility Ergonomics
+- **Physical Pointer Detection & Anti-Jitter Debounce (200 ms)**:
+  - Continuous tracking of absolute cursor coordinates (`get_global_cursor_pos`) across Windows (Win32), macOS (CoreGraphics / `CGEventCreate`), and Linux (X11 / Wayland via `xdotool` / `ydotool`).
+  - Anti-jitter algorithm: speech narration waits for 200 ms of verified cursor stillness (`hover_cursor_still_since`) after physical movement before speaking, eliminating auditory clutter during rapid mouse travel.
+  - 180 ms speech preemption deadline (`hover_speech_deadline`) enabling instantaneous cancellation and replacement of speech when rapidly traversing across zones or controls.
+  - **Adaptive Speech Hierarchy (`build_targeted_hover_speech`)**:
+    - Detailed contextual voice announcements: enriched element label, semantic role (*button, link, input field, tab, media player, checkbox*), bound keyboard shortcuts, and relative index within parent macro-zone (*e.g., "1 of 5"*).
+    - Automatic context deduplication: suppresses redundant parent macro-zone announcements when hovering consecutive controls within the same zone (`is_same_zone_as_last`).
+    - Immediate vocalization of interactive states (*checked/unchecked, expanded/collapsed, typed values, slider levels*).
+  - **Semantic Window Partitioning & Macro-Zones (`NavigationZone`)**:
+    - Automatic window decomposition into 2 to 4 logical semantic blocks (*Top bar, Content body, Side panel*) analyzed by LLM (`analyze_navigation_zones_with_llm`) with instant geometric fallback (`build_fallback_navigation_zones`).
+    - Contextual rewriting of cryptic or symbolic glyphs (*"✕"* ➔ *"Close window"*, *"⚙"* ➔ *"Sound settings"*, *"..."* ➔ *"More options"*).
+    - Universal text extraction target (`inject_text_reader_target`) prepended to every zone: single click or Enter press copies the block's text to clipboard and speaks it aloud without manual precision pointing.
+  - **High-Visibility Visual Feedback (WCAG AAA)**:
+    - Direct on-screen drawing of high-contrast borders: vivid 5px orange boundary around the target window (`draw_screen_orange_border`), 3px cyan halo around active macro-zones, and 3px crisp highlight around the control under cursor (`draw_screen_control_border`).
+    - Synchronized physical mouse cursor repositioning (`set_global_cursor_pos`) during switch/keyboard assisted navigation.
+  - **Multimodal & Single-Switch Interaction**:
+    - Natural multilingual voice activation/deactivation (*"mode survol"*, *"hover mode"*, *"switch mode"*, *"mode contacteur"*) alongside interactive HUD toggle button `🎯 Survol`.
+    - Full hardware switch or keyboard navigation (`Space`, `Enter`, `Tab`, directional arrows, numpad `4`/`6`).
+    - Contextual step-by-step upward traversal with `Escape` (Control ➔ Zone ➔ Window) without terminating the mode.
+    - Automatic detection and target updates for popped menus and dropdown lists after click actions (`new_popped_targets`).
+
+### 🚀 Cross-Platform Robustness & System Fixes
+- **Cross-Platform Accessibility Parity (macOS / Linux / Windows)**:
+  - Fixed `E0382` compiler errors (*use of moved value: `e.value`*) on macOS and Linux when extracting target `name` and `value` fields in `automation.rs`.
+  - Standardized accessibility trees across Windows UI Automation, macOS `AXUIElement` (via JXA), and Linux AT-SPI2 (via Python introspector).
+
+---
+
 ## [0.5.4] - 2026-10-22
 
 ### 🎯 Hover Mode & Hierarchical Switch Access
 - **Pointer Detection & Anti-Jitter Debounce (200 ms)**:
   - Automatic physical pointer stillness detection to trigger vocal narration without auditory overload during rapid movements.
   - 180 ms announcement queue window with seamless preemption (`hover_speech_deadline`).
-- **Adaptive Speech Hierarchy (`build_targeted_hover_speech`)**:
-  - Detailed control announcement: accessible label, semantic role, associated keyboard shortcut, and relative position (*e.g., "1 of 4"*).
-  - Context deduplication: suppresses redundant parent macro-zone names when hovering within the same interaction block.
-- **AI-Assisted Semantic Zoning (`analyze_navigation_zones_with_llm`)**:
-  - Automatic decomposition of complex windows into 2 to 4 logical macro-zones for streamlined navigation.
-  - Contextual rewrites of cryptic, truncated, or symbolic labels (*"✕"* ➔ *"Close window"*, *"⚙"* ➔ *"Settings"*) tailored for screen readers and low-vision users.
-- **3-Step Hierarchical Navigation (`SwitchAccessStep`)**:
-  - Cascading navigation flow: Window selection ➔ Zone/block selection ➔ Individual control interaction.
-  - Dynamic discovery of popped menus, context menus, and dropdown controls post-interaction (`new_popped_targets`).
-- **High-Visibility Visual Feedback**:
-  - Bold high-visibility orange borders around target windows and active controls (`draw_screen_orange_border`).
-  - Pulsing cyan halo outlining active macro-zones.
-- **Multimodal Control & Universal Shortcuts**:
-  - Voice control activation and deactivation (*"hover mode"*, *"switch access"*, *"switch mode"*, *"mode survol"*).
-  - Full hardware switch and keyboard support (`Space`, `Enter`, `Tab`, arrow keys, numpad `4`/`6`).
-  - Contextual `Escape` key for smooth step-by-step upward traversal through the navigation hierarchy.
-  - Interactive `🎯 Survol` HUD toggle button with real-time target status badge.
+  - **Adaptive Speech Hierarchy (`build_targeted_hover_speech`)**:
+    - Detailed control announcement: accessible label, semantic role, associated keyboard shortcut, and relative position (*e.g., "1 of 4"*).
+    - Context deduplication: suppresses redundant parent macro-zone names when hovering within the same interaction block.
+  - **AI-Assisted Semantic Zoning (`analyze_navigation_zones_with_llm`)**:
+    - Automatic decomposition of complex windows into 2 to 4 logical macro-zones for streamlined navigation.
+    - Contextual rewrites of cryptic, truncated, or symbolic labels (*"✕"* ➔ *"Close window"*, *"⚙"* ➔ *"Settings"*) tailored for screen readers and low-vision users.
+  - **3-Step Hierarchical Navigation (`SwitchAccessStep`)**:
+    - Cascading navigation flow: Window selection ➔ Zone/block selection ➔ Individual control interaction.
+    - Dynamic discovery of popped menus, context menus, and dropdown controls post-interaction (`new_popped_targets`).
+  - **High-Visibility Visual Feedback**:
+    - Bold high-visibility orange borders around target windows and active controls (`draw_screen_orange_border`).
+    - Pulsing cyan halo outlining active macro-zones.
+  - **Multimodal Control & Universal Shortcuts**:
+    - Voice control activation and deactivation (*"hover mode"*, *"switch access"*, *"switch mode"*, *"mode survol"*).
+    - Full hardware switch and keyboard support (`Space`, `Enter`, `Tab`, arrow keys, numpad `4`/`6`).
+    - Contextual `Escape` key for smooth step-by-step upward traversal through the navigation hierarchy.
+    - Interactive `🎯 Survol` HUD toggle button with real-time target status badge.
 
 ---
 
