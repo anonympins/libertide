@@ -97,6 +97,8 @@ pub struct NumberedElementTarget {
     pub role: String,
     #[serde(default)]
     pub shortcut: String,
+    #[serde(default)]
+    pub value: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -183,22 +185,137 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
 }
 
 #[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
-    let user_windows = list_user_windows();
-    user_windows
+    const JXA_WINS: &str = r#"(() => {
+        try {
+            const se = Application("System Events");
+            const procs = se.applicationProcesses.whose({ backgroundOnly: false, visible: true });
+            let list = [];
+            for (let i = 0; i < procs.length; i++) {
+                const p = procs[i];
+                const pName = p.name();
+                const wins = p.windows();
+                for (let j = 0; j < wins.length; j++) {
+                    const w = wins[j];
+                    const title = w.name() || pName;
+                    if (!title || title.indexOf("Libertide") !== -1) continue;
+                    let pos = [100, 100];
+                    let sz = [800, 600];
+                    try { pos = w.position(); } catch(e) {}
+                    try { sz = w.size(); } catch(e) {}
+                    list.push({
+                        id: pName + "_" + j,
+                        title: pName + " - " + title,
+                        x: Math.round(pos[0]),
+                        y: Math.round(pos[1]),
+                        width: Math.round(sz[0]),
+                        height: Math.round(sz[1])
+                    });
+                }
+            }
+            return JSON.stringify(list);
+        } catch(e) { return "[]"; }
+    })()"#;
+
+    #[derive(serde::Deserialize)]
+    struct MacWinRaw {
+        id: String,
+        title: String,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    }
+
+    let Ok(output) = std::process::Command::new("osascript")
+        .args(["-l", "JavaScript", "-e", JXA_WINS])
+        .output()
+    else {
+        return Vec::new();
+    };
+
+    let items: Vec<MacWinRaw> = serde_json::from_slice(&output.stdout).unwrap_or_default();
+    items
         .into_iter()
-        .enumerate()
-        .map(|(i, (id, title))| {
-            let hash = id.as_bytes().iter().fold(0isize, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as isize));
+        .filter(|w| w.width >= 100 && w.height >= 60)
+        .map(|w| {
+            let hash = w.id.as_bytes().iter().fold(0isize, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as isize));
             SwitchWindowTarget {
                 id: hash.abs().max(1),
-                title,
-                click_x: 200 + (i as i32 * 50) % 500,
-                click_y: 150 + (i as i32 * 40) % 400,
-                rect: [100, 100, 800, 600],
+                title: w.title,
+                click_x: w.x + (w.width / 2),
+                click_y: (w.y + 30).min(w.y + w.height - 10),
+                rect: [w.x, w.y, w.x + w.width, w.y + w.height],
             }
         })
         .collect()
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
+    let output = std::process::Command::new("wmctrl")
+        .args(["-l", "-G"])
+        .output();
+
+    let mut candidates = Vec::new();
+    if let Ok(out) = output {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 8 {
+                let win_id = parts[0];
+                let title = parts[7..].join(" ");
+                let t_clean = title.trim();
+                if t_clean.is_empty()
+                    || t_clean.contains("Libertide")
+                    || t_clean.eq_ignore_ascii_case("desktop")
+                {
+                    continue;
+                }
+                let x = parts[2].parse::<i32>().unwrap_or(0);
+                let y = parts[3].parse::<i32>().unwrap_or(0);
+                let w = parts[4].parse::<i32>().unwrap_or(0);
+                let h = parts[5].parse::<i32>().unwrap_or(0);
+                if w < 100 || h < 60 {
+                    continue;
+                }
+                let hash = win_id.as_bytes().iter().fold(0isize, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as isize));
+                candidates.push(SwitchWindowTarget {
+                    id: hash.abs().max(1),
+                    title: t_clean.to_string(),
+                    click_x: x + (w / 2),
+                    click_y: (y + 30).min(y + h - 10),
+                    rect: [x, y, x + w, y + h],
+                });
+            }
+        }
+    }
+    candidates
+}
+
+/// Détermine l'index de la fenêtre sous le point de l'écran donné
+pub fn find_switch_window_at_point(windows: &[SwitchWindowTarget], x: i32, y: i32) -> Option<usize> {
+    #[cfg(windows)]
+    {
+        let pt = windows::Win32::Foundation::POINT { x, y };
+        let child = unsafe { windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt) };
+        if !child.is_invalid() {
+            let root = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+                    child,
+                    windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+                )
+            };
+            let top_hwnd = if !root.is_invalid() { root } else { child };
+            if let Some(pos) = windows.iter().position(|w| w.id == top_hwnd.0 as isize) {
+                return Some(pos);
+            }
+        }
+    }
+    windows.iter().position(|w| {
+        x >= w.rect[0] && x <= w.rect[2] && y >= w.rect[1] && y <= w.rect[3]
+    })
 }
 
 #[cfg(windows)]
@@ -273,10 +390,21 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
                 "case à cocher".to_string()
             } else if e.is_media {
                 "lecteur multimédia".to_string()
-            } else if !e.localized_type.is_empty() {
+            } else if !
+                e.localized_type.is_empty() {
                 e.localized_type.clone()
             } else {
                 "contrôle".to_string()
+            };
+
+            let val_summary = if !e.value_text.is_empty() {
+                e.value_text.clone()
+            } else if !e.aria_description.is_empty() {
+                e.aria_description.clone()
+            } else if !e.help_text.is_empty() {
+                e.help_text.clone()
+            } else {
+                String::new()
             };
 
             let mut shortcut = String::new();
@@ -304,6 +432,7 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
                 click_y: e.click_y,
                 rect: [e.rect.left, e.rect.top, e.rect.right, e.rect.bottom],
                 name: display_name,
+                value: val_summary,
             }
         })
         .collect()
@@ -429,12 +558,13 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
             name: if !e.name.is_empty() {
                 e.name
             } else if !e.value.is_empty() {
-                e.value
+                e.value.clone()
             } else {
                 format!("[{}]", e.role.strip_prefix("AX").unwrap_or(&e.role))
             },
             role: e.role.strip_prefix("AX").unwrap_or(&e.role).to_lowercase(),
             shortcut: String::new(),
+            value: e.value,
         })
         .collect()
 }
@@ -536,12 +666,13 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
             name: if !e.name.is_empty() {
                 e.name
             } else if !e.value.is_empty() {
-                e.value
+                e.value.clone()
             } else {
                 format!("[{}]", e.role)
             },
             role: e.role.clone(),
             shortcut: String::new(),
+            value: e.value,
         })
         .collect()
 }
@@ -612,67 +743,56 @@ pub fn format_plural_control_type(targets: &[NumberedElementTarget]) -> String {
     }
 }
 
+pub fn inject_text_reader_target(zone: &mut NavigationZone) {
+    if zone.targets.iter().any(|t| t.role == "lecture textuelle") {
+        return;
+    }
+
+    let click_x = (zone.rect[0] + zone.rect[2]) / 2;
+    let click_y = zone.rect[1] + 16;
+    let reader_target = NumberedElementTarget {
+        index: 1,
+        click_x,
+        click_y,
+        rect: [zone.rect[0], zone.rect[1], (zone.rect[0] + 200).min(zone.rect[2]), (zone.rect[1] + 32).min(zone.rect[3])],
+        name: format!("📖 Lecture / Extraction texte ({})", zone.title),
+        role: "lecture textuelle".to_string(),
+        shortcut: "Entrée".to_string(),
+        value: String::new(),
+    };
+
+    zone.targets.insert(0, reader_target);
+    for (i, t) in zone.targets.iter_mut().enumerate() {
+        t.index = i + 1;
+    }
+}
+
 pub fn build_targeted_hover_speech(
-    macro_zone_title: Option<&str>,
-    zone_targets: &[NumberedElementTarget],
-    index_in_zone: Option<usize>,
+    _macro_zone_title: Option<&str>,
+    _zone_targets: &[NumberedElementTarget],
+    _index_in_zone: Option<usize>,
     target_name: &str,
     target_role: &str,
-    target_shortcut: &str,
-    is_same_zone_as_last: bool,
+    _target_shortcut: &str,
+    _is_same_zone_as_last: bool,
 ) -> String {
     let clean_name = target_name.trim();
-    let clean_role = target_role.trim().to_lowercase();
-    let clean_shortcut = target_shortcut.trim();
+    let clean_role = target_role.trim();
 
-    let mut micro_desc = if !clean_name.is_empty() {
-        format!("Survol : {clean_name}")
+    if clean_role.eq_ignore_ascii_case("lecture textuelle") {
+        if !clean_name.is_empty() {
+            return clean_name.to_string();
+        } else {
+            return "Lecture textuelle".to_string();
+        }
+    }
+
+    if !clean_name.is_empty() {
+        clean_name.to_string()
     } else if !clean_role.is_empty() {
-        format!("Survol : {clean_role}")
+        clean_role.to_string()
     } else {
-        "Survol : élément".to_string()
-    };
-
-    let name_lower = clean_name.to_lowercase();
-    let role_needed = !clean_role.is_empty()
-        && !name_lower.contains(&clean_role)
-        && clean_role != "contrôle"
-        && clean_role != "élément";
-
-    if role_needed {
-        micro_desc.push_str(&format!(", {clean_role}"));
-    }
-
-    if !clean_shortcut.is_empty() {
-        if role_needed {
-            micro_desc.push_str(&format!(" raccourci {clean_shortcut}"));
-        } else {
-            micro_desc.push_str(&format!(", raccourci {clean_shortcut}"));
-        }
-    }
-
-    let position_str = match (index_in_zone, zone_targets.len()) {
-        (Some(idx), total) if total > 1 => Some(format!("{idx} sur {total}")),
-        _ => None,
-    };
-
-    if is_same_zone_as_last {
-        if let Some(pos) = position_str {
-            format!("{pos}. {micro_desc}.")
-        } else {
-            format!("{micro_desc}.")
-        }
-    } else if let Some(zone) = macro_zone_title.filter(|z| !z.trim().is_empty()) {
-        let plural_type = format_plural_control_type(zone_targets);
-        if let Some(pos) = position_str {
-            format!("{zone}, {plural_type} ({pos}). {micro_desc}.")
-        } else {
-            format!("{zone}, {plural_type}. {micro_desc}.")
-        }
-    } else if let Some(pos) = position_str {
-        format!("{micro_desc} ({pos}).")
-    } else {
-        format!("{micro_desc}.")
+        "Contrôle".to_string()
     }
 }
 
@@ -780,6 +900,119 @@ pub static LAST_SCREEN_SUMMARY: Mutex<Option<String>> = Mutex::new(None);
 pub static IS_IMMERSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static IS_DICTATION_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static IMMERSION_SCREEN_HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub static SWITCH_HOOK_ENABLED: AtomicBool = AtomicBool::new(false);
+pub static SWITCH_KEY_QUEUE: Mutex<Vec<crate::types::SwitchKeyEvent>> = Mutex::new(Vec::new());
+
+#[cfg(windows)]
+static HOOK_KEYS_DOWN: Mutex<[bool; 256]> = Mutex::new([false; 256]);
+
+pub fn reset_switch_keys() {
+    if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+        q.clear();
+    }
+    #[cfg(windows)]
+    if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
+        *keys = [false; 256];
+    }
+}
+
+#[cfg(windows)]
+static KEYBOARD_HOOK_HANDLE: Mutex<Option<isize>> = Mutex::new(None);
+
+#[cfg(windows)]
+unsafe extern "system" fn switch_keyboard_hook_proc(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, GetForegroundWindow, GetWindowThreadProcessId, KBDLLHOOKSTRUCT, WM_KEYDOWN,
+        WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    };
+    use crate::types::SwitchKeyEvent;
+
+    if code >= 0 && SWITCH_HOOK_ENABLED.load(Ordering::Relaxed) {
+        let fg = GetForegroundWindow();
+        let mut fg_pid = 0u32;
+        let _ = GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+        let is_libertide_fg = fg_pid == std::process::id();
+
+        if !is_libertide_fg {
+        let kbd = *(lparam.0 as *const KBDLLHOOKSTRUCT);
+        let vk = kbd.vkCode;
+        let is_down = wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize;
+        let is_up = wparam.0 == WM_KEYUP as usize || wparam.0 == WM_SYSKEYUP as usize;
+
+        let is_shift = (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x10) as u16 & 0x8000) != 0;
+
+        let switch_event = match vk {
+            0x09 => Some(if is_shift { SwitchKeyEvent::Prev } else { SwitchKeyEvent::Next }), // Tab / Shift+Tab
+            0x25 | 0x26 | 0x64 | 0x34 => Some(SwitchKeyEvent::Prev), // Gauche, Haut, Pavé 4, Touche 4
+            0x27 | 0x28 | 0x66 | 0x36 => Some(SwitchKeyEvent::Next), // Droite, Bas, Pavé 6, Touche 6
+            0x0D | 0x20 => Some(SwitchKeyEvent::Select),             // Entrée, Espace
+            0x1B => Some(SwitchKeyEvent::Escape),                    // Échap
+            _ => None,
+        };
+
+        if let Some(event) = switch_event {
+                let vk_idx = (vk as usize) & 0xFF;
+            if is_down {
+                    let mut already_down = false;
+                    if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
+                        already_down = keys[vk_idx];
+                        keys[vk_idx] = true;
+                    }
+                    // Pousse l'événement uniquement lors de la transition enfoncée initiale (ignore l'auto-repeat typematic)
+                    if !already_down {
+                        if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                            q.push(event);
+                        }
+                }
+                } else if is_up {
+                    if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
+                        keys[vk_idx] = false;
+                    }
+            }
+            // Bloque et avale l'événement clavier : il n'atteindra jamais la fenêtre cible
+            if is_down || is_up {
+                return windows::Win32::Foundation::LRESULT(1);
+            }
+        }
+        }
+    }
+
+    CallNextHookEx(None, code, wparam, lparam)
+}
+
+#[cfg(windows)]
+pub fn install_switch_keyboard_hook() {
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WH_KEYBOARD_LL};
+    let mut guard = KEYBOARD_HOOK_HANDLE.lock().unwrap();
+    if guard.is_none() {
+        unsafe {
+            if let Ok(hook) = SetWindowsHookExW(
+                WH_KEYBOARD_LL,
+                Some(switch_keyboard_hook_proc),
+                windows::Win32::Foundation::HINSTANCE(std::ptr::null_mut()),
+                0,
+            ) {
+                *guard = Some(hook.0 as isize);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn uninstall_switch_keyboard_hook() {
+    use windows::Win32::UI::WindowsAndMessaging::{UnhookWindowsHookEx, HHOOK};
+    let mut guard = KEYBOARD_HOOK_HANDLE.lock().unwrap();
+    if let Some(raw) = guard.take() {
+        unsafe {
+            let _ = UnhookWindowsHookEx(HHOOK(raw as _));
+        }
+    }
+}
 
 #[cfg(windows)]
 pub fn update_last_external_focus() {

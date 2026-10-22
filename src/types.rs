@@ -265,6 +265,12 @@ pub struct ChatEntry {
     pub screen_size_kb: Option<f32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedWindowAnalysis {
+    pub summary: String,
+    pub zones: Vec<NavigationZone>,
+}
+
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     StatusChanged(AgentStatus),
@@ -286,7 +292,9 @@ pub enum AgentEvent {
     ShowFloatingCard(FloatingCard),
     CloseFloatingCard(String),
     NavigationZonesReady {
+        window_id: isize,
         window_title: String,
+        summary: String,
         zones: Vec<NavigationZone>,
     },
 }
@@ -312,8 +320,10 @@ pub enum AgentCommand {
     PeriodicScreenCheck,
     UndoLastAction,
     AnalyzeNavigationZones {
+        window_id: isize,
         window_title: String,
         targets: Vec<NumberedElementTarget>,
+        context_meta: Option<String>,
     },
 }
 

@@ -2027,6 +2027,72 @@ pub fn extract_scrollable_viewports_content(uia: &IUIAutomation, hwnd: HWND) -> 
 }
 
 #[cfg(windows)]
+pub fn extract_text_from_zone(
+    hwnd: HWND,
+    zone_rect: [i32; 4],
+    zone_targets: &[crate::automation::NumberedElementTarget],
+) -> String {
+    let mut collected = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        if let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+            if let Ok(root) = uia.ElementFromHandle(hwnd) {
+                if let Ok(cond) = uia.ControlViewCondition() {
+                    if let Ok(elements) = root.FindAll(TreeScope_Descendants, &cond) {
+                        let count = elements.Length().unwrap_or(0).min(250);
+                        for i in 0..count {
+                            if let Ok(item) = elements.GetElement(i) {
+                                if let Ok(r) = item.CurrentBoundingRectangle() {
+                                    let intersects = r.left < zone_rect[2]
+                                        && r.right > zone_rect[0]
+                                        && r.top < zone_rect[3]
+                                        && r.bottom > zone_rect[1];
+                                    if intersects {
+                                        if let Some(txt) = extract_inner_text(&uia, &item, 400) {
+                                            let trimmed = txt.trim().to_string();
+                                            if !trimmed.is_empty() && trimmed.len() >= 2 && seen.insert(trimmed.to_lowercase()) {
+                                                collected.push(trimmed);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for t in zone_targets {
+        if t.role != "lecture textuelle" && !t.name.is_empty() {
+            let clean = t.name.trim().to_string();
+            if seen.insert(clean.to_lowercase()) {
+                collected.push(clean);
+            }
+        }
+    }
+
+    if collected.is_empty() {
+        "Aucun texte détecté dans cette zone.".to_string()
+    } else {
+        collected.join("\n")
+    }
+}
+
+#[cfg(not(windows))]
+pub fn extract_text_from_zone(
+    _target: impl AsWindowTarget,
+    _zone_rect: [i32; 4],
+    zone_targets: &[crate::automation::NumberedElementTarget],
+) -> String {
+    let items: Vec<String> = zone_targets.iter().filter(|t| t.role != "lecture textuelle" && !t.name.is_empty()).map(|t| t.name.clone()).collect();
+    if items.is_empty() { "Aucun texte détecté dans cette zone.".to_string() } else { items.join("\n") }
+}
+
+#[cfg(windows)]
 fn is_ecommerce_action_term(term: &str) -> bool {
     let t = term.to_lowercase();
     t.contains("commande") || t.contains("panier") || t.contains("cart") || t.contains("checkout")
