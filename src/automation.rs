@@ -97,6 +97,8 @@ pub struct NumberedElementTarget {
     pub role: String,
     #[serde(default)]
     pub shortcut: String,
+    #[serde(default)]
+    pub value: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -395,6 +397,16 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
                 "contrôle".to_string()
             };
 
+            let val_summary = if !e.value_text.is_empty() {
+                e.value_text.clone()
+            } else if !e.aria_description.is_empty() {
+                e.aria_description.clone()
+            } else if !e.help_text.is_empty() {
+                e.help_text.clone()
+            } else {
+                String::new()
+            };
+
             let mut shortcut = String::new();
             unsafe {
                 if let Ok(acc) = e.element.CurrentAcceleratorKey() {
@@ -420,6 +432,7 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
                 click_y: e.click_y,
                 rect: [e.rect.left, e.rect.top, e.rect.right, e.rect.bottom],
                 name: display_name,
+                value: val_summary,
             }
         })
         .collect()
@@ -551,6 +564,7 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
             },
             role: e.role.strip_prefix("AX").unwrap_or(&e.role).to_lowercase(),
             shortcut: String::new(),
+            value: e.value,
         })
         .collect()
 }
@@ -658,6 +672,7 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
             },
             role: e.role.clone(),
             shortcut: String::new(),
+            value: e.value,
         })
         .collect()
 }
@@ -743,6 +758,7 @@ pub fn inject_text_reader_target(zone: &mut NavigationZone) {
         name: format!("📖 Lecture / Extraction texte ({})", zone.title),
         role: "lecture textuelle".to_string(),
         shortcut: "Entrée".to_string(),
+        value: String::new(),
     };
 
     zone.targets.insert(0, reader_target);

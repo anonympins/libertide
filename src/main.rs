@@ -1320,10 +1320,16 @@ impl OverlayApp {
                 });
 
                 if !targets.is_empty() {
+                    #[cfg(windows)]
+                    let context_meta = extract_window_context_meta(windows::Win32::Foundation::HWND(cur_win.id as _), &cur_win.title);
+                    #[cfg(not(windows))]
+                    let context_meta = None;
+
                     let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
                         window_id: cur_win.id,
                         window_title: cur_win.title.clone(),
                         targets,
+                        context_meta,
                     });
                 }
 
@@ -2432,10 +2438,16 @@ impl eframe::App for OverlayApp {
                                 });
 
                                 if !targets.is_empty() {
+                                    #[cfg(windows)]
+                                    let context_meta = extract_window_context_meta(windows::Win32::Foundation::HWND(cur_win.id as _), &cur_win.title);
+                                    #[cfg(not(windows))]
+                                    let context_meta = None;
+
                                     let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
                                         window_id: cur_win.id,
                                         window_title: cur_win.title.clone(),
                                         targets,
+                                        context_meta,
                                     });
                                 }
 
@@ -2535,6 +2547,7 @@ impl eframe::App for OverlayApp {
                                         window_id: cur_win.id,
                                         window_title: cur_win.title.clone(),
                                         targets: self.numbered_targets.clone(),
+                                        context_meta: None,
                                     });
                                 } else {
                                     let msg = format!("Fenêtre sélectionnée : {}. Aucun contrôle interactif direct détecté. Échap pour revenir.", cur_win.title);
@@ -3059,10 +3072,16 @@ impl eframe::App for OverlayApp {
                                             });
 
                                             if !targets.is_empty() {
+                                                #[cfg(windows)]
+                                                let context_meta = extract_window_context_meta(windows::Win32::Foundation::HWND(win_id as _), &cur_win.title);
+                                                #[cfg(not(windows))]
+                                                let context_meta = None;
+
                                                 let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
                                                     window_id: win_id,
                                                     window_title: cur_win.title.clone(),
                                                     targets,
+                                                    context_meta,
                                                 });
                                             }
 
@@ -5985,19 +6004,77 @@ pub fn build_fallback_navigation_zones(window_title: &str, targets: &[NumberedEl
     (summary, fallback_zones)
 }
 
+#[cfg(windows)]
+fn extract_window_context_meta(hwnd: windows::Win32::Foundation::HWND, title: &str) -> Option<String> {
+    if hwnd.0.is_null() || is_window_hung(hwnd) {
+        return None;
+    }
+    let mut meta = Vec::new();
+    let (_pid, exe_name) = get_window_process_info(hwnd);
+    meta.push(format!("Application hôte : \"{}\"", exe_name));
+
+    if let Some(file) = extract_filename_from_title(title) {
+        meta.push(format!("Document ou fichier actif : \"{}\"", file));
+    }
+
+    if is_browser_hwnd(hwnd, title) {
+        unsafe {
+            if let Ok(uia) = windows::Win32::System::Com::CoCreateInstance::<_, windows::Win32::UI::Accessibility::IUIAutomation>(
+                &windows::Win32::UI::Accessibility::CUIAutomation,
+                None,
+                windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
+            ) {
+                if let Ok(win_elem) = uia.ElementFromHandle(hwnd) {
+                    if let Ok(cond_doc) = uia.CreatePropertyCondition(
+                        windows::Win32::UI::Accessibility::UIA_ControlTypePropertyId,
+                        &windows::core::VARIANT::from(windows::Win32::UI::Accessibility::UIA_DocumentControlTypeId.0),
+                    ) {
+                        if let Ok(doc_elements) = win_elem.FindAll(windows::Win32::UI::Accessibility::TreeScope_Descendants, &cond_doc) {
+                            if let Ok(doc_elem) = doc_elements.GetElement(0) {
+                                if let Some(doc_text) = ui::extract_web_document_text(&doc_elem, 1500) {
+                                    let trimmed = doc_text.trim();
+                                    if !trimmed.is_empty() {
+                                        meta.push(format!("Extrait du corps de page :\n\"\"\"\n{}\n\"\"\"", truncate_with_notice(trimmed, 800)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else if is_terminal_window(hwnd, title) {
+        if let Some(term_text) = read_terminal_window_content(hwnd, title) {
+            meta.push(format!("Dernières lignes console :\n\"\"\"\n{}\n\"\"\"", truncate_with_notice(&term_text, 600)));
+        }
+    }
+
+    if meta.is_empty() { None } else { Some(meta.join("\n")) }
+}
+
 async fn analyze_navigation_zones_with_llm(
     client: &reqwest::Client,
     config: &LlmConfig,
     window_title: &str,
     targets: &[NumberedElementTarget],
+    context_meta: Option<&str>,
 ) -> (String, Vec<NavigationZone>) {
     if targets.is_empty() {
         return (format!("Fenêtre {window_title}. Aucun contrôle interactif direct détecté."), Vec::new());
     }
 
     let mut prompt_content = format!("Fenêtre analysée : \"{}\"\nContrôles et éléments de contenu détectés :\n", window_title);
+    if let Some(meta) = context_meta {
+        prompt_content.push_str(&format!("[Méta-informations et extrait du document] :\n{}\n\n", meta));
+    }
+    prompt_content.push_str("Contrôles et éléments interactifs détectés :\n");
     for t in targets.iter().take(60) {
-        prompt_content.push_str(&format!("- ID #{}: \"{}\" (rôle: {}, raccourci: {}) [x:{}, y:{}, w:{}, h:{}]\n", t.index, t.name, t.role, t.shortcut, t.rect[0], t.rect[1], t.rect[2] - t.rect[0], t.rect[3] - t.rect[1]));
+        let val_part = if !t.value.is_empty() {
+            format!(" (valeur/état: \"{}\")", t.value)
+        } else {
+            String::new()
+        };
+        prompt_content.push_str(&format!("- ID #{}: \"{}\" (rôle: {}{}, raccourci: {}) [x:{}, y:{}, w:{}, h:{}]\n", t.index, t.name, t.role, val_part, t.shortcut, t.rect[0], t.rect[1], t.rect[2] - t.rect[0], t.rect[3] - t.rect[1]));
     }
 
     let (_, lang_name) = get_system_locale_language();
@@ -6194,12 +6271,12 @@ fn main() -> eframe::Result<()> {
 
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    AgentCommand::AnalyzeNavigationZones { window_id, window_title, targets } => {
+                    AgentCommand::AnalyzeNavigationZones { window_id, window_title, targets, context_meta } => {
                         let client = reqwest::Client::new();
                         let current_llm_config = bg_llm_config.clone();
                         let event_tx = event_tx.clone();
                         tokio::spawn(async move {
-                            let (summary, zones) = analyze_navigation_zones_with_llm(&client, &current_llm_config, &window_title, &targets).await;
+                            let (summary, zones) = analyze_navigation_zones_with_llm(&client, &current_llm_config, &window_title, &targets, context_meta.as_deref()).await;
                             let _ = event_tx.send(AgentEvent::NavigationZonesReady {
                                 window_id,
                                 window_title,

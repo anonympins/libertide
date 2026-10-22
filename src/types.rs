@@ -323,6 +323,7 @@ pub enum AgentCommand {
         window_id: isize,
         window_title: String,
         targets: Vec<NumberedElementTarget>,
+        context_meta: Option<String>,
     },
 }
 
