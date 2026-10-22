@@ -666,7 +666,7 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
             name: if !e.name.is_empty() {
                 e.name
             } else if !e.value.is_empty() {
-                e.value
+                e.value.clone()
             } else {
                 format!("[{}]", e.role)
             },
