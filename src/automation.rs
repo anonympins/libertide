@@ -27,22 +27,15 @@ use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPRO
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationElement2,
     IUIAutomationExpandCollapsePattern, IUIAutomationInvokePattern, IUIAutomationLegacyIAccessiblePattern,
-    IUIAutomationRangeValuePattern,
     IUIAutomationScrollItemPattern, IUIAutomationScrollPattern, IUIAutomationSelectionItemPattern,
-    IUIAutomationSelectionPattern, IUIAutomationTextPattern, IUIAutomationTogglePattern,
+    IUIAutomationTextPattern, IUIAutomationTogglePattern,
     IUIAutomationValuePattern, TreeScope_Descendants, UIA_ButtonControlTypeId,
-    UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId, UIA_CustomControlTypeId,
     UIA_DataGridControlTypeId, UIA_DataItemControlTypeId, UIA_DocumentControlTypeId,
     UIA_EditControlTypeId, UIA_ExpandCollapsePatternId, UIA_GroupControlTypeId,
-    UIA_HeaderItemControlTypeId, UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId,
     UIA_InvokePatternId, UIA_LegacyIAccessiblePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
-    UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
-    UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId, UIA_RangeValuePatternId,
     UIA_ScrollBarControlTypeId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
     UIA_SelectionItemPatternId, UIA_SelectionPatternId, UIA_SliderControlTypeId,
-    UIA_SpinnerControlTypeId, UIA_TabControlTypeId, UIA_TabItemControlTypeId,
     UIA_TextPatternId, UIA_TogglePatternId, UIA_ToolBarControlTypeId,
-    UIA_TreeItemControlTypeId,
     UIA_ValuePatternId, UIA_SeparatorControlTypeId,
 };
 #[cfg(windows)]
@@ -55,7 +48,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow,
-    FindWindowW, GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+    FindWindowW, GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
     GetGUIThreadInfo, GUITHREADINFO,
     PostMessageW, SendMessageW, SetCursorPos, SetForegroundWindow, ShowWindow,
     SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE,
@@ -86,7 +79,7 @@ pub struct SwitchWindowTarget {
     pub rect: [i32; 4],
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, PartialEq, serde::Deserialize)]
 pub struct NumberedElementTarget {
     pub index: usize,
     pub click_x: i32,
@@ -99,6 +92,8 @@ pub struct NumberedElementTarget {
     pub shortcut: String,
     #[serde(default)]
     pub value: String,
+    #[serde(default)]
+    pub window_id: Option<isize>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -323,8 +318,17 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
     if hwnd.0.is_null() || is_window_hung(hwnd) {
         return Vec::new();
     }
+    let (_pid, exe_name) = get_window_process_info(hwnd);
+    let mut win_title_buf = [0u16; 512];
+    let t_len = unsafe { GetWindowTextW(hwnd, &mut win_title_buf) };
+    let win_title = if t_len > 0 {
+        String::from_utf16_lossy(&win_title_buf[..t_len as usize])
+    } else {
+        String::new()
+    };
+
     let elements = list_interactive_elements(hwnd);
-    elements
+    let mut targets: Vec<NumberedElementTarget> = elements
         .into_iter()
         .filter(|e| {
             if e.is_offscreen {
@@ -349,6 +353,7 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
                 || e.is_slider
                 || e.is_toggle
                 || e.is_option
+                || e.is_label
                 || e.has_action_pattern
         })
         .take(50)
@@ -358,6 +363,8 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
                 e.name.clone()
             } else if !e.aria_label.is_empty() {
                 e.aria_label.clone()
+            } else if !e.value_text.is_empty() {
+                e.value_text.clone()
             } else if !e.localized_type.is_empty() && !e.localized_type.eq_ignore_ascii_case("groupe") && !e.localized_type.eq_ignore_ascii_case("group") && !e.localized_type.eq_ignore_ascii_case("séparateur") {
                 e.localized_type.clone()
             } else if e.is_button {
@@ -368,6 +375,8 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
                 "Champ de saisie".to_string()
             } else if e.is_tab {
                 "Onglet".to_string()
+            } else if e.is_label {
+                "Texte".to_string()
             } else {
                 format!("Élément {}", i + 1)
             };
@@ -390,8 +399,9 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
                 "case à cocher".to_string()
             } else if e.is_media {
                 "lecteur multimédia".to_string()
-            } else if !
-                e.localized_type.is_empty() {
+            } else if e.is_label {
+                "étiquette".to_string()
+            } else if !e.localized_type.is_empty() {
                 e.localized_type.clone()
             } else {
                 "contrôle".to_string()
@@ -433,9 +443,49 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
                 rect: [e.rect.left, e.rect.top, e.rect.right, e.rect.bottom],
                 name: display_name,
                 value: val_summary,
+                window_id: Some(hwnd.0 as isize),
             }
         })
-        .collect()
+        .collect();
+
+    let mut wr = RECT::default();
+    let has_rect = unsafe { GetWindowRect(hwnd, &mut wr).is_ok() };
+
+    // Injection de sécurité pour IntelliJ / IDEs : si aucune zone de texte n'est listée
+    let is_editor = is_editor_window(hwnd, &win_title, &exe_name);
+    let has_textarea = targets.iter().any(|t| t.role == "zone de texte" || t.role == "champ de saisie");
+    if is_editor && !has_textarea && has_rect {
+        {
+            let w = wr.right - wr.left;
+            let h = wr.bottom - wr.top;
+            let filename = extract_filename_from_title(&win_title);
+            let display = filename.map(|f| format!("Éditeur ({f})")).unwrap_or_else(|| "Éditeur de code".to_string());
+            targets.insert(0, NumberedElementTarget {
+                index: 0,
+                role: "zone de texte".to_string(),
+                shortcut: "Ctrl+A".to_string(),
+                click_x: wr.left + w / 2,
+                click_y: wr.top + (h * 55 / 100),
+                rect: [wr.left + 50, wr.top + 80, wr.right - 50, wr.bottom - 50],
+                name: display,
+                value: String::new(),
+                window_id: Some(hwnd.0 as isize),
+            });
+            for (i, t) in targets.iter_mut().enumerate() {
+                t.index = i + 1;
+            }
+        }
+    }
+
+    if has_rect {
+        let window_rect = [wr.left, wr.top, wr.right, wr.bottom];
+        crate::ocr::enrich_targets_with_ocr(hwnd, window_rect, &mut targets);
+        for (i, t) in targets.iter_mut().enumerate() {
+            t.index = i + 1;
+        }
+    }
+
+    targets
 }
 
 #[cfg(not(windows))]
@@ -482,7 +532,7 @@ fn query_macos_ax_elements() -> Vec<MacosAxElementRaw> {
 
         const targetRoles = [
             "AXButton", "AXTextField", "AXTextArea", "AXPopUpButton",
-            "AXCheckBox", "AXRadioButton", "AXLink", "AXTab", "AXMenuItem", "AXComboBox"
+            "AXCheckBox", "AXRadioButton", "AXLink", "AXTab", "AXMenuItem", "AXComboBox", "AXStaticText"
         ];
 
         let elements = [];
@@ -556,15 +606,24 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
             click_y: e.y + (e.height / 2),
             rect: [e.x, e.y, e.x + e.width, e.y + e.height],
             name: if !e.name.is_empty() {
-                e.name
+                e.name.clone()
             } else if !e.value.is_empty() {
                 e.value.clone()
             } else {
                 format!("[{}]", e.role.strip_prefix("AX").unwrap_or(&e.role))
             },
-            role: e.role.strip_prefix("AX").unwrap_or(&e.role).to_lowercase(),
+            role: match e.role.strip_prefix("AX").unwrap_or(&e.role) {
+                "StaticText" => "étiquette".to_string(),
+                "TextField" => "champ de saisie".to_string(),
+                "TextArea" => "zone de texte".to_string(),
+                "Button" => "bouton".to_string(),
+                "Link" => "lien".to_string(),
+                "Tab" => "onglet".to_string(),
+                other => other.to_lowercase(),
+            },
             shortcut: String::new(),
             value: e.value,
+            window_id: None,
         })
         .collect()
 }
@@ -607,7 +666,7 @@ def walk(accessible, depth=0):
         role = accessible.get_role_name()
         state = accessible.get_state_set()
         is_showing = state.contains(Atspi.StateType.SHOWING) if state else True
-        if is_showing and role in ("push-button", "link", "entry", "password-text", "page-tab", "check-box", "radio-button", "combo-box"):
+        if is_showing and role in ("push-button", "link", "entry", "password-text", "page-tab", "check-box", "radio-button", "combo-box", "label", "text"):
             comp = accessible.get_component_iface()
             if comp:
                 bbox = comp.get_extents(Atspi.CoordType.SCREEN)
@@ -664,15 +723,23 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
             click_y: e.y + (e.height / 2),
             rect: [e.x, e.y, e.x + e.width, e.y + e.height],
             name: if !e.name.is_empty() {
-                e.name
+                e.name.clone()
             } else if !e.value.is_empty() {
                 e.value.clone()
             } else {
                 format!("[{}]", e.role)
             },
-            role: e.role.clone(),
+            role: match e.role.as_str() {
+                "label" | "text" => "étiquette".to_string(),
+                "entry" | "password-text" => "champ de saisie".to_string(),
+                "push-button" => "bouton".to_string(),
+                "link" => "lien".to_string(),
+                "page-tab" => "onglet".to_string(),
+                other => other.to_string(),
+            },
             shortcut: String::new(),
             value: e.value,
+            window_id: None,
         })
         .collect()
 }
@@ -729,6 +796,7 @@ pub fn format_plural_control_type(targets: &[NumberedElementTarget]) -> String {
     let link_count = targets.iter().filter(|t| t.role == "lien").count();
     let tab_count = targets.iter().filter(|t| t.role == "onglet").count();
     let input_count = targets.iter().filter(|t| t.role == "champ de saisie" || t.role == "zone de texte").count();
+    let label_count = targets.iter().filter(|t| t.role == "étiquette" || t.role == "label").count();
 
     if btn_count * 2 >= count {
         format!("{count} bouton{}", if count > 1 { "s" } else { "" })
@@ -738,6 +806,8 @@ pub fn format_plural_control_type(targets: &[NumberedElementTarget]) -> String {
         format!("{count} onglet{}", if count > 1 { "s" } else { "" })
     } else if input_count * 2 >= count {
         format!("{count} champ{}", if count > 1 { "s" } else { "" })
+    } else if label_count * 2 >= count {
+        format!("{count} étiquette{}", if count > 1 { "s" } else { "" })
     } else {
         format!("{count} élément{}", if count > 1 { "s" } else { "" })
     }
@@ -759,12 +829,39 @@ pub fn inject_text_reader_target(zone: &mut NavigationZone) {
         role: "lecture textuelle".to_string(),
         shortcut: "Entrée".to_string(),
         value: String::new(),
+        window_id: zone.targets.first().and_then(|t| t.window_id),
     };
 
     zone.targets.insert(0, reader_target);
     for (i, t) in zone.targets.iter_mut().enumerate() {
         t.index = i + 1;
     }
+}
+
+/// Active et clique sur une cible numérotée (refocus de la fenêtre hôte + clic au centre physique)
+pub fn activate_numbered_target(target: &NumberedElementTarget) -> bool {
+    #[cfg(windows)]
+    {
+        if let Some(win_id) = target.window_id {
+            let hwnd = HWND(win_id as _);
+            if !hwnd.0.is_null() && !is_window_hung(hwnd) {
+                force_foreground_window(hwnd);
+                restore_if_iconic(hwnd);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        click_element(target.click_x, target.click_y, None, None);
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        crate::ui::click_element(target.click_x, target.click_y, None, None);
+        true
+    }
+}
+
+pub fn click_numbered_target(target: &NumberedElementTarget) -> bool {
+    activate_numbered_target(target)
 }
 
 pub fn build_targeted_hover_speech(
@@ -784,6 +881,30 @@ pub fn build_targeted_hover_speech(
             return clean_name.to_string();
         } else {
             return "Lecture textuelle".to_string();
+        }
+    }
+
+    if clean_role.eq_ignore_ascii_case("visuel (ocr)") || clean_role.eq_ignore_ascii_case("ocr") {
+        if !clean_name.is_empty() {
+            return clean_name.to_string();
+        } else {
+            return "Zone visuelle".to_string();
+        }
+    }
+
+    if clean_role.eq_ignore_ascii_case("étiquette") || clean_role.eq_ignore_ascii_case("label") {
+        if !clean_name.is_empty() {
+            return format!("Texte : {clean_name}");
+        } else {
+            return "Texte".to_string();
+        }
+    }
+
+    if clean_role.eq_ignore_ascii_case("champ de saisie") || clean_role.eq_ignore_ascii_case("zone de texte") {
+        if !clean_name.is_empty() {
+            return format!("{clean_role} : {clean_name}");
+        } else {
+            return clean_role.to_string();
         }
     }
 
@@ -1909,6 +2030,12 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
         if fg_hwnd == hwnd {
             return true;
         }
+
+        // Contournement de l'inhibition de focus Windows via simulation de la touche Alt
+        const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
+        send_key_event(VK_MENU, KEYBD_EVENT_FLAGS(0));
+        send_key_event(VK_MENU, KEYEVENTF_KEYUP);
+
         let current_thread_id = GetCurrentThreadId();
         let mut target_pid = 0u32;
         let target_thread_id = GetWindowThreadProcessId(hwnd, Some(&mut target_pid));
@@ -2449,49 +2576,6 @@ pub fn focus_browser_address_bar(hwnd: HWND) {
     }
 }
 
-
-#[cfg(windows)]
-#[derive(Clone)]
-struct UiaElementInfo {
-    index: usize,
-    element: IUIAutomationElement,
-    automation_id: String,
-    help_text: String,
-    value_text: String,
-    name: String,
-    class_name: String,
-    primary_class: String,
-    data_attributes: Vec<(String, String)>,
-    json_metadata: Option<serde_json::Value>,
-    localized_type: String,
-    aria_role: String,
-    aria_label: String,
-    aria_description: String,
-    aria_indications: String,
-    is_edit_or_textarea: bool,
-    is_explicit_textarea: bool,
-    is_input: bool,
-    is_select: bool,
-    is_option: bool,
-    is_media: bool,
-    is_slider: bool,
-    is_toggle: bool,
-    is_button: bool,
-    is_link: bool,
-    is_tab: bool,
-    is_focusable: bool,
-    is_tabindex: bool,
-    is_web_content: bool,
-    is_browser_chrome: bool,
-    is_offscreen: bool,
-    click_x: i32,
-    click_y: i32,
-    rect: RECT,
-    has_action_pattern: bool,
-    pattern: Option<IUIAutomationInvokePattern>,
-    area: i64,
-}
-
 #[cfg(windows)]
 fn parse_aria_property_value(aria_properties: &str, target_key: &str) -> Option<String> {
     let target_clean = target_key.strip_prefix("aria-").unwrap_or(target_key).to_ascii_lowercase();
@@ -2760,668 +2844,6 @@ fn extract_scrollable_viewports_content(uia: &IUIAutomation, hwnd: HWND) -> Stri
         }
     }
     output
-}
-
-#[cfg(windows)]
-fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
-    let mut results = Vec::new();
-    if is_window_hung(hwnd) {
-        eprintln!("[UIA] Fenêtre {:?} figée (sablier). Inspection UI ignorée.", hwnd.0);
-        return results;
-    }
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let uia: Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
-        let Ok(uia) = uia else {
-            return results;
-        };
-
-        if let Ok(uia2) = uia.cast::<IUIAutomation2>() {
-            let _ = uia2.SetTransactionTimeout(2000);
-            let _ = uia2.SetConnectionTimeout(2000);
-        }
-
-        let Ok(window_element) = uia.ElementFromHandle(hwnd) else {
-            return results;
-        };
-
-        let Ok(cond) = uia.ControlViewCondition() else {
-            return results;
-        };
-
-        let Ok(elements) = window_element.FindAll(TreeScope_Descendants, &cond) else {
-            return results;
-        };
-
-        let mut class_win_buf = [0u16; 256];
-        let cw_len = GetClassNameW(hwnd, &mut class_win_buf);
-        let is_toast_window = if cw_len > 0 {
-            let cname = String::from_utf16_lossy(&class_win_buf[..cw_len as usize]);
-            is_toast_notification_window(hwnd, &cname, "")
-        } else {
-            false
-        };
-
-        let count = elements.Length().unwrap_or(0).clamp(0, 450);
-
-        // Délimitation géométrique du document web par rapport à la fenêtre
-        let mut doc_rect: Option<RECT> = None;
-        for i in 0..count {
-            if let Ok(item) = elements.GetElement(i) {
-                let ctype = item.CurrentControlType().unwrap_or_default();
-                let class_name = item.CurrentClassName().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
-                let is_doc = ctype == UIA_DocumentControlTypeId
-                    || class_name.contains("renderwidget")
-                    || class_name.contains("rootwebarea");
-                if is_doc {
-                    if let Ok(r) = item.CurrentBoundingRectangle() {
-                        let w = r.right - r.left;
-                        let h = r.bottom - r.top;
-                        if w > 200 && h > 150 {
-                            let replace = match doc_rect {
-                                Some(cur) => (w as i64 * h as i64) > ((cur.right - cur.left) as i64 * (cur.bottom - cur.top) as i64),
-                                None => true,
-                            };
-                            if replace {
-                                doc_rect = Some(r);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        for i in 0..count {
-            if let Ok(item) = elements.GetElement(i) {
-                let rect = item.CurrentBoundingRectangle().unwrap_or_default();
-                let width = rect.right - rect.left;
-                let height = rect.bottom - rect.top;
-                if width > 4 && height > 4 {
-                    let ctype = item.CurrentControlType().unwrap_or_default();
-                    let class_name = item.CurrentClassName().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
-                    let loc_type = item.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
-
-                    // Exclusion stricte des ascenseurs, séparateurs et conteneurs de groupement
-                    if ctype == UIA_ScrollBarControlTypeId
-                        || class_name.contains("scrollbar")
-                        || loc_type.contains("scrollbar")
-                        || loc_type.contains("défilement")
-                        || loc_type.contains("ascenseur")
-                        || ctype == UIA_SeparatorControlTypeId
-                        || loc_type.contains("séparateur")
-                        || loc_type.contains("separator")
-                        || class_name.contains("separator")
-                    {
-                        continue;
-                    }
-
-                    let is_grp = (ctype == UIA_GroupControlTypeId
-                        || loc_type == "groupe"
-                        || loc_type == "group"
-                        || class_name.contains("groupbox"))
-                        && ctype != UIA_ButtonControlTypeId
-                        && ctype != UIA_MenuItemControlTypeId
-                        && ctype != UIA_HyperlinkControlTypeId;
-
-                    if is_grp {
-                        continue;
-                    }
-
-                    let raw_name = item.CurrentName().map(|b| b.to_string()).unwrap_or_default();
-                    let mut name = raw_name.trim().to_string();
-                    let automation_id = item.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default();
-                    let help_text = item.CurrentHelpText().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
-                    let item_type = item.CurrentItemType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
-                    let item_status_raw = item.CurrentItemStatus().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
-                    let item_status = item_status_raw.to_lowercase();
-
-                    let primary_class = class_name
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or("")
-                        .to_string();
-
-                    let (aria_role, aria_properties) = if let Ok(e2) = item.cast::<IUIAutomationElement2>() {
-                        let r = e2.CurrentAriaRole().ok().map(|b| b.to_string()).unwrap_or_default();
-                        let p = e2.CurrentAriaProperties().ok().map(|b| b.to_string()).unwrap_or_default();
-                        (r, p)
-                    } else {
-                        (String::new(), String::new())
-                    };
-
-                    let (data_attrs, json_metadata) = parse_data_attributes_and_json(&aria_properties, &item_status_raw, &help_text);
-                    let (aria_label_opt, aria_desc_opt, indications_vec) = extract_aria_details(&aria_properties);
-                    let aria_label = aria_label_opt.unwrap_or_default();
-                    let aria_description = aria_desc_opt.unwrap_or_default();
-                    let mut aria_indications = indications_vec.join(", ");
-
-                    let auto_id_lower = automation_id.to_lowercase();
-                    let is_sys_name = name.eq_ignore_ascii_case("système") || name.eq_ignore_ascii_case("system");
-
-                    // Résolution sémantique et explicite des boutons système (Close, Maximize, Minimize, Restore, SystemMenu)
-                    if is_sys_name
-                        || auto_id_lower.contains("close")
-                        || auto_id_lower.contains("maximize")
-                        || auto_id_lower.contains("minimize")
-                        || auto_id_lower.contains("restore")
-                        || auto_id_lower.contains("systemmenu")
-                    {
-                        if auto_id_lower.contains("close") || class_name.contains("close") {
-                            name = "Fermer la fenêtre (✕)".to_string();
-                        } else if auto_id_lower.contains("maximize") || class_name.contains("maximize") {
-                            name = "Agrandir la fenêtre (□)".to_string();
-                        } else if auto_id_lower.contains("restore") || class_name.contains("restore") {
-                            name = "Restaurer la fenêtre (⧉)".to_string();
-                        } else if auto_id_lower.contains("minimize") || class_name.contains("minimize") {
-                            name = "Réduire la fenêtre (—)".to_string();
-                        } else if auto_id_lower.contains("systemmenu") || auto_id_lower == "systemmenubar" || class_name.contains("systemmenu") {
-                            name = "Menu Système de la fenêtre".to_string();
-                        } else if is_sys_name {
-                            if !help_text.is_empty() {
-                                name = help_text.clone();
-                            } else if !aria_label.is_empty() {
-                                name = aria_label.clone();
-                            } else {
-                                let mut win_r = RECT::default();
-                                if unsafe { GetWindowRect(hwnd, &mut win_r).is_ok() } {
-                                    let dist_from_right = (win_r.right - rect.right).max(0);
-                                    let dist_from_left = (rect.left - win_r.left).max(0);
-                                    if rect.top <= win_r.top + 70 {
-                                        if dist_from_right < 60 {
-                                            name = "Fermer la fenêtre (✕)".to_string();
-                                        } else if dist_from_right < 115 {
-                                            name = "Agrandir / Restaurer (□)".to_string();
-                                        } else if dist_from_right < 170 {
-                                            name = "Réduire la fenêtre (—)".to_string();
-                                        } else if dist_from_left < 70 {
-                                            name = "Menu Système (icône)".to_string();
-                                        } else {
-                                            name = format!("Contrôle fenêtre ({})", if !loc_type.is_empty() { &loc_type } else { "Système" });
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Filtrage des éléments techniques générés par les Chrome DevTools (F12)
-                    let is_devtools = class_name.contains("devtools")
-                        || automation_id.to_lowercase().contains("devtools")
-                        || loc_type.contains("devtools")
-                        || name.to_lowercase().starts_with("devtools")
-                        || class_name.contains("inspector")
-                        || automation_id.to_lowercase().contains("inspector")
-                        || class_name.contains("treeview") && (name.contains("<") && name.contains(">"))
-                        || class_name.contains("consoleview")
-                        || class_name.contains("networkpanel")
-                        || class_name.contains("sourcespanel")
-                        || automation_id.to_lowercase().starts_with("elements-tab")
-                        || automation_id.to_lowercase().starts_with("console-tab");
-                    if is_devtools {
-                        continue;
-                    }
-
-                    let is_swing_tab_class = class_name.contains("editortabs")
-                        || class_name.contains("jbtabs")
-                        || class_name.contains("tablabel")
-                        || class_name.contains("singlerowlayout");
-
-                    let has_source_ext = {
-                        let n = name.to_lowercase();
-                        n.ends_with(".rs")
-                            || n.ends_with(".toml")
-                            || n.ends_with(".json")
-                            || n.ends_with(".md")
-                            || n.ends_with(".txt")
-                            || n.ends_with(".js")
-                            || n.ends_with(".ts")
-                            || n.ends_with(".py")
-                            || n.ends_with(".java")
-                            || n.ends_with(".c")
-                            || n.ends_with(".cpp")
-                    };
-
-                    let is_top_editor_area = doc_rect.map_or(rect.top < 350, |dr| rect.top <= dr.top + 80);
-
-                    let is_tab_candidate = ctype == UIA_TabItemControlTypeId
-                        || ctype == UIA_TabControlTypeId
-                        || loc_type.contains("onglet")
-                        || loc_type.contains("tab")
-                        || class_name.contains("tab")
-                        || automation_id.to_lowercase().contains("tab")
-                        || is_swing_tab_class
-                        || (has_source_ext && is_top_editor_area && height < 50);
-
-                    let is_offscreen = item.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false);
-                    let is_in_web = doc_rect.is_some() || is_browser_hwnd(hwnd, "");
-                    // Conserver les éléments hors viewport dans les pages web pour permettre leur détection et ScrollIntoView
-                    if is_offscreen && !is_tab_candidate && !is_toast_window && !is_in_web {
-                        continue;
-                    }
-                    let ctype = item.CurrentControlType().unwrap_or_default();
-                    let is_edit_type = ctype == UIA_EditControlTypeId || ctype == UIA_DocumentControlTypeId;
-
-                    let is_root_web_area = class_name.contains("rootwebarea")
-                        || loc_type.contains("rootwebarea")
-                        || automation_id.to_lowercase().contains("rootwebarea");
-                    if is_root_web_area {
-                        continue;
-                    }
-
-                    let mut value_text = item
-                        .GetCurrentPattern(UIA_ValuePatternId)
-                        .ok()
-                        .and_then(|p| p.cast::<IUIAutomationValuePattern>().ok())
-                        .and_then(|vp| vp.CurrentValue().ok())
-                        .map(|b| b.to_string())
-                        .unwrap_or_default()
-                        .trim().to_string();
-
-                    if value_text.is_empty() {
-                        if let Ok(p) = item.GetCurrentPattern(UIA_RangeValuePatternId) {
-                            if let Ok(rvp) = p.cast::<IUIAutomationRangeValuePattern>() {
-                                if let Ok(val) = rvp.CurrentValue() {
-                                    value_text = format!("{:.0}", val);
-                                }
-                            }
-                        }
-                    }
-
-                    if value_text.is_empty() {
-                        if let Ok(p) = item.GetCurrentPattern(UIA_SelectionPatternId) {
-                            if let Ok(sp) = p.cast::<IUIAutomationSelectionPattern>() {
-                                if let Ok(sel_arr) = sp.GetCurrentSelection() {
-                                    let sel_len = sel_arr.Length().unwrap_or(0);
-                                    let mut sel_names = Vec::new();
-                                    for si in 0..sel_len.min(5) {
-                                        if let Ok(s_elem) = sel_arr.GetElement(si) {
-                                            if let Ok(s_name) = s_elem.CurrentName() {
-                                                let s_str = s_name.to_string();
-                                                if !s_str.trim().is_empty() {
-                                                    sel_names.push(s_str.trim().to_string());
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if !sel_names.is_empty() {
-                                        value_text = sel_names.join(", ");
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if value_text.is_empty() {
-                        if let Ok(p) = item.GetCurrentPattern(UIA_LegacyIAccessiblePatternId) {
-                            if let Ok(legacy) = p.cast::<IUIAutomationLegacyIAccessiblePattern>() {
-                                if let Ok(val) = legacy.CurrentValue() {
-                                    let s = val.to_string();
-                                    if !s.trim().is_empty() {
-                                        value_text = s.trim().to_string();
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if let Ok(p) = item.GetCurrentPattern(UIA_TogglePatternId) {
-                        if let Ok(tp) = p.cast::<IUIAutomationTogglePattern>() {
-                            if let Ok(st) = tp.CurrentToggleState() {
-                                let st_str = match st.0 {
-                                    0 => "désactivé",
-                                    1 => "activé",
-                                    _ => "indéterminé",
-                                };
-                                if !aria_indications.is_empty() {
-                                    aria_indications.push_str(&format!(", état: {st_str}"));
-                                } else {
-                                    aria_indications = format!("état: {st_str}");
-                                }
-                            }
-                        }
-                    }
-
-                    if let Ok(p) = item.GetCurrentPattern(UIA_ExpandCollapsePatternId) {
-                        if let Ok(ecp) = p.cast::<IUIAutomationExpandCollapsePattern>() {
-                            if let Ok(st) = ecp.CurrentExpandCollapseState() {
-                                let exp_str = match st.0 {
-                                    0 => "replié",
-                                    1 => "déroulé",
-                                    2 => "partiellement déroulé",
-                                    _ => "",
-                                };
-                                if !exp_str.is_empty() {
-                                    if !aria_indications.is_empty() {
-                                        aria_indications.push_str(&format!(", {exp_str}"));
-                                    } else {
-                                        aria_indications = exp_str.to_string();
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if let Ok(p) = item.GetCurrentPattern(UIA_SelectionItemPatternId) {
-                        if let Ok(sip) = p.cast::<IUIAutomationSelectionItemPattern>() {
-                            if let Ok(is_sel) = sip.CurrentIsSelected() {
-                                if is_sel.as_bool() {
-                                    if !aria_indications.is_empty() {
-                                        aria_indications.push_str(", sélectionné");
-                                    } else {
-                                        aria_indications = "sélectionné".to_string();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let is_focusable = item.CurrentIsKeyboardFocusable().map(|b| b.as_bool()).unwrap_or(false);
-
-                    let is_explicit_textarea = class_name.contains("textarea")
-                        || loc_type.contains("textarea")
-                        || loc_type.contains("zone de texte")
-                        || aria_role.to_lowercase() == "textbox" && height >= 35
-                        || (is_edit_type && height >= 35);
-
-                    let is_aria_input = aria_role.to_lowercase().contains("textbox")
-                        || aria_role.to_lowercase().contains("searchbox")
-                        || aria_role.to_lowercase().contains("combobox")
-                        || aria_properties.to_lowercase().contains("role=textbox")
-                        || aria_properties.to_lowercase().contains("role=searchbox");
-
-                    let is_input = !is_explicit_textarea && (is_edit_type
-                        || is_aria_input
-                        || class_name.contains("input")
-                        || loc_type.contains("input")
-                        || class_name.contains("edit")
-                        || loc_type.contains("edit")
-                        || loc_type.contains("saisie"));
-
-                    let is_select = ctype == UIA_ComboBoxControlTypeId
-                        || ctype == UIA_ListControlTypeId
-                        || ctype == UIA_DataGridControlTypeId
-                        || loc_type.contains("liste déroulante")
-                        || loc_type.contains("combobox")
-                        || loc_type.contains("select")
-                        || loc_type.contains("menu déroulant")
-                        || aria_role.to_lowercase().contains("combobox")
-                        || aria_role.to_lowercase().contains("listbox")
-                        || aria_role.to_lowercase().contains("select")
-                        || class_name.contains("select")
-                        || class_name.contains("combobox")
-                        || automation_id.to_lowercase().contains("select");
-
-                    let is_slider = ctype == UIA_SliderControlTypeId
-                        || ctype == UIA_ProgressBarControlTypeId
-                        || ctype == UIA_SpinnerControlTypeId
-                        || loc_type.contains("curseur")
-                        || loc_type.contains("slider")
-                        || class_name.contains("slider");
-
-                    let is_toggle = ctype == UIA_CheckBoxControlTypeId
-                        || ctype == UIA_RadioButtonControlTypeId
-                        || loc_type.contains("case à cocher")
-                        || loc_type.contains("bascule")
-                        || loc_type.contains("toggle")
-                        || loc_type.contains("commutateur");
-
-                    let is_option = ctype == UIA_ListItemControlTypeId
-                        || ctype == UIA_TreeItemControlTypeId
-                        || ctype == UIA_MenuItemControlTypeId
-                        || ctype == UIA_DataItemControlTypeId
-                        || aria_role == "option"
-                        || aria_role == "listitem"
-                        || aria_role == "menuitem"
-                        || loc_type.contains("option")
-                        || loc_type.contains("élément de liste")
-                        || loc_type.contains("suggestion")
-                        || class_name.contains("suggestion")
-                        || class_name.contains("dropdown")
-                        || class_name.contains("popup")
-                        || automation_id.to_lowercase().contains("option");
-
-                    let is_media = aria_role == "video"
-                        || aria_role == "audio"
-                        || aria_role == "media"
-                        || loc_type.contains("vidéo")
-                        || loc_type.contains("video")
-                        || loc_type.contains("audio")
-                        || loc_type.contains("lecteur")
-                        || loc_type.contains("player")
-                        || class_name.contains("video-stream")
-                        || class_name.contains("html5-main-video")
-                        || class_name.contains("html5-video-player")
-                        || class_name.contains("jw-video")
-                        || class_name.contains("vjs-tech")
-                        || (class_name.contains("video") && !class_name.contains("vide"))
-                        || class_name.contains("audio")
-                        || automation_id.to_lowercase().contains("video")
-                        || automation_id.to_lowercase().contains("audio")
-                        || automation_id.to_lowercase().contains("player");
-
-                    let is_edit_or_textarea = is_explicit_textarea || is_input || is_select;
-
-                    let is_role_button = aria_role == "button"
-                        || aria_role.contains("button")
-                        || aria_role.contains("bouton")
-                        || aria_role.contains("switch")
-                        || aria_role.contains("checkbox")
-                        || aria_properties.contains("role=button")
-                        || aria_properties.contains("role='button'")
-                        || aria_properties.contains("role=\"button\"");
-
-                    let has_button_data = data_attrs.iter().any(|(k, v)| {
-                        (k.contains("role") && v == "button")
-                            || (k.contains("action") && (v.contains("click") || v.contains("submit") || v.contains("btn")))
-                            || (k.contains("test") && (v.contains("btn") || v.contains("button")))
-                    });
-
-                    let is_close_or_cross = name == "×"
-                        || name == "✕"
-                        || name == "⨯"
-                        || name == "x"
-                        || name == "X"
-                        || name.contains("Fermer")
-                        || class_name.contains("close")
-                        || class_name.contains("dismiss")
-                        || class_name.contains("cross")
-                        || automation_id.to_lowercase().contains("close")
-                        || automation_id.to_lowercase().contains("dismiss")
-                        || aria_label.to_lowercase().contains("fermer")
-                        || aria_label.to_lowercase().contains("close");
-
-                    let is_button = ctype == UIA_ButtonControlTypeId
-                        || ctype == UIA_MenuItemControlTypeId
-                        || ctype == UIA_HeaderItemControlTypeId
-                        || ctype == UIA_ImageControlTypeId && (!name.is_empty() || !aria_label.is_empty())
-                        || ctype == UIA_ToolBarControlTypeId
-                        || loc_type.contains("bouton")
-                        || loc_type.contains("button")
-                        || is_role_button
-                        || has_button_data
-                        || is_close_or_cross
-                        || is_media
-                        || is_slider
-                        || is_toggle
-                        || class_name.contains("button")
-                        || class_name.contains("btn")
-                        || automation_id.to_lowercase().contains("button")
-                        || automation_id.to_lowercase().contains("btn");
-
-                    if is_close_or_cross && (name.is_empty() || name == "×" || name == "✕" || name == "⨯" || name.eq_ignore_ascii_case("x")) {
-                        name = "Fermer (croix ✕)".to_string();
-                    } else if is_media && name.is_empty() {
-                        let is_aud = aria_role == "audio" || loc_type.contains("audio") || class_name.contains("audio");
-                        name = if is_aud {
-                            "Lecteur audio (cliquer pour jouer)".to_string()
-                        } else {
-                            "Lecteur vidéo (cliquer pour jouer)".to_string()
-                        };
-                    }
-
-                    let is_role_link = aria_role == "link"
-                        || aria_role.contains("link")
-                        || aria_role.contains("lien")
-                        || aria_properties.contains("role=link")
-                        || aria_properties.contains("role='link'")
-                        || aria_properties.contains("role=\"link\"")
-                        || item_type.contains("link")
-                        || item_type.contains("lien")
-                        || item_status.contains("link")
-                        || class_name.contains("role-link")
-                        || class_name.contains("role_link")
-                        || class_name.contains("role=link")
-                        || (class_name.contains("link") && !is_edit_type);
-
-                    let is_link = ctype == UIA_HyperlinkControlTypeId
-                        || loc_type.contains("lien")
-                        || loc_type.contains("link")
-                        || loc_type.contains("hyperlink")
-                        || is_role_link;
-
-                    let mut is_tab = is_tab_candidate;
-
-                    let (is_web_content, is_browser_chrome) = match doc_rect {
-                        Some(dr) => {
-                            if rect.bottom <= (dr.top + 5) {
-                                (false, true)
-                            } else {
-                                (true, false)
-                            }
-                        }
-                        None => (false, false),
-                    };
-
-                    // Prise en compte et intégration sémantique prioritaire de l'aria-label
-                    if !aria_label.is_empty() {
-                        if name.is_empty() || is_poor_or_redundant_link(&name) {
-                            name = aria_label.clone();
-                        } else if !name.to_lowercase().contains(&aria_label.to_lowercase()) {
-                            if aria_label.to_lowercase().contains(&name.to_lowercase()) {
-                                name = aria_label.clone();
-                            } else {
-                                name = format!("{name} [aria: {aria_label}]");
-                            }
-                        }
-                    }
-
-                    let has_tabindex = (aria_properties.contains("tabindex")
-                        && !aria_properties.contains("tabindex=-1")
-                        && !aria_properties.contains("tabindex=\"-1\"")
-                        && !aria_properties.contains("tabindex='-1'"))
-                        || (is_web_content && (is_focusable || is_option || is_media) && !is_edit_or_textarea && !is_link && !is_button);
-                    let is_tabindex = has_tabindex;
-
-                    if is_browser_chrome && !name.is_empty() && !name.starts_with("[Navigateur]") {
-                        name = format!("[Navigateur] {name}");
-                    }
-
-                    const MAX_INTERACTIVE_TEXT_LEN: usize = 110;
-                    if (name.is_empty() || is_tabindex) && (is_link || is_button || is_tab || is_tabindex || is_focusable) {
-                        if let Some(txt) = extract_inner_text(&uia, &item, MAX_INTERACTIVE_TEXT_LEN) {
-                            if name.is_empty() {
-                                name = txt;
-                                if !is_tab {
-                                    let n_low = name.to_lowercase();
-                                    let has_ext = n_low.ends_with(".rs")
-                                        || n_low.ends_with(".toml")
-                                        || n_low.ends_with(".json")
-                                        || n_low.ends_with(".md")
-                                        || n_low.ends_with(".txt")
-                                        || n_low.ends_with(".py")
-                                        || n_low.ends_with(".java")
-                                        || n_low.ends_with(".js")
-                                        || n_low.ends_with(".ts");
-                                    if has_ext && is_top_editor_area && height < 50 {
-                                        is_tab = true;
-                                    }
-                                }
-                            } else if is_tabindex && name != txt && !name.contains(&txt) {
-                                let combined = format!("{name} {txt}");
-                                name = combined.chars().take(MAX_INTERACTIVE_TEXT_LEN).collect();
-                            }
-                        }
-                    }
-
-                    if name.chars().count() > MAX_INTERACTIVE_TEXT_LEN {
-                        name = name.chars().take(MAX_INTERACTIVE_TEXT_LEN).collect();
-                    }
-
-                    if name.is_empty() {
-                        if let Some((_, val)) = data_attrs.iter().find(|(k, _)| k.contains("test") || k.contains("action") || k.contains("target")) {
-                            name = format!("[data: {val}]");
-                        } else if !primary_class.is_empty() && (is_button || is_link || is_tab || is_edit_or_textarea) {
-                            name = format!(".{primary_class}");
-                        }
-                    }
-
-                    if name.is_empty() && aria_label.is_empty() && automation_id.is_empty() && help_text.is_empty() && value_text.is_empty()
-                        && data_attrs.is_empty() && primary_class.is_empty()
-                        && !is_edit_or_textarea && !is_button && !is_link && !is_tab && !is_focusable && !is_tabindex && !is_media && !is_slider && !is_toggle {
-                        continue;
-                    }
-
-                    let click_x = rect.left + width / 2;
-                    let click_y = rect.top + height / 2;
-                    let pattern = item.GetCurrentPattern(UIA_InvokePatternId)
-                        .ok()
-                        .and_then(|p| p.cast::<IUIAutomationInvokePattern>().ok());
-                    let has_toggle = item.GetCurrentPattern(UIA_TogglePatternId).is_ok();
-                    let has_sel_item = item.GetCurrentPattern(UIA_SelectionItemPatternId).is_ok();
-                    let has_expand = item.GetCurrentPattern(UIA_ExpandCollapsePatternId).is_ok();
-                    let has_legacy = item.GetCurrentPattern(UIA_LegacyIAccessiblePatternId)
-                        .ok()
-                        .and_then(|p| p.cast::<IUIAutomationLegacyIAccessiblePattern>().ok())
-                        .and_then(|l| l.CurrentDefaultAction().ok())
-                        .map(|b| !b.to_string().trim().is_empty())
-                        .unwrap_or(false);
-                    let has_action_pattern = pattern.is_some() || has_toggle || has_sel_item || has_expand || has_legacy;
-                    let area = (width as i64) * (height as i64);
-                    let index = results.len() + 1;
-                    results.push(UiaElementInfo {
-                        index,
-                        element: item,
-                        automation_id,
-                        help_text,
-                        value_text,
-                        name,
-                        class_name,
-                        primary_class,
-                        data_attributes: data_attrs,
-                        json_metadata,
-                        localized_type: loc_type,
-                        aria_role,
-                        aria_label,
-                        aria_description,
-                        aria_indications,
-                        is_edit_or_textarea,
-                        is_explicit_textarea,
-                        is_input,
-                        is_select,
-                        is_option,
-                        is_media,
-                        is_slider,
-                        is_toggle,
-                        is_button,
-                        is_link,
-                        is_tab,
-                        is_focusable,
-                        is_tabindex,
-                        is_web_content,
-                        is_browser_chrome,
-                        is_offscreen,
-                        click_x,
-                        click_y,
-                        rect,
-                        has_action_pattern,
-                        pattern,
-                        area,
-                    });
-                }
-            }
-        }
-        results.sort_by_key(|e| !e.is_tab);
-    }
-    results
 }
 
 #[cfg(windows)]
@@ -3938,154 +3360,6 @@ pub fn try_execute_direct_cli(prompt: &str) -> Option<String> {
     }
 
     None
-}
-
-#[cfg(windows)]
-fn click_element(
-    x: i32,
-    y: i32,
-    element: Option<&IUIAutomationElement>,
-    invoke_pattern: Option<&IUIAutomationInvokePattern>,
-) {
-    let mut click_x = x;
-    let mut click_y = y;
-    let work_area = get_desktop_work_area();
-
-    // 1. Détection hors-écran & défilement automatique
-    if let Some(elem) = element {
-        unsafe {
-            let is_offscreen = elem.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false);
-            let needs_scroll = is_offscreen
-                || click_x < work_area.left
-                || click_x >= work_area.right
-                || click_y < work_area.top
-                || click_y >= work_area.bottom;
-
-            if needs_scroll {
-                if let Ok(pattern_unk) = elem.GetCurrentPattern(UIA_ScrollItemPatternId) {
-                    if let Ok(scroll_pattern) = pattern_unk.cast::<IUIAutomationScrollItemPattern>() {
-                        let _ = scroll_pattern.ScrollIntoView();
-                        std::thread::sleep(Duration::from_millis(60));
-                    }
-                }
-            }
-
-            // Recalibrage précis des coordonnées via BoundingRectangle après scroll éventuel
-            if let Ok(rect) = elem.CurrentBoundingRectangle() {
-                let width = rect.right - rect.left;
-                let height = rect.bottom - rect.top;
-                if width > 0 && height > 0 {
-                    click_x = rect.left + (width / 2);
-                    click_y = rect.top + (height / 2);
-                }
-            }
-
-            let _ = elem.SetFocus();
-            std::thread::sleep(Duration::from_millis(30));
-        }
-    }
-
-    // 2. Priorisation des patterns programmatiques UIA
-    // Si une invocation programmatique réussit, on évite les clics physiques fantômes
-    let mut programmatic_success = false;
-
-    if let Some(pattern) = invoke_pattern {
-        unsafe {
-            if pattern.Invoke().is_ok() {
-                programmatic_success = true;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    } else if let Some(elem) = element {
-        unsafe {
-            if let Ok(unk) = elem.GetCurrentPattern(UIA_TogglePatternId) {
-                if let Ok(tp) = unk.cast::<IUIAutomationTogglePattern>() {
-                    if tp.Toggle().is_ok() {
-                        programmatic_success = true;
-                    }
-                }
-            }
-            if !programmatic_success {
-                if let Ok(unk) = elem.GetCurrentPattern(UIA_SelectionItemPatternId) {
-                    if let Ok(sip) = unk.cast::<IUIAutomationSelectionItemPattern>() {
-                        if sip.Select().is_ok() {
-                            programmatic_success = true;
-                        }
-                    }
-                }
-            }
-            if !programmatic_success {
-                if let Ok(unk) = elem.GetCurrentPattern(UIA_ExpandCollapsePatternId) {
-                    if let Ok(ecp) = unk.cast::<IUIAutomationExpandCollapsePattern>() {
-                        if let Ok(state) = ecp.CurrentExpandCollapseState() {
-                            if state.0 == 0 {
-                                if ecp.Expand().is_ok() {
-                                    programmatic_success = true;
-                                }
-                            } else {
-                                if ecp.Collapse().is_ok() {
-                                    programmatic_success = true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if !programmatic_success {
-                if let Ok(unk) = elem.GetCurrentPattern(UIA_LegacyIAccessiblePatternId) {
-                    if let Ok(legacy) = unk.cast::<IUIAutomationLegacyIAccessiblePattern>() {
-                        if legacy.DoDefaultAction().is_ok() {
-                            programmatic_success = true;
-                        }
-                    }
-                }
-            }
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-
-    if programmatic_success {
-        return;
-    }
-
-    // 3. Clic souris physique avec clampage géométrique strict dans l'espace de travail visible
-    let safe_x = click_x.clamp(work_area.left + 2, (work_area.right - 2).max(work_area.left + 2));
-    let safe_y = click_y.clamp(work_area.top + 2, (work_area.bottom - 2).max(work_area.top + 2));
-
-    unsafe {
-        let _ = SetCursorPos(safe_x, safe_y);
-        std::thread::sleep(Duration::from_millis(30));
-
-        let mouse_down = INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: 0,
-                    dy: 0,
-                    mouseData: 0,
-                    dwFlags: MOUSEEVENTF_LEFTDOWN,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        let mouse_up = INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: 0,
-                    dy: 0,
-                    mouseData: 0,
-                    dwFlags: MOUSEEVENTF_LEFTUP,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        SendInput(&[mouse_down], std::mem::size_of::<INPUT>() as i32);
-        std::thread::sleep(Duration::from_millis(40));
-        SendInput(&[mouse_up], std::mem::size_of::<INPUT>() as i32);
-    }
 }
 
 

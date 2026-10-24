@@ -652,27 +652,37 @@ pub fn draw_screen_orange_border(rect: [i32; 4]) {
     unsafe {
         let hdc = GetDC(std::ptr::null_mut());
         if !hdc.is_null() {
-            // Orange vif haute visibilité RGB(255, 140, 0) -> BGR: 0x00008CFF
-            let orange_pen = CreatePen(0 /* PS_SOLID */, 5, 0x00008CFF);
-            let old_pen = SelectObject(hdc, orange_pen);
+            // Jaune d'or haute visibilité RGB(255, 215, 0) -> BGR: 0x0000D7FF
+            let pen_width = 5;
+            let half_pen = pen_width / 2;
+            let gold_pen = CreatePen(0 /* PS_SOLID */, pen_width, 0x0000D7FF);
+            let old_pen = SelectObject(hdc, gold_pen);
 
+            let work_area = get_desktop_work_area();
             let [x1, y1, x2, y2] = rect;
-            // 1. Grand cadre orange vif autour de la fenêtre
-            let _ = MoveToEx(hdc, x1, y1, std::ptr::null_mut());
-            let _ = LineTo(hdc, x2, y1);
-            let _ = LineTo(hdc, x2, y2);
-            let _ = LineTo(hdc, x1, y2);
-            let _ = LineTo(hdc, x1, y1);
+
+            // Clamping strict à l'espace de travail avec décalage inset
+            let draw_x1 = (x1 + half_pen).clamp(work_area.left, work_area.right - 1);
+            let draw_y1 = (y1 + half_pen).clamp(work_area.top, work_area.bottom - 1);
+            let draw_x2 = (x2 - half_pen).clamp(work_area.left, work_area.right - 1);
+            let draw_y2 = (y2 - half_pen).clamp(work_area.top, work_area.bottom - 1);
+
+            // 1. Grand cadre doré autour de la fenêtre
+            let _ = MoveToEx(hdc, draw_x1, draw_y1, std::ptr::null_mut());
+            let _ = LineTo(hdc, draw_x2, draw_y1);
+            let _ = LineTo(hdc, draw_x2, draw_y2);
+            let _ = LineTo(hdc, draw_x1, draw_y2);
+            let _ = LineTo(hdc, draw_x1, draw_y1);
 
             // 2. Encadré d'accentuation orange autour de l'icône de la fenêtre (en-tête supérieur gauche)
             let icon_w = 48.min((x2 - x1).max(10));
             let icon_h = 36.min((y2 - y1).max(10));
-            let _ = MoveToEx(hdc, x1, y1 + icon_h, std::ptr::null_mut());
-            let _ = LineTo(hdc, x1 + icon_w, y1 + icon_h);
-            let _ = LineTo(hdc, x1 + icon_w, y1);
+            let _ = MoveToEx(hdc, draw_x1, (y1 + icon_h).clamp(work_area.top, work_area.bottom - 1), std::ptr::null_mut());
+            let _ = LineTo(hdc, (x1 + icon_w).clamp(work_area.left, work_area.right - 1), (y1 + icon_h).clamp(work_area.top, work_area.bottom - 1));
+            let _ = LineTo(hdc, (x1 + icon_w).clamp(work_area.left, work_area.right - 1), draw_y1);
 
             let _ = SelectObject(hdc, old_pen);
-            let _ = DeleteObject(orange_pen);
+            let _ = DeleteObject(gold_pen);
             let _ = ReleaseDC(std::ptr::null_mut(), hdc);
         }
     }

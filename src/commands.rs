@@ -13,16 +13,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetForegroundWindow, GetWindowRect, IsIconic, PostMessageW,
+    FindWindowW, GetForegroundWindow, GetWindowRect, PostMessageW,
     SetCursorPos, ShowWindow, SW_MAXIMIZE, SW_MINIMIZE, WM_CLOSE,
 };
 
+use crate::ui::click_element;
 use crate::ui::*;
 use crate::automation::*;
-use crate::autostart::*;
 use crate::fs_util::*;
-use crate::scheduler::*;
-use crate::types::{AgentAction, QuickSuggestionItem};
+use crate::types::{AgentAction};
 use crate::window_util::*;
 
 #[cfg(windows)]

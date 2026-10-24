@@ -8,7 +8,9 @@
 [![WCAG Accessibility](https://img.shields.io/badge/Accessibility-WCAG%20AAA-brightgreen)](#-visual-comfort--high-visibility-wcag-aaa)
 [![Platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue)](#-getting-started-in-3-steps)
 
-Windows : [![https://github.com/anonympins/fingerprint/actions/workflows/rust.yml](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust.yml)](https://github.com/anonympins/libertide/actions/workflows/rust.yml) / UNIX : [![https://github.com/anonympins/libertide/actions/workflows/rust-unix.yml](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-unix.yml)](https://github.com/anonympins/libertide/actions/workflows/rust-unix.yml) / macOS : [![https://github.com/anonympins/libertide/actions/workflows/rust-macos.yml](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-macos.yml)](https://github.com/anonympins/libertide/actions/workflows/rust-macos.yml)
+[![Windows Build](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust.yml?label=Windows)](https://github.com/anonympins/libertide/actions/workflows/rust.yml)
+[![UNIX Build](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-unix.yml?label=Linux%20%2F%20UNIX)](https://github.com/anonympins/libertide/actions/workflows/rust-unix.yml)
+[![macOS Build](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-macos.yml?label=macOS)](https://github.com/anonympins/libertide/actions/workflows/rust-macos.yml)
 
 <p align="center">
   <img src="public/screenshot-1.png" alt="Libertide transparent interface" width="360">
@@ -70,6 +72,11 @@ The interface adapts dynamically to your eyesight:
   - *Mint Emerald & Amethyst* for calming, restful reading.
 - **Audio cues (Earcons)**: gentle sound cues confirm application states without requiring you to look at the screen.
 
+### 7. 👁️ Embedded OCR & Universal Visual Detection
+No application is left behind, even without accessibility metadata:
+- **Zero accessibility dead-ends**: For custom canvas elements, legacy desktop software, remote desktops, or code editors where standard accessibility trees (UI Automation, AX, AT-SPI) fall short, Libertide automatically detects text and controls via real-time Optical Character Recognition (OCR).
+- **Visual text turned interactive**: Any recognized visual text becomes immediately actionable—numbered with badges, read aloud in stabilized hover mode, and clickable by voice or switch.
+
 ---
 
 ## 📖 Everyday Use Cases (Real-World Examples)
@@ -110,12 +117,13 @@ The interface adapts dynamically to your eyesight:
 
 | Shortcut / Key | Action |
 | :--- | :--- |
+| **`H` key** | Toggles stabilized anti-tremor hover mode on or off. |
 | **`R` key** | Starts or stops instant speech dictation. |
 | **`Spacebar`** | Activates the currently highlighted element in **Switch Access** mode. |
 | **`Enter` key** | Confirms a command or triggers a click on the selected element. |
 | **`Tab` / Arrows / Numpad `4`-`6`** | Moves selection between regions or items. |
 | **`Escape` key** | **Safety & Emergency stop**: aborts any action immediately, silences text-to-speech, or navigates back one level. |
-| **`🎯 Hover` button** | Toggles stabilized anti-tremor hover mode on or off. |
+| **`🎯 Hover` button** | Toggles stabilized anti-tremor hover mode on or off (same as `H`). |
 
 ---
 
@@ -140,6 +148,27 @@ To process natural language commands, Libertide connects to your preferred AI pr
 3. Paste your key: Libertide is ready to assist you right away!
 
 *(During your very first voice recognition session, the lightweight Whisper model will download automatically in the background).*
+
+---
+
+## 🛠️ Building from Source
+
+If you want to contribute to Libertide or build from the repository:
+
+### Prerequisites
+- [Rust](https://rustup.rs/) (latest stable toolchain)
+- Node.js & npm / pnpm (for the frontend overlay)
+
+### Build Steps
+```bash
+# Clone repository
+git clone https://github.com/anonympins/libertide.git
+cd libertide
+
+# Install dependencies and run in development mode
+npm install
+npm run tauri dev # or cargo run depending on your project runner
+```
 
 ---
 
@@ -174,6 +203,9 @@ Libertide understands English, French, and most modern languages:
 
 **Does Libertide work without expensive assistive hardware?**  
 Yes, absolutely. That is the core mission: a standard webcam, any basic microphone, and a regular mouse or keyboard spacebar are all you need.
+
+**How does Libertide handle apps without native accessibility tags (canvas, legacy tools)?**  
+Libertide includes an embedded OCR engine that scans visual screen regions in real time. Visual labels and controls in custom apps or remote desktops are automatically recognized, read aloud, and assigned click badges.
 
 **Do my voice and private data remain private?**  
 Speech recognition for continuous dictation runs directly on your local machine via Whisper. Your speech is not sent to external servers for continuous transcription.
