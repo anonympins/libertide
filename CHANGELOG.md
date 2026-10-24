@@ -5,6 +5,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [0.6.0] - 2026-10-28
+
+### 🕹️ Hardware Ergonomics & Trackball Navigation (`main.rs`, `floating_window.rs`, `ui.rs`)
+- **Native Support for Trackballs & Ergonomic Mice**:
+- Direct interception and dedicated assignment of Windows/OS auxiliary buttons (`VK_XBUTTON1`, `VK_XBUTTON2`, `VK_MBUTTON`).
+- **Scroll Wheel Button / Middle Click (`VK_MBUTTON`)**: Instantly interrupts ongoing speech synthesis without disrupting the focus of the host application.
+- **Side Button 4 (`VK_XBUTTON1`)**: Toggles Dictation mode instantly, with automatic restoration of the previous external focus.
+- **Side Button 5 (`VK_XBUTTON2`)**: Immediately enables/disables Hover mode and switch access (`switch_access_mode`).
+- **Drag-to-Scroll (Touch/Gesture-based Scrolling)**:
+- Fluid navigation via click-and-drag (`handle_drag_to_scroll`) integrated into all floating windows, data tables, code blocks, and Markdown views—eliminating the need to precisely target scroll bars.
+- **Window Cycling Stability (`cycle_user_window`)**:
+- Implements a fixed geometric sorting order for windows, preventing erratic jumping caused by Z-order reordering in Windows.
+
+### 🔌 Plug-and-Play Switches & Switch Access (`automation.rs`, `main.rs`)
+- **Dedicated Low-Level Keyboard Hook (`WH_KEYBOARD_LL`)**:
+- Secure interception and consumption of switch-input keys, ensuring no events "leak" through to background applications. - Ready-to-use universal mapping:
+- **Validation / Selection**: `Space`, `Enter`, Numpad `1` / `5`.
+- **Next / Previous Navigation**: `Tab` / `Shift+Tab`, Arrow keys, Numpad `2` / `3` / `4` / `6`.
+- **Back / Escape**: `Esc`, `Backspace`, Numpad `0`.
+- **Dedicated hardware shortcuts**: `F7` (Hover toggle), `F8` / `Pause` (Dictation toggle), `F9` (Voice change), `F4` (Reset).
+- **Single-Switch Hold Algorithm**:
+- Automatic detection of short presses (selection/click) versus long presses (> 1,100 ms for backspace/exiting a level), enabling full control via a single physical switch.
+
+### ⏱️ Advanced Dwell Pointer & Analyze/Send Button (`main.rs`, `floating_window.rs`)
+- **Responsive Dwell Engine with progressive visual feedback (`DwellState`)**:
+- Dwell time configurable via a slider in the settings, persisted in `.env` (`DWELL_TIME_MS`, ranging from 600 ms to 2,500 ms).
+- Integrated visual progress indicator displayed beneath each button and tab (high-visibility, WCAG-compliant neon green).
+- 500 ms anti-bounce cooldown period to prevent unintentional double-triggers.
+- **Dual-Function Analyze/Send Button**:
+- If the text field contains input: sends the command directly to the agent, then resets the interface and clears suggestions. - If the field is empty: automatically triggers a full semantic analysis of the active window.
+
+### 🎨 Interface Redesign to WCAG 2.2 AAA Standards (`main.rs`, `theme.rs`)
+- **WCAG 2.2 AAA-compliant touch targets (50 × 50 px)**:
+- Standardized bottom action bar (`ACCESSIBILITY_BTN_SIZE = 50x50`): *Analyze*, *Microphone*, *Dictation*, *Hover*, *Voice*, *Settings*, and *Clear* buttons.
+- High-contrast typography (22 pt icons, 9 pt sub-labels) featuring bold outlines and accent halos.
+- **Enhanced Visual Accessibility Themes**:
+- Interactive preview and seamless voice-controlled switching (e.g., *"Next theme"*, *"High contrast"*).
+- High-visibility accent borders across the screen: a 5 px gold frame for the active window, a 3 px cyan halo for specific zones, and a 3 px orange border for the currently focused control.
+
+### 📖 Enhanced Voice Narration for Floating Windows & Captures (`floating_window.rs`, `main.rs`)
+- **Semantic speech generator for floating windows (`build_narrator_speech`)**:
+- Comprehensive, structured oral transcription for all types of floating windows (Markdown, comparison tables, data sheets, forms).
+- Automatic inventory of available interactions and actions, presented verbally.
+- Instant voice-triggered commands (e.g., *"Read window"*, *"Read card"*, *"Read summary"*) with systematic quick-action suggestions (e.g., `🔊 Read: <Title>`). - **Synchronization and Clickable Multimedia Links**:
+- Rendering of and direct clicking on `[link="action:..."]` macros embedded within text and table cells.
+- Universal keyboard shortcuts (`Ctrl+A` / `Ctrl+C`) and context menus for copying cells, entire rows, or complete tables with a single click.
+
+### 🧹 Architecture Standardization (`src/`)
+- Standardization of automation and text-input interfaces across Windows, macOS (`AXUIElement`), and Linux (`AT-SPI2`).
+- Robust action history management (`ActionHistoryManager`) with bidirectional Undo and Redo functionality.
+
+---
 
 ## [0.5.6] - 2026-10-26
 

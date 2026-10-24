@@ -7,7 +7,12 @@ pub enum SwitchKeyEvent {
     Select,
     Next,
     Prev,
+    Back,
     Escape,
+    ToggleSwitch,
+    ToggleDictation,
+    ToggleVoice,
+    Clear,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

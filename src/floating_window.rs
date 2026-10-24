@@ -4,6 +4,7 @@ use eframe::egui::text::LayoutJob;
 use eframe::egui::TextFormat;
 use serde::{Deserialize, Serialize};
 use crate::automation::set_clipboard_text;
+use crate::{apply_dwell_to_response, DwellState};
 use crate::{play_earcon, Earcon};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +132,39 @@ pub enum FloatingContentType {
 
 fn default_submit_label() -> String {
     "🔍 Lancer la recherche".to_string()
+}
+
+#[derive(Debug, Clone)]
+pub enum FloatingCardOutput {
+    Prompt(String),
+    Speak(String),
+}
+
+/// Gère le défilement par clic-glissé (drag-to-scroll) natif via les événements de pointeur
+fn handle_drag_to_scroll(ui: &egui::Ui, allow_x: bool, allow_y: bool) {
+    let (is_dragging, delta, started_in_ui) = ui.input(|i| {
+        let is_down = i.pointer.primary_down() || i.pointer.middle_down();
+        let dragging = i.pointer.is_decidedly_dragging() && is_down;
+        let in_ui = i.pointer
+            .press_origin()
+            .or_else(|| i.pointer.interact_pos())
+            .map_or(false, |pos| ui.clip_rect().contains(pos));
+        (dragging, i.pointer.delta(), in_ui)
+    });
+
+    if is_dragging && started_in_ui && !ui.ctx().egui_is_using_pointer() {
+        let mut scroll_delta = egui::Vec2::ZERO;
+        if allow_x {
+            scroll_delta.x = delta.x;
+        }
+        if allow_y {
+            scroll_delta.y = delta.y;
+        }
+        if scroll_delta != egui::Vec2::ZERO {
+            ui.scroll_with_delta(scroll_delta);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -323,7 +357,102 @@ impl FloatingCard {
         Self::new(clean_id, title, content)
     }
 
-    pub fn show(&mut self, ctx: &egui::Context) -> Option<String> {
+    /// Construit une retranscription détaillée et fluide pour le narrateur vocal
+    /// incluant le contenu textuel et l'inventaire des interactions possibles.
+    pub fn build_narrator_speech(&self) -> String {
+        let mut speech = String::new();
+        match &self.content {
+            FloatingContentType::Markdown { text } => {
+                speech.push_str(&format!("Fenêtre : {}.\n\n", self.title));
+                let clean_text = crate::tts::sanitize_for_tts(text);
+                speech.push_str(&clean_text);
+
+                let mut interactions = Vec::new();
+                for line in text.lines() {
+                    let spans = parse_inline_markdown(line);
+                    for span in spans {
+                        if span.style == InlineStyle::Link {
+                            let label = span.text.trim();
+                            if !label.is_empty() {
+                                let clean_lbl = label.trim_start_matches(['▶', '🎬', '🎵', '🎙', '📻', '📄', '🖼', '⚡', '🔗', ' ']).trim();
+                                if let Some(target) = span.target {
+                                    if target.starts_with("action:") || target.starts_with("prompt:") {
+                                        interactions.push(format!("Action : {clean_lbl}"));
+                                    } else if target.starts_with("http") {
+                                        interactions.push(format!("Lien web : {clean_lbl}"));
+                                    } else {
+                                        interactions.push(clean_lbl.to_string());
+                                    }
+                                } else {
+                                    interactions.push(clean_lbl.to_string());
+                                }
+                            }
+                        }
+                    }
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("▶ ") || trimmed.starts_with("🎬 ") {
+                        let v = trimmed.trim_start_matches(['▶', '🎬', ' ']).trim();
+                        if !interactions.iter().any(|s| s.contains(v)) {
+                            interactions.push(format!("Vidéo : {v}"));
+                        }
+                    } else if trimmed.starts_with("🎵 ") || trimmed.starts_with("🎙") {
+                        let a = trimmed.trim_start_matches(['🎵', '🎙', ' ']).trim();
+                        if !interactions.iter().any(|s| s.contains(a)) {
+                            interactions.push(format!("Audio : {a}"));
+                        }
+                    }
+                }
+                interactions.dedup();
+                if !interactions.is_empty() {
+                    speech.push_str(". Interactions possibles : vous pouvez cliquer sur : ");
+                    speech.push_str(&interactions.join(", "));
+                    speech.push('.');
+                }
+            }
+            FloatingContentType::Table { headers, rows } => {
+                speech.push_str(&format!("Tableau : {}.\n", self.title));
+                if !headers.is_empty() {
+                    speech.push_str(&format!("Il comporte {} colonnes : {}. ", headers.len(), headers.join(", ")));
+                }
+                speech.push_str(&format!("Il y a {} lignes de données. ", rows.len()));
+                let sample_count = rows.len().min(5);
+                for (r_idx, row) in rows.iter().take(sample_count).enumerate() {
+                    speech.push_str(&format!("Ligne {} : ", r_idx + 1));
+                    let mut parts = Vec::new();
+                    for (c_idx, cell) in row.iter().enumerate() {
+                        let col_name = headers.get(c_idx).map(|s| s.as_str()).unwrap_or("");
+                        let clean_cell = crate::tts::sanitize_for_tts(cell);
+                        if !col_name.is_empty() {
+                            parts.push(format!("{col_name} : {clean_cell}"));
+                        } else {
+                            parts.push(clean_cell);
+                        }
+                    }
+                    speech.push_str(&parts.join(", "));
+                    speech.push_str(". ");
+                }
+                if rows.len() > sample_count {
+                    speech.push_str(&format!("Et {} autres lignes disponibles. ", rows.len() - sample_count));
+                }
+                speech.push_str("Interactions possibles : vous pouvez cliquer sur les cellules du tableau ou copier les données.");
+            }
+            FloatingContentType::Stats { items } => {
+                speech.push_str(&format!("Fiche d'informations : {}.\n", self.title));
+                for (k, v) in items {
+                    speech.push_str(&format!("{} : {}. ", k, v));
+                }
+                speech.push_str("Interactions possibles : vous pouvez copier ces données ou fermer la fiche.");
+            }
+            FloatingContentType::Form { fields, submit_label, .. } => {
+                speech.push_str(&format!("Formulaire interactif : {}.\n", self.title));
+                speech.push_str(&format!("Ce formulaire contient {} options. ", fields.len()));
+                speech.push_str(&format!("Interactions possibles : vous pouvez modifier ces critères puis cliquer sur le bouton {} pour lancer la requête.", submit_label));
+            }
+        }
+        speech
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context, dwell_state: &mut DwellState) -> Option<FloatingCardOutput> {
         if !self.open {
             return None;
         }
@@ -353,7 +482,7 @@ impl FloatingCard {
             .with_min_inner_size([280.0, 160.0])
             .with_resizable(true);
 
-        let mut submitted_prompt = None;
+        let mut requested_output = None;
 
         ctx.show_viewport_immediate(viewport_id, builder, |vp_ctx, _class| {
             vp_ctx.request_repaint();
@@ -387,6 +516,24 @@ impl FloatingCard {
                         if title_resp.dragged() {
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
                         }
+
+                        // Bouton d'accessibilité pour la lecture vocale complète
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.add_space(8.0);
+                            let read_btn = ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new("🔊 Lire")
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(255, 220, 130))
+                                        .strong(),
+                                )
+                                .small()
+                                .corner_radius(egui::CornerRadius::same(4)),
+                            ).on_hover_text("Faire lire le contenu et les interactions possibles par le narrateur");
+                            let read_btn_id = ui.make_persistent_id(format!("dwell_read_card_{}", self.id));
+                            if apply_dwell_to_response(ui, dwell_state, read_btn_id, &read_btn) {
+                                requested_output = Some(FloatingCardOutput::Speak(self.build_narrator_speech()));
+                            }
                         
                         // Raccourcis et boutons de copie pour le contenu Markdown
                         if let FloatingContentType::Markdown { ref text } = self.content {
@@ -403,8 +550,6 @@ impl FloatingCard {
                                 play_earcon(Earcon::Success);
                             }
 
-                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                ui.add_space(8.0);
                                 let copy_btn = ui.add(
                                     egui::Button::new(
                                         egui::RichText::new("📋 Copier tout")
@@ -414,29 +559,34 @@ impl FloatingCard {
                                     .small()
                                     .corner_radius(egui::CornerRadius::same(4)),
                                 );
-                                if copy_btn.on_hover_text("Copier tout le contenu (Ctrl+A / Ctrl+C)").clicked() {
+                                let copy_btn_id = ui.make_persistent_id(format!("dwell_copy_all_{}", self.id));
+                                if apply_dwell_to_response(ui, dwell_state, copy_btn_id, &copy_btn) {
                                     set_clipboard_text(text);
                                     ui.ctx().copy_text(text.clone());
                                     play_earcon(Earcon::Success);
                                 }
-                            });
-                        }
+                            }
+                        });
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(
+                            let close_btn = ui.button(
                                 egui::RichText::new("✕")
                                     .size(12.5)
                                     .color(egui::Color32::from_rgb(255, 130, 130)),
-                            ).on_hover_text("Fermer cette fenêtre volante").clicked() {
+                            ).on_hover_text("Fermer cette fenêtre volante");
+                            let close_id = ui.make_persistent_id(format!("dwell_close_card_{}", self.id));
+                            if apply_dwell_to_response(ui, dwell_state, close_id, &close_btn) {
                                 self.open = false;
                             }
 
                             let max_icon = if is_maximized { "⧉" } else { "□" };
-                            if ui.button(
+                            let max_btn = ui.button(
                                 egui::RichText::new(max_icon)
                                     .size(11.0)
                                     .color(egui::Color32::from_rgb(200, 215, 230)),
-                            ).on_hover_text(if is_maximized { "Restaurer" } else { "Agrandir" }).clicked() {
+                            ).on_hover_text(if is_maximized { "Restaurer" } else { "Agrandir" });
+                            let max_id = ui.make_persistent_id(format!("dwell_max_card_{}", self.id));
+                            if apply_dwell_to_response(ui, dwell_state, max_id, &max_btn) {
                                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
                             }
                         });
@@ -458,6 +608,7 @@ impl FloatingCard {
                         .id_salt(format!("card_scroll_vert_{card_id}"))
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
+                            handle_drag_to_scroll(ui, false, true);
                             match &mut self.content {
                                 FloatingContentType::Table { headers, rows } => {
                                     if headers.is_empty() && rows.is_empty() {
@@ -487,7 +638,8 @@ impl FloatingCard {
                                                 .small()
                                                 .corner_radius(egui::CornerRadius::same(4)),
                                             );
-                                            if copy_tbl.on_hover_text("Copier tout le tableau au format Markdown").clicked() {
+                                            let copy_tbl_id = ui.make_persistent_id(format!("dwell_copy_table_{}", self.id));
+                                            if apply_dwell_to_response(ui, dwell_state, copy_tbl_id, &copy_tbl) {
                                                 set_clipboard_text(&full_table_md);
                                                 ui.ctx().copy_text(full_table_md.clone());
                                                 play_earcon(Earcon::Success);
@@ -505,6 +657,7 @@ impl FloatingCard {
                                         .id_salt(format!("card_tbl_scroll_horiz_{card_id}"))
                                         .auto_shrink([false, false])
                                         .show(ui, |ui| {
+                                            handle_drag_to_scroll(ui, true, false);
                                             egui::Grid::new(format!("grid_{card_id}"))
                                                 .striped(true)
                                                 .spacing([14.0, 6.0])
@@ -512,11 +665,11 @@ impl FloatingCard {
                                                 .show(ui, |ui| {
                                                     for (c_idx, h) in headers.iter().enumerate() {
                                                         let w = col_widths.get(c_idx).copied().unwrap_or(85.0);
-                                                        render_table_cell(ui, h, egui::Color32::from_rgb(0, 210, 255), headers, &full_table_md, true, w);
+                                                        render_table_cell(ui, h, egui::Color32::from_rgb(0, 210, 255), headers, &full_table_md, true, w, dwell_state, &format!("th_{card_id}_{c_idx}"));
                                                     }
                                                     ui.end_row();
 
-                                                    for row in rows.iter() {
+                                                    for (r_idx, row) in rows.iter().enumerate() {
                                                         for (c_idx, cell) in row.iter().enumerate() {
                                                             let text_color = if c_idx == 0 {
                                                                 egui::Color32::from_rgb(240, 245, 255)
@@ -524,8 +677,8 @@ impl FloatingCard {
                                                                 egui::Color32::from_rgb(205, 220, 235)
                                                             };
                                                             let w = col_widths.get(c_idx).copied().unwrap_or(85.0);
-                                                            if let Some(act) = render_table_cell(ui, cell, text_color, row, &full_table_md, false, w) {
-                                                                submitted_prompt = Some(act);
+                                                            if let Some(act) = render_table_cell(ui, cell, text_color, row, &full_table_md, false, w, dwell_state, &format!("td_{card_id}_{r_idx}_{c_idx}")) {
+                                                                requested_output = Some(FloatingCardOutput::Prompt(act));
                                                             }
                                                         }
                                                         ui.end_row();
@@ -572,8 +725,8 @@ impl FloatingCard {
                                         play_earcon(Earcon::Success);
                                     }
 
-                                    if let Some(prompt) = render_markdown(ui, text, &card_id) {
-                                        submitted_prompt = Some(prompt);
+                                    if let Some(prompt) = render_markdown(ui, text, &card_id, dwell_state) {
+                                        requested_output = Some(FloatingCardOutput::Prompt(prompt));
                                     }
                                 }
                                 FloatingContentType::Form { fields, submit_label, prompt_prefix } => {
@@ -687,11 +840,15 @@ impl FloatingCard {
                                             .corner_radius(egui::CornerRadius::same(6))
                                             .min_size(egui::vec2(130.0, 26.0));
 
-                                            if ui.add(submit_btn).on_hover_text("Valider les critères et lancer la requête").clicked() {
+                                            let submit_resp = ui.add(submit_btn).on_hover_text("Valider les critères et lancer la requête");
+                                            let submit_id = ui.make_persistent_id(format!("dwell_form_submit_{}", self.id));
+                                            if apply_dwell_to_response(ui, dwell_state, submit_id, &submit_resp) {
                                                 form_submitted = true;
                                             }
 
-                                            if ui.button("Annuler").clicked() {
+                                            let cancel_resp = ui.button("Annuler");
+                                            let cancel_id = ui.make_persistent_id(format!("dwell_form_cancel_{}", self.id));
+                                            if apply_dwell_to_response(ui, dwell_state, cancel_id, &cancel_resp) {
                                                 close_window = true;
                                             }
                                         });
@@ -737,7 +894,7 @@ impl FloatingCard {
                                             }
                                         }
                                         close_window = true;
-                                        submitted_prompt = Some(prompt_lines.join("\n"));
+                                        requested_output = Some(FloatingCardOutput::Prompt(prompt_lines.join("\n")));
                                     }
                                 }
                             }
@@ -796,7 +953,7 @@ impl FloatingCard {
         });
         ctx.request_repaint_of(viewport_id);
 
-        submitted_prompt
+        requested_output
     }
 }
 
@@ -1259,6 +1416,8 @@ fn render_line_spans(
     base_size: f32,
     force_italic: bool,
     base_color: egui::Color32,
+    dwell_state: &mut DwellState,
+    span_prefix_id: &str,
 ) -> Option<String> {
     let spans = parse_inline_markdown(line);
     let has_links = spans.iter().any(|s| s.style == InlineStyle::Link && s.target.is_some());
@@ -1266,7 +1425,7 @@ fn render_line_spans(
     if !has_links {
         let avail = ui.available_width().max(40.0);
         let job = create_layout_job(line, base_size, avail, force_italic, base_color);
-        let resp = ui.add(egui::Label::new(job).wrap().selectable(true));
+        let resp = ui.add(egui::Label::new(job).wrap().sense(egui::Sense::click()));
         resp.context_menu(|ui| {
             if ui.button("📋 Copier le texte").clicked() {
                 set_clipboard_text(line);
@@ -1283,7 +1442,7 @@ fn render_line_spans(
     let row_resp = ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(3.5, 3.5);
 
-        for span in spans {
+        for (span_idx, span) in spans.into_iter().enumerate() {
             if span.style == InlineStyle::Link && span.target.is_some() {
                 let raw_text = span.text.trim();
                 let clean_text = raw_text
@@ -1334,7 +1493,9 @@ fn render_line_spans(
                     format!("Ouvrir le lien web : {target}")
                 };
 
-                if ui.add(btn).on_hover_text(hover_desc).clicked() {
+                let btn_resp = ui.add(btn).on_hover_text(hover_desc);
+                let span_dwell_id = ui.make_persistent_id(format!("{span_prefix_id}_span_{span_idx}"));
+                if apply_dwell_to_response(ui, dwell_state, span_dwell_id, &btn_resp) {
                     action_to_run = handle_link_click(ui.ctx(), target, clean_text);
                 }
             } else {
@@ -1343,7 +1504,7 @@ fn render_line_spans(
                     continue;
                 }
                 for word in words {
-                    ui.add(egui::Label::new(egui::RichText::new(word).size(base_size).color(base_color)).selectable(true).wrap());
+                    ui.add(egui::Label::new(egui::RichText::new(word).size(base_size).color(base_color)).wrap());
                 }
             }
         }
@@ -1489,6 +1650,8 @@ fn render_table_cell(
     table_markdown: &str,
     is_header: bool,
     col_width: f32,
+    dwell_state: &mut DwellState,
+    cell_id: &str,
 ) -> Option<String> {
     let mut clicked_action = None;
     let resp = ui.scope(|ui| {
@@ -1497,7 +1660,7 @@ fn render_table_cell(
 
         if is_header {
             let job = create_layout_job(cell, 12.0, col_width, false, text_color);
-            let l_resp = ui.add(egui::Label::new(job).selectable(true).wrap());
+            let l_resp = ui.add(egui::Label::new(job).wrap().sense(egui::Sense::click()));
             l_resp.context_menu(|ui| {
                 if ui.button("📋 Copier l'en-tête").clicked() {
                     set_clipboard_text(cell);
@@ -1513,7 +1676,7 @@ fn render_table_cell(
                 }
             });
         } else {
-            clicked_action = render_line_spans(ui, cell, 11.5, false, text_color);
+            clicked_action = render_line_spans(ui, cell, 11.5, false, text_color, dwell_state, cell_id);
         }
     });
 
@@ -1544,7 +1707,7 @@ fn render_table_cell(
     clicked_action
 }
 
-pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<String> {
+pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state: &mut DwellState) -> Option<String> {
     let mut lines = text.lines().peekable();
     let mut block_idx = 0usize;
     let mut clicked_action: Option<String> = None;
@@ -1582,8 +1745,11 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                                 .strong(),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("📋 Copier").on_hover_text("Copier ce code").clicked() {
+                            let copy_code_btn = ui.small_button("📋 Copier").on_hover_text("Copier ce code");
+                            let copy_code_id = ui.make_persistent_id(format!("dwell_copy_code_{code_scroll_id}"));
+                            if apply_dwell_to_response(ui, dwell_state, copy_code_id, &copy_code_btn) {
                                 ui.ctx().copy_text(full_code.clone());
+                                play_earcon(Earcon::Success);
                             }
                         });
                     });
@@ -1595,6 +1761,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                         .id_salt(code_scroll_id)
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
+                            handle_drag_to_scroll(ui, true, false);
                             let mut code_job = LayoutJob::default();
                             code_job.wrap.max_width = f32::INFINITY;
                             let mut fmt = TextFormat::default();
@@ -1626,7 +1793,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                 };
 
                 ui.add_space(extra_space);
-                if let Some(act) = render_line_spans(ui, content, font_size, false, color) {
+                if let Some(act) = render_line_spans(ui, content, font_size, false, color, dwell_state, &format!("hd_{card_id}_{block_idx}")) {
                     clicked_action = Some(act);
                 }
 
@@ -1666,7 +1833,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("▍").size(13.0).color(egui::Color32::from_rgb(0, 200, 255)));
-                        if let Some(act) = render_line_spans(ui, &quote_text, 12.0, true, egui::Color32::from_rgb(205, 225, 245)) {
+                        if let Some(act) = render_line_spans(ui, &quote_text, 12.0, true, egui::Color32::from_rgb(205, 225, 245), dwell_state, &format!("quote_{card_id}_{block_idx}")) {
                             clicked_action = Some(act);
                         }
                     });
@@ -1724,7 +1891,8 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                                     .small()
                                     .corner_radius(egui::CornerRadius::same(4)),
                                 );
-                                if copy_tbl_btn.on_hover_text("Copier tout le tableau au format Markdown").clicked() {
+                                let copy_tbl_id = ui.make_persistent_id(format!("dwell_copy_tbl_{table_id}"));
+                                if apply_dwell_to_response(ui, dwell_state, copy_tbl_id, &copy_tbl_btn) {
                                     set_clipboard_text(&raw_table_md);
                                     ui.ctx().copy_text(raw_table_md.clone());
                                     play_earcon(Earcon::Success);
@@ -1744,18 +1912,19 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                             .id_salt(table_scroll_id)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                egui::Grid::new(table_id)
+                                handle_drag_to_scroll(ui, true, false);
+                                egui::Grid::new(&table_id)
                                     .striped(true)
                                     .spacing([12.0, 5.0])
                                     .min_col_width(0.0)
                                     .show(ui, |ui| {
                                         for (c_idx, h) in headers.iter().enumerate() {
                                             let w = col_widths.get(c_idx).copied().unwrap_or(70.0);
-                                            render_table_cell(ui, h, egui::Color32::from_rgb(0, 215, 255), &headers, &raw_table_md, true, w);
+                                            render_table_cell(ui, h, egui::Color32::from_rgb(0, 215, 255), &headers, &raw_table_md, true, w, dwell_state, &format!("md_th_{table_id}_{c_idx}"));
                                         }
                                         ui.end_row();
 
-                                        for row in &rows {
+                                        for (r_idx, row) in rows.iter().enumerate() {
                                             for (c_idx, cell) in row.iter().enumerate() {
                                                 let text_color = if c_idx == 0 {
                                                     egui::Color32::from_rgb(240, 245, 255)
@@ -1763,7 +1932,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                                                     egui::Color32::from_rgb(205, 220, 235)
                                                 };
                                                 let w = col_widths.get(c_idx).copied().unwrap_or(70.0);
-                                                if let Some(act) = render_table_cell(ui, cell, text_color, row, &raw_table_md, false, w) {
+                                                if let Some(act) = render_table_cell(ui, cell, text_color, row, &raw_table_md, false, w, dwell_state, &format!("md_td_{table_id}_{r_idx}_{c_idx}")) {
                                                     clicked_action = Some(act);
                                                 }
                                             }
@@ -1782,6 +1951,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
             continue;
         }
 
+        block_idx += 1;
         let indent_spaces = line.chars().take_while(|c| c.is_whitespace()).count();
         let indent_level = (indent_spaces / 2).min(4);
 
@@ -1794,7 +1964,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 let synthetic_link = format!("[▶ {video_title}]({prompt_target})");
-                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255)) {
+                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255), dwell_state, &format!("media_vid_{card_id}_{block_idx}")) {
                     clicked_action = Some(act);
                 }
             });
@@ -1811,7 +1981,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 let synthetic_link = format!("[🎵 {audio_title}]({prompt_target})");
-                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255)) {
+                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255), dwell_state, &format!("media_aud_{card_id}_{block_idx}")) {
                     clicked_action = Some(act);
                 }
             });
@@ -1827,7 +1997,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 let synthetic_link = format!("[📄 {doc_title}]({prompt_target})");
-                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255)) {
+                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255), dwell_state, &format!("media_doc_{card_id}_{block_idx}")) {
                     clicked_action = Some(act);
                 }
             });
@@ -1843,7 +2013,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 let synthetic_link = format!("[🖼️ {img_title}]({prompt_target})");
-                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255)) {
+                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255), dwell_state, &format!("media_img_{card_id}_{block_idx}")) {
                     clicked_action = Some(act);
                 }
             });
@@ -1864,7 +2034,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 ui.label(egui::RichText::new(bullet).size(12.0).color(bullet_color).strong());
-                if let Some(act) = render_line_spans(ui, item_content, 12.5, false, egui::Color32::from_rgb(225, 235, 245)) {
+                if let Some(act) = render_line_spans(ui, item_content, 12.5, false, egui::Color32::from_rgb(225, 235, 245), dwell_state, &format!("li_{card_id}_{block_idx}")) {
                     clicked_action = Some(act);
                 }
             });
@@ -1878,7 +2048,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 ui.label(egui::RichText::new(num_str).size(12.0).color(egui::Color32::from_rgb(255, 215, 110)).strong());
-                if let Some(act) = render_line_spans(ui, item_content, 12.5, false, egui::Color32::from_rgb(225, 235, 245)) {
+                if let Some(act) = render_line_spans(ui, item_content, 12.5, false, egui::Color32::from_rgb(225, 235, 245), dwell_state, &format!("num_{card_id}_{block_idx}")) {
                     clicked_action = Some(act);
                 }
             });
@@ -1886,7 +2056,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
             continue;
         }
 
-        if let Some(act) = render_line_spans(ui, trimmed, 12.5, false, egui::Color32::from_rgb(220, 230, 242)) {
+        if let Some(act) = render_line_spans(ui, trimmed, 12.5, false, egui::Color32::from_rgb(220, 230, 242), dwell_state, &format!("p_{card_id}_{block_idx}")) {
             clicked_action = Some(act);
         }
         ui.add_space(2.0);
