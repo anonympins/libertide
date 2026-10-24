@@ -134,6 +134,12 @@ fn default_submit_label() -> String {
     "🔍 Lancer la recherche".to_string()
 }
 
+#[derive(Debug, Clone)]
+pub enum FloatingCardOutput {
+    Prompt(String),
+    Speak(String),
+}
+
 /// Gère le défilement par clic-glissé (drag-to-scroll) natif via les événements de pointeur
 fn handle_drag_to_scroll(ui: &egui::Ui, allow_x: bool, allow_y: bool) {
     let (is_dragging, delta, started_in_ui) = ui.input(|i| {
@@ -351,7 +357,102 @@ impl FloatingCard {
         Self::new(clean_id, title, content)
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, dwell_state: &mut DwellState) -> Option<String> {
+    /// Construit une retranscription détaillée et fluide pour le narrateur vocal
+    /// incluant le contenu textuel et l'inventaire des interactions possibles.
+    pub fn build_narrator_speech(&self) -> String {
+        let mut speech = String::new();
+        match &self.content {
+            FloatingContentType::Markdown { text } => {
+                speech.push_str(&format!("Fenêtre : {}.\n\n", self.title));
+                let clean_text = crate::tts::sanitize_for_tts(text);
+                speech.push_str(&clean_text);
+
+                let mut interactions = Vec::new();
+                for line in text.lines() {
+                    let spans = parse_inline_markdown(line);
+                    for span in spans {
+                        if span.style == InlineStyle::Link {
+                            let label = span.text.trim();
+                            if !label.is_empty() {
+                                let clean_lbl = label.trim_start_matches(['▶', '🎬', '🎵', '🎙', '📻', '📄', '🖼', '⚡', '🔗', ' ']).trim();
+                                if let Some(target) = span.target {
+                                    if target.starts_with("action:") || target.starts_with("prompt:") {
+                                        interactions.push(format!("Action : {clean_lbl}"));
+                                    } else if target.starts_with("http") {
+                                        interactions.push(format!("Lien web : {clean_lbl}"));
+                                    } else {
+                                        interactions.push(clean_lbl.to_string());
+                                    }
+                                } else {
+                                    interactions.push(clean_lbl.to_string());
+                                }
+                            }
+                        }
+                    }
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("▶ ") || trimmed.starts_with("🎬 ") {
+                        let v = trimmed.trim_start_matches(['▶', '🎬', ' ']).trim();
+                        if !interactions.iter().any(|s| s.contains(v)) {
+                            interactions.push(format!("Vidéo : {v}"));
+                        }
+                    } else if trimmed.starts_with("🎵 ") || trimmed.starts_with("🎙") {
+                        let a = trimmed.trim_start_matches(['🎵', '🎙', ' ']).trim();
+                        if !interactions.iter().any(|s| s.contains(a)) {
+                            interactions.push(format!("Audio : {a}"));
+                        }
+                    }
+                }
+                interactions.dedup();
+                if !interactions.is_empty() {
+                    speech.push_str(". Interactions possibles : vous pouvez cliquer sur : ");
+                    speech.push_str(&interactions.join(", "));
+                    speech.push('.');
+                }
+            }
+            FloatingContentType::Table { headers, rows } => {
+                speech.push_str(&format!("Tableau : {}.\n", self.title));
+                if !headers.is_empty() {
+                    speech.push_str(&format!("Il comporte {} colonnes : {}. ", headers.len(), headers.join(", ")));
+                }
+                speech.push_str(&format!("Il y a {} lignes de données. ", rows.len()));
+                let sample_count = rows.len().min(5);
+                for (r_idx, row) in rows.iter().take(sample_count).enumerate() {
+                    speech.push_str(&format!("Ligne {} : ", r_idx + 1));
+                    let mut parts = Vec::new();
+                    for (c_idx, cell) in row.iter().enumerate() {
+                        let col_name = headers.get(c_idx).map(|s| s.as_str()).unwrap_or("");
+                        let clean_cell = crate::tts::sanitize_for_tts(cell);
+                        if !col_name.is_empty() {
+                            parts.push(format!("{col_name} : {clean_cell}"));
+                        } else {
+                            parts.push(clean_cell);
+                        }
+                    }
+                    speech.push_str(&parts.join(", "));
+                    speech.push_str(". ");
+                }
+                if rows.len() > sample_count {
+                    speech.push_str(&format!("Et {} autres lignes disponibles. ", rows.len() - sample_count));
+                }
+                speech.push_str("Interactions possibles : vous pouvez cliquer sur les cellules du tableau ou copier les données.");
+            }
+            FloatingContentType::Stats { items } => {
+                speech.push_str(&format!("Fiche d'informations : {}.\n", self.title));
+                for (k, v) in items {
+                    speech.push_str(&format!("{} : {}. ", k, v));
+                }
+                speech.push_str("Interactions possibles : vous pouvez copier ces données ou fermer la fiche.");
+            }
+            FloatingContentType::Form { fields, submit_label, .. } => {
+                speech.push_str(&format!("Formulaire interactif : {}.\n", self.title));
+                speech.push_str(&format!("Ce formulaire contient {} options. ", fields.len()));
+                speech.push_str(&format!("Interactions possibles : vous pouvez modifier ces critères puis cliquer sur le bouton {} pour lancer la requête.", submit_label));
+            }
+        }
+        speech
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context, dwell_state: &mut DwellState) -> Option<FloatingCardOutput> {
         if !self.open {
             return None;
         }
@@ -381,7 +482,7 @@ impl FloatingCard {
             .with_min_inner_size([280.0, 160.0])
             .with_resizable(true);
 
-        let mut submitted_prompt = None;
+        let mut requested_output = None;
 
         ctx.show_viewport_immediate(viewport_id, builder, |vp_ctx, _class| {
             vp_ctx.request_repaint();
@@ -415,6 +516,24 @@ impl FloatingCard {
                         if title_resp.dragged() {
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
                         }
+
+                        // Bouton d'accessibilité pour la lecture vocale complète
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.add_space(8.0);
+                            let read_btn = ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new("🔊 Lire")
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(255, 220, 130))
+                                        .strong(),
+                                )
+                                .small()
+                                .corner_radius(egui::CornerRadius::same(4)),
+                            ).on_hover_text("Faire lire le contenu et les interactions possibles par le narrateur");
+                            let read_btn_id = ui.make_persistent_id(format!("dwell_read_card_{}", self.id));
+                            if apply_dwell_to_response(ui, dwell_state, read_btn_id, &read_btn) {
+                                requested_output = Some(FloatingCardOutput::Speak(self.build_narrator_speech()));
+                            }
                         
                         // Raccourcis et boutons de copie pour le contenu Markdown
                         if let FloatingContentType::Markdown { ref text } = self.content {
@@ -431,8 +550,6 @@ impl FloatingCard {
                                 play_earcon(Earcon::Success);
                             }
 
-                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                ui.add_space(8.0);
                                 let copy_btn = ui.add(
                                     egui::Button::new(
                                         egui::RichText::new("📋 Copier tout")
@@ -448,8 +565,8 @@ impl FloatingCard {
                                     ui.ctx().copy_text(text.clone());
                                     play_earcon(Earcon::Success);
                                 }
-                            });
-                        }
+                            }
+                        });
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let close_btn = ui.button(
@@ -561,7 +678,7 @@ impl FloatingCard {
                                                             };
                                                             let w = col_widths.get(c_idx).copied().unwrap_or(85.0);
                                                             if let Some(act) = render_table_cell(ui, cell, text_color, row, &full_table_md, false, w, dwell_state, &format!("td_{card_id}_{r_idx}_{c_idx}")) {
-                                                                submitted_prompt = Some(act);
+                                                                requested_output = Some(FloatingCardOutput::Prompt(act));
                                                             }
                                                         }
                                                         ui.end_row();
@@ -609,7 +726,7 @@ impl FloatingCard {
                                     }
 
                                     if let Some(prompt) = render_markdown(ui, text, &card_id, dwell_state) {
-                                        submitted_prompt = Some(prompt);
+                                        requested_output = Some(FloatingCardOutput::Prompt(prompt));
                                     }
                                 }
                                 FloatingContentType::Form { fields, submit_label, prompt_prefix } => {
@@ -777,7 +894,7 @@ impl FloatingCard {
                                             }
                                         }
                                         close_window = true;
-                                        submitted_prompt = Some(prompt_lines.join("\n"));
+                                        requested_output = Some(FloatingCardOutput::Prompt(prompt_lines.join("\n")));
                                     }
                                 }
                             }
@@ -836,7 +953,7 @@ impl FloatingCard {
         });
         ctx.request_repaint_of(viewport_id);
 
-        submitted_prompt
+        requested_output
     }
 }
 

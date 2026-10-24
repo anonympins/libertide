@@ -16,7 +16,7 @@ mod ui;
 mod ocr;
 
 use audio::spawn_audio_worker;
-use floating_window::{update_open_floating_cards, FloatingCard, OPEN_FLOATING_CARDS};
+use floating_window::{update_open_floating_cards, FloatingCard, FloatingCardOutput, OPEN_FLOATING_CARDS};
 use automation::*;
 use fs_util::*;
 use theme::{AppTheme, SettingsTab};
@@ -2134,6 +2134,35 @@ impl eframe::App for OverlayApp {
                         }
                     }
 
+                    // Raccourci vocal pour faire lire la fenêtre volante active
+                    if norm_prompt == "lis la fenetre" || norm_prompt == "lis la fenêtre" || norm_prompt == "lis le resume" || norm_prompt == "lis le résumé" || norm_prompt == "lis la carte" || norm_prompt.starts_with("lis la fenetre") || norm_prompt.starts_with("lis la fenêtre") {
+                        if let Some(card) = self.floating_cards.last() {
+                            let speech = card.build_narrator_speech();
+                            self.stop_speaking();
+                            play_earcon(Earcon::Success);
+                            self.status = AgentStatus::Speaking;
+                            self.chat_history.push(ChatEntry {
+                                role: ChatRole::User,
+                                text: prompt,
+                                timestamp: current_time_str(),
+                                quick_suggestions: Vec::new(),
+                                screen_size_kb: None,
+                            });
+                            self.chat_history.push(ChatEntry {
+                                role: ChatRole::Agent,
+                                text: speech.clone(),
+                                timestamp: current_time_str(),
+                                quick_suggestions: Vec::new(),
+                                screen_size_kb: None,
+                            });
+                            let _ = self.tts_sender.send(TtsCommand::Speak(speech));
+                            if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                                self.start_recording(&ctx, false);
+                            }
+                            return;
+                        }
+                    }
+
                     if is_switch_access_command(&prompt) {
                         self.toggle_switch_access_mode();
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
@@ -2428,12 +2457,27 @@ impl eframe::App for OverlayApp {
                 }
                 AgentEvent::ShowFloatingCard(card) => {
                     let vp_id = egui::ViewportId::from_hash_of(&card.id);
+                    let card_title = card.title.clone();
                     if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == card.id) {
                         *existing = card;
                     } else {
                         self.floating_cards.push(card);
                     }
                     update_open_floating_cards(&self.floating_cards);
+                    let read_suggestion = format!("🔊 Lire : {card_title}");
+                    if let Some(last_entry) = self.chat_history.last_mut() {
+                        if !last_entry.quick_suggestions.iter().any(|s| s.as_str() == Some(&read_suggestion)) {
+                            last_entry.quick_suggestions.insert(0, QuickSuggestionItem::Text(read_suggestion));
+                        }
+                    } else {
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: format!("Fenêtre volante affichée : {card_title}"),
+                            timestamp: current_time_str(),
+                            quick_suggestions: vec![QuickSuggestionItem::Text(read_suggestion)],
+                            screen_size_kb: None,
+                        });
+                    }
                     ctx.request_repaint();
                     ctx.request_repaint_of(vp_id);
                 }
@@ -4201,21 +4245,24 @@ impl eframe::App for OverlayApp {
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 6.0;
 
-                                        // 1. Bouton Envoyer (WCAG AAA 50x50, hover vert RGB(38, 168, 75))
-                                        let send_id = ui.make_persistent_id("dwell_btn_send");
-                                        let send_prog = self.dwell_state.get_progress(send_id);
-                                        let send_resp = render_accessible_icon_button(
+                                        // 1. Bouton Analyser (WCAG AAA 50x50)
+                                        let analyze_id = ui.make_persistent_id("dwell_btn_analyze");
+                                        let analyze_prog = self.dwell_state.get_progress(analyze_id);
+                                        let analyze_resp = render_accessible_icon_button(
                                             ui,
-                                            "➔",
-                                            "Envoyer",
-                                            "Envoyer (Entrée) : Transmettre la consigne à l'assistant",
+                                            "🔍",
+                                            "Analyser",
+                                            "Analyser : Résumer ce que fait la fenêtre active (ou Entrée pour envoyer)",
                                             false,
-                                            send_prog,
-                                            Some(egui::Color32::from_rgb(34, 150, 68)),
-                                            Some(egui::Color32::from_rgb(38, 168, 75)),
+                                            analyze_prog,
+                                            Some(egui::Color32::from_rgb(0, 140, 220)),
+                                            Some(egui::Color32::from_rgb(0, 165, 245)),
                                         );
-                                        let (send_dwell, _) = self.dwell_state.update(send_id, send_resp.hovered());
-                                        if (send_resp.clicked() || send_dwell || enter_hit) && !self.input_text.trim().is_empty() {
+                                        let (analyze_dwell, _) = self.dwell_state.update(analyze_id, analyze_resp.hovered());
+                                        let analyze_btn_hit = analyze_resp.clicked() || analyze_dwell;
+                                        let enter_with_text = enter_hit && !self.input_text.trim().is_empty();
+
+                                        if analyze_btn_hit || enter_with_text {
                                             self.stop_speaking();
                                             if self.is_recording {
                                                 self.stop_recording();
@@ -4223,7 +4270,18 @@ impl eframe::App for OverlayApp {
                                             self.continuous_mode = true;
                                             self.input_suggestions.clear();
                                             self.last_suggestion_query.clear();
-                                            let prompt = std::mem::take(&mut self.input_text).trim().to_string();
+                                            let prompt = if analyze_btn_hit {
+                                                let typed = std::mem::take(&mut self.input_text).trim().to_string();
+                                                if typed.is_empty() {
+                                                    "Analyse l'écran et résume ce que fait la fenêtre en cours.".to_string()
+                                                } else if typed.to_lowercase().contains("analyse") || typed.to_lowercase().contains("résum") {
+                                                    typed
+                                                } else {
+                                                    format!("Analyse l'écran et résume ce que fait la fenêtre en cours : {}", typed)
+                                                }
+                                            } else {
+                                                std::mem::take(&mut self.input_text).trim().to_string()
+                                            };
                                             self.live_transcript.clear();
                                             self.chat_history.push(ChatEntry {
                                                 role: ChatRole::User,
@@ -4679,6 +4737,66 @@ impl eframe::App for OverlayApp {
                                         self.status = AgentStatus::Thinking;
                                         self.continuous_mode = true;
                                         self.live_transcript.clear();
+
+                                        // Interception directe pour faire lire la fenêtre volante par le narrateur
+                                        let is_read_card = prompt.starts_with("🔊 Lire : ") || prompt.starts_with("Lire : ");
+                                        let matching_card = if is_read_card {
+                                            let target_title = prompt
+                                                .strip_prefix("🔊 Lire : ")
+                                                .or_else(|| prompt.strip_prefix("Lire : "))
+                                                .unwrap_or(&prompt)
+                                                .trim();
+                                            self.floating_cards.iter().find(|c| c.title.eq_ignore_ascii_case(target_title) || c.id.eq_ignore_ascii_case(target_title))
+                                                .cloned()
+                                                .or_else(|| self.floating_cards.last().cloned())
+                                        } else {
+                                            None
+                                        };
+
+                                        if let Some(card) = matching_card {
+                                            let speech = card.build_narrator_speech();
+                                            play_earcon(Earcon::Success);
+                                            self.status = AgentStatus::Speaking;
+                                            self.chat_history.push(ChatEntry {
+                                                role: ChatRole::User,
+                                                text: prompt.clone(),
+                                                timestamp: current_time_str(),
+                                                quick_suggestions: Vec::new(),
+                                                screen_size_kb: None,
+                                            });
+                                            self.chat_history.push(ChatEntry {
+                                                role: ChatRole::Agent,
+                                                text: speech.clone(),
+                                                timestamp: current_time_str(),
+                                                quick_suggestions: Vec::new(),
+                                                screen_size_kb: None,
+                                            });
+                                            let _ = self.tts_sender.send(TtsCommand::Speak(speech));
+                                            return;
+                                        }
+
+
+                                            let is_read_card_prompt = prompt.to_lowercase().starts_with("lis la fen")
+                                                || prompt.to_lowercase().starts_with("lire la fen")
+                                                || prompt.starts_with("🔊 Lire : ");
+                                            if is_read_card_prompt {
+                                                if let Some(card) = self.floating_cards.last() {
+                                                    let speech = card.build_narrator_speech();
+                                                    play_earcon(Earcon::Success);
+                                                    self.status = AgentStatus::Speaking;
+                                                    self.chat_history.push(ChatEntry {
+                                                        role: ChatRole::Agent,
+                                                        text: speech.clone(),
+                                                        timestamp: current_time_str(),
+                                                        quick_suggestions: Vec::new(),
+                                                        screen_size_kb: None,
+                                                    });
+                                                    let _ = self.tts_sender.send(TtsCommand::Speak(speech));
+                                                    self.continuous_mode = false;
+                                                    return;
+                                                }
+                                            }
+
                                         self.chat_history.push(ChatEntry {
                                             role: ChatRole::User,
                                             text: prompt.clone(),
@@ -5467,17 +5585,34 @@ impl eframe::App for OverlayApp {
 
                 // Affichage dynamique des fenêtres volantes (stats, tables, contenus, formulaires de requête)
                 let mut submitted_card_prompts = Vec::new();
+                let mut card_speech = None;
                 let prev_card_count = self.floating_cards.len();
                 let dwell_state = &mut self.dwell_state;
                 self.floating_cards.retain_mut(|card| {
-                    if let Some(prompt) = card.show(&ctx, dwell_state) {
-                        submitted_card_prompts.push(prompt);
+                    if let Some(out) = card.show(&ctx, dwell_state) {
+                        match out {
+                            FloatingCardOutput::Prompt(prompt) => submitted_card_prompts.push(prompt),
+                            FloatingCardOutput::Speak(speech) => card_speech = Some(speech),
+                        }
                     }
                     card.open
                 });
                 if self.floating_cards.len() != prev_card_count {
                     update_open_floating_cards(&self.floating_cards);
                     ctx.request_repaint();
+                }
+                if let Some(speech) = card_speech {
+                    self.stop_speaking();
+                    play_earcon(Earcon::Success);
+                    self.status = AgentStatus::Speaking;
+                    self.chat_history.push(ChatEntry {
+                        role: ChatRole::Agent,
+                        text: speech.clone(),
+                        timestamp: current_time_str(),
+                        quick_suggestions: Vec::new(),
+                        screen_size_kb: None,
+                    });
+                    let _ = self.tts_sender.send(TtsCommand::Speak(speech));
                 }
                 for prompt in submitted_card_prompts {
                     self.stop_speaking();
@@ -6429,6 +6564,15 @@ async fn call_llm_prompt(
                     }
                 }
                 _ => {}
+            }
+        }
+
+        for act in &payload.actions {
+            if let AgentAction::ShowFloatingCard { title, .. } = act {
+                let read_btn_text = format!("🔊 Lire : {title}");
+                if !payload.quick_suggestions.iter().any(|s| s.as_str() == Some(&read_btn_text)) {
+                    payload.quick_suggestions.insert(0, QuickSuggestionItem::Text(read_btn_text));
+                }
             }
         }
 
