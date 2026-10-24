@@ -378,8 +378,9 @@ fn get_ocr_engine() -> Option<&'static ocrs::OcrEngine> {
                 PathBuf::from("/usr/share/libertide/models").join(name),
             ];
             if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
-                candidates.push(PathBuf::from(dir).join("models").join(name));
-                candidates.push(PathBuf::from(dir).join(name));
+                let base = PathBuf::from(dir);
+                candidates.push(base.join("models").join(name));
+                candidates.push(base.join(name));
             }
             if let Ok(home) = std::env::var("HOME") {
                 candidates.push(PathBuf::from(home).join(".cache/libertide/models").join(name));
@@ -428,8 +429,8 @@ fn get_ocr_engine() -> Option<&'static ocrs::OcrEngine> {
         let rec_path = ensure_model("text-recognition.rten")
             .or_else(|| ensure_model("text-recognition.onnx"))?;
 
-        let detection_model = Model::load_file(&det_path).ok()?;
-        let recognition_model = Model::load_file(&rec_path).ok()?;
+        let detection_model = rten::model::Model::load_file(&det_path).ok()?;
+        let recognition_model = rten::model::Model::load_file(&rec_path).ok()?;
 
         OcrEngine::new(OcrEngineParams {
             detection_model: Some(detection_model),
