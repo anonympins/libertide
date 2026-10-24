@@ -363,6 +363,7 @@ pub fn recognize_texts_vision(rect: [i32; 4]) -> Vec<(String, [i32; 4])> {
 #[cfg(target_os = "linux")]
 fn get_ocr_engine() -> Option<&'static ocrs::OcrEngine> {
     use std::path::PathBuf;
+    use rten::Model;
     use std::sync::OnceLock;
 
     static ENGINE: OnceLock<Option<ocrs::OcrEngine>> = OnceLock::new();
@@ -380,11 +381,13 @@ fn get_ocr_engine() -> Option<&'static ocrs::OcrEngine> {
         candidates.into_iter().find(|p| p.is_file())
     }
 
-        let det_path = find_model("text-detection.rten")?;
-        let rec_path = find_model("text-recognition.rten")?;
+        let det_path = find_model("text-detection.onnx")
+            .or_else(|| find_model("text-detection.rten"))?;
+        let rec_path = find_model("text-recognition.onnx")
+            .or_else(|| find_model("text-recognition.rten"))?;
 
-        let det_model = ocrs::rten::Model::load_file(&det_path).ok()?;
-        let rec_model = ocrs::rten::Model::load_file(&rec_path).ok()?;
+        let det_model = Model::load_file(&det_path).ok()?;
+        let rec_model = Model::load_file(&rec_path).ok()?;
 
         ocrs::OcrEngine::new(ocrs::OcrEngineParams {
             detection_model: Some(det_model),
