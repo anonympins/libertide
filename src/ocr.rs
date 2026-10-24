@@ -420,7 +420,7 @@ pub fn recognize_texts_ocrs(
     let Ok(img_source) = ocrs::ImageSource::from_bytes(&rgb, (w, h)) else {
         return Vec::new();
     };
-    let Ok(input) = engine.prepare_input(&img_source) else {
+    let Ok(input) = engine.prepare_input(img_source) else {
         return Vec::new();
     };
     let Ok(word_rects) = engine.detect_words(&input) else {
@@ -436,12 +436,24 @@ pub fn recognize_texts_ocrs(
         if let Some(txt) = text_opt {
             let s = txt.to_string().trim().to_string();
             if !s.is_empty() {
-                let r = line.bounding_rect();
-                let x0 = window_rect[0] + r.left() as i32;
-                let y0 = window_rect[1] + r.top() as i32;
-                let x1 = window_rect[0] + r.right() as i32;
-                let y1 = window_rect[1] + r.bottom() as i32;
-                out.push((s, [x0, y0, x1, y1]));
+                let mut min_x = i32::MAX;
+                let mut min_y = i32::MAX;
+                let mut max_x = i32::MIN;
+                let mut max_y = i32::MIN;
+                for word in line {
+                    let r = word.bounding_rect();
+                    min_x = min_x.min(r.left() as i32);
+                    min_y = min_y.min(r.top() as i32);
+                    max_x = max_x.max(r.right() as i32);
+                    max_y = max_y.max(r.bottom() as i32);
+                }
+                if min_x < max_x && min_y < max_y {
+                    let x0 = window_rect[0] + min_x;
+                    let y0 = window_rect[1] + min_y;
+                    let x1 = window_rect[0] + max_x;
+                    let y1 = window_rect[1] + max_y;
+                    out.push((s, [x0, y0, x1, y1]));
+                }
             }
         }
     }
