@@ -4,6 +4,7 @@ use eframe::egui::text::LayoutJob;
 use eframe::egui::TextFormat;
 use serde::{Deserialize, Serialize};
 use crate::automation::set_clipboard_text;
+use crate::{apply_dwell_to_response, DwellState};
 use crate::{play_earcon, Earcon};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -323,7 +324,7 @@ impl FloatingCard {
         Self::new(clean_id, title, content)
     }
 
-    pub fn show(&mut self, ctx: &egui::Context) -> Option<String> {
+    pub fn show(&mut self, ctx: &egui::Context, dwell_state: &mut DwellState) -> Option<String> {
         if !self.open {
             return None;
         }
@@ -414,7 +415,8 @@ impl FloatingCard {
                                     .small()
                                     .corner_radius(egui::CornerRadius::same(4)),
                                 );
-                                if copy_btn.on_hover_text("Copier tout le contenu (Ctrl+A / Ctrl+C)").clicked() {
+                                let copy_btn_id = ui.make_persistent_id(format!("dwell_copy_all_{}", self.id));
+                                if apply_dwell_to_response(ui, dwell_state, copy_btn_id, &copy_btn) {
                                     set_clipboard_text(text);
                                     ui.ctx().copy_text(text.clone());
                                     play_earcon(Earcon::Success);
@@ -423,20 +425,24 @@ impl FloatingCard {
                         }
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(
+                            let close_btn = ui.button(
                                 egui::RichText::new("✕")
                                     .size(12.5)
                                     .color(egui::Color32::from_rgb(255, 130, 130)),
-                            ).on_hover_text("Fermer cette fenêtre volante").clicked() {
+                            ).on_hover_text("Fermer cette fenêtre volante");
+                            let close_id = ui.make_persistent_id(format!("dwell_close_card_{}", self.id));
+                            if apply_dwell_to_response(ui, dwell_state, close_id, &close_btn) {
                                 self.open = false;
                             }
 
                             let max_icon = if is_maximized { "⧉" } else { "□" };
-                            if ui.button(
+                            let max_btn = ui.button(
                                 egui::RichText::new(max_icon)
                                     .size(11.0)
                                     .color(egui::Color32::from_rgb(200, 215, 230)),
-                            ).on_hover_text(if is_maximized { "Restaurer" } else { "Agrandir" }).clicked() {
+                            ).on_hover_text(if is_maximized { "Restaurer" } else { "Agrandir" });
+                            let max_id = ui.make_persistent_id(format!("dwell_max_card_{}", self.id));
+                            if apply_dwell_to_response(ui, dwell_state, max_id, &max_btn) {
                                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
                             }
                         });
@@ -487,7 +493,8 @@ impl FloatingCard {
                                                 .small()
                                                 .corner_radius(egui::CornerRadius::same(4)),
                                             );
-                                            if copy_tbl.on_hover_text("Copier tout le tableau au format Markdown").clicked() {
+                                            let copy_tbl_id = ui.make_persistent_id(format!("dwell_copy_table_{}", self.id));
+                                            if apply_dwell_to_response(ui, dwell_state, copy_tbl_id, &copy_tbl) {
                                                 set_clipboard_text(&full_table_md);
                                                 ui.ctx().copy_text(full_table_md.clone());
                                                 play_earcon(Earcon::Success);
@@ -512,11 +519,11 @@ impl FloatingCard {
                                                 .show(ui, |ui| {
                                                     for (c_idx, h) in headers.iter().enumerate() {
                                                         let w = col_widths.get(c_idx).copied().unwrap_or(85.0);
-                                                        render_table_cell(ui, h, egui::Color32::from_rgb(0, 210, 255), headers, &full_table_md, true, w);
+                                                        render_table_cell(ui, h, egui::Color32::from_rgb(0, 210, 255), headers, &full_table_md, true, w, dwell_state, &format!("th_{card_id}_{c_idx}"));
                                                     }
                                                     ui.end_row();
 
-                                                    for row in rows.iter() {
+                                                    for (r_idx, row) in rows.iter().enumerate() {
                                                         for (c_idx, cell) in row.iter().enumerate() {
                                                             let text_color = if c_idx == 0 {
                                                                 egui::Color32::from_rgb(240, 245, 255)
@@ -524,7 +531,7 @@ impl FloatingCard {
                                                                 egui::Color32::from_rgb(205, 220, 235)
                                                             };
                                                             let w = col_widths.get(c_idx).copied().unwrap_or(85.0);
-                                                            if let Some(act) = render_table_cell(ui, cell, text_color, row, &full_table_md, false, w) {
+                                                            if let Some(act) = render_table_cell(ui, cell, text_color, row, &full_table_md, false, w, dwell_state, &format!("td_{card_id}_{r_idx}_{c_idx}")) {
                                                                 submitted_prompt = Some(act);
                                                             }
                                                         }
@@ -572,7 +579,7 @@ impl FloatingCard {
                                         play_earcon(Earcon::Success);
                                     }
 
-                                    if let Some(prompt) = render_markdown(ui, text, &card_id) {
+                                    if let Some(prompt) = render_markdown(ui, text, &card_id, dwell_state) {
                                         submitted_prompt = Some(prompt);
                                     }
                                 }
@@ -687,11 +694,15 @@ impl FloatingCard {
                                             .corner_radius(egui::CornerRadius::same(6))
                                             .min_size(egui::vec2(130.0, 26.0));
 
-                                            if ui.add(submit_btn).on_hover_text("Valider les critères et lancer la requête").clicked() {
+                                            let submit_resp = ui.add(submit_btn).on_hover_text("Valider les critères et lancer la requête");
+                                            let submit_id = ui.make_persistent_id(format!("dwell_form_submit_{}", self.id));
+                                            if apply_dwell_to_response(ui, dwell_state, submit_id, &submit_resp) {
                                                 form_submitted = true;
                                             }
 
-                                            if ui.button("Annuler").clicked() {
+                                            let cancel_resp = ui.button("Annuler");
+                                            let cancel_id = ui.make_persistent_id(format!("dwell_form_cancel_{}", self.id));
+                                            if apply_dwell_to_response(ui, dwell_state, cancel_id, &cancel_resp) {
                                                 close_window = true;
                                             }
                                         });
@@ -1259,6 +1270,8 @@ fn render_line_spans(
     base_size: f32,
     force_italic: bool,
     base_color: egui::Color32,
+    dwell_state: &mut DwellState,
+    span_prefix_id: &str,
 ) -> Option<String> {
     let spans = parse_inline_markdown(line);
     let has_links = spans.iter().any(|s| s.style == InlineStyle::Link && s.target.is_some());
@@ -1283,7 +1296,7 @@ fn render_line_spans(
     let row_resp = ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(3.5, 3.5);
 
-        for span in spans {
+        for (span_idx, span) in spans.into_iter().enumerate() {
             if span.style == InlineStyle::Link && span.target.is_some() {
                 let raw_text = span.text.trim();
                 let clean_text = raw_text
@@ -1334,7 +1347,9 @@ fn render_line_spans(
                     format!("Ouvrir le lien web : {target}")
                 };
 
-                if ui.add(btn).on_hover_text(hover_desc).clicked() {
+                let btn_resp = ui.add(btn).on_hover_text(hover_desc);
+                let span_dwell_id = ui.make_persistent_id(format!("{span_prefix_id}_span_{span_idx}"));
+                if apply_dwell_to_response(ui, dwell_state, span_dwell_id, &btn_resp) {
                     action_to_run = handle_link_click(ui.ctx(), target, clean_text);
                 }
             } else {
@@ -1489,6 +1504,8 @@ fn render_table_cell(
     table_markdown: &str,
     is_header: bool,
     col_width: f32,
+    dwell_state: &mut DwellState,
+    cell_id: &str,
 ) -> Option<String> {
     let mut clicked_action = None;
     let resp = ui.scope(|ui| {
@@ -1513,7 +1530,7 @@ fn render_table_cell(
                 }
             });
         } else {
-            clicked_action = render_line_spans(ui, cell, 11.5, false, text_color);
+            clicked_action = render_line_spans(ui, cell, 11.5, false, text_color, dwell_state, cell_id);
         }
     });
 
@@ -1544,7 +1561,7 @@ fn render_table_cell(
     clicked_action
 }
 
-pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<String> {
+pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state: &mut DwellState) -> Option<String> {
     let mut lines = text.lines().peekable();
     let mut block_idx = 0usize;
     let mut clicked_action: Option<String> = None;
@@ -1582,8 +1599,11 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                                 .strong(),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("📋 Copier").on_hover_text("Copier ce code").clicked() {
+                            let copy_code_btn = ui.small_button("📋 Copier").on_hover_text("Copier ce code");
+                            let copy_code_id = ui.make_persistent_id(format!("dwell_copy_code_{code_scroll_id}"));
+                            if apply_dwell_to_response(ui, dwell_state, copy_code_id, &copy_code_btn) {
                                 ui.ctx().copy_text(full_code.clone());
+                                play_earcon(Earcon::Success);
                             }
                         });
                     });
@@ -1626,7 +1646,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                 };
 
                 ui.add_space(extra_space);
-                if let Some(act) = render_line_spans(ui, content, font_size, false, color) {
+                if let Some(act) = render_line_spans(ui, content, font_size, false, color, dwell_state, &format!("hd_{card_id}_{block_idx}")) {
                     clicked_action = Some(act);
                 }
 
@@ -1666,7 +1686,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("▍").size(13.0).color(egui::Color32::from_rgb(0, 200, 255)));
-                        if let Some(act) = render_line_spans(ui, &quote_text, 12.0, true, egui::Color32::from_rgb(205, 225, 245)) {
+                        if let Some(act) = render_line_spans(ui, &quote_text, 12.0, true, egui::Color32::from_rgb(205, 225, 245), dwell_state, &format!("quote_{card_id}_{block_idx}")) {
                             clicked_action = Some(act);
                         }
                     });
@@ -1724,7 +1744,8 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                                     .small()
                                     .corner_radius(egui::CornerRadius::same(4)),
                                 );
-                                if copy_tbl_btn.on_hover_text("Copier tout le tableau au format Markdown").clicked() {
+                                let copy_tbl_id = ui.make_persistent_id(format!("dwell_copy_tbl_{table_id}"));
+                                if apply_dwell_to_response(ui, dwell_state, copy_tbl_id, &copy_tbl_btn) {
                                     set_clipboard_text(&raw_table_md);
                                     ui.ctx().copy_text(raw_table_md.clone());
                                     play_earcon(Earcon::Success);
@@ -1744,18 +1765,18 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                             .id_salt(table_scroll_id)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                egui::Grid::new(table_id)
+                                egui::Grid::new(&table_id)
                                     .striped(true)
                                     .spacing([12.0, 5.0])
                                     .min_col_width(0.0)
                                     .show(ui, |ui| {
                                         for (c_idx, h) in headers.iter().enumerate() {
                                             let w = col_widths.get(c_idx).copied().unwrap_or(70.0);
-                                            render_table_cell(ui, h, egui::Color32::from_rgb(0, 215, 255), &headers, &raw_table_md, true, w);
+                                            render_table_cell(ui, h, egui::Color32::from_rgb(0, 215, 255), &headers, &raw_table_md, true, w, dwell_state, &format!("md_th_{table_id}_{c_idx}"));
                                         }
                                         ui.end_row();
 
-                                        for row in &rows {
+                                        for (r_idx, row) in rows.iter().enumerate() {
                                             for (c_idx, cell) in row.iter().enumerate() {
                                                 let text_color = if c_idx == 0 {
                                                     egui::Color32::from_rgb(240, 245, 255)
@@ -1763,7 +1784,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                                                     egui::Color32::from_rgb(205, 220, 235)
                                                 };
                                                 let w = col_widths.get(c_idx).copied().unwrap_or(70.0);
-                                                if let Some(act) = render_table_cell(ui, cell, text_color, row, &raw_table_md, false, w) {
+                                                if let Some(act) = render_table_cell(ui, cell, text_color, row, &raw_table_md, false, w, dwell_state, &format!("md_td_{table_id}_{r_idx}_{c_idx}")) {
                                                     clicked_action = Some(act);
                                                 }
                                             }
@@ -1782,6 +1803,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
             continue;
         }
 
+        block_idx += 1;
         let indent_spaces = line.chars().take_while(|c| c.is_whitespace()).count();
         let indent_level = (indent_spaces / 2).min(4);
 
@@ -1794,7 +1816,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 let synthetic_link = format!("[▶ {video_title}]({prompt_target})");
-                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255)) {
+                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255), dwell_state, &format!("media_vid_{card_id}_{block_idx}")) {
                     clicked_action = Some(act);
                 }
             });
@@ -1811,7 +1833,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 let synthetic_link = format!("[🎵 {audio_title}]({prompt_target})");
-                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255)) {
+                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255), dwell_state, &format!("media_aud_{card_id}_{block_idx}")) {
                     clicked_action = Some(act);
                 }
             });
@@ -1827,7 +1849,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 let synthetic_link = format!("[📄 {doc_title}]({prompt_target})");
-                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255)) {
+                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255), dwell_state, &format!("media_doc_{card_id}_{block_idx}")) {
                     clicked_action = Some(act);
                 }
             });
@@ -1843,7 +1865,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 let synthetic_link = format!("[🖼️ {img_title}]({prompt_target})");
-                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255)) {
+                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255), dwell_state, &format!("media_img_{card_id}_{block_idx}")) {
                     clicked_action = Some(act);
                 }
             });
@@ -1864,7 +1886,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 ui.label(egui::RichText::new(bullet).size(12.0).color(bullet_color).strong());
-                if let Some(act) = render_line_spans(ui, item_content, 12.5, false, egui::Color32::from_rgb(225, 235, 245)) {
+                if let Some(act) = render_line_spans(ui, item_content, 12.5, false, egui::Color32::from_rgb(225, 235, 245), dwell_state, &format!("li_{card_id}_{block_idx}")) {
                     clicked_action = Some(act);
                 }
             });
@@ -1878,7 +1900,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 ui.label(egui::RichText::new(num_str).size(12.0).color(egui::Color32::from_rgb(255, 215, 110)).strong());
-                if let Some(act) = render_line_spans(ui, item_content, 12.5, false, egui::Color32::from_rgb(225, 235, 245)) {
+                if let Some(act) = render_line_spans(ui, item_content, 12.5, false, egui::Color32::from_rgb(225, 235, 245), dwell_state, &format!("num_{card_id}_{block_idx}")) {
                     clicked_action = Some(act);
                 }
             });
@@ -1886,7 +1908,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str) -> Option<S
             continue;
         }
 
-        if let Some(act) = render_line_spans(ui, trimmed, 12.5, false, egui::Color32::from_rgb(220, 230, 242)) {
+        if let Some(act) = render_line_spans(ui, trimmed, 12.5, false, egui::Color32::from_rgb(220, 230, 242), dwell_state, &format!("p_{card_id}_{block_idx}")) {
             clicked_action = Some(act);
         }
         ui.add_space(2.0);

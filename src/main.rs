@@ -223,16 +223,19 @@ pub fn render_accessible_icon_button(
     active: bool,
     dwell_progress: Option<f32>,
     active_color: Option<egui::Color32>,
+    hover_color: Option<egui::Color32>,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(ACCESSIBILITY_BTN_SIZE, egui::Sense::click());
 
     let default_active = egui::Color32::from_rgb(0, 120, 215);
     let chosen_active = active_color.unwrap_or(default_active);
+    let default_hover = egui::Color32::from_gray(65);
+    let chosen_hover = hover_color.unwrap_or(default_hover);
 
     let bg_color = if active {
         chosen_active
     } else if response.hovered() {
-        egui::Color32::from_gray(65)
+        chosen_hover
     } else {
         egui::Color32::from_gray(38)
     };
@@ -295,6 +298,26 @@ pub fn render_accessible_icon_button(
     }
 
     response.on_hover_text(tooltip)
+}
+
+pub fn apply_dwell_to_response(
+    ui: &egui::Ui,
+    dwell_state: &mut DwellState,
+    id: egui::Id,
+    response: &egui::Response,
+) -> bool {
+    let (triggered, progress) = dwell_state.update(id, response.hovered());
+    if progress > 0.0 && progress <= 1.0 {
+        let rect = response.rect;
+        let bar_height = 3.5;
+        let progress_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.bottom() - bar_height),
+            egui::pos2(rect.left() + rect.width() * progress, rect.bottom()),
+        );
+        ui.painter().rect_filled(progress_rect, egui::CornerRadius::same(2), egui::Color32::from_rgb(76, 217, 100));
+        ui.ctx().request_repaint();
+    }
+    response.clicked() || triggered
 }
 
 pub struct OverlayApp {
@@ -1119,7 +1142,7 @@ impl OverlayApp {
             .ok()
             .or_else(|| read_env_var_from_file(".env", "DWELL_TIME_MS"))
             .and_then(|s| s.trim().parse::<u64>().ok())
-            .unwrap_or(2000);
+            .unwrap_or(2200);
 
         let mut app = Self {
             status: AgentStatus::Idle,
@@ -3701,8 +3724,15 @@ impl eframe::App for OverlayApp {
 
                 ui.scope_builder(egui::UiBuilder::new().max_rect(header_rect), |ui| {
                     ui.horizontal(|ui| {
-                        let tab_assist = ui.selectable_label(self.active_tab == ActiveTab::Assistance, "🤖 Assistance");
-                        if tab_assist.clicked() {
+                        let is_assist_active = self.active_tab == ActiveTab::Assistance;
+                        let tab_assist = ui.selectable_label(is_assist_active, "🤖 Assistance");
+                        let tab_assist_id = ui.make_persistent_id("dwell_tab_assistance");
+                        let assist_activated = if !is_assist_active {
+                            apply_dwell_to_response(ui, &mut self.dwell_state, tab_assist_id, &tab_assist)
+                        } else {
+                            tab_assist.clicked()
+                        };
+                        if assist_activated {
                             self.active_tab = ActiveTab::Assistance;
                         }
                         let chat_title = if self.twitch_messages.is_empty() {
@@ -3710,8 +3740,15 @@ impl eframe::App for OverlayApp {
                         } else {
                             format!("💬 Chat ({})", self.twitch_messages.len())
                         };
-                        let tab_chat = ui.selectable_label(self.active_tab == ActiveTab::Chat, chat_title);
-                        if tab_chat.clicked() {
+                        let is_chat_active = self.active_tab == ActiveTab::Chat;
+                        let tab_chat = ui.selectable_label(is_chat_active, chat_title);
+                        let tab_chat_id = ui.make_persistent_id("dwell_tab_twitch_chat");
+                        let chat_activated = if !is_chat_active {
+                            apply_dwell_to_response(ui, &mut self.dwell_state, tab_chat_id, &tab_chat)
+                        } else {
+                            tab_chat.clicked()
+                        };
+                        if chat_activated {
                             self.active_tab = ActiveTab::Chat;
                         }
                         tab_bar_max_x = tab_assist.rect.max.x.max(tab_chat.rect.max.x);
@@ -3999,8 +4036,9 @@ impl eframe::App for OverlayApp {
                                                 .small();
 
                                                 let resp = ui.add(chip)
-                                                    .on_hover_text(format!("Lancer '{}' (Clic gauche)\nTab : compléter dans le champ", sug));
-                                                if resp.clicked() {
+                                                    .on_hover_text(format!("Lancer '{}' (Clic ou maintien au survol)\nTab : compléter dans le champ", sug));
+                                                let sug_dwell_id = ui.make_persistent_id(format!("dwell_app_sug_{sug}"));
+                                                if apply_dwell_to_response(ui, &mut self.dwell_state, sug_dwell_id, &resp) {
                                                     clicked_app_suggestion = Some(format!("Ouvrir {sug}"));
                                                 }
                                                 resp.context_menu(|ui| {
@@ -4014,10 +4052,10 @@ impl eframe::App for OverlayApp {
                                         ui.add_space(2.0);
                                     }
 
-                                    // 1ère rangée : Champ de saisie occupant tout l'espace disponible + bouton Envoyer
+                                    // 1ère rangée : Champ de saisie occupant 100% de la largeur disponible
+                                    let mut enter_hit = false;
                                     ui.horizontal(|ui| {
-                                        let send_btn_w = 64.0;
-                                        let edit_width = (ui.available_width() - send_btn_w - ui.spacing().item_spacing.x).max(60.0);
+                                        let edit_width = ui.available_width().max(60.0);
                                         let input_id = egui::Id::new("prompt_input_text");
                                         let is_input_focused = ctx.memory(|m| m.has_focus(input_id));
                                         let is_modal_open = self.show_api_key_modal;
@@ -4187,17 +4225,31 @@ impl eframe::App for OverlayApp {
                                             let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
                                         }
 
-                                        let enter_hit = (response.lost_focus() || response.has_focus())
+                                        enter_hit = (response.lost_focus() || response.has_focus())
                                             && ctx.input(|i| i.key_pressed(egui::Key::Enter));
-                                        let send_btn = ui.add_sized(
-                                            [send_btn_w, 24.0],
-                                            egui::Button::new(
-                                                egui::RichText::new("Envoyer")
-                                                    .size(11.5)
-                                                    .color(theme.accent_text),
-                                            ),
+                                    });
+
+                                    ui.add_space(3.0);
+
+                                    // 2e rangée : 7 boutons d'action ergonomiques (WCAG 2.2 AAA, Clic & Dwell 800 ms)
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = ACCESSIBILITY_ITEM_SPACING;
+
+                                        // 1. Bouton Envoyer (WCAG AAA 50x50, hover vert RGB(38, 168, 75))
+                                        let send_id = ui.make_persistent_id("dwell_btn_send");
+                                        let send_prog = self.dwell_state.get_progress(send_id);
+                                        let send_resp = render_accessible_icon_button(
+                                            ui,
+                                            "➔",
+                                            "Envoyer",
+                                            "Envoyer (Entrée) : Transmettre la consigne à l'assistant",
+                                            false,
+                                            send_prog,
+                                            Some(egui::Color32::from_rgb(34, 150, 68)),
+                                            Some(egui::Color32::from_rgb(38, 168, 75)),
                                         );
-                                        if (send_btn.clicked() || enter_hit) && !self.input_text.trim().is_empty() {
+                                        let (send_dwell, _) = self.dwell_state.update(send_id, send_resp.hovered());
+                                        if (send_resp.clicked() || send_dwell || enter_hit) && !self.input_text.trim().is_empty() {
                                             self.stop_speaking();
                                             if self.is_recording {
                                                 self.stop_recording();
@@ -4265,15 +4317,8 @@ impl eframe::App for OverlayApp {
                                                 let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
                                             }
                                         }
-                                    });
 
-                                    ui.add_space(3.0);
-
-                                    // 2e rangée : 6 boutons d'action ergonomiques (WCAG 2.2 AAA, Clic & Dwell 800 ms)
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = ACCESSIBILITY_ITEM_SPACING;
-
-                                        // 1. Bouton Micro
+                                        // 2. Bouton Micro
                                         let mic_id = ui.make_persistent_id("dwell_btn_mic");
                                         let mic_prog = self.dwell_state.get_progress(mic_id);
                                         let (mic_icon, mic_sub, mic_color) = if self.is_recording {
@@ -4289,13 +4334,14 @@ impl eframe::App for OverlayApp {
                                             self.is_recording,
                                             mic_prog,
                                             mic_color,
+                                            None,
                                         );
                                         let (mic_dwell, _) = self.dwell_state.update(mic_id, mic_resp.hovered());
                                         if mic_resp.clicked() || mic_dwell {
                                             self.toggle_recording(ui.ctx());
                                         }
 
-                                        // 2. Bouton Dictée
+                                        // 3. Bouton Dictée
                                         let dict_id = ui.make_persistent_id("dwell_btn_dict");
                                         let dict_prog = self.dwell_state.get_progress(dict_id);
                                         let dict_sub = if self.dictation_mode { "Actif" } else { "Dictée" };
@@ -4307,6 +4353,7 @@ impl eframe::App for OverlayApp {
                                             self.dictation_mode,
                                             dict_prog,
                                             Some(egui::Color32::from_rgb(215, 155, 30)),
+                                            None,
                                         );
                                         let (dict_dwell, _) = self.dwell_state.update(dict_id, dict_resp.hovered());
                                         if dict_resp.clicked() || dict_dwell {
@@ -4322,7 +4369,7 @@ impl eframe::App for OverlayApp {
                                             }
                                         }
 
-                                        // 3. Bouton Survol (Switch Access)
+                                        // 4. Bouton Survol (Switch Access)
                                         let switch_id = ui.make_persistent_id("dwell_btn_switch");
                                         let switch_prog = self.dwell_state.get_progress(switch_id);
                                         let switch_sub = if self.switch_access_mode { "Actif" } else { "Survol" };
@@ -4334,13 +4381,14 @@ impl eframe::App for OverlayApp {
                                             self.switch_access_mode,
                                             switch_prog,
                                             Some(egui::Color32::from_rgb(235, 115, 0)),
+                                            None,
                                         );
                                         let (switch_dwell, _) = self.dwell_state.update(switch_id, switch_resp.hovered());
                                         if switch_resp.clicked() || switch_dwell {
                                             self.toggle_switch_access_mode();
                                         }
 
-                                        // 4. Bouton Voix
+                                        // 5. Bouton Voix
                                         let voice_id = ui.make_persistent_id("dwell_btn_voice");
                                         let voice_prog = self.dwell_state.get_progress(voice_id);
                                         let (voice_icon, voice_sub) = match self.voice_gender {
@@ -4364,6 +4412,7 @@ impl eframe::App for OverlayApp {
                                             self.status == AgentStatus::Speaking,
                                             voice_prog,
                                             Some(theme.accent),
+                                            None,
                                         );
                                         let (voice_dwell, _) = self.dwell_state.update(voice_id, voice_resp.hovered());
                                         if voice_resp.clicked() || voice_dwell {
@@ -4379,7 +4428,7 @@ impl eframe::App for OverlayApp {
                                             }
                                         });
 
-                                        // 5. Bouton Réglages
+                                        // 6. Bouton Réglages
                                         let settings_id = ui.make_persistent_id("dwell_btn_settings");
                                         let settings_prog = self.dwell_state.get_progress(settings_id);
                                         let settings_resp = render_accessible_icon_button(
@@ -4390,6 +4439,7 @@ impl eframe::App for OverlayApp {
                                             self.show_api_key_modal,
                                             settings_prog,
                                             Some(theme.accent),
+                                            None,
                                         );
                                         let (settings_dwell, _) = self.dwell_state.update(settings_id, settings_resp.hovered());
                                         if settings_resp.clicked() || settings_dwell {
@@ -4400,7 +4450,7 @@ impl eframe::App for OverlayApp {
                                             self.stop_speaking();
                                         }
 
-                                        // 6. Bouton Effacer
+                                        // 7. Bouton Effacer
                                         let clear_id = ui.make_persistent_id("dwell_btn_clear");
                                         let clear_prog = self.dwell_state.get_progress(clear_id);
                                         let clear_resp = render_accessible_icon_button(
@@ -4410,6 +4460,7 @@ impl eframe::App for OverlayApp {
                                             "Effacer : Réinitialiser l'historique et la mémoire contextuelle",
                                             false,
                                             clear_prog,
+                                            None,
                                             None,
                                         );
                                         let (clear_dwell, _) = self.dwell_state.update(clear_id, clear_resp.hovered());
@@ -4454,6 +4505,7 @@ impl eframe::App for OverlayApp {
                                     let last_agent_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::Agent);
                                     let mut clicked_quick_suggestion: Option<String> = None;
                                     let mut request_stop_speaking = false;
+                                    let mut speak_message: Option<String> = None;
 
                                     for (idx, entry) in self.chat_history.iter().enumerate() {
                                         let is_highlighted = Some(idx) == last_user_idx || Some(idx) == last_agent_idx;
@@ -4533,7 +4585,7 @@ impl eframe::App for OverlayApp {
                                                 || (entry.text.contains('|') && entry.text.contains('\n'));
 
                                             if entry.role == ChatRole::Agent && has_interactive_md {
-                                                if let Some(prompt) = floating_window::render_markdown(ui, &entry.text, &format!("chat_entry_{idx}")) {
+                                                if let Some(prompt) = floating_window::render_markdown(ui, &entry.text, &format!("chat_entry_{idx}"), &mut self.dwell_state) {
                                                     clicked_quick_suggestion = Some(prompt);
                                                 }
                                             } else {
@@ -4546,6 +4598,12 @@ impl eframe::App for OverlayApp {
                                             }
                                             let label_resp = ui.add(egui::Label::new(rich).wrap());
                                             let interact_resp = ui.interact(label_resp.rect, msg_id, egui::Sense::click());
+
+                                            let msg_dwell_id = ui.make_persistent_id(format!("dwell_chat_msg_{idx}"));
+                                            let dwell_triggered = apply_dwell_to_response(ui, &mut self.dwell_state, msg_dwell_id, &interact_resp);
+                                            if dwell_triggered {
+                                                speak_message = Some(entry.text.clone());
+                                            }
 
                                             if interact_resp.clicked() {
                                                 ui.memory_mut(|m| m.request_focus(msg_id));
@@ -4590,7 +4648,7 @@ impl eframe::App for OverlayApp {
                                             if !entry.quick_suggestions.is_empty() {
                                                 ui.add_space(4.0);
                                                 ui.horizontal_wrapped(|ui| {
-                                                    for sug in &entry.quick_suggestions {
+                                                    for (sug_idx, sug) in entry.quick_suggestions.iter().enumerate() {
                                                         if let Some(clean_label) = sug.to_display_string() {
                                                             let clean_label = clean_label.trim();
                                                             if clean_label.is_empty() {
@@ -4604,7 +4662,9 @@ impl eframe::App for OverlayApp {
                                                                 .stroke(egui::Stroke::new(1.0, theme.border))
                                                                 .corner_radius(egui::CornerRadius::same(10));
 
-                                                            if ui.add(btn).on_hover_text("Cliquer pour choisir cette suggestion").clicked() {
+                                                            let resp = ui.add(btn).on_hover_text("Cliquer ou maintenir au survol pour choisir cette suggestion");
+                                                            let sug_dwell_id = ui.make_persistent_id(format!("dwell_quick_sug_{idx}_{sug_idx}"));
+                                                            if apply_dwell_to_response(ui, &mut self.dwell_state, sug_dwell_id, &resp) {
                                                                 clicked_quick_suggestion = Some(clean_label.to_string());
                                                             }
                                                         }
@@ -4631,6 +4691,17 @@ impl eframe::App for OverlayApp {
                                             screen_size_kb: None,
                                         });
                                         let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
+                                    }
+
+                                    if let Some(text_to_speak) = speak_message {
+                                        self.stop_speaking();
+                                        play_earcon(Earcon::Success);
+                                        let clean_text = sanitize_for_tts(&text_to_speak);
+                                        if !clean_text.trim().is_empty() {
+                                            self.status = AgentStatus::Speaking;
+                                            let _ = self.tts_sender.send(TtsCommand::Speak(clean_text));
+                                            ctx.request_repaint();
+                                        }
                                     }
 
                                     if request_stop_speaking {
@@ -4712,6 +4783,7 @@ impl eframe::App for OverlayApp {
                                                 .color(egui::Color32::from_rgba_unmultiplied(180, 190, 205, 150)),
                                         );
                                     } else {
+                                        let mut speak_twitch_message: Option<String> = None;
                                         for (idx, msg) in self.twitch_messages.iter().enumerate() {
                                             let t_id = ui.make_persistent_id(format!("twitch_msg_item_{idx}"));
                                             let layer_id = ui.layer_id();
@@ -4737,6 +4809,11 @@ impl eframe::App for OverlayApp {
                                             }).response;
                                             let resp = ui.interact(resp.rect, t_id, egui::Sense::click());
 
+                                            let t_dwell_id = ui.make_persistent_id(format!("dwell_twitch_msg_{idx}"));
+                                            if apply_dwell_to_response(ui, &mut self.dwell_state, t_dwell_id, &resp) {
+                                                speak_twitch_message = Some(format!("{}: {}", msg.author, msg.text));
+                                            }
+
                                             if resp.clicked() {
                                                 ui.memory_mut(|m| m.request_focus(t_id));
                                             }
@@ -4761,6 +4838,17 @@ impl eframe::App for OverlayApp {
                                                 );
                                             }
                                             ui.add_space(3.0);
+                                        }
+
+                                        if let Some(t_speech) = speak_twitch_message {
+                                            self.stop_speaking();
+                                            play_earcon(Earcon::Success);
+                                            let clean_speech = sanitize_for_tts(&t_speech);
+                                            if !clean_speech.trim().is_empty() {
+                                                self.status = AgentStatus::Speaking;
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(clean_speech));
+                                                ctx.request_repaint();
+                                            }
                                         }
                                     }
                                 });
@@ -5021,32 +5109,46 @@ impl eframe::App for OverlayApp {
                         .show(&ctx, |ui| {
                             // En-tête avec onglets de configuration
                             ui.horizontal(|ui| {
+                                let is_llm_active = self.settings_tab == SettingsTab::LlmProvider;
                                 let tab_llm = ui.selectable_label(
-                                    self.settings_tab == SettingsTab::LlmProvider,
+                                    is_llm_active,
                                     egui::RichText::new("🔑 Fournisseur LLM")
                                         .size(12.0)
-                                        .color(if self.settings_tab == SettingsTab::LlmProvider {
+                                        .color(if is_llm_active {
                                             theme.accent
                                         } else {
                                             theme.text_secondary
                                         })
                                         .strong(),
                                 );
-                                if tab_llm.clicked() {
+                                let tab_llm_id = ui.make_persistent_id("dwell_tab_llm_provider");
+                                let llm_activated = if !is_llm_active {
+                                    apply_dwell_to_response(ui, &mut self.dwell_state, tab_llm_id, &tab_llm)
+                                } else {
+                                    tab_llm.clicked()
+                                };
+                                if llm_activated {
                                     self.settings_tab = SettingsTab::LlmProvider;
                                 }
+                                let is_theme_active = self.settings_tab == SettingsTab::Theme;
                                 let tab_theme = ui.selectable_label(
-                                    self.settings_tab == SettingsTab::Theme,
+                                    is_theme_active,
                                     egui::RichText::new("🎨 Thèmes & Accessibilité")
                                         .size(12.0)
-                                        .color(if self.settings_tab == SettingsTab::Theme {
+                                        .color(if is_theme_active {
                                             theme.accent
                                         } else {
                                             theme.text_secondary
                                         })
                                         .strong(),
                                 );
-                                if tab_theme.clicked() {
+                                let tab_theme_id = ui.make_persistent_id("dwell_tab_theme");
+                                let theme_activated = if !is_theme_active {
+                                    apply_dwell_to_response(ui, &mut self.dwell_state, tab_theme_id, &tab_theme)
+                                } else {
+                                    tab_theme.clicked()
+                                };
+                                if theme_activated {
                                     self.settings_tab = SettingsTab::Theme;
                                 }
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -5370,8 +5472,9 @@ impl eframe::App for OverlayApp {
                 // Affichage dynamique des fenêtres volantes (stats, tables, contenus, formulaires de requête)
                 let mut submitted_card_prompts = Vec::new();
                 let prev_card_count = self.floating_cards.len();
+                let dwell_state = &mut self.dwell_state;
                 self.floating_cards.retain_mut(|card| {
-                    if let Some(prompt) = card.show(&ctx) {
+                    if let Some(prompt) = card.show(&ctx, dwell_state) {
                         submitted_card_prompts.push(prompt);
                     }
                     card.open
