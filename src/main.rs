@@ -13,13 +13,13 @@ mod types;
 mod window_util;
 mod commands;
 mod ui;
+mod ocr;
 
 use audio::spawn_audio_worker;
 use floating_window::{update_open_floating_cards, FloatingCard, OPEN_FLOATING_CARDS};
 use automation::*;
 use fs_util::*;
-use pattern::clean_words;
-use theme::{AppTheme, SettingsTab, ThemeColors};
+use theme::{AppTheme, SettingsTab};
 use tts::{sanitize_for_tts, spawn_tts_worker};
 use twitch::{search_twitch_channels, spawn_twitch_worker};
 use window_util::*;
@@ -34,11 +34,7 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use windows::core::Interface;
 #[cfg(windows)]
-use windows::Win32::Foundation::POINT;
-#[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-#[cfg(windows)]
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 #[cfg(windows)]
 extern "system" {
@@ -863,6 +859,17 @@ pub(crate) fn current_time_str() -> String {
     }
 }
 
+#[cfg(windows)]
+fn get_window_title(hwnd: windows::Win32::Foundation::HWND) -> String {
+    let mut buf = [0u16; 512];
+    let len = unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(hwnd, &mut buf) };
+    if len > 0 {
+        String::from_utf16_lossy(&buf[..len as usize]).trim().to_string()
+    } else {
+        String::new()
+    }
+}
+
 fn focus_element_target(target: &NumberedElementTarget) {
     if let Ok(mut guard) = LAST_FOCUSED_RECT.lock() {
         *guard = Some(target.rect);
@@ -872,14 +879,23 @@ fn focus_element_target(target: &NumberedElementTarget) {
 
     #[cfg(windows)]
     unsafe {
-        let pt = windows::Win32::Foundation::POINT { x: target.click_x, y: target.click_y };
-        let target_child = windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt);
-        if !target_child.is_invalid() {
-            let root = windows::Win32::UI::WindowsAndMessaging::GetAncestor(
-                target_child,
-                windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
-            );
-            let top_hwnd = if !root.is_invalid() { root } else { target_child };
+        let top_hwnd = if let Some(wid) = target.window_id {
+            windows::Win32::Foundation::HWND(wid as _)
+        } else {
+            let pt = windows::Win32::Foundation::POINT { x: target.click_x, y: target.click_y };
+            let target_child = windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt);
+            if !target_child.is_invalid() {
+                let root = windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+                    target_child,
+                    windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+                );
+                if !root.is_invalid() { root } else { target_child }
+            } else {
+                windows::Win32::Foundation::HWND(std::ptr::null_mut())
+            }
+        };
+
+        if !top_hwnd.0.is_null() {
             let cur_fg = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
             if cur_fg != top_hwnd {
                 force_foreground_window(top_hwnd);
@@ -887,6 +903,7 @@ fn focus_element_target(target: &NumberedElementTarget) {
             }
         }
 
+        let pt = windows::Win32::Foundation::POINT { x: target.click_x, y: target.click_y };
         let mut uia_focused = false;
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         if let Ok(automation) = windows::Win32::System::Com::CoCreateInstance::<_, windows::Win32::UI::Accessibility::IUIAutomation>(
@@ -2665,6 +2682,17 @@ impl eframe::App for OverlayApp {
                             }
 
                             let cur_target = &self.numbered_targets[self.switch_focus_index % num_targets];
+                            #[cfg(windows)]
+                            {
+                                let host_wid = cur_target.window_id.or(self.switch_active_window_id);
+                                if let Some(wid) = host_wid {
+                                    let hwnd = windows::Win32::Foundation::HWND(wid as _);
+                                    if !is_window_hung(hwnd) {
+                                        force_foreground_window(hwnd);
+                                        restore_if_iconic(hwnd);
+                                    }
+                                }
+                            }
                             focus_element_target(cur_target);
                             self.hover_last_cursor_pos = Some((cur_target.click_x, cur_target.click_y));
                             self.hover_cursor_still_since = Instant::now();
@@ -2743,17 +2771,217 @@ impl eframe::App for OverlayApp {
                                 let vocal_read = format!("Lecture du texte de la zone {}. {}", zone_title, extracted_text);
                                 let _ = self.tts_sender.send(TtsCommand::Speak(vocal_read));
                                 ctx.request_repaint();
+                            } else if cur_target.role == "étiquette" || cur_target.role == "label" {
+                                let click_x = cur_target.click_x;
+                                let click_y = cur_target.click_y;
+                                #[cfg(windows)]
+                                draw_screen_control_border(cur_target.rect, false);
+
+                                let mut full_label_text = cur_target.name.clone();
+                                #[cfg(windows)]
+                                {
+                                    let pt = windows::Win32::Foundation::POINT { x: click_x, y: click_y };
+                                    let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) };
+                                    if let Ok(automation) = unsafe {
+                                        windows::Win32::System::Com::CoCreateInstance::<_, windows::Win32::UI::Accessibility::IUIAutomation>(
+                                            &windows::Win32::UI::Accessibility::CUIAutomation,
+                                            None,
+                                            windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
+                                        )
+                                    } {
+                                        if let Ok(elem) = unsafe { automation.ElementFromPoint(pt) } {
+                                            if let Some(txt) = ui::extract_inner_text(&automation, &elem, 600) {
+                                                if !txt.trim().is_empty() {
+                                                    full_label_text = txt.trim().to_string();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if full_label_text.is_empty() && !cur_target.value.is_empty() {
+                                    full_label_text = cur_target.value.clone();
+                                }
+
+                                set_clipboard_text(&full_label_text);
+
+                                let vocal_read = if !full_label_text.is_empty() {
+                                    full_label_text.clone()
+                                } else {
+                                    "Étiquette vide.".to_string()
+                                };
+
+                                self.chat_history.push(ChatEntry {
+                                    role: ChatRole::Agent,
+                                    text: format!("🏷️ [Texte] : {}", vocal_read),
+                                    timestamp: current_time_str(),
+                                    quick_suggestions: Vec::new(),
+                                    screen_size_kb: None,
+                                });
+
+                                let _ = self.tts_sender.send(TtsCommand::Stop);
+                                let _ = self.tts_sender.send(TtsCommand::Speak(vocal_read));
+                                ctx.request_repaint();
+                            } else if cur_target.role == "champ de saisie" || cur_target.role == "zone de texte" {
+                                let click_x = cur_target.click_x;
+                                let click_y = cur_target.click_y;
+                                let target_name = if !cur_target.name.is_empty() { cur_target.name.clone() } else { cur_target.role.clone() };
+                                let host_window_id = cur_target.window_id.or(self.switch_active_window_id);
+
+                                #[cfg(windows)]
+                                let mut uia_elem = None;
+
+                                #[cfg(windows)]
+                                {
+                                    if let Some(wid) = host_window_id {
+                                        let h = windows::Win32::Foundation::HWND(wid as _);
+                                        if !is_window_hung(h) {
+                                            force_foreground_window(h);
+                                            restore_if_iconic(h);
+                                        }
+                                    }
+                                    let pt = windows::Win32::Foundation::POINT { x: click_x, y: click_y };
+                                    unsafe {
+                                        let target_child = windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt);
+                                        if !target_child.is_invalid() {
+                                            let root = windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+                                                target_child,
+                                                windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+                                            );
+                                            let top_hwnd = if !root.is_invalid() { root } else { target_child };
+                                            force_foreground_window(top_hwnd);
+                                            restore_if_iconic(top_hwnd);
+                                        }
+                                        let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(click_x, click_y);
+                                    }
+                                    std::thread::sleep(Duration::from_millis(40));
+
+                                    unsafe {
+                                        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+                                        if let Ok(automation) = windows::Win32::System::Com::CoCreateInstance::<_, windows::Win32::UI::Accessibility::IUIAutomation>(
+                                            &windows::Win32::UI::Accessibility::CUIAutomation,
+                                            None,
+                                            windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
+                                        ) {
+                                            if let Ok(elem) = automation.ElementFromPoint(pt) {
+                                                let is_focusable = elem.CurrentIsKeyboardFocusable().map(|b| b.as_bool()).unwrap_or(false);
+                                                if is_focusable {
+                                                    let _ = elem.SetFocus();
+                                                }
+                                                uia_elem = Some(elem);
+                                            }
+                                        }
+                                    }
+                                    ui::click_element(click_x, click_y, uia_elem.as_ref(), None);
+                                }
+                                #[cfg(not(windows))]
+                                {
+                                    ui::click_element(click_x, click_y, None, None);
+                                }
+
+                                let mut current_val = cur_target.value.clone();
+                                #[cfg(windows)]
+                                if let Some(ref elem) = uia_elem {
+                                    if let Ok(p) = unsafe { elem.GetCurrentPattern(windows::Win32::UI::Accessibility::UIA_ValuePatternId) } {
+                                        if let Ok(vp) = p.cast::<windows::Win32::UI::Accessibility::IUIAutomationValuePattern>() {
+                                            if let Ok(v) = unsafe { vp.CurrentValue() } {
+                                                let s = v.to_string();
+                                                if !s.trim().is_empty() {
+                                                    current_val = s.trim().to_string();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if current_val.is_empty() {
+                                        if let Ok(p) = unsafe { elem.GetCurrentPattern(windows::Win32::UI::Accessibility::UIA_TextPatternId) } {
+                                            if let Ok(tp) = p.cast::<windows::Win32::UI::Accessibility::IUIAutomationTextPattern>() {
+                                                if let Ok(range) = unsafe { tp.DocumentRange() } {
+                                                    if let Ok(bstr) = unsafe { range.GetText(1000) } {
+                                                        let s = bstr.to_string();
+                                                        if !s.trim().is_empty() {
+                                                            current_val = s.trim().to_string();
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                #[cfg(not(windows))]
+                                if current_val.is_empty() {
+                                    if let Some(txt) = get_active_field_content() {
+                                        current_val = txt;
+                                    }
+                                }
+
+                                let (locale, _) = get_system_locale_language();
+                                let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+                                let dict_msg = localized_speech(
+                                    lang_prefix,
+                                    "Mode dictée activé.",
+                                    "Dictation mode activated.",
+                                    "Modo dictado activado.",
+                                    "Diktatmodus aktiviert.",
+                                    "Modalità dettatura attivata.",
+                                    "Modo ditado ativado.",
+                                    "Режим диктовки включен.",
+                                    "听写模式已激活。",
+                                    "音声入力モードが有効になりました。",
+                                );
+
+                                let vocal_read = if !current_val.is_empty() {
+                                    format!("{}, valeur : {}. {}", target_name, current_val, dict_msg)
+                                } else {
+                                    format!("{}, champ vide. {}", target_name, dict_msg)
+                                };
+
+                                self.dictation_mode = true;
+                                IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
+                                self.continuous_mode = true;
+
+                                if let Ok(mut guard) = LAST_FOCUSED_RECT.lock() {
+                                    *guard = Some(cur_target.rect);
+                                }
+                                if let Some(wid) = host_window_id {
+                                    if let Ok(mut lock) = LAST_EXTERNAL_HWND.lock() {
+                                        *lock = Some(wid);
+                                    }
+                                }
+
+                                self.chat_history.push(ChatEntry {
+                                    role: ChatRole::Agent,
+                                    text: format!("✍️ [{}] {} :\n{}\n\n*({})*", cur_target.role, target_name, if current_val.is_empty() { "(vide)".to_string() } else { current_val }, dict_msg),
+                                    timestamp: current_time_str(),
+                                    quick_suggestions: vec![
+                                        QuickSuggestionItem::Text("Désactiver la dictée".to_string()),
+                                        QuickSuggestionItem::Text("Effacer le texte".to_string()),
+                                    ],
+                                    screen_size_kb: None,
+                                });
+
+                                let _ = self.tts_sender.send(TtsCommand::Stop);
+                                let _ = self.tts_sender.send(TtsCommand::Speak(vocal_read));
+                                ctx.request_repaint();
                             } else {
                             let cur_target = &self.numbered_targets[self.switch_focus_index % num_targets];
                             let click_x = cur_target.click_x;
                             let click_y = cur_target.click_y;
                             let target_name = cur_target.name.clone();
+                            let host_window_id = cur_target.window_id.or(self.switch_active_window_id);
 
                             #[cfg(windows)]
                             let mut target_top_hwnd = windows::Win32::Foundation::HWND(std::ptr::null_mut());
 
                             #[cfg(windows)]
                             {
+                                if let Some(wid) = host_window_id {
+                                    let h = windows::Win32::Foundation::HWND(wid as _);
+                                    if !is_window_hung(h) {
+                                        target_top_hwnd = h;
+                                        force_foreground_window(h);
+                                        restore_if_iconic(h);
+                                    }
+                                }
                                 let pt = windows::Win32::Foundation::POINT { x: click_x, y: click_y };
                                 unsafe {
                                     let target_child = windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt);
@@ -2763,9 +2991,11 @@ impl eframe::App for OverlayApp {
                                             windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
                                         );
                                         let top_hwnd = if !root.is_invalid() { root } else { target_child };
-                                        target_top_hwnd = top_hwnd;
-                                        force_foreground_window(top_hwnd);
-                                        restore_if_iconic(top_hwnd);
+                                        if target_top_hwnd.0.is_null() {
+                                            target_top_hwnd = top_hwnd;
+                                            force_foreground_window(top_hwnd);
+                                            restore_if_iconic(top_hwnd);
+                                        }
                                     }
                                     let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(click_x, click_y);
                                 }
@@ -2795,67 +3025,138 @@ impl eframe::App for OverlayApp {
                             let _ = self.tts_sender.send(TtsCommand::Stop);
                             let _ = self.tts_sender.send(TtsCommand::Speak(action_feedback));
 
-                            std::thread::sleep(Duration::from_millis(160));
-
-                            #[cfg(windows)]
-                            let all_window_targets = if !target_top_hwnd.0.is_null() {
-                                collect_numbered_targets_for_window(target_top_hwnd)
-                            } else {
-                                collect_numbered_targets_for_active_window()
-                            };
-
-                            #[cfg(not(windows))]
-                            let all_window_targets = collect_numbered_targets_for_active_window();
-
-                            let (z_min_x, z_min_y, z_max_x, z_max_y) = if let Some(z_idx) = self.switch_active_zone_index {
-                                if let Some(zone) = self.switch_zones.get(z_idx) {
-                                    (
-                                        zone.rect[0] - 25,
-                                        zone.rect[1] - 25,
-                                        zone.rect[2] + 40,
-                                        zone.rect[3] + 250,
-                                    )
-                                } else {
-                                    (click_x - 300, click_y - 100, click_x + 300, click_y + 400)
-                                }
-                            } else {
-                                (click_x - 300, click_y - 100, click_x + 300, click_y + 400)
-                            };
-
-                            let zone_targets: Vec<NumberedElementTarget> = all_window_targets
-                                .into_iter()
-                                .filter(|t| {
-                                    t.click_x >= z_min_x
-                                        && t.click_x <= z_max_x
-                                        && t.click_y >= z_min_y
-                                        && t.click_y <= z_max_y
-                                })
-                                .collect();
+                            std::thread::sleep(Duration::from_millis(180));
 
                             let old_targets = self.numbered_targets.clone();
-                            let new_popped_targets: Vec<NumberedElementTarget> = zone_targets
-                                .iter()
-                                .filter(|zt| {
-                                    !old_targets.iter().any(|ot| {
-                                        (ot.click_x - zt.click_x).abs() <= 6
-                                            && (ot.click_y - zt.click_y).abs() <= 6
-                                    })
-                                })
-                                .cloned()
-                                .collect();
+                            let mut context_updated = false;
 
-                            if !new_popped_targets.is_empty() {
-                                let mut updated = zone_targets;
-                                for (i, t) in updated.iter_mut().enumerate() {
-                                    t.index = i + 1;
+                            // 1. Détection de l'apparition d'une nouvelle fenêtre (boîte de dialogue, modale, etc.)
+                            #[cfg(windows)]
+                            {
+                                let cur_fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+                                let is_new_window = !cur_fg.0.is_null()
+                                    && !target_top_hwnd.0.is_null()
+                                    && cur_fg != target_top_hwnd
+                                    && !is_window_hung(cur_fg);
+
+                                if is_new_window {
+                                    let win_title = get_window_title(cur_fg);
+                                    if !win_title.is_empty() && !win_title.to_lowercase().contains("libertide") {
+                                        let new_win_targets = collect_numbered_targets_for_window(cur_fg);
+                                        if !new_win_targets.is_empty() {
+                                            self.switch_windows = collect_switch_candidate_windows();
+                                            self.switch_active_window_id = Some(cur_fg.0 as isize);
+                                            self.switch_zones.clear();
+                                            self.switch_active_zone_index = None;
+                                            self.numbered_targets = new_win_targets;
+                                            self.switch_focus_index = 0;
+
+                                            let mut r = windows::Win32::Foundation::RECT::default();
+                                            let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(cur_fg, &mut r) };
+                                            draw_screen_orange_border([r.left, r.top, r.right, r.bottom]);
+
+                                            if let Some(first) = self.numbered_targets.first() {
+                                                focus_element_target(first);
+                                                self.hover_last_cursor_pos = Some((first.click_x, first.click_y));
+                                                self.hover_cursor_still_since = Instant::now();
+                                                self.hover_last_announced_target = Some(first.index);
+                                                let win_announcement = format!("{win_title}. {}", first.name);
+                                                let _ = self.tts_sender.send(TtsCommand::Stop);
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(win_announcement));
+                                            }
+                                            context_updated = true;
+                                            ctx.request_repaint();
+                                        }
+                                    }
                                 }
-                                self.numbered_targets = updated;
-                                self.switch_focus_index = 0;
-                                if let Some(first) = self.numbered_targets.first() {
-                                    focus_element_target(first);
-                                    self.hover_last_cursor_pos = Some((first.click_x, first.click_y));
-                                    self.hover_cursor_still_since = Instant::now();
-                                    self.hover_last_announced_target = Some(first.index);
+                            }
+
+                            // 2 & 3. Si aucune nouvelle fenêtre, analyser la fenêtre pour de nouveaux éléments (menus contextuels, popups)
+                            if !context_updated {
+                                #[cfg(windows)]
+                                let all_window_targets = if !target_top_hwnd.0.is_null() {
+                                    collect_numbered_targets_for_window(target_top_hwnd)
+                                } else {
+                                    collect_numbered_targets_for_active_window()
+                                };
+
+                                #[cfg(not(windows))]
+                                let all_window_targets = collect_numbered_targets_for_active_window();
+
+                                let mut new_popped_targets: Vec<NumberedElementTarget> = all_window_targets
+                                    .iter()
+                                    .filter(|ft| {
+                                        !old_targets.iter().any(|ot| {
+                                            (ot.click_x - ft.click_x).abs() <= 6
+                                                && (ot.click_y - ft.click_y).abs() <= 6
+                                                && ot.name == ft.name
+                                        })
+                                    })
+                                    .cloned()
+                                    .collect();
+
+                                if !new_popped_targets.is_empty() {
+                                    for (i, t) in new_popped_targets.iter_mut().enumerate() {
+                                        t.index = i + 1;
+                                    }
+                                    self.numbered_targets = new_popped_targets;
+                                    self.switch_focus_index = 0;
+                                    if let Some(first) = self.numbered_targets.first() {
+                                        focus_element_target(first);
+                                        self.hover_last_cursor_pos = Some((first.click_x, first.click_y));
+                                        self.hover_cursor_still_since = Instant::now();
+                                        self.hover_last_announced_target = Some(first.index);
+                                        let menu_announcement = format!("Menu : {}", first.name);
+                                        let _ = self.tts_sender.send(TtsCommand::Stop);
+                                        let _ = self.tts_sender.send(TtsCommand::Speak(menu_announcement));
+                                    }
+                                    context_updated = true;
+                                    ctx.request_repaint();
+                                }
+                            }
+
+                            // Repli : mise à jour des éléments de la zone actuelle si le contenu a changé sans popup
+                            if !context_updated {
+                                #[cfg(windows)]
+                                let all_window_targets = if !target_top_hwnd.0.is_null() {
+                                    collect_numbered_targets_for_window(target_top_hwnd)
+                                } else {
+                                    collect_numbered_targets_for_active_window()
+                                };
+                                #[cfg(not(windows))]
+                                let all_window_targets = collect_numbered_targets_for_active_window();
+
+                                let (z_min_x, z_min_y, z_max_x, z_max_y) = if let Some(z_idx) = self.switch_active_zone_index {
+                                    if let Some(zone) = self.switch_zones.get(z_idx) {
+                                        (
+                                            zone.rect[0] - 25,
+                                            zone.rect[1] - 25,
+                                            zone.rect[2] + 40,
+                                            zone.rect[3] + 250,
+                                        )
+                                    } else {
+                                        (click_x - 300, click_y - 100, click_x + 300, click_y + 400)
+                                    }
+                                } else {
+                                    (click_x - 300, click_y - 100, click_x + 300, click_y + 400)
+                                };
+
+                                let zone_targets: Vec<NumberedElementTarget> = all_window_targets
+                                    .into_iter()
+                                    .filter(|t| {
+                                        t.click_x >= z_min_x
+                                            && t.click_x <= z_max_x
+                                            && t.click_y >= z_min_y
+                                            && t.click_y <= z_max_y
+                                    })
+                                    .collect();
+
+                                if !zone_targets.is_empty() && zone_targets != old_targets {
+                                    let mut updated = zone_targets;
+                                    for (i, t) in updated.iter_mut().enumerate() {
+                                        t.index = i + 1;
+                                    }
+                                    self.numbered_targets = updated;
                                 }
                             }
                             }
@@ -2904,6 +3205,31 @@ impl eframe::App for OverlayApp {
                     self.hover_last_cursor_pos = Some((cur_x, cur_y));
                     self.hover_pending_speech = None;
                     self.hover_speech_deadline = None;
+
+                    // Détection et bascule immédiate vers la fenêtre survolée en cours de mouvement
+                    if !self.switch_windows.is_empty() {
+                        if let Some(w_idx) = find_switch_window_at_point(&self.switch_windows, cur_x, cur_y) {
+                            let hovered_win = &self.switch_windows[w_idx];
+                            if self.switch_active_window_id != Some(hovered_win.id) {
+                                self.switch_active_window_id = Some(hovered_win.id);
+                                self.switch_focus_index = w_idx;
+                                #[cfg(windows)]
+                                {
+                                    let hwnd = windows::Win32::Foundation::HWND(hovered_win.id as _);
+                                    if !is_window_hung(hwnd) {
+                                        force_foreground_window(hwnd);
+                                        restore_if_iconic(hwnd);
+                                    }
+                                    draw_screen_orange_border(hovered_win.rect);
+                                }
+                                #[cfg(not(windows))]
+                                {
+                                    force_foreground_window(&hovered_win.title);
+                                    restore_if_iconic(&hovered_win.title);
+                                }
+                            }
+                        }
+                    }
                 } else if self.hover_physical_mouse_moved
                     && !is_recent_switch_nav
                     && self.hover_cursor_still_since.elapsed() >= Duration::from_millis(200) {
@@ -3328,17 +3654,26 @@ impl eframe::App for OverlayApp {
                                         } else if !self.numbered_targets.is_empty() {
                                             let cur = &self.numbered_targets[self.switch_focus_index % self.numbered_targets.len()];
                                             let label = if cur.name.is_empty() { "Contrôle" } else { cur.name.as_str() };
+                                            let action_hint = if cur.role == "étiquette" || cur.role == "label" {
+                                                "lire"
+                                            } else if cur.role == "champ de saisie" || cur.role == "zone de texte" {
+                                                "lire / activer"
+                                            } else if cur.role == "lecture textuelle" {
+                                                "extraire"
+                                            } else {
+                                                "cliquer"
+                                            };
                                             localized_speech(
                                                 lang_prefix,
-                                                &format!("🎯 {label} (Entrée: cliquer)"),
-                                                &format!("🎯 {label} (Enter: click)"),
-                                                &format!("🎯 {label} (Entrar: clic)"),
-                                                &format!("🎯 {label} (Eingabe: Klick)"),
-                                                &format!("🎯 {label} (Invio: clic)"),
-                                                &format!("🎯 {label} (Enter: clicar)"),
-                                                &format!("🎯 {label} (Enter: клик)"),
-                                                &format!("🎯 {label} (Enter: 点击)"),
-                                                &format!("🎯 {label} (Enter: クリック)"),
+                                                &format!("🎯 {label} (Entrée: {action_hint})"),
+                                                &format!("🎯 {label} (Enter: {action_hint})"),
+                                                &format!("🎯 {label} (Entrar: {action_hint})"),
+                                                &format!("🎯 {label} (Eingabe: {action_hint})"),
+                                                &format!("🎯 {label} (Invio: {action_hint})"),
+                                                &format!("🎯 {label} (Enter: {action_hint})"),
+                                                &format!("🎯 {label} (Enter: {action_hint})"),
+                                                &format!("🎯 {label} (Enter: {action_hint})"),
+                                                &format!("🎯 {label} (Enter: {action_hint})"),
                                             )
                                         } else {
                                             localized_speech(
@@ -4280,8 +4615,9 @@ impl eframe::App for OverlayApp {
                 if self.show_numbered_targets {
                     for target in &self.numbered_targets {
                         let ppp = ctx.pixels_per_point().max(0.5);
-                        let left = target.rect[0] as f32 / ppp;
-                        let top = target.rect[1] as f32 / ppp;
+                        let window_origin = self.window_pos.unwrap_or_default();
+                        let left = (target.rect[0] as f32 / ppp) - window_origin.x;
+                        let top = (target.rect[1] as f32 / ppp) - window_origin.y;
                         let badge_rect = egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(22.0, 18.0));
                         
                         let badge_bg = if target.role == "lecture textuelle" {
@@ -4319,49 +4655,57 @@ impl eframe::App for OverlayApp {
 
                 // Halo visuel pulsé entourant la zone de navigation analysée par le LLM
                 if self.switch_access_mode && self.switch_step == SwitchAccessStep::Zones && !self.switch_zones.is_empty() {
-                    let cur_zone = &self.switch_zones[self.switch_focus_index % self.switch_zones.len()];
-                    let ppp = ctx.pixels_per_point().max(0.5);
-                    let z_rect = egui::Rect::from_min_max(
-                        egui::pos2(cur_zone.rect[0] as f32 / ppp, cur_zone.rect[1] as f32 / ppp),
-                        egui::pos2(cur_zone.rect[2] as f32 / ppp, cur_zone.rect[3] as f32 / ppp),
-                    );
-                    painter.rect_stroke(
-                        z_rect.expand(6.0),
-                        egui::CornerRadius::same(8),
-                            egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 200, 255)),
-                        egui::StrokeKind::Outside,
-                    );
+                    #[cfg(not(windows))]
+                    {
+                        let cur_zone = &self.switch_zones[self.switch_focus_index % self.switch_zones.len()];
+                        let ppp = ctx.pixels_per_point().max(0.5);
+                        let window_origin = self.window_pos.unwrap_or_default();
+                        let z_rect = egui::Rect::from_min_max(
+                            egui::pos2((cur_zone.rect[0] as f32 / ppp) - window_origin.x, (cur_zone.rect[1] as f32 / ppp) - window_origin.y),
+                            egui::pos2((cur_zone.rect[2] as f32 / ppp) - window_origin.x, (cur_zone.rect[3] as f32 / ppp) - window_origin.y),
+                        );
+                        painter.rect_stroke(
+                            z_rect.expand(6.0),
+                            egui::CornerRadius::same(8),
+                                egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 200, 255)),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
                 }
 
                 // Cadre net délimitant le contrôle ciblé en mode Switch Access
                 if self.switch_access_mode && self.switch_step == SwitchAccessStep::Elements && !self.numbered_targets.is_empty() {
-                    let cur_target = &self.numbered_targets[self.switch_focus_index % self.numbered_targets.len()];
-                    let ppp = ctx.pixels_per_point().max(0.5);
-                    let t_rect = egui::Rect::from_min_max(
-                        egui::pos2(cur_target.rect[0] as f32 / ppp, cur_target.rect[1] as f32 / ppp),
-                        egui::pos2(cur_target.rect[2] as f32 / ppp, cur_target.rect[3] as f32 / ppp),
-                    );
-                    let stroke_color = if cur_target.role == "lecture textuelle" {
-                        egui::Color32::from_rgb(0, 230, 255)
-                    } else {
-                        egui::Color32::from_rgb(255, 140, 0)
-                    };
-                    painter.rect_stroke(
-                        t_rect.expand(3.0),
-                        egui::CornerRadius::same(6),
-                        egui::Stroke::new(2.5, stroke_color),
-                        egui::StrokeKind::Outside,
-                    );
+                    #[cfg(not(windows))]
+                    {
+                        let cur_target = &self.numbered_targets[self.switch_focus_index % self.numbered_targets.len()];
+                        let ppp = ctx.pixels_per_point().max(0.5);
+                        let window_origin = self.window_pos.unwrap_or_default();
+                        let t_rect = egui::Rect::from_min_max(
+                            egui::pos2((cur_target.rect[0] as f32 / ppp) - window_origin.x, (cur_target.rect[1] as f32 / ppp) - window_origin.y),
+                            egui::pos2((cur_target.rect[2] as f32 / ppp) - window_origin.x, (cur_target.rect[3] as f32 / ppp) - window_origin.y),
+                        );
+                        let stroke_color = if cur_target.role == "lecture textuelle" {
+                            egui::Color32::from_rgb(0, 230, 255)
+                        } else {
+                            egui::Color32::from_rgb(255, 140, 0)
+                        };
+                        painter.rect_stroke(
+                            t_rect.expand(3.0),
+                            egui::CornerRadius::same(6),
+                            egui::Stroke::new(2.5, stroke_color),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
                 }
 
                 // Indicateur visuel du mode Switch Access
                 if self.switch_access_mode {
-                        let stroke_color = egui::Color32::from_rgb(255, 140, 0);
+                    let stroke_color = egui::Color32::from_rgb(255, 215, 0);
                     painter.rect_stroke(
-                        control_rect.expand(2.0),
+                        control_rect,
                         egui::CornerRadius::same(12),
                         egui::Stroke::new(2.5, stroke_color),
-                        egui::StrokeKind::Outside,
+                        egui::StrokeKind::Inside,
                     );
                 }
                 // Tracé de l'outline rect de la zone cible en mode dictée
@@ -4369,9 +4713,10 @@ impl eframe::App for OverlayApp {
                     if let Ok(guard) = LAST_FOCUSED_RECT.lock() {
                         if let Some([left, top, right, bottom]) = *guard {
                             let ppp = ctx.pixels_per_point().max(0.5);
+                            let window_origin = self.window_pos.unwrap_or_default();
                             let screen_rect = egui::Rect::from_min_max(
-                                egui::pos2(left as f32 / ppp, top as f32 / ppp),
-                                egui::pos2(right as f32 / ppp, bottom as f32 / ppp),
+                                egui::pos2((left as f32 / ppp) - window_origin.x, (top as f32 / ppp) - window_origin.y),
+                                egui::pos2((right as f32 / ppp) - window_origin.x, (bottom as f32 / ppp) - window_origin.y),
                             );
                             // Dessin d'un halo semi-transparent et d'une bordure dorée
                             ui.painter().rect_stroke(

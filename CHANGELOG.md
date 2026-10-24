@@ -6,6 +6,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.6] - 2026-10-26
+
+### 👁️ Multi-Platform Vision & OCR Engine (`ocr.rs`)
+- **High-Performance Visual Capture & Recognition**:
+  - **Windows**: Ultra-fast (< 3 ms) in-memory 32-bit RGBA frame capture via GDI (`BitBlt`, `GetDIBits`), paired with a cellular luminance gradient transition analysis algorithm (`detect_visual_boxes_from_pixels`) and semantic Win32 / UIA resolution (`resolve_visual_zone_content`).
+  - **macOS**: Native **Apple Vision** integration (`VNRecognizeTextRequest`) paired with CoreGraphics capture (`CGWindowListCreateImage`), hardware-accelerated by the Apple Neural Engine (ANE) on Apple Silicon M1 to M4 chips (< 5 ms).
+  - **Linux**: Pure-Rust lightweight OCR engine powered by `ocrs` and `rten` (`text-detection` and `text-recognition`), direct X11 capture (`XGetImage`), with seamless background downloading and local model caching in `~/.cache/libertide/models`.
+  - **Orphan Text & Button Detection (`enrich_targets_with_ocr`)**:
+    - Connected-component bounding box analysis with horizontal bridging for adjacent words on the same line.
+    - Strict spatial deduplication: visual OCR targets never overlap controls already backed by a valid native accessibility node.
+
+### 🎯 Hover Mode & Accessibility Ergonomics Integration (`automation.rs`, `ui.rs`)
+- **Universal Interaction on Non-Accessible Interfaces**:
+  - Automatic discovery and hover vocalization for controls in applications lacking native accessibility trees (HTML5/WebGL Canvas, Java Swing apps, custom ImGui/Qt interfaces, PDF viewers, or remote desktop sessions).
+  - Automatic numbered badge assignment and activation shortcuts (`NumberedElementTarget`) for every visually recognized text element (*"visuel (OCR)"*, *"texte (Apple Vision)"*, *"texte (ocrs)"*).
+- **Macro-Zone Text Reading Enrichment (`extract_text_from_zone`)**:
+  - Integration of OCR-detected text blocks into the zone-reading command, ensuring full speech synthesis even when native UIA, AXUIElement, or AT-SPI2 text nodes are missing.
+- **Switch Navigation & Rendering Robustness**:
+  - Seamless integration into the switch/hover hierarchy (Window ➔ Zone ➔ Control/Visual Text).
+  - Immediate incorporation of enriched visual targets into hover bounding box calculations and simulated click coordinates.
+
+---
+
 ## [0.5.5] - 2026-10-24
 
 ### 🎯 Hover Mode & Accessibility Ergonomics
