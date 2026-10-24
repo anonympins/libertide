@@ -363,35 +363,77 @@ pub fn recognize_texts_vision(rect: [i32; 4]) -> Vec<(String, [i32; 4])> {
 #[cfg(target_os = "linux")]
 fn get_ocr_engine() -> Option<&'static ocrs::OcrEngine> {
     use std::path::PathBuf;
-    use rten::Model;
+    use std::process::Command;
     use std::sync::OnceLock;
+    use ocrs::{OcrEngine, OcrEngineParams};
+    use rten::Model;
 
-    static ENGINE: OnceLock<Option<ocrs::OcrEngine>> = OnceLock::new();
+    static ENGINE: OnceLock<Option<OcrEngine>> = OnceLock::new();
 
     ENGINE.get_or_init(|| {
-        fn find_model(name: &str) -> Option<PathBuf> {
+        fn ensure_model(name: &str) -> Option<PathBuf> {
             let mut candidates = vec![
-            PathBuf::from(name),
-            PathBuf::from("models").join(name),
-            PathBuf::from("/usr/share/libertide/models").join(name),
-        ];
-        if let Ok(home) = std::env::var("HOME") {
-            candidates.push(PathBuf::from(home).join(".cache/libertide/models").join(name));
+                PathBuf::from(name),
+                PathBuf::from("models").join(name),
+                PathBuf::from("/usr/share/libertide/models").join(name),
+            ];
+            if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
+                candidates.push(PathBuf::from(dir).join("models").join(name));
+                candidates.push(PathBuf::from(dir).join(name));
+            }
+            if let Ok(home) = std::env::var("HOME") {
+                candidates.push(PathBuf::from(home).join(".cache/libertide/models").join(name));
+            }
+
+            if let Some(existing) = candidates.into_iter().find(|p| p.is_file()) {
+                return Some(existing);
+            }
+
+            // Téléchargement automatique vers le cache si inexistant
+            let target_dir = std::env::var("HOME")
+                .map(|h| PathBuf::from(h).join(".cache/libertide/models"))
+                .unwrap_or_else(|_| PathBuf::from("models"));
+
+            let _ = std::fs::create_dir_all(&target_dir);
+            let target_path = target_dir.join(name);
+            let temp_path = target_dir.join(format!("{name}.tmp"));
+
+            let url = format!("https://robertknight.github.io/ocrs-models/{name}");
+            let ok = Command::new("curl")
+                .args(["-f", "-L", "-sS", "-o"])
+                .arg(&temp_path)
+                .arg(&url)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+                || Command::new("wget")
+                    .args(["-q", "-O"])
+                    .arg(&temp_path)
+                    .arg(&url)
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+
+            if ok && temp_path.is_file() {
+                if std::fs::rename(&temp_path, &target_path).is_ok() {
+                    return Some(target_path);
+                }
+            }
+            let _ = std::fs::remove_file(&temp_path);
+            None
         }
-        candidates.into_iter().find(|p| p.is_file())
-    }
 
-        let det_path = find_model("text-detection.onnx")
-            .or_else(|| find_model("text-detection.rten"))?;
-        let rec_path = find_model("text-recognition.onnx")
-            .or_else(|| find_model("text-recognition.rten"))?;
+        let det_path = ensure_model("text-detection.rten")
+            .or_else(|| ensure_model("text-detection.onnx"))?;
+        let rec_path = ensure_model("text-recognition.rten")
+            .or_else(|| ensure_model("text-recognition.onnx"))?;
 
-        let det_model = rten::model::Model::load_file(&det_path).ok()?;
-        let rec_model = rten::model::Model::load_file(&rec_path).ok()?;
+        let detection_model = Model::load_file(&det_path).ok()?;
+        let recognition_model = Model::load_file(&rec_path).ok()?;
 
-        ocrs::OcrEngine::new(ocrs::OcrEngineParams {
-            detection_model: Some(det_model),
-            recognition_model: Some(rec_model),
+        OcrEngine::new(OcrEngineParams {
+            detection_model: Some(detection_model),
+            recognition_model: Some(recognition_model),
             ..Default::default()
         }).ok()
     }).as_ref()
@@ -438,7 +480,7 @@ pub fn recognize_texts_ocrs(
     for (line, text_opt) in line_rects.iter().zip(texts.into_iter()) {
         if let Some(txt) = text_opt {
             let s = txt.to_string().trim().to_string();
-            if !s.is_empty() {
+            if s.len() > 1 {
                 let mut min_x = i32::MAX;
                 let mut min_y = i32::MAX;
                 let mut max_x = i32::MIN;
