@@ -441,11 +441,12 @@ pub fn recognize_texts_ocrs(
                 let mut max_x = i32::MIN;
                 let mut max_y = i32::MIN;
                 for word in line {
-                    let r = word.bounding_rect();
-                    min_x = min_x.min(r.left() as i32);
-                    min_y = min_y.min(r.top() as i32);
-                    max_x = max_x.max(r.right() as i32);
-                    max_y = max_y.max(r.bottom() as i32);
+                    for pt in word.corners() {
+                        min_x = min_x.min(pt.x.floor() as i32);
+                        min_y = min_y.min(pt.y.floor() as i32);
+                        max_x = max_x.max(pt.x.ceil() as i32);
+                        max_y = max_y.max(pt.y.ceil() as i32);
+                    }
                 }
                 if min_x < max_x && min_y < max_y {
                     let x0 = window_rect[0] + min_x;
