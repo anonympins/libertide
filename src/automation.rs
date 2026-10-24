@@ -1026,6 +1026,22 @@ pub static SWITCH_HOOK_ENABLED: AtomicBool = AtomicBool::new(false);
 pub static SWITCH_KEY_QUEUE: Mutex<Vec<crate::types::SwitchKeyEvent>> = Mutex::new(Vec::new());
 
 #[cfg(windows)]
+pub mod accessibility_keys {
+    use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
+
+    pub const VK_SWITCH_PRIMARY: VIRTUAL_KEY = VIRTUAL_KEY(0x20);   // Espace (Contacteur 1 standard / validation)
+    pub const VK_SWITCH_ENTER: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);     // Entrée (Contacteur 2 standard / sélection)
+    pub const VK_SWITCH_F7: VIRTUAL_KEY = VIRTUAL_KEY(0x76);        // F7 (Contacteur profil comm) -> Toggle Survol / Dwell
+    pub const VK_SWITCH_F8: VIRTUAL_KEY = VIRTUAL_KEY(0x77);        // F8 (Contacteur profil comm) -> Toggle Dictée
+    pub const VK_SWITCH_F9: VIRTUAL_KEY = VIRTUAL_KEY(0x78);        // F9 -> Toggle Voix / TTS
+    pub const VK_SWITCH_F4: VIRTUAL_KEY = VIRTUAL_KEY(0x73);        // F4 -> Effacer / Trash
+    pub const VK_PAUSE_BREAK: VIRTUAL_KEY = VIRTUAL_KEY(0x13);      // Touche Pause -> Toggle Dictée
+    pub const VK_XBUTTON1: VIRTUAL_KEY = VIRTUAL_KEY(0x05);         // Trackball bouton 4 (Souris 4)
+    pub const VK_XBUTTON2: VIRTUAL_KEY = VIRTUAL_KEY(0x06);         // Trackball bouton 5 (Souris 5)
+    pub const VK_MBUTTON: VIRTUAL_KEY = VIRTUAL_KEY(0x04);          // Trackball bouton molette
+}
+
+#[cfg(windows)]
 static HOOK_KEYS_DOWN: Mutex<[bool; 256]> = Mutex::new([false; 256]);
 
 pub fn reset_switch_keys() {
@@ -1053,7 +1069,7 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
     };
     use crate::types::SwitchKeyEvent;
 
-    if code >= 0 && SWITCH_HOOK_ENABLED.load(Ordering::Relaxed) {
+    if code >= 0 {
         let fg = GetForegroundWindow();
         let mut fg_pid = 0u32;
         let _ = GetWindowThreadProcessId(fg, Some(&mut fg_pid));
@@ -1066,13 +1082,18 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         let is_up = wparam.0 == WM_KEYUP as usize || wparam.0 == WM_SYSKEYUP as usize;
 
         let is_shift = (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x10) as u16 & 0x8000) != 0;
+        let is_switch_hook_on = SWITCH_HOOK_ENABLED.load(Ordering::Relaxed);
 
         let switch_event = match vk {
-            0x09 => Some(if is_shift { SwitchKeyEvent::Prev } else { SwitchKeyEvent::Next }), // Tab / Shift+Tab
-            0x25 | 0x26 | 0x64 | 0x34 => Some(SwitchKeyEvent::Prev), // Gauche, Haut, Pavé 4, Touche 4
-            0x27 | 0x28 | 0x66 | 0x36 => Some(SwitchKeyEvent::Next), // Droite, Bas, Pavé 6, Touche 6
-            0x0D | 0x20 => Some(SwitchKeyEvent::Select),             // Entrée, Espace
-            0x1B => Some(SwitchKeyEvent::Escape),                    // Échap
+            0x76 => Some(SwitchKeyEvent::ToggleSwitch),             // F7 -> Toggle Survol
+            0x77 | 0x13 => Some(SwitchKeyEvent::ToggleDictation),  // F8 ou Pause -> Toggle Dictée
+            0x78 => Some(SwitchKeyEvent::ToggleVoice),              // F9 -> Toggle Voix
+            0x73 => Some(SwitchKeyEvent::Clear),                    // F4 -> Effacer / Trash
+            0x09 if is_switch_hook_on => Some(if is_shift { SwitchKeyEvent::Prev } else { SwitchKeyEvent::Next }), // Tab / Shift+Tab
+            0x25 | 0x26 | 0x64 | 0x34 if is_switch_hook_on => Some(SwitchKeyEvent::Prev), // Gauche, Haut, Pavé 4, Touche 4
+            0x27 | 0x28 | 0x66 | 0x36 if is_switch_hook_on => Some(SwitchKeyEvent::Next), // Droite, Bas, Pavé 6, Touche 6
+            0x0D | 0x20 if is_switch_hook_on => Some(SwitchKeyEvent::Select),             // Entrée, Espace
+            0x1B if is_switch_hook_on => Some(SwitchKeyEvent::Escape),                    // Échap
             _ => None,
         };
 

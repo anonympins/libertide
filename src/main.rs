@@ -123,12 +123,178 @@ pub fn get_tts_audio_level() -> f32 {
     f32::from_bits(TTS_AUDIO_LEVEL.load(Ordering::Relaxed))
 }
 
+
+
 pub fn set_mic_audio_level(level: f32) {
     MIC_AUDIO_LEVEL.store(level.to_bits(), Ordering::Relaxed);
 }
 
 pub fn get_mic_audio_level() -> f32 {
     f32::from_bits(MIC_AUDIO_LEVEL.load(Ordering::Relaxed))
+}
+
+
+// Constantes ergonomiques d'accessibilité motrice (WCAG 2.2 AAA Target Size)
+pub const ACCESSIBILITY_BTN_SIZE: egui::Vec2 = egui::vec2(50.0, 50.0);
+pub const ACCESSIBILITY_ICON_FONT: egui::FontId = egui::FontId::proportional(22.0);
+pub const ACCESSIBILITY_SUB_FONT: egui::FontId = egui::FontId::proportional(9.0);
+pub const ACCESSIBILITY_ITEM_SPACING: f32 = 8.0;
+
+#[derive(Default)]
+pub struct DwellState {
+    pub hovered_id: Option<egui::Id>,
+    pub hover_start: Option<Instant>,
+    pub dwell_duration: Duration,
+    pub cooldown_until: Option<Instant>,
+}
+
+impl DwellState {
+    pub fn new(millis: u64) -> Self {
+        Self {
+            hovered_id: None,
+            hover_start: None,
+            dwell_duration: Duration::from_millis(millis),
+            cooldown_until: None,
+        }
+    }
+
+    pub fn get_progress(&self, id: egui::Id) -> Option<f32> {
+        if self.hovered_id == Some(id) {
+            if let Some(start) = self.hover_start {
+                let elapsed = Instant::now().duration_since(start);
+                let ratio = (elapsed.as_secs_f32() / self.dwell_duration.as_secs_f32()).clamp(0.0, 1.0);
+                return Some(ratio);
+            }
+        }
+        None
+    }
+
+    pub fn update(&mut self, id: egui::Id, is_hovered: bool) -> (bool, f32) {
+        let now = Instant::now();
+
+        if let Some(cooldown) = self.cooldown_until {
+            if now < cooldown {
+                if !is_hovered && self.hovered_id == Some(id) {
+                    self.hovered_id = None;
+                    self.hover_start = None;
+                }
+                return (false, 0.0);
+            } else {
+                self.cooldown_until = None;
+            }
+        }
+
+        if !is_hovered {
+            if self.hovered_id == Some(id) {
+                self.hovered_id = None;
+                self.hover_start = None;
+            }
+            return (false, 0.0);
+        }
+
+        if self.hovered_id != Some(id) {
+            self.hovered_id = Some(id);
+            self.hover_start = Some(now);
+            return (false, 0.0);
+        }
+
+        if let Some(start) = self.hover_start {
+            let elapsed = now.duration_since(start);
+            let ratio = (elapsed.as_secs_f32() / self.dwell_duration.as_secs_f32()).clamp(0.0, 1.0);
+
+            if elapsed >= self.dwell_duration {
+                self.hover_start = None;
+                self.hovered_id = None;
+                self.cooldown_until = Some(now + Duration::from_millis(500));
+                return (true, 1.0);
+            }
+            return (false, ratio);
+        }
+
+        (false, 0.0)
+    }
+}
+
+pub fn render_accessible_icon_button(
+    ui: &mut egui::Ui,
+    icon: &str,
+    sub_label: &str,
+    tooltip: &str,
+    active: bool,
+    dwell_progress: Option<f32>,
+    active_color: Option<egui::Color32>,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(ACCESSIBILITY_BTN_SIZE, egui::Sense::click());
+
+    let default_active = egui::Color32::from_rgb(0, 120, 215);
+    let chosen_active = active_color.unwrap_or(default_active);
+
+    let bg_color = if active {
+        chosen_active
+    } else if response.hovered() {
+        egui::Color32::from_gray(65)
+    } else {
+        egui::Color32::from_gray(38)
+    };
+
+    ui.painter().rect_filled(rect, egui::CornerRadius::same(10), bg_color);
+
+    // Jauge visuelle de progression Dwell (vert fluo accessible WCAG)
+    if let Some(progress) = dwell_progress {
+        if progress > 0.0 && progress <= 1.0 {
+            let bar_height = 4.0;
+            let progress_rect = egui::Rect::from_min_max(
+                egui::pos2(rect.left(), rect.bottom() - bar_height),
+                egui::pos2(rect.left() + rect.width() * progress, rect.bottom()),
+            );
+            ui.painter().rect_filled(
+                progress_rect,
+                egui::CornerRadius::same(2),
+                egui::Color32::from_rgb(76, 217, 100),
+            );
+            ui.ctx().request_repaint();
+        }
+    }
+
+    let stroke_color = if active {
+        egui::Color32::WHITE
+    } else if response.hovered() {
+        egui::Color32::from_rgb(180, 220, 255)
+    } else {
+        egui::Color32::from_gray(80)
+    };
+    ui.painter().rect_stroke(
+        rect,
+        egui::CornerRadius::same(10),
+        egui::Stroke::new(if active { 2.0 } else { 1.2 }, stroke_color),
+        egui::StrokeKind::Inside,
+    );
+
+    let icon_pos = if sub_label.is_empty() {
+        rect.center()
+    } else {
+        egui::pos2(rect.center().x, rect.center().y - 6.0)
+    };
+
+    ui.painter().text(
+        icon_pos,
+        egui::Align2::CENTER_CENTER,
+        icon,
+        ACCESSIBILITY_ICON_FONT,
+        if active { egui::Color32::WHITE } else { egui::Color32::from_gray(235) },
+    );
+
+    if !sub_label.is_empty() {
+        ui.painter().text(
+            egui::pos2(rect.center().x, rect.bottom() - 9.0),
+            egui::Align2::CENTER_CENTER,
+            sub_label,
+            ACCESSIBILITY_SUB_FONT,
+            if active { egui::Color32::from_rgb(240, 240, 255) } else { egui::Color32::from_gray(180) },
+        );
+    }
+
+    response.on_hover_text(tooltip)
 }
 
 pub struct OverlayApp {
@@ -148,6 +314,8 @@ pub struct OverlayApp {
     llm_config: LlmConfig,
     theme: AppTheme,
     settings_tab: SettingsTab,
+    dwell_state: DwellState,
+    last_trackball_input: Instant,
 
     // Accessibilité : Ciblage par numéros & Mode contacteur unique (Switch Access)
     numbered_targets: Vec<NumberedElementTarget>,
@@ -947,6 +1115,12 @@ impl OverlayApp {
         };
         let _ = tts_sender.send(TtsCommand::Speak(initial_subtitle.clone()));
 
+        let dwell_millis = std::env::var("DWELL_TIME_MS")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "DWELL_TIME_MS"))
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(2000);
+
         let mut app = Self {
             status: AgentStatus::Idle,
             chat_history: vec![ChatEntry {
@@ -970,6 +1144,8 @@ impl OverlayApp {
             llm_config: llm_config.clone(),
             theme,
             settings_tab: SettingsTab::LlmProvider,
+            dwell_state: DwellState::new(dwell_millis),
+            last_trackball_input: Instant::now() - Duration::from_secs(1),
 
             numbered_targets: Vec::new(),
             show_numbered_targets: false,
@@ -1519,6 +1695,40 @@ impl eframe::App for OverlayApp {
 
         let ppp = ctx.pixels_per_point().max(0.5);
         #[cfg(windows)]
+        {
+            // Gestion ergonomique des boutons auxiliaires trackball (VK_XBUTTON1, VK_XBUTTON2, VK_MBUTTON)
+            if self.last_trackball_input.elapsed() >= Duration::from_millis(250) {
+                let xbutton1 = unsafe { (GetAsyncKeyState(0x05) as u16 & 0x8000) != 0 }; // Trackball Bouton 4
+                let xbutton2 = unsafe { (GetAsyncKeyState(0x06) as u16 & 0x8000) != 0 }; // Trackball Bouton 5
+                let mbutton  = unsafe { (GetAsyncKeyState(0x04) as u16 & 0x8000) != 0 }; // Molette / Clic central
+
+                if mbutton && self.status == AgentStatus::Speaking {
+                    self.last_trackball_input = Instant::now();
+                    self.stop_speaking();
+                    play_earcon(Earcon::Success);
+                } else if xbutton1 {
+                    self.last_trackball_input = Instant::now();
+                    if self.dictation_mode {
+                        self.exit_dictation_mode();
+                    } else {
+                        self.dictation_mode = true;
+                        IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
+                        restore_external_focus();
+                        if !self.is_recording {
+                            self.start_recording(&ctx, true);
+                        }
+                        play_earcon(Earcon::Success);
+                    }
+                    ctx.request_repaint();
+                } else if xbutton2 {
+                    self.last_trackball_input = Instant::now();
+                    self.toggle_switch_access_mode();
+                    ctx.request_repaint();
+                }
+            }
+        }
+
+        #[cfg(windows)]
         let (work_x, work_y, work_w, work_h, taskbar_top) = {
             let wa = get_desktop_work_area();
             let left = wa.left as f32 / ppp;
@@ -1534,7 +1744,7 @@ impl eframe::App for OverlayApp {
         };
 
         let min_win_w: f32 = 380.0;
-        let min_win_h: f32 = 158.0;
+        let min_win_h: f32 = 175.0;
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(min_win_w, min_win_h)));
 
         let inner_rect_opt = ctx.input(|i| i.viewport().inner_rect);
@@ -1553,7 +1763,7 @@ impl eframe::App for OverlayApp {
 
         let padding: f32 = 2.0;
         let has_suggestions = !self.input_suggestions.is_empty();
-        let control_h: f32 = if has_suggestions { 128.0 } else { 102.0 };
+        let control_h: f32 = if has_suggestions { 142.0 } else { 116.0 };
 
         let max_chat_h = (work_h - control_h - 60.0).clamp(180.0, 560.0);
         let min_chat_h: f32 = 50.0;
@@ -4056,37 +4266,47 @@ impl eframe::App for OverlayApp {
 
                                     ui.add_space(3.0);
 
-                                    // 2e rangée : Boutons d'action, dictée, profil vocal, clé API et corbeille
+                                    // 2e rangée : 6 boutons d'action ergonomiques (WCAG 2.2 AAA, Clic & Dwell 800 ms)
                                     ui.horizontal(|ui| {
-                                        let mic_text = if self.is_recording {
-                                            egui::RichText::new("🔴 Stop (r)")
-                                                .color(egui::Color32::from_rgb(255, 90, 90))
-                                                .strong()
+                                        ui.spacing_mut().item_spacing.x = ACCESSIBILITY_ITEM_SPACING;
+
+                                        // 1. Bouton Micro
+                                        let mic_id = ui.make_persistent_id("dwell_btn_mic");
+                                        let mic_prog = self.dwell_state.get_progress(mic_id);
+                                        let (mic_icon, mic_sub, mic_color) = if self.is_recording {
+                                            ("🔴", "Stop", Some(egui::Color32::from_rgb(235, 60, 60)))
                                         } else {
-                                            egui::RichText::new("🎙 Rec (r)")
-                                                .color(egui::Color32::from_rgb(180, 220, 255))
+                                            ("🎙", "Micro", None)
                                         };
-
-                                        let mic_btn = ui.button(mic_text).on_hover_text(
-                                            "Activer ou désactiver l'écoute instantanée (raccourci r)",
+                                        let mic_resp = render_accessible_icon_button(
+                                            ui,
+                                            mic_icon,
+                                            mic_sub,
+                                            "Micro (r) : Activer ou couper l'écoute vocale",
+                                            self.is_recording,
+                                            mic_prog,
+                                            mic_color,
                                         );
-
-                                        if mic_btn.clicked() {
+                                        let (mic_dwell, _) = self.dwell_state.update(mic_id, mic_resp.hovered());
+                                        if mic_resp.clicked() || mic_dwell {
                                             self.toggle_recording(ui.ctx());
                                         }
 
-                                        let dict_text = if self.dictation_mode {
-                                            egui::RichText::new("✍ Dictée ON")
-                                                .color(egui::Color32::from_rgb(255, 205, 70))
-                                                .strong()
-                                        } else {
-                                            egui::RichText::new("✍ Dictée")
-                                                .color(egui::Color32::from_rgb(180, 210, 235))
-                                        };
-                                        let dict_btn = ui.button(dict_text).on_hover_text(
-                                            "Activer ou désactiver le mode dictée vocale directe (Échap pour quitter)",
+                                        // 2. Bouton Dictée
+                                        let dict_id = ui.make_persistent_id("dwell_btn_dict");
+                                        let dict_prog = self.dwell_state.get_progress(dict_id);
+                                        let dict_sub = if self.dictation_mode { "Actif" } else { "Dictée" };
+                                        let dict_resp = render_accessible_icon_button(
+                                            ui,
+                                            "✍",
+                                            dict_sub,
+                                            "Dictée : Saisie vocale directe dans vos applications (Échap pour quitter)",
+                                            self.dictation_mode,
+                                            dict_prog,
+                                            Some(egui::Color32::from_rgb(215, 155, 30)),
                                         );
-                                        if dict_btn.clicked() {
+                                        let (dict_dwell, _) = self.dwell_state.update(dict_id, dict_resp.hovered());
+                                        if dict_resp.clicked() || dict_dwell {
                                             if self.dictation_mode {
                                                 self.exit_dictation_mode();
                                             } else {
@@ -4099,41 +4319,54 @@ impl eframe::App for OverlayApp {
                                             }
                                         }
 
-                                        let switch_text = if self.switch_access_mode {
-                                            egui::RichText::new("🎯 Survol ON")
-                                                .color(egui::Color32::from_rgb(255, 140, 0))
-                                                .strong()
-                                        } else {
-                                            egui::RichText::new("🎯 Survol")
-                                                .color(egui::Color32::from_rgb(180, 210, 235))
-                                        };
-                                        let switch_btn = ui.button(switch_text).on_hover_text(
-                                            "Activer ou désactiver le mode survol automatique + contacteur (Entrée pour valider)",
+                                        // 3. Bouton Survol (Switch Access)
+                                        let switch_id = ui.make_persistent_id("dwell_btn_switch");
+                                        let switch_prog = self.dwell_state.get_progress(switch_id);
+                                        let switch_sub = if self.switch_access_mode { "Actif" } else { "Survol" };
+                                        let switch_resp = render_accessible_icon_button(
+                                            ui,
+                                            "🎯",
+                                            switch_sub,
+                                            "Survol : Mode contacteur unique & navigation automatique (Entrée pour valider)",
+                                            self.switch_access_mode,
+                                            switch_prog,
+                                            Some(egui::Color32::from_rgb(235, 115, 0)),
                                         );
-                                        if switch_btn.clicked() {
+                                        let (switch_dwell, _) = self.dwell_state.update(switch_id, switch_resp.hovered());
+                                        if switch_resp.clicked() || switch_dwell {
                                             self.toggle_switch_access_mode();
                                         }
 
-                                        // Sélecteur visuel de profil vocal étendu
-                                        let (voice_icon_text, voice_color) = match self.voice_gender {
-                                            VoiceProfile::Denise => ("👩 Denise", egui::Color32::from_rgb(255, 170, 220)),
-                                            VoiceProfile::Henri => ("👨 Henri", egui::Color32::from_rgb(130, 200, 255)),
-                                            VoiceProfile::Hortense => ("🎙️ Hortense", egui::Color32::from_rgb(255, 195, 130)),
-                                            VoiceProfile::Paul => ("🎩 Paul", egui::Color32::from_rgb(160, 220, 180)),
-                                            VoiceProfile::Sylvie => ("🍁 Sylvie", egui::Color32::from_rgb(255, 150, 150)),
-                                            VoiceProfile::Jean => ("⚡ Jean", egui::Color32::from_rgb(205, 170, 255)),
+                                        // 4. Bouton Voix
+                                        let voice_id = ui.make_persistent_id("dwell_btn_voice");
+                                        let voice_prog = self.dwell_state.get_progress(voice_id);
+                                        let (voice_icon, voice_sub) = match self.voice_gender {
+                                            VoiceProfile::Denise => ("👩", "Denise"),
+                                            VoiceProfile::Henri => ("👨", "Henri"),
+                                            VoiceProfile::Hortense => ("🎙️", "Hortense"),
+                                            VoiceProfile::Paul => ("🎩", "Paul"),
+                                            VoiceProfile::Sylvie => ("🍁", "Sylvie"),
+                                            VoiceProfile::Jean => ("⚡", "Jean"),
                                         };
                                         let next_gender = self.voice_gender.next();
-                                        let voice_btn = ui.button(egui::RichText::new(voice_icon_text).color(voice_color))
-                                            .on_hover_text(format!(
-                                                "Voix active : {}\nClic gauche : basculer vers {}\nClic droit : choisir parmi toutes les voix",
+                                        let voice_resp = render_accessible_icon_button(
+                                            ui,
+                                            voice_icon,
+                                            voice_sub,
+                                            &format!(
+                                                "Voix : {}\nClic ou survol : basculer vers {}\nClic droit : menu des voix",
                                                 self.voice_gender.display_name(),
                                                 next_gender.display_name()
-                                            ));
-                                        if voice_btn.clicked() {
+                                            ),
+                                            self.status == AgentStatus::Speaking,
+                                            voice_prog,
+                                            Some(theme.accent),
+                                        );
+                                        let (voice_dwell, _) = self.dwell_state.update(voice_id, voice_resp.hovered());
+                                        if voice_resp.clicked() || voice_dwell {
                                             self.set_voice_gender(next_gender);
                                         }
-                                        voice_btn.context_menu(|ui| {
+                                        voice_resp.context_menu(|ui| {
                                             for &profile in VoiceProfile::ALL {
                                                 let is_selected = self.voice_gender == profile;
                                                 if ui.selectable_label(is_selected, profile.display_name()).clicked() {
@@ -4143,10 +4376,20 @@ impl eframe::App for OverlayApp {
                                             }
                                         });
 
-                                        let key_btn = ui
-                                            .button("⚙")
-                                            .on_hover_text("Paramètres (Fournisseurs LLM, clé API, Thèmes & Accessibilité)");
-                                        if key_btn.clicked() {
+                                        // 5. Bouton Réglages
+                                        let settings_id = ui.make_persistent_id("dwell_btn_settings");
+                                        let settings_prog = self.dwell_state.get_progress(settings_id);
+                                        let settings_resp = render_accessible_icon_button(
+                                            ui,
+                                            "⚙",
+                                            "Réglages",
+                                            "Réglages : Fournisseurs LLM, clés API, Thèmes & Accessibilité",
+                                            self.show_api_key_modal,
+                                            settings_prog,
+                                            Some(theme.accent),
+                                        );
+                                        let (settings_dwell, _) = self.dwell_state.update(settings_id, settings_resp.hovered());
+                                        if settings_resp.clicked() || settings_dwell {
                                             self.settings_tab = SettingsTab::LlmProvider;
                                             self.show_api_key_modal = true;
                                             self.sync_modal_inputs_for_provider(self.llm_config.provider);
@@ -4154,11 +4397,21 @@ impl eframe::App for OverlayApp {
                                             self.stop_speaking();
                                         }
 
-                                        let clear_btn = ui
-                                            .button("🗑")
-                                            .on_hover_text("Effacer l'historique et la mémoire contextuelle");
-                                        if clear_btn.clicked() {
-                                            self.command_sender.send(AgentCommand::ClearHistory).ok();
+                                        // 6. Bouton Effacer
+                                        let clear_id = ui.make_persistent_id("dwell_btn_clear");
+                                        let clear_prog = self.dwell_state.get_progress(clear_id);
+                                        let clear_resp = render_accessible_icon_button(
+                                            ui,
+                                            "🗑",
+                                            "Effacer",
+                                            "Effacer : Réinitialiser l'historique et la mémoire contextuelle",
+                                            false,
+                                            clear_prog,
+                                            None,
+                                        );
+                                        let (clear_dwell, _) = self.dwell_state.update(clear_id, clear_resp.hovered());
+                                        if clear_resp.clicked() || clear_dwell {
+                                            let _ = self.command_sender.send(AgentCommand::ClearHistory);
                                             self.chat_history.clear();
                                             self.window_analysis_cache.clear();
                                             self.chat_history.push(ChatEntry {
@@ -4169,7 +4422,7 @@ impl eframe::App for OverlayApp {
                                                 screen_size_kb: None,
                                             });
                                             self.live_transcript.clear();
-                                            let _ = self.tts_sender.send(TtsCommand::Stop);
+                                            self.stop_speaking();
                                         }
                                     });
                                 });
@@ -5072,6 +5325,28 @@ impl eframe::App for OverlayApp {
                                             .italics(),
                                     );
                                 });
+
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new("Temporisation du clic au survol (Dwell) :")
+                                    .size(11.5)
+                                    .color(theme.text_secondary),
+                            );
+                            ui.add_space(3.0);
+                            let mut current_dwell_ms = self.dwell_state.dwell_duration.as_millis() as u64;
+                            let prev_dwell_ms = current_dwell_ms;
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Délai :").size(12.0).strong().color(egui::Color32::WHITE));
+                                ui.add(egui::Slider::new(&mut current_dwell_ms, 600..=2500).suffix(" ms").step_by(50.0))
+                                    .on_hover_text("Délai de maintien du pointeur requis avant déclenchement automatique");
+                            });
+                            if current_dwell_ms != prev_dwell_ms {
+                                self.dwell_state.dwell_duration = Duration::from_millis(current_dwell_ms);
+                                let _ = write_env_var_to_file(".env", "DWELL_TIME_MS", &current_dwell_ms.to_string());
+                                std::env::set_var("DWELL_TIME_MS", current_dwell_ms.to_string());
+                            }
 
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
