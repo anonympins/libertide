@@ -429,8 +429,8 @@ fn get_ocr_engine() -> Option<&'static ocrs::OcrEngine> {
         let rec_path = ensure_model("text-recognition.rten")
             .or_else(|| ensure_model("text-recognition.onnx"))?;
 
-        let detection_model = rten::model::Model::load_file(&det_path).ok()?;
-        let recognition_model = rten::model::Model::load_file(&rec_path).ok()?;
+        let detection_model = rten::Model::load_file(&det_path).ok()?;
+        let recognition_model = rten::Model::load_file(&rec_path).ok()?;
 
         OcrEngine::new(OcrEngineParams {
             detection_model: Some(detection_model),
