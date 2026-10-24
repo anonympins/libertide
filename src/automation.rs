@@ -1078,9 +1078,17 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         let mut fg_pid = 0u32;
         let _ = GetWindowThreadProcessId(fg, Some(&mut fg_pid));
         let is_libertide_fg = fg_pid == std::process::id();
+        let kbd = *(lparam.0 as *const KBDLLHOOKSTRUCT);
+
+        // Si l'événement a été injecté par un logiciel tiers (ex: PowerToys, AutoHotkey),
+        // ne pas le bloquer pour lui permettre d'atteindre la fenêtre cible.
+        const LLKHF_INJECTED: u32 = 0x00000010;
+        let is_injected = (kbd.flags.0 & LLKHF_INJECTED) != 0;
+        if is_injected {
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
 
         if !is_libertide_fg {
-        let kbd = *(lparam.0 as *const KBDLLHOOKSTRUCT);
         let vk = kbd.vkCode;
         let is_down = wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize;
         let is_up = wparam.0 == WM_KEYUP as usize || wparam.0 == WM_SYSKEYUP as usize;
@@ -1281,6 +1289,11 @@ pub fn restore_external_focus_target(target: Option<HWND>) -> bool {
 
     if let Some(hwnd) = target_hwnd {
         if !hwnd.0.is_null() && !is_window_hung(hwnd) {
+            let fg = unsafe { GetForegroundWindow() };
+            if fg == hwnd {
+                return true;
+            }
+
             let (_pid, exe_name) = get_window_process_info(hwnd);
             let is_browser = is_browser_executable(&exe_name);
 
@@ -1289,13 +1302,8 @@ pub fn restore_external_focus_target(target: Option<HWND>) -> bool {
                 return true;
             }
 
-            // Contournement universel de l'inhibition de focus Windows via simulation de la touche Alt
-            const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
-            send_key_event(VK_MENU, KEYBD_EVENT_FLAGS(0));
-            send_key_event(VK_MENU, KEYEVENTF_KEYUP);
-
             force_foreground_window(hwnd);
-            std::thread::sleep(Duration::from_millis(40));
+            std::thread::sleep(Duration::from_millis(80));
 
             // 2. Si c'est un contrôle Win32 enfant (ex: canevas Java Swing IntelliJ, Notepad, champs de dialogue)
             if let Ok(clock) = LAST_FOCUSED_CHILD_HWND.lock() {
@@ -2130,6 +2138,11 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
             let _ = BringWindowToTop(hwnd);
             let _ = SetForegroundWindow(hwnd);
         }
+
+        // Désactive immédiatement le mode menu Windows s'il a été enclenché par la touche Alt
+        const VK_ESCAPE: VIRTUAL_KEY = VIRTUAL_KEY(0x1B);
+        send_key_event(VK_ESCAPE, KEYBD_EVENT_FLAGS(0));
+        send_key_event(VK_ESCAPE, KEYEVENTF_KEYUP);
     }
     true
 }

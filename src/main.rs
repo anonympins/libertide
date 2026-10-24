@@ -467,6 +467,34 @@ fn is_stop_dictation_command(text: &str) -> bool {
     TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig))
 }
 
+fn is_start_dictation_command(text: &str) -> bool {
+    let norm = normalize_for_command_match(text);
+    const TRIGGERS: &[&str] = &[
+        // FR
+        "active la dictee", "active la dictée", "activer la dictee", "activer la dictée",
+        "lance la dictee", "lance la dictée", "lancer la dictee", "lancer la dictée",
+        "mode dictee", "mode dictée", "demarre la dictee", "démarre la dictée",
+        "demarrer la dictee", "démarrer la dictée", "passer en dictee", "passer en dictée",
+        // EN
+        "start dictation", "enable dictation", "activate dictation", "dictation mode", "begin dictation",
+        // ES
+        "activar dictado", "iniciar dictado", "modo dictado", "comenzar dictado",
+        // DE
+        "diktat aktivieren", "diktat starten", "diktatmodus",
+        // IT
+        "attiva dettatura", "avvia dettatura", "modalita dettatura", "modalità dettatura",
+        // PT
+        "ativar ditado", "iniciar ditado", "modo ditado",
+        // RU
+        "включить диктовку", "начать диктовку", "режим диктовки",
+        // ZH
+        "开启听写", "启动听写", "听写模式",
+        // JA
+        "ディクテーション開始", "音声入力開始", "ディクテーションモード",
+    ];
+    TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig))
+}
+
 fn is_switch_access_command(text: &str) -> bool {
     let norm = normalize_for_command_match(text);
     const TRIGGERS: &[&str] = &[
@@ -1434,6 +1462,46 @@ impl OverlayApp {
         let _ = self.tts_sender.send(TtsCommand::Speak(stop_msg));
     }
 
+    fn enter_dictation_mode(&mut self) {
+        self.dictation_mode = true;
+        self.continuous_mode = true;
+        IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
+        play_earcon(Earcon::Success);
+        let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
+        if self.is_recording {
+            self.stop_recording();
+        }
+        self.live_transcript.clear();
+        self.status = AgentStatus::Speaking;
+        let _ = self.tts_sender.send(TtsCommand::Stop);
+        restore_external_focus();
+        let (locale, _) = get_system_locale_language();
+        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+        let msg = localized_speech(
+            lang_prefix,
+            "Mode dictée activé.",
+            "Dictation mode activated.",
+            "Modo dictado activado.",
+            "Diktatmodus aktiviert.",
+            "Modalità dettatura attivata.",
+            "Modo ditado ativado.",
+            "Режим диктовки включен.",
+            "听写模式已激活。",
+            "音声入力モードが有効になりました。",
+        );
+        self.chat_history.push(ChatEntry {
+            role: ChatRole::Agent,
+            text: msg.clone(),
+            timestamp: current_time_str(),
+            quick_suggestions: vec![
+                QuickSuggestionItem::Text("Désactiver la dictée".to_string()),
+                QuickSuggestionItem::Text("Effacer le texte".to_string()),
+            ],
+            screen_size_kb: None,
+        });
+        let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+    }
+
     fn exit_dictation_mode(&mut self) {
         self.dictation_mode = false;
         self.continuous_mode = false;
@@ -1734,13 +1802,7 @@ impl eframe::App for OverlayApp {
                     if self.dictation_mode {
                         self.exit_dictation_mode();
                     } else {
-                        self.dictation_mode = true;
-                        IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
-                        restore_external_focus();
-                        if !self.is_recording {
-                            self.start_recording(&ctx, true);
-                        }
-                        play_earcon(Earcon::Success);
+                        self.enter_dictation_mode();
                     }
                     ctx.request_repaint();
                 } else if xbutton2 {
@@ -1901,17 +1963,27 @@ impl eframe::App for OverlayApp {
                     if text.trim().is_empty() && quick_suggestions.is_empty() {
                         continue;
                     }
-                    if !sanitize_for_tts(&text).trim().is_empty() {
-                        self.status = AgentStatus::Speaking;
+                    if text.trim().is_empty() {
+                        if let Some(last) = self.chat_history.last_mut().filter(|e| e.role == ChatRole::Agent) {
+                            for sug in quick_suggestions {
+                                if !last.quick_suggestions.iter().any(|s| s.as_str() == sug.as_str()) {
+                                    last.quick_suggestions.push(sug);
+                                }
+                            }
+                        }
+                    } else {
+                        if !sanitize_for_tts(&text).trim().is_empty() {
+                            self.status = AgentStatus::Speaking;
+                            let _ = self.tts_sender.send(TtsCommand::Speak(text.clone()));
+                        }
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text,
+                            timestamp: current_time_str(),
+                            quick_suggestions,
+                            screen_size_kb: None,
+                        });
                     }
-                    self.chat_history.push(ChatEntry {
-                        role: ChatRole::Agent,
-                        text: text.clone(),
-                        timestamp: current_time_str(),
-                        quick_suggestions,
-                        screen_size_kb: None,
-                    });
-                    let _ = self.tts_sender.send(TtsCommand::Speak(text));
                 }
                 AgentEvent::SilentNarration(full_text) => {
                     self.chat_history.push(ChatEntry {
@@ -2248,6 +2320,12 @@ impl eframe::App for OverlayApp {
                         return;
                     }
 
+                    // Activation déterministe immédiate du mode dictée
+                    if !self.dictation_mode && is_start_dictation_command(&prompt) {
+                        self.enter_dictation_mode();
+                        return;
+                    }
+
                     // 2 bis. Exécution déterministe locale instantanée des commandes de base (< 20 ms, 0 token LLM)
                     if let Some(feedback) = try_execute_local_navigation_shortcut(&prompt) {
                         play_earcon(Earcon::Success);
@@ -2458,6 +2536,7 @@ impl eframe::App for OverlayApp {
                 AgentEvent::ShowFloatingCard(card) => {
                     let vp_id = egui::ViewportId::from_hash_of(&card.id);
                     let card_title = card.title.clone();
+                    let card_speech = card.build_narrator_speech();
                     if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == card.id) {
                         *existing = card;
                     } else {
@@ -2477,6 +2556,10 @@ impl eframe::App for OverlayApp {
                             quick_suggestions: vec![QuickSuggestionItem::Text(read_suggestion)],
                             screen_size_kb: None,
                         });
+                    }
+                    if self.status != AgentStatus::Speaking && !card_speech.trim().is_empty() {
+                        self.status = AgentStatus::Speaking;
+                        let _ = self.tts_sender.send(TtsCommand::Speak(card_speech));
                     }
                     ctx.request_repaint();
                     ctx.request_repaint_of(vp_id);
@@ -2516,6 +2599,34 @@ impl eframe::App for OverlayApp {
         let mut hook_events = Vec::new();
         if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
             hook_events.append(&mut *q);
+        }
+
+        if hook_events.contains(&SwitchKeyEvent::ToggleDictation) {
+            if self.dictation_mode {
+                self.exit_dictation_mode();
+            } else {
+                self.enter_dictation_mode();
+            }
+        }
+        if hook_events.contains(&SwitchKeyEvent::ToggleSwitch) {
+            self.toggle_switch_access_mode();
+        }
+        if hook_events.contains(&SwitchKeyEvent::ToggleVoice) {
+            self.set_voice_gender(self.voice_gender.next());
+        }
+        if hook_events.contains(&SwitchKeyEvent::Clear) {
+            let _ = self.command_sender.send(AgentCommand::ClearHistory);
+            self.chat_history.clear();
+            self.window_analysis_cache.clear();
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: "Mémoire contextuelle réinitialisée.".to_string(),
+                timestamp: current_time_str(),
+                quick_suggestions: Vec::new(),
+                screen_size_kb: None,
+            });
+            self.live_transcript.clear();
+            self.stop_speaking();
         }
 
         #[cfg(windows)]
@@ -4384,12 +4495,7 @@ impl eframe::App for OverlayApp {
                                             if self.dictation_mode {
                                                 self.exit_dictation_mode();
                                             } else {
-                                                self.dictation_mode = true;
-                                                IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
-                                                restore_external_focus();
-                                                if !self.is_recording {
-                                                    self.start_recording(ui.ctx(), true);
-                                                }
+                                                self.enter_dictation_mode();
                                             }
                                         }
 
@@ -4639,7 +4745,7 @@ impl eframe::App for OverlayApp {
                                                 || (entry.text.contains('|') && entry.text.contains('\n'));
 
                                             if entry.role == ChatRole::Agent && has_interactive_md {
-                                                if let Some(prompt) = floating_window::render_markdown(ui, &entry.text, &format!("chat_entry_{idx}"), &mut self.dwell_state) {
+                                                if let Some(prompt) = floating_window::render_markdown(ui, &entry.text, &format!("chat_entry_{idx}"), &mut self.dwell_state, &theme) {
                                                     clicked_quick_suggestion = Some(prompt);
                                                 }
                                             } else {
@@ -5588,8 +5694,9 @@ impl eframe::App for OverlayApp {
                 let mut card_speech = None;
                 let prev_card_count = self.floating_cards.len();
                 let dwell_state = &mut self.dwell_state;
+                let theme_colors = self.theme.colors();
                 self.floating_cards.retain_mut(|card| {
-                    if let Some(out) = card.show(&ctx, dwell_state) {
+                    if let Some(out) = card.show(&ctx, dwell_state, &theme_colors) {
                         match out {
                             FloatingCardOutput::Prompt(prompt) => submitted_card_prompts.push(prompt),
                             FloatingCardOutput::Speak(speech) => card_speech = Some(speech),
@@ -6550,10 +6657,15 @@ async fn call_llm_prompt(
             _ => None,
         }).collect();
 
+        let mut card_speeches: Vec<String> = Vec::new();
         for act in &payload.actions {
             match act {
                 AgentAction::ShowFloatingCard { id, title, card_type, data } => {
                     let card = FloatingCard::from_action_data(id.clone(), title.clone(), card_type, data);
+                    let speech = card.build_narrator_speech();
+                    if !speech.trim().is_empty() {
+                        card_speeches.push(speech);
+                    }
                     let _ = event_tx.send(AgentEvent::ShowFloatingCard(card));
                 }
                 AgentAction::CloseFloatingCard { id } => {
@@ -6564,6 +6676,17 @@ async fn call_llm_prompt(
                     }
                 }
                 _ => {}
+            }
+        }
+
+        if !card_speeches.is_empty() {
+            let combined = card_speeches.join("\n\n");
+            let trimmed_narr = payload.narration.trim();
+            if trimmed_narr.is_empty() {
+                payload.narration = combined;
+            } else if !trimmed_narr.contains(&combined) {
+                let sep = if trimmed_narr.ends_with('.') || trimmed_narr.ends_with(':') || trimmed_narr.ends_with('!') { " " } else { ". " };
+                payload.narration = format!("{}{}{}", trimmed_narr, sep, combined);
             }
         }
 
@@ -6786,17 +6909,6 @@ async fn call_llm_prompt(
             pass += 1;
         } else {
             println!("[Agent] Nombre maximal de passes ({max_agent_passes}) atteint.");
-            let screen_for_sug = if !screen_after.trim().is_empty() {
-                screen_after.clone()
-            } else {
-                LAST_SCREEN_SUMMARY.lock().ok().and_then(|s| s.clone()).unwrap_or_default()
-            };
-            let auto_suggestions = generate_fallback_suggestions_from_screen(&screen_for_sug);
-            has_spoken = true;
-            let _ = event_tx.send(AgentEvent::ReplaceNarration {
-                text: "Actions terminées. Voici les suites possibles identifiées à l'écran :".to_string(),
-                quick_suggestions: auto_suggestions,
-            });
             break;
         }
     }

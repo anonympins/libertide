@@ -1938,7 +1938,8 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     restore_external_focus_target(Some(hwnd));
                     restore_if_iconic(hwnd);
                     release_modifier_keys();
-                    std::thread::sleep(Duration::from_millis(40));
+                    // Attente de stabilisation de la file de messages et du focus de la fenêtre cible
+                    std::thread::sleep(Duration::from_millis(120));
 
                     if is_terminal_window(hwnd, win_title) {
                         send_terminal_input(hwnd, text, should_enter);
@@ -1949,12 +1950,15 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                             if let Some(elem) = find_best_input_element(&elements, target_desc) {
                                 unsafe { let _ = elem.element.SetFocus(); }
                                 click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
-                                std::thread::sleep(Duration::from_millis(50));
+                                std::thread::sleep(Duration::from_millis(80));
                             }
                         } else if window.is_some() && !has_focused_textarea(hwnd) {
                             refocus_largest_textarea_or_fallback(hwnd);
-                            std::thread::sleep(Duration::from_millis(40));
+                            std::thread::sleep(Duration::from_millis(80));
                         }
+
+                        // Pause de sécurité avant le premier caractère
+                        std::thread::sleep(Duration::from_millis(40));
 
                         let text_to_type = if !text.ends_with(' ') && !text.ends_with('\n') {
                             format!("{text} ")
@@ -1965,14 +1969,14 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         for c in text_to_type.chars() {
                             if c == '\n' || c == '\r' {
                                 send_hotkey(&[], VIRTUAL_KEY(0x0D));
-                                std::thread::sleep(Duration::from_millis(15));
+                                std::thread::sleep(Duration::from_millis(25));
                             } else {
                                 send_char_unicode(c);
-                                std::thread::sleep(Duration::from_millis(2));
+                                std::thread::sleep(Duration::from_millis(10));
                             }
                         }
                         if should_enter {
-                            std::thread::sleep(Duration::from_millis(30));
+                            std::thread::sleep(Duration::from_millis(40));
                             send_hotkey(&[], VIRTUAL_KEY(0x0D));
                         }
                         feedback.push(format!("Texte dicté inséré directement au clavier ({} caractères).", text.len()));
