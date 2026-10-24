@@ -134,6 +134,33 @@ fn default_submit_label() -> String {
     "🔍 Lancer la recherche".to_string()
 }
 
+/// Gère le défilement par clic-glissé (drag-to-scroll) natif via les événements de pointeur
+fn handle_drag_to_scroll(ui: &egui::Ui, allow_x: bool, allow_y: bool) {
+    let (is_dragging, delta, started_in_ui) = ui.input(|i| {
+        let is_down = i.pointer.primary_down() || i.pointer.middle_down();
+        let dragging = i.pointer.is_decidedly_dragging() && is_down;
+        let in_ui = i.pointer
+            .press_origin()
+            .or_else(|| i.pointer.interact_pos())
+            .map_or(false, |pos| ui.clip_rect().contains(pos));
+        (dragging, i.pointer.delta(), in_ui)
+    });
+
+    if is_dragging && started_in_ui && !ui.ctx().egui_is_using_pointer() {
+        let mut scroll_delta = egui::Vec2::ZERO;
+        if allow_x {
+            scroll_delta.x = delta.x;
+        }
+        if allow_y {
+            scroll_delta.y = delta.y;
+        }
+        if scroll_delta != egui::Vec2::ZERO {
+            ui.scroll_with_delta(scroll_delta);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FloatingCard {
     pub id: String,
@@ -464,6 +491,7 @@ impl FloatingCard {
                         .id_salt(format!("card_scroll_vert_{card_id}"))
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
+                            handle_drag_to_scroll(ui, false, true);
                             match &mut self.content {
                                 FloatingContentType::Table { headers, rows } => {
                                     if headers.is_empty() && rows.is_empty() {
@@ -512,6 +540,7 @@ impl FloatingCard {
                                         .id_salt(format!("card_tbl_scroll_horiz_{card_id}"))
                                         .auto_shrink([false, false])
                                         .show(ui, |ui| {
+                                            handle_drag_to_scroll(ui, true, false);
                                             egui::Grid::new(format!("grid_{card_id}"))
                                                 .striped(true)
                                                 .spacing([14.0, 6.0])
@@ -1279,7 +1308,7 @@ fn render_line_spans(
     if !has_links {
         let avail = ui.available_width().max(40.0);
         let job = create_layout_job(line, base_size, avail, force_italic, base_color);
-        let resp = ui.add(egui::Label::new(job).wrap().selectable(true));
+        let resp = ui.add(egui::Label::new(job).wrap().sense(egui::Sense::click()));
         resp.context_menu(|ui| {
             if ui.button("📋 Copier le texte").clicked() {
                 set_clipboard_text(line);
@@ -1358,7 +1387,7 @@ fn render_line_spans(
                     continue;
                 }
                 for word in words {
-                    ui.add(egui::Label::new(egui::RichText::new(word).size(base_size).color(base_color)).selectable(true).wrap());
+                    ui.add(egui::Label::new(egui::RichText::new(word).size(base_size).color(base_color)).wrap());
                 }
             }
         }
@@ -1514,7 +1543,7 @@ fn render_table_cell(
 
         if is_header {
             let job = create_layout_job(cell, 12.0, col_width, false, text_color);
-            let l_resp = ui.add(egui::Label::new(job).selectable(true).wrap());
+            let l_resp = ui.add(egui::Label::new(job).wrap().sense(egui::Sense::click()));
             l_resp.context_menu(|ui| {
                 if ui.button("📋 Copier l'en-tête").clicked() {
                     set_clipboard_text(cell);
@@ -1615,6 +1644,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
                         .id_salt(code_scroll_id)
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
+                            handle_drag_to_scroll(ui, true, false);
                             let mut code_job = LayoutJob::default();
                             code_job.wrap.max_width = f32::INFINITY;
                             let mut fmt = TextFormat::default();
@@ -1765,6 +1795,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
                             .id_salt(table_scroll_id)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
+                                handle_drag_to_scroll(ui, true, false);
                                 egui::Grid::new(&table_id)
                                     .striped(true)
                                     .spacing([12.0, 5.0])

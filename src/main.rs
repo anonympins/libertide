@@ -1208,7 +1208,7 @@ impl OverlayApp {
             drag_offset: None,
             current_win_w: 560.0,
             chat_height: 70.0,
-            current_win_h: 178.0,
+            current_win_h: 196.0,
             is_hidden: false,
             mouse_passthrough: false,
             show_api_key_modal: has_no_key,
@@ -1767,7 +1767,7 @@ impl eframe::App for OverlayApp {
         };
 
         let min_win_w: f32 = 380.0;
-        let min_win_h: f32 = 175.0;
+        let min_win_h: f32 = 196.0;
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(min_win_w, min_win_h)));
 
         let inner_rect_opt = ctx.input(|i| i.viewport().inner_rect);
@@ -1786,7 +1786,7 @@ impl eframe::App for OverlayApp {
 
         let padding: f32 = 2.0;
         let has_suggestions = !self.input_suggestions.is_empty();
-        let control_h: f32 = if has_suggestions { 142.0 } else { 116.0 };
+        let control_h: f32 = if has_suggestions { 162.0 } else { 136.0 };
 
         let max_chat_h = (work_h - control_h - 60.0).clamp(180.0, 560.0);
         let min_chat_h: f32 = 50.0;
@@ -3944,7 +3944,7 @@ impl eframe::App for OverlayApp {
                                             AgentStatus::Idle => format!("{prov_name} · en veille"),
                                             AgentStatus::Thinking => format!("{prov_name} · réflexion..."),
                                             AgentStatus::Speaking => format!("{prov_name} · en direct"),
-                                            AgentStatus::Listening => format!("{prov_name} · écoute active (r)..."),
+                                            AgentStatus::Listening => String::new(),
                                             AgentStatus::EmergencyStopped => "Système verrouillé".to_string(),
                                         }
                                     };
@@ -3959,46 +3959,7 @@ impl eframe::App for OverlayApp {
                                         theme.accent
                                     };
 
-                                    ui.horizontal(|ui| {
-                                        let badge_resp = ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(&status_badge)
-                                                    .size(11.0)
-                                                    .color(badge_color),
-                                            )
-                                            .sense(if self.status == AgentStatus::Speaking { egui::Sense::click() } else { egui::Sense::hover() }),
-                                        );
-                                        if self.status == AgentStatus::Speaking {
-                                            if badge_resp.hovered() {
-                                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                            }
-                                            if badge_resp.on_hover_text("Cliquer pour couper la parole (Échap)").clicked() {
-                                                self.stop_speaking();
-                                            }
-                                        }
-                                        ui.add_space(4.0);
-                                        self.draw_mini_equalizer(ui, time);
-
-                                        if self.status == AgentStatus::Speaking {
-                                            ui.add_space(6.0);
-                                            let stop_speech_btn = ui.add(
-                                                egui::Button::new(
-                                                    egui::RichText::new("🔇 Couper la parole")
-                                                        .size(10.5)
-                                                        .color(egui::Color32::from_rgb(255, 140, 140))
-                                                        .strong(),
-                                                )
-                                                .small()
-                                                .corner_radius(egui::CornerRadius::same(6)),
-                                            );
-                                            if stop_speech_btn.on_hover_text("Interrompre la synthèse vocale immédiatement (Échap)").clicked() {
-                                                self.stop_speaking();
-                                            }
-                                        }
-                                    });
-
                                     if self.is_recording && !self.live_transcript.is_empty() {
-                                        ui.add_space(2.0);
                                         ui.add(
                                             egui::Label::new(
                                                 egui::RichText::new(&self.live_transcript)
@@ -4007,6 +3968,7 @@ impl eframe::App for OverlayApp {
                                             )
                                             .truncate(),
                                         );
+                                        ui.add_space(2.0);
                                     }
 
                                     ui.add_space(4.0);
@@ -4121,8 +4083,9 @@ impl eframe::App for OverlayApp {
 
                                         let prev_text = self.input_text.clone();
                                         let response = ui.add_sized(
-                                            [edit_width, 24.0],
-                                            egui::TextEdit::singleline(&mut self.input_text)
+                                            [edit_width, 54.0],
+                                            egui::TextEdit::multiline(&mut self.input_text)
+                                                .desired_rows(3)
                                                 .id(input_id)
                                                 .hint_text(if self.is_recording {
                                                     "Écoute Whisper active... parlez ou tapez"
@@ -4226,14 +4189,17 @@ impl eframe::App for OverlayApp {
                                         }
 
                                         enter_hit = (response.lost_focus() || response.has_focus())
-                                            && ctx.input(|i| i.key_pressed(egui::Key::Enter));
+                                            && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                                        if enter_hit {
+                                            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                                        }
                                     });
 
                                     ui.add_space(3.0);
 
                                     // 2e rangée : 7 boutons d'action ergonomiques (WCAG 2.2 AAA, Clic & Dwell 800 ms)
                                     ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = ACCESSIBILITY_ITEM_SPACING;
+                                        ui.spacing_mut().item_spacing.x = 6.0;
 
                                         // 1. Bouton Envoyer (WCAG AAA 50x50, hover vert RGB(38, 168, 75))
                                         let send_id = ui.make_persistent_id("dwell_btn_send");
@@ -4478,6 +4444,36 @@ impl eframe::App for OverlayApp {
                                             self.live_transcript.clear();
                                             self.stop_speaking();
                                         }
+
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            ui.vertical(|ui| {
+                                                ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                                                    if !status_badge.is_empty() {
+                                                        let badge_resp = ui.add(
+                                                            egui::Label::new(
+                                                                egui::RichText::new(&status_badge)
+                                                                    .size(10.0)
+                                                                    .color(badge_color),
+                                                            )
+                                                            .truncate()
+                                                            .sense(if self.status == AgentStatus::Speaking { egui::Sense::click() } else { egui::Sense::hover() }),
+                                                        );
+                                                        if self.status == AgentStatus::Speaking {
+                                                            if badge_resp.hovered() {
+                                                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                                            }
+                                                            if badge_resp.on_hover_text("Cliquer pour couper la parole (Échap)").clicked() {
+                                                                self.stop_speaking();
+                                                            }
+                                                        } else {
+                                                            badge_resp.on_hover_text(&status_badge);
+                                                        }
+                                                    }
+                                                    ui.add_space(2.0);
+                                                    self.draw_mini_equalizer(ui, time);
+                                                });
+                                            });
+                                        });
                                     });
                                 });
                             });
@@ -7311,7 +7307,7 @@ fn main() -> eframe::Result<()> {
         .with_always_on_top()
         .with_resizable(true)
         .with_min_inner_size([380.0, 158.0])
-        .with_inner_size([560.0, 178.0]);
+        .with_inner_size([560.0, 196.0]);
 
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../public/favicon-256x256.png")) {
         viewport = viewport.with_icon(Arc::new(icon));
