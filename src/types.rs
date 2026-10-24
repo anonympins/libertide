@@ -7,6 +7,7 @@ pub enum SwitchKeyEvent {
     Select,
     Next,
     Prev,
+    Back,
     Escape,
     ToggleSwitch,
     ToggleDictation,

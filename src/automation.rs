@@ -1043,6 +1043,7 @@ pub mod accessibility_keys {
 
 #[cfg(windows)]
 static HOOK_KEYS_DOWN: Mutex<[bool; 256]> = Mutex::new([false; 256]);
+static HOOK_KEYS_DOWN_TIME: Mutex<[Option<Instant>; 256]> = Mutex::new([None; 256]);
 
 pub fn reset_switch_keys() {
     if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
@@ -1051,6 +1052,9 @@ pub fn reset_switch_keys() {
     #[cfg(windows)]
     if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
         *keys = [false; 256];
+    }
+    if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+        *times = [None; 256];
     }
 }
 
@@ -1090,10 +1094,15 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
             0x78 => Some(SwitchKeyEvent::ToggleVoice),              // F9 -> Toggle Voix
             0x73 => Some(SwitchKeyEvent::Clear),                    // F4 -> Effacer / Trash
             0x09 if is_switch_hook_on => Some(if is_shift { SwitchKeyEvent::Prev } else { SwitchKeyEvent::Next }), // Tab / Shift+Tab
-            0x25 | 0x26 | 0x64 | 0x34 if is_switch_hook_on => Some(SwitchKeyEvent::Prev), // Gauche, Haut, Pavé 4, Touche 4
-            0x27 | 0x28 | 0x66 | 0x36 if is_switch_hook_on => Some(SwitchKeyEvent::Next), // Droite, Bas, Pavé 6, Touche 6
-            0x0D | 0x20 if is_switch_hook_on => Some(SwitchKeyEvent::Select),             // Entrée, Espace
-            0x1B if is_switch_hook_on => Some(SwitchKeyEvent::Escape),                    // Échap
+            // Précédent : Flèche Gauche, Flèche Haut, Pavé Num 4, Touche 3, Pavé Num 3 (profil boîtier)
+            0x25 | 0x26 | 0x64 | 0x33 | 0x63 if is_switch_hook_on => Some(SwitchKeyEvent::Prev),
+            // Suivant : Flèche Droite, Flèche Bas, Pavé Num 6, Touche 2, Pavé Num 2 (profil boîtier)
+            0x27 | 0x28 | 0x66 | 0x32 | 0x62 if is_switch_hook_on => Some(SwitchKeyEvent::Next),
+            // Sélection : Entrée, Espace, Touche 1, Pavé Num 1, Pavé Num 5
+            0x0D | 0x20 | 0x31 | 0x61 | 0x65 if is_switch_hook_on => Some(SwitchKeyEvent::Select),
+            // Retour / Sortie : Backspace (Retour arrière), Échap, Pavé Num 0, Touche 0
+            0x08 | 0x60 | 0x30 if is_switch_hook_on => Some(SwitchKeyEvent::Back),
+            0x1B if is_switch_hook_on => Some(SwitchKeyEvent::Escape),
             _ => None,
         };
 
@@ -1105,16 +1114,40 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                         already_down = keys[vk_idx];
                         keys[vk_idx] = true;
                     }
-                    // Pousse l'événement uniquement lors de la transition enfoncée initiale (ignore l'auto-repeat typematic)
                     if !already_down {
-                        if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
-                            q.push(event);
+                        if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+                            times[vk_idx] = Some(Instant::now());
                         }
-                }
-                } else if is_up {
+                        // Pour les touches directes (Next, Prev, Back, Escape, Fonctions)
+                        if event != SwitchKeyEvent::Select {
+                            if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                q.push(event);
+                            }
+                        }
+                    }
+            } else if is_up {
+                    let press_duration = if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+                        times[vk_idx].take().map(|t| t.elapsed())
+                    } else {
+                        None
+                    };
                     if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
                         keys[vk_idx] = false;
                     }
+
+                    // Détection appui court vs appui long sur le contacteur de validation
+                    if event == SwitchKeyEvent::Select {
+                        let is_long_press = press_duration.map_or(false, |d| d >= Duration::from_millis(1100));
+                        if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                            if is_long_press {
+                                // Appui long = Retour / Sortie (indispensable pour 1 contacteur unique !)
+                                q.push(SwitchKeyEvent::Back);
+                            } else {
+                                // Appui court = Validation / Sélection
+                                q.push(SwitchKeyEvent::Select);
+                            }
+                        }
+                }
             }
             // Bloque et avale l'événement clavier : il n'atteindra jamais la fenêtre cible
             if is_down || is_up {

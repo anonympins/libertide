@@ -2455,9 +2455,10 @@ impl eframe::App for OverlayApp {
         let global_escape_hit = unsafe { (GetAsyncKeyState(0x1B) as u16 & 0x8000) != 0 };
         #[cfg(not(windows))]
         let global_escape_hit = false;
-        let hook_escape_hit = hook_events.contains(&SwitchKeyEvent::Escape);
+        let hook_escape_hit = hook_events.contains(&SwitchKeyEvent::Escape) || hook_events.contains(&SwitchKeyEvent::Back);
 
-        let egui_escape_hit = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let egui_backspace_hit = ctx.input(|i| i.key_pressed(egui::Key::Backspace));
+        let egui_escape_hit = ctx.input(|i| i.key_pressed(egui::Key::Escape)) || (egui_backspace_hit && !is_typing);
         let escape_triggered = (egui_escape_hit || hook_escape_hit || (global_escape_hit && self.dictation_mode))
             && self.last_switch_input.elapsed() >= Duration::from_millis(250);
 
@@ -2561,11 +2562,13 @@ impl eframe::App for OverlayApp {
             let egui_nav_next = ctx.input(|i| {
                 i.key_pressed(egui::Key::ArrowRight)
                     || i.key_pressed(egui::Key::ArrowDown)
+                    || i.key_pressed(egui::Key::Num2)
                     || i.key_pressed(egui::Key::Num6)
             }) || (egui_tab && !is_shift);
             let egui_nav_prev = ctx.input(|i| {
                 i.key_pressed(egui::Key::ArrowLeft)
                     || i.key_pressed(egui::Key::ArrowUp)
+                    || i.key_pressed(egui::Key::Num3)
                     || i.key_pressed(egui::Key::Num4)
             }) || (egui_tab && is_shift);
 
