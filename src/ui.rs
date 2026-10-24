@@ -25,9 +25,9 @@ use windows::Win32::UI::Accessibility::{
     UIA_RangeValuePatternId, UIA_ScrollBarControlTypeId, UIA_ScrollItemPatternId,
     UIA_ScrollPatternId, UIA_SelectionItemPatternId, UIA_SelectionPatternId,
     UIA_SliderControlTypeId, UIA_SpinnerControlTypeId, UIA_TabControlTypeId,
-    UIA_TabItemControlTypeId, UIA_TextPatternId, UIA_TogglePatternId,
+    UIA_TabItemControlTypeId, UIA_TextPatternId, UIA_TogglePatternId, IUIAutomationTreeWalker,
     UIA_ToolBarControlTypeId, UIA_TreeItemControlTypeId, UIA_ValuePatternId,
-    UIA_GroupControlTypeId, UIA_SeparatorControlTypeId,
+    UIA_GroupControlTypeId, UIA_SeparatorControlTypeId, UIA_TextControlTypeId,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -38,9 +38,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 #[cfg(not(windows))]
 pub use crate::automation::{AsWindowTarget, NumberedElementTarget, VIRTUAL_KEY};
 #[cfg(windows)]
-use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetClassNameW, GetWindowRect, SetCursorPos};
+use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetClassNameW, GetWindowRect, GetWindowTextW, SetCursorPos};
 
 pub use crate::automation::{
+    activate_numbered_target, click_numbered_target,
     ActionHistoryManager, UndoOperation, ACTION_HISTORY,
     execute_undo_operation, undo_last_system_action, redo_last_system_action,
 };
@@ -81,6 +82,7 @@ pub struct UiaElementInfo {
     pub is_button: bool,
     pub is_link: bool,
     pub is_tab: bool,
+    pub is_label: bool,
     pub is_focusable: bool,
     pub is_tabindex: bool,
     pub is_web_content: bool,
@@ -89,6 +91,7 @@ pub struct UiaElementInfo {
     pub click_x: i32,
     pub click_y: i32,
     pub rect: RECT,
+    pub parent_rect: Option<RECT>,
     pub has_action_pattern: bool,
     pub pattern: Option<IUIAutomationInvokePattern>,
     pub area: i64,
@@ -112,6 +115,7 @@ pub struct UiaElementInfo {
     pub click_x: i32,
     pub click_y: i32,
     pub rect: [i32; 4],
+    pub parent_rect: Option<[i32; 4]>,
     pub is_button: bool,
     pub is_link: bool,
     pub is_edit_or_textarea: bool,
@@ -123,6 +127,7 @@ pub struct UiaElementInfo {
     pub is_slider: bool,
     pub is_toggle: bool,
     pub is_tab: bool,
+    pub is_label: bool,
     pub is_focusable: bool,
     pub is_tabindex: bool,
     pub is_web_content: bool,
@@ -309,6 +314,17 @@ pub fn click_element(x: i32, y: i32, _element: Option<&()>, _invoke_pattern: Opt
 }
 
 #[cfg(windows)]
+fn win_title_buf_to_string(hwnd: HWND) -> String {
+    let mut title_buf = [0u16; 512];
+    let len = unsafe { GetWindowTextW(hwnd, &mut title_buf) };
+    if len > 0 {
+        String::from_utf16_lossy(&title_buf[..len as usize])
+    } else {
+        String::new()
+    }
+}
+
+#[cfg(windows)]
 pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
     let mut results = Vec::new();
     if is_window_hung(hwnd) {
@@ -334,6 +350,8 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
         let Ok(cond) = uia.ControlViewCondition() else {
             return results;
         };
+
+        let walker = uia.ControlViewWalker().ok();
 
         let Ok(elements) = window_element.FindAll(TreeScope_Descendants, &cond) else {
             return results;
@@ -451,6 +469,8 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         continue;
                     }
 
+                    let mut is_window_control = false;
+
                     let is_sys_name = name.eq_ignore_ascii_case("système") || name.eq_ignore_ascii_case("system");
 
                     // Résolution sémantique et explicite des boutons système (Close, Maximize, Minimize, Restore, SystemMenu)
@@ -463,14 +483,19 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     {
                         if auto_id_lower.contains("close") || class_name.contains("close") {
                             name = "Fermer la fenêtre (✕)".to_string();
+                            is_window_control = true;
                         } else if auto_id_lower.contains("maximize") || class_name.contains("maximize") {
                             name = "Agrandir la fenêtre (□)".to_string();
+                            is_window_control = true;
                         } else if auto_id_lower.contains("restore") || class_name.contains("restore") {
                             name = "Restaurer la fenêtre (⧉)".to_string();
+                            is_window_control = true;
                         } else if auto_id_lower.contains("minimize") || class_name.contains("minimize") {
                             name = "Réduire la fenêtre (—)".to_string();
+                            is_window_control = true;
                         } else if auto_id_lower.contains("systemmenu") || auto_id_lower == "systemmenubar" || class_name.contains("systemmenu") {
                             name = "Menu Système de la fenêtre".to_string();
+                            is_window_control = true;
                         } else if is_sys_name {
                             if !help_text.is_empty() {
                                 name = help_text.clone();
@@ -484,14 +509,19 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                                     if rect.top <= win_r.top + 70 {
                                         if dist_from_right < 60 {
                                             name = "Fermer la fenêtre (✕)".to_string();
+                                            is_window_control = true;
                                         } else if dist_from_right < 115 {
                                             name = "Agrandir / Restaurer (□)".to_string();
+                                            is_window_control = true;
                                         } else if dist_from_right < 170 {
                                             name = "Réduire la fenêtre (—)".to_string();
+                                            is_window_control = true;
                                         } else if dist_from_left < 70 {
                                             name = "Menu Système (icône)".to_string();
+                                            is_window_control = true;
                                         } else {
                                             name = format!("Contrôle fenêtre ({})", if !loc_type.is_empty() { &loc_type } else { "Système" });
+                                            is_window_control = true;
                                         }
                                     }
                                 }
@@ -592,9 +622,19 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         }
                     }
 
-                    let is_focusable = item.CurrentIsKeyboardFocusable().map(|b| b.as_bool()).unwrap_or(false);
+                    let is_swing_editor_class = class_name.contains("editorcomponent")
+                        || class_name.contains("editorpane")
+                        || class_name.contains("jtextarea")
+                        || class_name.contains("jtextpane")
+                        || class_name.contains("consoleview")
+                        || (class_name.contains("canvas") && (class_name.contains("awt") || class_name.contains("sun") || (width > 250 && height > 150)));
+
+                    let is_editor_win = is_editor_window(hwnd, &name, &primary_class);
+
+                    let is_focusable = item.CurrentIsKeyboardFocusable().map(|b| b.as_bool()).unwrap_or(false) || is_swing_editor_class;
                     let is_explicit_textarea = class_name.contains("textarea")
                         || loc_type.contains("textarea")
+                        || is_swing_editor_class
                         || loc_type.contains("zone de texte")
                         || aria_role.to_lowercase() == "textbox" && height >= 35
                         || (is_edit_type && height >= 35);
@@ -607,6 +647,7 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
 
                     let is_input = !is_explicit_textarea && (is_edit_type
                         || is_aria_input
+                        || (is_editor_win && is_swing_editor_class)
                         || class_name.contains("input")
                         || loc_type.contains("input")
                         || class_name.contains("edit")
@@ -640,6 +681,18 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || loc_type.contains("bascule")
                         || loc_type.contains("toggle")
                         || loc_type.contains("commutateur");
+
+                    let is_label = (ctype == UIA_TextControlTypeId
+                        || loc_type.contains("étiquette")
+                        || loc_type.contains("etiquette")
+                        || loc_type.contains("label")
+                        || loc_type.contains("texte statique")
+                        || loc_type.contains("static text")
+                        || aria_role == "label"
+                        || aria_role == "status"
+                        || aria_role == "caption")
+                        && ctype != UIA_ButtonControlTypeId
+                        && ctype != UIA_HyperlinkControlTypeId;
 
                     let is_option = ctype == UIA_ListItemControlTypeId
                         || ctype == UIA_TreeItemControlTypeId
@@ -724,6 +777,7 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
 
                     if is_close_or_cross && (name.is_empty() || name == "×" || name == "✕" || name == "⨯" || name.eq_ignore_ascii_case("x")) {
                         name = "Fermer (croix ✕)".to_string();
+                        is_window_control = true;
                     } else if is_media && name.is_empty() {
                         let is_aud = aria_role == "audio" || loc_type.contains("audio") || class_name.contains("audio");
                         name = if is_aud {
@@ -775,12 +829,16 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || (is_web_content && (is_focusable || is_option || is_media) && !is_edit_or_textarea && !is_link && !is_button);
                     let is_tabindex = has_tabindex;
 
-                    if is_browser_chrome && !name.is_empty() && !name.starts_with("[Navigateur]") {
+                    if is_browser_chrome && !name.is_empty() && !name.starts_with("[Navigateur]") && !is_window_control {
                         name = format!("[Navigateur] {name}");
                     }
 
+                    if is_label && name.trim().len() < 2 {
+                        continue;
+                    }
+
                     const MAX_INTERACTIVE_TEXT_LEN: usize = 110;
-                    if (name.is_empty() || is_tabindex) && (is_link || is_button || is_tab || is_tabindex || is_focusable) {
+                    if (name.is_empty() || is_tabindex || is_label) && (is_link || is_button || is_tab || is_tabindex || is_focusable || is_label) {
                         if let Some(txt) = extract_inner_text(&uia, &item, MAX_INTERACTIVE_TEXT_LEN) {
                             if name.is_empty() {
                                 name = txt;
@@ -799,9 +857,15 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         }
                     }
 
+                    if is_swing_editor_class && (name.is_empty() || name.to_lowercase().contains("canvas")) {
+                        name = extract_filename_from_title(&win_title_buf_to_string(hwnd))
+                            .map(|f| format!("Éditeur de code ({f})"))
+                            .unwrap_or_else(|| "Zone d'édition de code".to_string());
+                    }
+
                     if name.is_empty() && aria_label.is_empty() && automation_id.is_empty() && help_text.is_empty() && value_text.is_empty()
                         && data_attrs.is_empty() && primary_class.is_empty()
-                        && !is_edit_or_textarea && !is_button && !is_link && !is_tab && !is_focusable && !is_tabindex && !is_media && !is_slider && !is_toggle {
+                        && !is_edit_or_textarea && !is_button && !is_link && !is_tab && !is_focusable && !is_tabindex && !is_media && !is_slider && !is_toggle && !is_label {
                         continue;
                     }
 
@@ -822,6 +886,8 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let has_action_pattern = pattern.is_some() || has_toggle || has_sel_item || has_expand || has_legacy;
                     let area = (width as i64) * (height as i64);
                     let index = results.len() + 1;
+                    let parent_rect = walker.as_ref().and_then(|w| get_parent_container_rect(w, &item, &rect));
+
                     results.push(UiaElementInfo {
                         index,
                         element: item,
@@ -849,6 +915,7 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         is_button,
                         is_link,
                         is_tab,
+                        is_label,
                         is_focusable,
                         is_tabindex,
                         is_web_content,
@@ -857,6 +924,7 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         click_x,
                         click_y,
                         rect,
+                        parent_rect,
                         has_action_pattern,
                         pattern,
                         area,
@@ -879,6 +947,7 @@ pub fn list_interactive_elements(_target: impl AsWindowTarget) -> Vec<UiaElement
             let is_btn = lower.contains("button") || lower.contains("bouton");
             let is_lnk = lower.contains("link") || lower.contains("lien");
             let is_input = lower.contains("text") || lower.contains("entry") || lower.contains("champ");
+            let is_label = lower.contains("label") || lower.contains("étiquette") || lower.contains("static");
             let w = (t.rect[2] - t.rect[0]).max(1) as i64;
             let h = (t.rect[3] - t.rect[1]).max(1) as i64;
             UiaElementInfo {
@@ -897,6 +966,7 @@ pub fn list_interactive_elements(_target: impl AsWindowTarget) -> Vec<UiaElement
                 click_x: t.click_x,
                 click_y: t.click_y,
                 rect: t.rect,
+                parent_rect: None,
                 is_button: is_btn,
                 is_link: is_lnk,
                 is_edit_or_textarea: is_input,
@@ -908,6 +978,7 @@ pub fn list_interactive_elements(_target: impl AsWindowTarget) -> Vec<UiaElement
                 is_slider: false,
                 is_toggle: false,
                 is_tab: false,
+                is_label,
                 is_focusable: true,
                 is_tabindex: false,
                 is_web_content: false,
@@ -2512,4 +2583,114 @@ pub fn score_enriched_button(text: &str) -> f32 {
 #[cfg(windows)]
 fn name_words_count(s: &str) -> usize {
     s.split_whitespace().count()
+}
+
+#[cfg(windows)]
+pub fn get_parent_container_rect(
+    walker: &IUIAutomationTreeWalker,
+    element: &IUIAutomationElement,
+    child_rect: &RECT,
+) -> Option<RECT> {
+    let child_w = child_rect.right - child_rect.left;
+    let child_h = child_rect.bottom - child_rect.top;
+    let mut current = element.clone();
+
+    for _ in 0..3 {
+        if let Ok(parent) = unsafe { walker.GetParentElement(&current) } {
+            if let Ok(pr) = unsafe { parent.CurrentBoundingRectangle() } {
+                let pw = pr.right - pr.left;
+                let ph = pr.bottom - pr.top;
+                if pw >= child_w && ph >= child_h && (pw > child_w + 4 || ph > child_h + 4) && pw < 2800 && ph < 2000 {
+                    return Some(pr);
+                }
+            }
+            current = parent;
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+/// Calcule la délimitation optimale d'une zone (zone bleue) en se ferrant aux conteneurs
+/// parents au lieu de se restreindre à la boîte englobante minimale des éléments enfants.
+#[cfg(windows)]
+pub fn compute_zone_rect_anchored_to_parents(
+    elements: &[UiaElementInfo],
+    window_rect: Option<RECT>,
+) -> RECT {
+    if elements.is_empty() {
+        return window_rect.unwrap_or_default();
+    }
+
+    let mut min_left = elements.iter().map(|e| e.rect.left).min().unwrap_or(0);
+    let mut min_top = elements.iter().map(|e| e.rect.top).min().unwrap_or(0);
+    let mut max_right = elements.iter().map(|e| e.rect.right).max().unwrap_or(0);
+    let mut max_bottom = elements.iter().map(|e| e.rect.bottom).max().unwrap_or(0);
+
+    let parent_rects: Vec<&RECT> = elements.iter().filter_map(|e| e.parent_rect.as_ref()).collect();
+    if !parent_rects.is_empty() {
+        let p_min_left = parent_rects.iter().map(|r| r.left).min().unwrap_or(min_left);
+        let p_min_top = parent_rects.iter().map(|r| r.top).min().unwrap_or(min_top);
+        let p_max_right = parent_rects.iter().map(|r| r.right).max().unwrap_or(max_right);
+        let p_max_bottom = parent_rects.iter().map(|r| r.bottom).max().unwrap_or(max_bottom);
+
+        let pw = p_max_right - p_min_left;
+        let ph = p_max_bottom - p_min_top;
+        if pw > 0 && ph > 0 && pw < 2800 && ph < 2000 {
+            min_left = p_min_left;
+            min_top = p_min_top;
+            max_right = p_max_right;
+            max_bottom = p_max_bottom;
+        }
+    } else {
+        const PADDING: i32 = 8;
+        min_left -= PADDING;
+        min_top -= PADDING;
+        max_right += PADDING;
+        max_bottom += PADDING;
+    }
+
+    if let Some(win) = window_rect {
+        min_left = min_left.max(win.left);
+        min_top = min_top.max(win.top);
+        max_right = max_right.min(win.right);
+        max_bottom = max_bottom.min(win.bottom);
+    }
+
+    RECT { left: min_left, top: min_top, right: max_right, bottom: max_bottom }
+}
+
+/// Fait défiler les fenêtres de manière cyclique stable avec les flèches (-1 ou +1)
+/// sans subir le réordonnancement du Z-order de Windows qui cause le va-et-vient.
+#[cfg(windows)]
+pub fn cycle_user_window(
+    user_windows: &[(HWND, String)],
+    current_hwnd: Option<HWND>,
+    direction: i32,
+) -> Option<HWND> {
+    if user_windows.is_empty() {
+        return None;
+    }
+
+    let mut stable_windows = user_windows.to_vec();
+    stable_windows.sort_by_key(|&(h, _)| {
+        let mut r = RECT::default();
+        if unsafe { GetWindowRect(h, &mut r).is_ok() } {
+            (r.left, r.top)
+        } else {
+            (0, 0)
+        }
+    });
+
+    let current = current_hwnd.unwrap_or_else(|| stable_windows[0].0);
+    let cur_idx = stable_windows.iter().position(|&(h, _)| h == current).unwrap_or(0);
+    let len = stable_windows.len() as i32;
+    let next_idx = ((cur_idx as i32 + direction).rem_euclid(len)) as usize;
+
+    let target_hwnd = stable_windows[next_idx].0;
+    force_foreground_window(target_hwnd);
+    restore_if_iconic(target_hwnd);
+
+    Some(target_hwnd)
 }
