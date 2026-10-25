@@ -487,6 +487,7 @@ impl FloatingCard {
 
         ctx.show_viewport_immediate(viewport_id, builder, |vp_ctx, _class| {
             vp_ctx.request_repaint();
+            vp_ctx.set_zoom_factor(ctx.zoom_factor());
             if vp_ctx.input(|i| i.viewport().close_requested()) {
                 self.open = false;
             }

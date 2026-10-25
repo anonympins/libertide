@@ -1374,6 +1374,15 @@ impl OverlayApp {
             .and_then(|s| s.trim().parse::<u64>().ok())
             .unwrap_or(2200);
 
+        let initial_zoom = std::env::var("FONT_SIZE")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "FONT_SIZE"))
+            .or_else(|| std::env::var("ZOOM_FACTOR").ok())
+            .or_else(|| read_env_var_from_file(".env", "ZOOM_FACTOR"))
+            .and_then(|s| s.trim().parse::<f32>().ok())
+            .map(|z| z.clamp(0.7, 2.5))
+            .unwrap_or(1.0);
+
         let mut app = Self {
             status: AgentStatus::Idle,
             chat_history: vec![ChatEntry {
@@ -1392,7 +1401,7 @@ impl OverlayApp {
             whisper_ready: false,
             continuous_mode: true,
             dictation_mode: false,
-            zoom_factor: 1.0,
+            zoom_factor: initial_zoom,
             voice_gender: initial_voice,
             llm_config: llm_config.clone(),
             theme,
@@ -1478,6 +1487,14 @@ impl OverlayApp {
         self.theme = theme;
         let _ = write_env_var_to_file(".env", "THEME", theme.key());
         std::env::set_var("THEME", theme.key());
+    }
+
+    pub fn set_zoom_factor(&mut self, factor: f32) {
+        let clamped = factor.clamp(0.7, 2.5);
+        self.zoom_factor = clamped;
+        let val_str = format!("{:.2}", clamped);
+        let _ = write_env_var_to_file(".env", "FONT_SIZE", &val_str);
+        std::env::set_var("FONT_SIZE", &val_str);
     }
 
     fn draw_avatar(&self, ui: &mut egui::Ui, center: egui::Pos2, base_radius: f32, time: f64) {
@@ -2058,7 +2075,7 @@ impl eframe::App for OverlayApp {
         let current_chat_h = self.chat_height.clamp(min_chat_h, max_chat_h);
 
         // Arrondi pour éviter les oscillations de conversion DPI sub-pixel
-        let modal_min_h = if self.show_api_key_modal { 320.0 } else { min_win_h };
+        let modal_min_h = if self.show_api_key_modal { 380.0 } else { min_win_h };
         let target_win_h = (padding + current_chat_h + padding + control_h + padding).max(modal_min_h).round();
         let active_win_h = inner_rect_opt.map_or(self.current_win_h, |r| r.height().max(min_win_h));
 
@@ -2311,24 +2328,27 @@ impl eframe::App for OverlayApp {
                     }
 
                     // Traitement du zoom adaptatif vocal
-                    if norm_prompt.contains("grossis") || norm_prompt.contains("zoom plus") || norm_prompt.contains("agrandis") || norm_prompt.contains("zoom in") {
-                        self.zoom_factor = (self.zoom_factor + 0.15).clamp(0.7, 2.5);
+                    if norm_prompt.contains("grossis") || norm_prompt.contains("zoom plus") || norm_prompt.contains("agrandis") || norm_prompt.contains("zoom in")
+                        || norm_prompt.contains("police plus grande") || norm_prompt.contains("texte plus grand") || norm_prompt.contains("agrandir la police") || norm_prompt.contains("agrandir le texte") {
+                        self.set_zoom_factor(self.zoom_factor + 0.15);
                         play_earcon(Earcon::Success);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx, false);
                         }
                         return;
                     }
-                    if norm_prompt.contains("zoom moins") || norm_prompt.contains("retrecis") || norm_prompt.contains("rétrécis") || norm_prompt.contains("zoom out") {
-                        self.zoom_factor = (self.zoom_factor - 0.15).clamp(0.7, 2.5);
+                    if norm_prompt.contains("zoom moins") || norm_prompt.contains("retrecis") || norm_prompt.contains("rétrécis") || norm_prompt.contains("zoom out")
+                        || norm_prompt.contains("police plus petite") || norm_prompt.contains("texte plus petit") || norm_prompt.contains("diminuer la police") || norm_prompt.contains("diminuer le texte") {
+                        self.set_zoom_factor(self.zoom_factor - 0.15);
                         play_earcon(Earcon::Success);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx, false);
                         }
                         return;
                     }
-                    if norm_prompt.contains("zoom normal") || norm_prompt.contains("taille normale") || norm_prompt.contains("reset zoom") {
-                        self.zoom_factor = 1.0;
+                    if norm_prompt.contains("zoom normal") || norm_prompt.contains("taille normale") || norm_prompt.contains("reset zoom")
+                        || norm_prompt.contains("police normale") || norm_prompt.contains("texte normal") || norm_prompt.contains("reinitialiser police") || norm_prompt.contains("réinitialiser police") {
+                        self.set_zoom_factor(1.0);
                         play_earcon(Earcon::Success);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx, false);
@@ -5945,6 +5965,41 @@ impl eframe::App for OverlayApp {
                             ui.separator();
                             ui.add_space(4.0);
                             ui.label(
+                                egui::RichText::new("Taille de police et affichage des textes :")
+                                    .size(11.5)
+                                    .color(theme.text_secondary),
+                            );
+                            ui.add_space(3.0);
+                            let mut current_zoom = self.zoom_factor;
+                            let prev_zoom = current_zoom;
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Police :").size(12.0).strong().color(egui::Color32::WHITE));
+                                let slider = egui::Slider::new(&mut current_zoom, 0.70..=2.20)
+                                    .step_by(0.05)
+                                    .custom_formatter(|val, _| {
+                                        format!("{:.0} %", val * 100.0)
+                                    });
+                                ui.add(slider)
+                                    .on_hover_text("Ajuster la taille de police et le zoom des textes de l'interface (70% à 220%)");
+
+                                if ui.small_button("A-").on_hover_text("Diminuer la taille de police (-10%)").clicked() {
+                                    current_zoom = (current_zoom - 0.10).max(0.70);
+                                }
+                                if ui.small_button("100%").on_hover_text("Rétablir la taille de police standard (100%)").clicked() {
+                                    current_zoom = 1.0;
+                                }
+                                if ui.small_button("A+").on_hover_text("Agrandir la taille de police (+10%)").clicked() {
+                                    current_zoom = (current_zoom + 0.10).min(2.20);
+                                }
+                            });
+                            if (current_zoom - prev_zoom).abs() > 0.001 {
+                                self.set_zoom_factor(current_zoom);
+                            }
+
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(4.0);
+                            ui.label(
                                 egui::RichText::new("Temporisation du clic au survol (Dwell) :")
                                     .size(11.5)
                                     .color(theme.text_secondary),
@@ -5978,7 +6033,7 @@ impl eframe::App for OverlayApp {
                                     self.show_api_key_modal = false;
                                 }
                                 ui.label(
-                                    egui::RichText::new("Astuce vocale : dites « thème suivant » ou « contraste élevé »")
+                                    egui::RichText::new("Astuce vocale : dites « police plus grande », « zoom normal » ou « contraste élevé »")
                                         .size(10.0)
                                         .color(theme.text_secondary),
                                 );
