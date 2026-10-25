@@ -477,7 +477,7 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
         }
     }
 
-    if has_rect {
+    if has_rect && targets.len() < 3 {
         let window_rect = [wr.left, wr.top, wr.right, wr.bottom];
         crate::ocr::enrich_targets_with_ocr(hwnd, window_rect, &mut targets);
         for (i, t) in targets.iter_mut().enumerate() {

@@ -900,7 +900,7 @@ pub fn detect_visual_boxes_from_pixels(
 
     // Trier les cibles par ordre visuel de lecture (haut-vers-bas, gauche-vers-droite)
     candidate_boxes.sort_by_key(|b| (b[1] / 20) * 10000 + b[0]);
-    candidate_boxes.truncate(25);
+    candidate_boxes.truncate(8);
 
     candidate_boxes
 }
