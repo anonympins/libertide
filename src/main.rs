@@ -158,7 +158,14 @@ impl DwellState {
         }
     }
 
+    pub fn is_enabled(&self) -> bool {
+        !self.dwell_duration.is_zero()
+    }
+
     pub fn get_progress(&self, id: egui::Id) -> Option<f32> {
+        if !self.is_enabled() {
+            return None;
+        }
         if self.hovered_id == Some(id) {
             if let Some(start) = self.hover_start {
                 let elapsed = Instant::now().duration_since(start);
@@ -170,6 +177,9 @@ impl DwellState {
     }
 
     pub fn update(&mut self, id: egui::Id, is_hovered: bool) -> (bool, f32) {
+        if !self.is_enabled() {
+            return (false, 0.0);
+        }
         let now = Instant::now();
 
         if let Some(cooldown) = self.cooldown_until {
@@ -306,6 +316,9 @@ pub fn apply_dwell_to_response(
     id: egui::Id,
     response: &egui::Response,
 ) -> bool {
+    if !dwell_state.is_enabled() {
+        return response.clicked();
+    }
     let (triggered, progress) = dwell_state.update(id, response.hovered());
     if progress > 0.0 && progress <= 1.0 {
         let rect = response.rect;
@@ -509,15 +522,62 @@ fn is_switch_access_command(text: &str) -> bool {
         // IT
         "accesso a interruttori", "modalita cursore", "modalita interruttore", "interruttore",
         // PT
-        "acesso por interruptor", "modo comutador", "comutador", "interruptor",
+        "acesso por interruptor", "modo comutador", "comutador", "interruptor", "modo de sobrevoo",
         // RU
-        "переключатель", "режим переключателя",
+        "переключатель", "режим переключателя", "режим наведения",
         // ZH
-        "切换控制", "开关控制", "悬停控制",
+        "切换控制", "开关控制", "悬停控制", "悬停模式",
         // JA
         "スイッチアクセス", "スイッチ操作", "ホバーモード",
     ];
     TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig))
+}
+
+pub fn is_hover_nav_asked() -> bool {
+    std::env::var("HOVER_NAV_ASKED")
+        .ok()
+        .or_else(|| read_env_var_from_file(".env", "HOVER_NAV_ASKED"))
+        .map(|s| {
+            let t = s.trim();
+            t.eq_ignore_ascii_case("true") || t == "1"
+        })
+        .unwrap_or(false)
+}
+
+pub fn mark_hover_nav_asked() {
+    std::env::set_var("HOVER_NAV_ASKED", "true");
+    let _ = write_env_var_to_file(".env", "HOVER_NAV_ASKED", "true");
+}
+
+fn is_dismiss_hover_command(text: &str) -> bool {
+    let norm = normalize_for_command_match(text);
+    const TRIGGERS: &[&str] = &[
+        // FR
+        "non merci", "pas maintenant", "plus tard", "refuser survol", "pas de survol",
+        // EN
+        "no thanks", "not now", "later", "no thank you", "dismiss hover",
+        // ES
+        "no gracias", "ahora no", "mas tarde", "más tarde",
+        // DE
+        "nein danke", "nicht jetzt", "spater", "später",
+        // IT
+        "no grazie", "non adesso", "piu tardi", "più tardi",
+        // PT
+        "nao obrigado", "não obrigado", "agora nao", "agora não", "mais tarde",
+        // RU
+        "нет спасибо", "не сейчас", "позже",
+        // ZH
+        "不用了", "谢谢不用", "稍后", "暂不", "不需要",
+        // JA
+        "結構です", "あとで", "今はいい",
+    ];
+    if TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig)) {
+        return true;
+    }
+    if !is_hover_nav_asked() && (norm == "non" || norm == "no" || norm == "nein" || norm == "nao" || norm == "não" || norm == "нет" || norm == "いいえ") {
+        return true;
+    }
+    false
 }
 
 fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
@@ -1159,10 +1219,58 @@ impl OverlayApp {
         let llm_config = resolve_llm_config();
         let theme = AppTheme::resolve_theme();
         let has_no_key = llm_config.api_key.is_empty();
-        let initial_subtitle = if has_no_key {
-            "Veuillez renseigner votre clé API LLM pour activer l'assistant.".to_string()
+        let hover_asked = is_hover_nav_asked();
+        let (locale, _) = get_system_locale_language();
+        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+
+        let (initial_subtitle, initial_suggestions) = if !hover_asked {
+            let question = localized_speech(
+                lang_prefix,
+                "Voulez-vous activer la navigation au survol ?",
+                "Do you want to enable hover navigation?",
+                "¿Desea activar la navegación al pasar el cursor?",
+                "Möchten Sie die Hover-Navigation aktivieren?",
+                "Vuoi attivare la navigazione al passaggio del mouse?",
+                "Deseja ativar a navegação por cursor?",
+                "Хотите включить навигацию при наведении?",
+                "是否要启用悬停导航？",
+                "ホバーナビゲーションを有効にしますか？",
+            );
+            let btn_hover = localized_speech(
+                lang_prefix,
+                "Mode survol",
+                "Hover mode",
+                "Modo sobrevuelo",
+                "Hover-Modus",
+                "Modalità cursore",
+                "Modo de sobrevoo",
+                "Режим наведения",
+                "悬停模式",
+                "ホバーモード",
+            );
+            let btn_no = localized_speech(
+                lang_prefix,
+                "Non merci",
+                "No thanks",
+                "No, gracias",
+                "Nein danke",
+                "No grazie",
+                "Não, obrigado",
+                "Нет, спасибо",
+                "不用了",
+                "いいえ",
+            );
+            (
+                question,
+                vec![
+                    QuickSuggestionItem::Text(btn_hover),
+                    QuickSuggestionItem::Text(btn_no),
+                ],
+            )
+        } else if has_no_key {
+            ("Veuillez renseigner votre clé API LLM pour activer l'assistant.".to_string(), Vec::new())
         } else {
-            "En attente d'instructions d'exploration...".to_string()
+            ("En attente d'instructions d'exploration...".to_string(), Vec::new())
         };
         let _ = tts_sender.send(TtsCommand::Speak(initial_subtitle.clone()));
 
@@ -1178,7 +1286,7 @@ impl OverlayApp {
                 role: ChatRole::Agent,
                 text: initial_subtitle,
                 timestamp: current_time_str(),
-                quick_suggestions: Vec::new(),
+                quick_suggestions: initial_suggestions,
                 screen_size_kb: None,
             }],
             active_tab: ActiveTab::Assistance,
@@ -1539,6 +1647,7 @@ impl OverlayApp {
     }
 
     pub fn toggle_switch_access_mode(&mut self) {
+        mark_hover_nav_asked();
         self.switch_access_mode = !self.switch_access_mode;
         SWITCH_HOOK_ENABLED.store(self.switch_access_mode, Ordering::SeqCst);
         automation::reset_switch_keys();
@@ -2235,7 +2344,11 @@ impl eframe::App for OverlayApp {
                         }
                     }
 
+                    let (locale, _) = get_system_locale_language();
+                    let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+
                     if is_switch_access_command(&prompt) {
+                        mark_hover_nav_asked();
                         self.toggle_switch_access_mode();
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx, false);
@@ -2243,8 +2356,42 @@ impl eframe::App for OverlayApp {
                         return;
                     }
 
-                    let (locale, _) = get_system_locale_language();
-                    let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+                    if is_dismiss_hover_command(&prompt) {
+                        mark_hover_nav_asked();
+                        play_earcon(Earcon::Success);
+                        self.status = AgentStatus::Idle;
+                        let reply = localized_speech(
+                            lang_prefix,
+                            "Très bien. Vous pouvez activer le mode survol à tout moment avec le bouton Survol ou en disant « mode survol ».",
+                            "Understood. You can enable hover mode at any time using the Hover button or by saying \"hover mode\".",
+                            "Entendido. Puede activar el modo sobrevuelo en cualquier momento con el botón Sobrevuelo o diciendo «modo sobrevuelo».",
+                            "Verstanden. Sie können den Hover-Modus jederzeit über die Schaltfläche Hover oder mit dem Befehl „Hover-Modus“ aktivieren.",
+                            "Ricevuto. Puoi attivare la modalità cursore in qualsiasi momento con il pulsante Cursore o dicendo \"modalità cursore\".",
+                            "Entendido. Você pode ativar o modo de sobrevoo a qualquer momento com o botão Sobrevoo ou dizendo «modo de sobrevoo».",
+                            "Понятно. Вы можете включить режим наведения в любое время с помощью кнопки или команды «режим наведения».",
+                            "好的。您可以随时通过“悬停”按钮或语音指令“悬停模式”来启用它。",
+                            "承知しました。「ホバー」ボタンまたは「ホバーモード」の音声コマンドでいつでも有効にできます。",
+                        );
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::User,
+                            text: prompt,
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: reply.clone(),
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx, false);
+                        }
+                        return;
+                    }
 
                     // 1. Arrêt d'urgence local universel (<50ms, sans requête LLM)
                     if is_emergency_stop_command(&prompt) {
@@ -4844,6 +4991,53 @@ impl eframe::App for OverlayApp {
                                         self.continuous_mode = true;
                                         self.live_transcript.clear();
 
+                                        if is_switch_access_command(&prompt) {
+                                            mark_hover_nav_asked();
+                                            if !self.switch_access_mode {
+                                                self.toggle_switch_access_mode();
+                                            }
+                                            if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                                                self.start_recording(&ctx, false);
+                                            }
+                                            return;
+                                        }
+
+                                        if is_dismiss_hover_command(&prompt) {
+                                            mark_hover_nav_asked();
+                                            play_earcon(Earcon::Success);
+                                            self.status = AgentStatus::Idle;
+                                            let (locale, _) = get_system_locale_language();
+                                            let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+                                            let reply = localized_speech(
+                                                lang_prefix,
+                                                "Très bien. Vous pouvez activer le mode survol à tout moment avec le bouton Survol ou en disant « mode survol ».",
+                                                "Understood. You can enable hover mode at any time using the Hover button or by saying \"hover mode\".",
+                                                "Entendido. Puede activar el modo sobrevuelo en cualquier momento con el botón Sobrevuelo o diciendo «modo sobrevuelo».",
+                                                "Verstanden. Sie können den Hover-Modus jederzeit über die Schaltfläche Hover oder mit dem Befehl „Hover-Modus“ aktivieren.",
+                                                "Ricevuto. Puoi attivare la modalità cursore in qualsiasi momento con il pulsante Cursore o dicendo \"modalità cursore\".",
+                                                "Entendido. Você pode ativar o modo de sobrevoo a qualquer momento com o botão Sobrevoo ou dizendo «modo de sobrevoo».",
+                                                "Понятно. Вы можете включить режим наведения в любое время с помощью кнопки или команды «режим наведения».",
+                                                "好的。您可以随时通过“悬停”按钮或语音指令“悬停模式”来启用它。",
+                                                "承知しました。「ホバー」ボタンまたは「ホバーモード」の音声コマンドでいつでも有効にできます。",
+                                            );
+                                            self.chat_history.push(ChatEntry {
+                                                role: ChatRole::User,
+                                                text: prompt.clone(),
+                                                timestamp: current_time_str(),
+                                                quick_suggestions: Vec::new(),
+                                                screen_size_kb: None,
+                                            });
+                                            self.chat_history.push(ChatEntry {
+                                                role: ChatRole::Agent,
+                                                text: reply.clone(),
+                                                timestamp: current_time_str(),
+                                                quick_suggestions: Vec::new(),
+                                                screen_size_kb: None,
+                                            });
+                                            let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                                            return;
+                                        }
+
                                         // Interception directe pour faire lire la fenêtre volante par le narrateur
                                         let is_read_card = prompt.starts_with("🔊 Lire : ") || prompt.starts_with("Lire : ");
                                         let matching_card = if is_read_card {
@@ -5664,8 +5858,17 @@ impl eframe::App for OverlayApp {
                             let prev_dwell_ms = current_dwell_ms;
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new("Délai :").size(12.0).strong().color(egui::Color32::WHITE));
-                                ui.add(egui::Slider::new(&mut current_dwell_ms, 600..=2500).suffix(" ms").step_by(50.0))
-                                    .on_hover_text("Délai de maintien du pointeur requis avant déclenchement automatique");
+                                let slider = egui::Slider::new(&mut current_dwell_ms, 0..=2500)
+                                    .step_by(50.0)
+                                    .custom_formatter(|val, _| {
+                                        if val <= 0.0 {
+                                            "Désactivé (0 ms)".to_string()
+                                        } else {
+                                            format!("{:.0} ms", val)
+                                        }
+                                    });
+                                ui.add(slider)
+                                    .on_hover_text("Délai de maintien du pointeur requis avant déclenchement automatique (0 ms pour désactiver)");
                             });
                             if current_dwell_ms != prev_dwell_ms {
                                 self.dwell_state.dwell_duration = Duration::from_millis(current_dwell_ms);

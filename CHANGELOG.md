@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ToggleDictation`: Toggles dictation on/off, with voice feedback.
 - `ToggleSwitch`: Toggles hover mode and hierarchical switch control on/off.
 - `ToggleVoice`: Cycles through available text-to-speech profiles.
-- `Clear`: Performs a full reset of the chat history, clears the contextual analysis cache, and interrupts speech output with an audible notification.
+- `Clear`: Performs a full reset of the chat history, clears the contextual analysis cache, and interrupts speech output with an audible notification.Leai
 ---
 ## [0.6.0] - 2026-10-28
 
