@@ -146,6 +146,10 @@ pub struct DwellState {
     pub hover_start: Option<Instant>,
     pub dwell_duration: Duration,
     pub cooldown_until: Option<Instant>,
+    pub last_triggered_id: Option<egui::Id>,
+    pub last_triggered_time: Option<Instant>,
+    pub unhovered_since: Option<Instant>,
+    pub locked_ids: std::collections::HashMap<egui::Id, Instant>,
 }
 
 impl DwellState {
@@ -155,6 +159,10 @@ impl DwellState {
             hover_start: None,
             dwell_duration: Duration::from_millis(millis),
             cooldown_until: None,
+            last_triggered_id: None,
+            last_triggered_time: None,
+            unhovered_since: None,
+            locked_ids: std::collections::HashMap::new(),
         }
     }
 
@@ -162,8 +170,37 @@ impl DwellState {
         !self.dwell_duration.is_zero()
     }
 
+    pub fn lock_id(&mut self, id: egui::Id, duration: Duration) {
+        let until = Instant::now() + duration;
+        self.locked_ids.insert(id, until);
+        if self.hovered_id == Some(id) {
+            self.hovered_id = None;
+            self.hover_start = None;
+        }
+    }
+
+    pub fn is_locked(&self, id: egui::Id) -> bool {
+        if let Some(&until) = self.locked_ids.get(&id) {
+            if Instant::now() < until {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn reset_hover(&mut self, id: egui::Id) {
+        if self.hovered_id == Some(id) {
+            self.hovered_id = None;
+            self.hover_start = None;
+        }
+    }
+
     pub fn get_progress(&self, id: egui::Id) -> Option<f32> {
         if !self.is_enabled() {
+            return None;
+        }
+        // Protection œil fixe : aucun rendu de jauge si l'élément vient d'être déclenché ou est verrouillé
+        if self.last_triggered_id == Some(id) || self.is_locked(id) {
             return None;
         }
         if self.hovered_id == Some(id) {
@@ -181,6 +218,53 @@ impl DwellState {
             return (false, 0.0);
         }
         let now = Instant::now();
+
+        // 1. Purge des verrous expirés
+        self.locked_ids.retain(|_, until| *until > now);
+
+        // 2. Si l'élément est sous verrouillage étendu (ex: lecture de texte)
+        if self.is_locked(id) {
+            if self.hovered_id == Some(id) {
+                self.hovered_id = None;
+                self.hover_start = None;
+            }
+            return (false, 0.0);
+        }
+
+        // 3. Protection œil fixe : l'élément vient d'être déclenché
+        if self.last_triggered_id == Some(id) {
+            if is_hovered {
+                // Le regard ou pointeur reste fixé : on réinitialise l'absence et on empêche tout redéclenchement
+                self.unhovered_since = None;
+                self.hovered_id = None;
+                self.hover_start = None;
+                return (false, 0.0);
+            } else {
+                // Le regard a quitté l'élément
+                if self.unhovered_since.is_none() {
+                    self.unhovered_since = Some(now);
+                }
+                let unhovered_time = self.unhovered_since.unwrap();
+                let unhovered_long_enough = now.duration_since(unhovered_time) >= Duration::from_millis(600);
+                let refractory_passed = self.last_triggered_time.map_or(true, |t| now.duration_since(t) >= Duration::from_millis(1500));
+
+                if unhovered_long_enough && refractory_passed {
+                    self.last_triggered_id = None;
+                    self.last_triggered_time = None;
+                    self.unhovered_since = None;
+                }
+                return (false, 0.0);
+            }
+        }
+
+        // Si l'utilisateur regarde activement un autre élément, libérer l'ancien ID après un délai raisonnable
+        if is_hovered && self.last_triggered_id.is_some() && self.last_triggered_id != Some(id) {
+            if self.last_triggered_time.map_or(true, |t| now.duration_since(t) >= Duration::from_millis(500)) {
+                self.last_triggered_id = None;
+                self.last_triggered_time = None;
+                self.unhovered_since = None;
+            }
+        }
 
         if let Some(cooldown) = self.cooldown_until {
             if now < cooldown {
@@ -215,6 +299,9 @@ impl DwellState {
             if elapsed >= self.dwell_duration {
                 self.hover_start = None;
                 self.hovered_id = None;
+                self.last_triggered_id = Some(id);
+                self.last_triggered_time = Some(now);
+                self.unhovered_since = None;
                 self.cooldown_until = Some(now + Duration::from_millis(500));
                 return (true, 1.0);
             }
@@ -319,6 +406,13 @@ pub fn apply_dwell_to_response(
     if !dwell_state.is_enabled() {
         return response.clicked();
     }
+    if response.clicked() {
+        dwell_state.reset_hover(id);
+        dwell_state.last_triggered_id = Some(id);
+        dwell_state.last_triggered_time = Some(Instant::now());
+        dwell_state.unhovered_since = None;
+        return true;
+    }
     let (triggered, progress) = dwell_state.update(id, response.hovered());
     if progress > 0.0 && progress <= 1.0 {
         let rect = response.rect;
@@ -330,7 +424,7 @@ pub fn apply_dwell_to_response(
         ui.painter().rect_filled(progress_rect, egui::CornerRadius::same(2), egui::Color32::from_rgb(76, 217, 100));
         ui.ctx().request_repaint();
     }
-    response.clicked() || triggered
+    triggered
 }
 
 pub struct OverlayApp {
@@ -4909,6 +5003,7 @@ impl eframe::App for OverlayApp {
                                             let msg_dwell_id = ui.make_persistent_id(format!("dwell_chat_msg_{idx}"));
                                             let dwell_triggered = apply_dwell_to_response(ui, &mut self.dwell_state, msg_dwell_id, &interact_resp);
                                             if dwell_triggered {
+                                                self.dwell_state.lock_id(msg_dwell_id, Duration::from_secs(6));
                                                 speak_message = Some(entry.text.clone());
                                             }
 
@@ -5225,6 +5320,7 @@ impl eframe::App for OverlayApp {
 
                                             let t_dwell_id = ui.make_persistent_id(format!("dwell_twitch_msg_{idx}"));
                                             if apply_dwell_to_response(ui, &mut self.dwell_state, t_dwell_id, &resp) {
+                                                self.dwell_state.lock_id(t_dwell_id, Duration::from_secs(6));
                                                 speak_twitch_message = Some(format!("{}: {}", msg.author, msg.text));
                                             }
 

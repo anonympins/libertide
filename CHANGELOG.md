@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ---
 ## [0.6.1] - 2026-10-29
 
+### 🚀 First-Launch Onboarding & Hover Navigation Detection (`main.rs`)
+- **First-Run Interactive Setup (`HOVER_NAV_ASKED`)**:
+  - Detects the first launch of the application and persists `HOVER_NAV_ASKED=true` in `.env`.
+  - Welcomes the user with a prompt translated into their system language (*"Voulez-vous activer la navigation au survol ?"*, *"Do you want to enable hover navigation?"*, etc.) spoken aloud via TTS and displayed in chat.
+  - Includes quick-action suggestion chips (*"Mode survol"* / *"Non merci"*) responsive to both click/dwell and localized voice commands (*"non merci"*, *"pas maintenant"*, etc.).
+
+### ⏱️ Dwell Timer Disabling at 0 ms (`main.rs`)
+- **Complete Dwell Deactivation (`DwellState::is_enabled`)**:
+  - Added `is_enabled()` to `DwellState` to verify non-zero dwell durations.
+  - When `dwell_duration == 0`, `update` and `get_progress` return immediately without triggering actions or drawing progress bars.
+  - `apply_dwell_to_response` falls back directly to standard physical click interactions (`response.clicked()`).
+  - The settings slider now ranges down to 0 ms with explicit formatting (*"Désactivé (0 ms)"*).
+
+### 👁️ Fixed-Eye ("Sticky Gaze") Protection & TTS Lockout (`main.rs`, `floating_window.rs`)
+- **Anti-Sticky Gaze Engine (`DwellState`)**:
+  - Memorizes `last_triggered_id` to prevent looping triggers while the user's eye or cursor remains stationary on an element.
+  - Requires pointer departure for at least 600 ms and a 1,500 ms minimum refractory interval before re-arming the same control.
+- **Extended Lockout for Text Reading (`lock_id`)**:
+  - Added `lock_id(&mut self, id, duration)` to `DwellState`.
+  - Applies an immediate 6-second lock when reading chat entries, Twitch messages, or floating card *"🔊 Lire"* narrator buttons, eliminating speech repetition caused by ocular jitter or prolonged gaze.
+
 ### ✍️ Fixes for Direct Input & Dictation Mode (`commands.rs`, `automation.rs`, `main.rs`)
 - **Resolved Truncation of Initial Characters in Dictation Mode (`Dictate`)**:
 - **Stabilized Focus and Message Queues**: Increased the delay to 120 ms when restoring external focus (`restore_external_focus_target`), ensuring that target windows (Win32, Chromium, Electron, Java Swing, Notepad) have fully processed `WM_ACTIVATE` and `WM_SETFOCUS` before the first keystroke is sent.

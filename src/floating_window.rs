@@ -533,6 +533,7 @@ impl FloatingCard {
                             ).on_hover_text("Faire lire le contenu et les interactions possibles par le narrateur");
                             let read_btn_id = ui.make_persistent_id(format!("dwell_read_card_{}", self.id));
                             if apply_dwell_to_response(ui, dwell_state, read_btn_id, &read_btn) {
+                                dwell_state.lock_id(read_btn_id, std::time::Duration::from_secs(6));
                                 requested_output = Some(FloatingCardOutput::Speak(self.build_narrator_speech()));
                             }
                         
