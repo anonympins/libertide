@@ -5,6 +5,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [0.6.1] - 2026-10-29
+
+### 🚀 First-Launch Onboarding & Hover Navigation Detection (`main.rs`)
+- **First-Run Interactive Setup (`HOVER_NAV_ASKED`)**:
+  - Detects the first launch of the application and persists `HOVER_NAV_ASKED=true` in `.env`.
+  - Welcomes the user with a prompt translated into their system language (*"Voulez-vous activer la navigation au survol ?"*, *"Do you want to enable hover navigation?"*, etc.) spoken aloud via TTS and displayed in chat.
+  - Includes quick-action suggestion chips (*"Mode survol"* / *"Non merci"*) responsive to both click/dwell and localized voice commands (*"non merci"*, *"pas maintenant"*, etc.).
+
+### ⏱️ Dwell Timer Disabling at 0 ms (`main.rs`)
+- **Complete Dwell Deactivation (`DwellState::is_enabled`)**:
+  - Added `is_enabled()` to `DwellState` to verify non-zero dwell durations.
+  - When `dwell_duration == 0`, `update` and `get_progress` return immediately without triggering actions or drawing progress bars.
+  - `apply_dwell_to_response` falls back directly to standard physical click interactions (`response.clicked()`).
+  - The settings slider now ranges down to 0 ms with explicit formatting (*"Désactivé (0 ms)"*).
+
+### 👁️ Fixed-Eye ("Sticky Gaze") Protection & TTS Lockout (`main.rs`, `floating_window.rs`)
+- **Anti-Sticky Gaze Engine (`DwellState`)**:
+  - Memorizes `last_triggered_id` to prevent looping triggers while the user's eye or cursor remains stationary on an element.
+  - Requires pointer departure for at least 600 ms and a 1,500 ms minimum refractory interval before re-arming the same control.
+- **Extended Lockout for Text Reading (`lock_id`)**:
+  - Added `lock_id(&mut self, id, duration)` to `DwellState`.
+  - Applies an immediate 6-second lock when reading chat entries, Twitch messages, or floating card *"🔊 Lire"* narrator buttons, eliminating speech repetition caused by ocular jitter or prolonged gaze.
+
+### ✍️ Fixes for Direct Input & Dictation Mode (`commands.rs`, `automation.rs`, `main.rs`)
+- **Resolved Truncation of Initial Characters in Dictation Mode (`Dictate`)**:
+- **Stabilized Focus and Message Queues**: Increased the delay to 120 ms when restoring external focus (`restore_external_focus_target`), ensuring that target windows (Win32, Chromium, Electron, Java Swing, Notepad) have fully processed `WM_ACTIVATE` and `WM_SETFOCUS` before the first keystroke is sent.
+- **Adjusted Character Injection Cadence**: Set the keystroke interval to 10 ms per Unicode character (`send_char_unicode`) and 25 ms for line breaks, preventing dropped keystrokes during high CPU load or when message queues are slow.
+- **Automatic Deactivation of Windows Menu Mode (`VK_MENU`)**:
+- Removed redundant Alt key trigger when the target window is already in the foreground (`GetForegroundWindow() == hwnd`).
+- Immediately sends a `VK_ESCAPE` after bringing the window to the foreground to prevent the Windows menu bar from being inadvertently activated by the Alt key.
+- **Comprehensive, Bidirectional Dictation Mode Announcements**:
+- Added `enter_dictation_mode`: notifications are now displayed in the chat and spoken aloud via the narrator (TTS). Includes context-aware quick suggestions (e.g., *"Disable dictation"*, *"Clear text"*), restores focus to the host application, and resumes continuous listening once the announcement concludes. - Instantaneous deterministic voice-based detection via `is_start_dictation_command` (e.g., *"active la dictée"*, *"lance la dictée"*, *"mode dictée"*, *"start dictation"*, etc.).
+- Synchronized triggering via the interface button ("click & dwell"), the trackball's auxiliary button (`XButton1`), and hardware switches (`SwitchKeyEvent::ToggleDictation`).
+
+### ⌨️ Keyboard Interoperability & Remapping Tools (`automation.rs`)
+- **Handling of Injected Events (PowerToys Keyboard Manager, AutoHotkey)**:
+- Added filtering for the low-level flag `LLKHF_INJECTED` (`0x00000010`) within the global keyboard hook `switch_keyboard_hook_proc`.
+- Keys and shortcuts remapped by third-party software are no longer intercepted or consumed by Libertide, allowing them to be passed directly to the active application and input fields.
+
+### 🎨 Thematic Harmonization of Floating Windows (`floating_window.rs`, `main.rs`)
+- **Dynamic Adoption of the Application's Active Theme**:
+- `FloatingCard::show` and `render_markdown` now dynamically inherit the application's `ThemeColors` instead of relying on a fixed, dark neon palette.
+- Comprehensive harmonization of modal backgrounds, borders, Markdown headers (H1, H2, H3), blockquotes, code blocks, list bullets, statistics badges, table grids, and form controls across all 7 accessibility themes (*Cyber ​​Cyan, Emerald, Amethyst, High-Contrast Yellow, High-Contrast White, Soft Amber, Colorblind-Friendly*). - Touch/mouse scrolling (`handle_drag_to_scroll`) and copy buttons are preserved, featuring the accent and contrast color schemes of the selected profile.
+
+### 🔌 Hardware Event Queue & Switch Controls (`main.rs`)
+- **Processing of Asynchronous Keyboard & Switch Events**:
+- Immediate handling of signals from the `SWITCH_KEY_QUEUE` within the main loop:
+- `ToggleDictation`: Toggles dictation on/off, with voice feedback.
+- `ToggleSwitch`: Toggles hover mode and hierarchical switch control on/off.
+- `ToggleVoice`: Cycles through available text-to-speech profiles.
+- `Clear`: Performs a full reset of the chat history, clears the contextual analysis cache, and interrupts speech output with an audible notification.Leai
+---
 ## [0.6.0] - 2026-10-28
 
 ### 🕹️ Hardware Ergonomics & Trackball Navigation (`main.rs`, `floating_window.rs`, `ui.rs`)

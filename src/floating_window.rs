@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::automation::set_clipboard_text;
 use crate::{apply_dwell_to_response, DwellState};
 use crate::{play_earcon, Earcon};
+use crate::theme::ThemeColors;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenCardSummary {
@@ -452,7 +453,7 @@ impl FloatingCard {
         speech
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, dwell_state: &mut DwellState) -> Option<FloatingCardOutput> {
+    pub fn show(&mut self, ctx: &egui::Context, dwell_state: &mut DwellState, theme: &ThemeColors) -> Option<FloatingCardOutput> {
         if !self.open {
             return None;
         }
@@ -495,8 +496,8 @@ impl FloatingCard {
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::new()
-                        .fill(egui::Color32::from_rgba_unmultiplied(14, 18, 24, 230))
-                        .stroke(egui::Stroke::new(1.2, egui::Color32::from_rgba_unmultiplied(0, 195, 255, 140)))
+                        .fill(theme.modal_bg)
+                        .stroke(egui::Stroke::new(1.2, theme.border))
                         .corner_radius(egui::CornerRadius::same(12))
                         .inner_margin(egui::Margin::symmetric(12, 10)),
                 )
@@ -508,7 +509,7 @@ impl FloatingCard {
                                 egui::RichText::new(&viewport_title)
                                     .strong()
                                     .size(13.0)
-                                    .color(egui::Color32::from_rgb(0, 215, 255)),
+                                    .color(theme.accent),
                             )
                             .sense(egui::Sense::drag()),
                         );
@@ -524,7 +525,7 @@ impl FloatingCard {
                                 egui::Button::new(
                                     egui::RichText::new("🔊 Lire")
                                         .size(10.5)
-                                        .color(egui::Color32::from_rgb(255, 220, 130))
+                                        .color(theme.text_user)
                                         .strong(),
                                 )
                                 .small()
@@ -532,6 +533,7 @@ impl FloatingCard {
                             ).on_hover_text("Faire lire le contenu et les interactions possibles par le narrateur");
                             let read_btn_id = ui.make_persistent_id(format!("dwell_read_card_{}", self.id));
                             if apply_dwell_to_response(ui, dwell_state, read_btn_id, &read_btn) {
+                                dwell_state.lock_id(read_btn_id, std::time::Duration::from_secs(6));
                                 requested_output = Some(FloatingCardOutput::Speak(self.build_narrator_speech()));
                             }
                         
@@ -554,7 +556,7 @@ impl FloatingCard {
                                     egui::Button::new(
                                         egui::RichText::new("📋 Copier tout")
                                             .size(10.5)
-                                            .color(egui::Color32::from_rgb(180, 220, 255)),
+                                            .color(theme.accent_text),
                                     )
                                     .small()
                                     .corner_radius(egui::CornerRadius::same(4)),
@@ -583,7 +585,7 @@ impl FloatingCard {
                             let max_btn = ui.button(
                                 egui::RichText::new(max_icon)
                                     .size(11.0)
-                                    .color(egui::Color32::from_rgb(200, 215, 230)),
+                                    .color(theme.text_secondary),
                             ).on_hover_text(if is_maximized { "Restaurer" } else { "Agrandir" });
                             let max_id = ui.make_persistent_id(format!("dwell_max_card_{}", self.id));
                             if apply_dwell_to_response(ui, dwell_state, max_id, &max_btn) {
@@ -612,7 +614,7 @@ impl FloatingCard {
                             match &mut self.content {
                                 FloatingContentType::Table { headers, rows } => {
                                     if headers.is_empty() && rows.is_empty() {
-                                        ui.label(egui::RichText::new("Tableau vide").italics().color(egui::Color32::GRAY));
+                                        ui.label(egui::RichText::new("Tableau vide").italics().color(theme.text_secondary));
                                         return;
                                     }
 
@@ -627,13 +629,13 @@ impl FloatingCard {
                                     }
 
                                     ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new("📊 Données").size(11.0).color(egui::Color32::from_rgb(0, 200, 255)).strong());
+                                        ui.label(egui::RichText::new("📊 Données").size(11.0).color(theme.accent).strong());
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             let copy_tbl = ui.add(
                                                 egui::Button::new(
                                                     egui::RichText::new("📋 Copier le tableau")
                                                         .size(10.5)
-                                                        .color(egui::Color32::from_rgb(180, 220, 255)),
+                                                        .color(theme.accent_text),
                                                 )
                                                 .small()
                                                 .corner_radius(egui::CornerRadius::same(4)),
@@ -665,19 +667,19 @@ impl FloatingCard {
                                                 .show(ui, |ui| {
                                                     for (c_idx, h) in headers.iter().enumerate() {
                                                         let w = col_widths.get(c_idx).copied().unwrap_or(85.0);
-                                                        render_table_cell(ui, h, egui::Color32::from_rgb(0, 210, 255), headers, &full_table_md, true, w, dwell_state, &format!("th_{card_id}_{c_idx}"));
+                                                        render_table_cell(ui, h, theme.accent, headers, &full_table_md, true, w, dwell_state, &format!("th_{card_id}_{c_idx}"), theme);
                                                     }
                                                     ui.end_row();
 
                                                     for (r_idx, row) in rows.iter().enumerate() {
                                                         for (c_idx, cell) in row.iter().enumerate() {
                                                             let text_color = if c_idx == 0 {
-                                                                egui::Color32::from_rgb(240, 245, 255)
+                                                                theme.text_primary
                                                             } else {
-                                                                egui::Color32::from_rgb(205, 220, 235)
+                                                                theme.text_secondary
                                                             };
                                                             let w = col_widths.get(c_idx).copied().unwrap_or(85.0);
-                                                            if let Some(act) = render_table_cell(ui, cell, text_color, row, &full_table_md, false, w, dwell_state, &format!("td_{card_id}_{r_idx}_{c_idx}")) {
+                                                            if let Some(act) = render_table_cell(ui, cell, text_color, row, &full_table_md, false, w, dwell_state, &format!("td_{card_id}_{r_idx}_{c_idx}"), theme) {
                                                                 requested_output = Some(FloatingCardOutput::Prompt(act));
                                                             }
                                                         }
@@ -690,12 +692,12 @@ impl FloatingCard {
                                     ui.vertical(|ui| {
                                         for (k, v) in items.iter() {
                                             ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new(format!("{k} :")).color(egui::Color32::from_rgb(170, 190, 215)));
+                                                ui.label(egui::RichText::new(format!("{k} :")).color(theme.text_secondary));
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                     ui.label(
                                                         egui::RichText::new(v)
                                                             .strong()
-                                                            .color(egui::Color32::from_rgb(255, 215, 110)),
+                                                            .color(theme.text_user),
                                                     );
                                                 });
                                             });
@@ -725,7 +727,7 @@ impl FloatingCard {
                                         play_earcon(Earcon::Success);
                                     }
 
-                                    if let Some(prompt) = render_markdown(ui, text, &card_id, dwell_state) {
+                                    if let Some(prompt) = render_markdown(ui, text, &card_id, dwell_state, theme) {
                                         requested_output = Some(FloatingCardOutput::Prompt(prompt));
                                     }
                                 }
@@ -741,7 +743,7 @@ impl FloatingCard {
                                                         checked,
                                                         egui::RichText::new(&field.label)
                                                             .size(12.5)
-                                                            .color(egui::Color32::from_rgb(230, 240, 255)),
+                                                            .color(theme.text_primary),
                                                     );
                                                     resp.on_hover_text(format!("Activer/Désactiver : {}", field.label));
                                                 }
@@ -749,7 +751,7 @@ impl FloatingCard {
                                                     ui.label(
                                                         egui::RichText::new(&field.label)
                                                             .size(11.5)
-                                                            .color(egui::Color32::from_rgb(0, 200, 255))
+                                                            .color(theme.accent)
                                                             .strong(),
                                                     );
                                                     ui.add_space(1.0);
@@ -763,7 +765,7 @@ impl FloatingCard {
                                                         ui.label(
                                                             egui::RichText::new(&field.label)
                                                                 .size(11.5)
-                                                                .color(egui::Color32::from_rgb(0, 200, 255))
+                                                                .color(theme.accent)
                                                                 .strong(),
                                                         );
                                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -775,7 +777,7 @@ impl FloatingCard {
                                                             ui.label(
                                                                 egui::RichText::new(display_val)
                                                                     .size(12.0)
-                                                                    .color(egui::Color32::from_rgb(255, 215, 110))
+                                                                    .color(theme.text_user)
                                                                     .strong(),
                                                             );
                                                         });
@@ -792,7 +794,7 @@ impl FloatingCard {
                                                     ui.label(
                                                         egui::RichText::new(&field.label)
                                                             .size(11.5)
-                                                            .color(egui::Color32::from_rgb(0, 200, 255))
+                                                            .color(theme.accent)
                                                             .strong(),
                                                     );
                                                     ui.add_space(1.0);
@@ -810,7 +812,7 @@ impl FloatingCard {
                                                     ui.label(
                                                         egui::RichText::new(&field.label)
                                                             .size(11.5)
-                                                            .color(egui::Color32::from_rgb(0, 200, 255))
+                                                            .color(theme.accent)
                                                             .strong(),
                                                     );
                                                     ui.add_space(2.0);
@@ -834,9 +836,9 @@ impl FloatingCard {
                                                 egui::RichText::new(submit_label.as_str())
                                                     .strong()
                                                     .size(12.5)
-                                                    .color(egui::Color32::from_rgb(18, 20, 26)),
+                                                    .color(theme.control_bg),
                                             )
-                                            .fill(egui::Color32::from_rgb(0, 215, 255))
+                                            .fill(theme.accent)
                                             .corner_radius(egui::CornerRadius::same(6))
                                             .min_size(egui::vec2(130.0, 26.0));
 
@@ -938,11 +940,11 @@ impl FloatingCard {
                         let grip_se = egui::Rect::from_min_size(egui::pos2(min.x + total_w - 12.0, min.y + total_h - 12.0), egui::vec2(10.0, 10.0));
                         painter.line_segment(
                             [egui::pos2(grip_se.min.x, grip_se.max.y), egui::pos2(grip_se.max.x, grip_se.min.y)],
-                            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 90)),
+                            egui::Stroke::new(1.0, theme.border),
                         );
                         painter.line_segment(
                             [egui::pos2(grip_se.min.x + 3.0, grip_se.max.y), egui::pos2(grip_se.max.x, grip_se.min.y + 3.0)],
-                            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 50)),
+                            egui::Stroke::new(1.0, theme.border_subtle),
                         );
                     }
 
@@ -1297,8 +1299,8 @@ fn create_layout_job(
             }
             InlineStyle::Link => {
                 fmt.font_id = egui::FontId::proportional(base_size);
-                fmt.color = egui::Color32::from_rgb(0, 215, 255);
-                fmt.underline = egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 215, 255));
+                fmt.color = base_color;
+                fmt.underline = egui::Stroke::new(1.0, base_color);
             }
         }
         job.append(span.text, 0.0, fmt);
@@ -1418,6 +1420,7 @@ fn render_line_spans(
     base_color: egui::Color32,
     dwell_state: &mut DwellState,
     span_prefix_id: &str,
+    theme: &ThemeColors,
 ) -> Option<String> {
     let spans = parse_inline_markdown(line);
     let has_links = spans.iter().any(|s| s.style == InlineStyle::Link && s.target.is_some());
@@ -1464,15 +1467,15 @@ fn render_line_spans(
 
                 let (bg_color, stroke_color, text_color) = if is_action {
                     (
-                        egui::Color32::from_rgba_unmultiplied(0, 180, 255, 38),
-                        egui::Color32::from_rgba_unmultiplied(0, 215, 255, 130),
-                        egui::Color32::from_rgb(0, 235, 255),
+                        theme.tab_active_bg,
+                        theme.border,
+                        theme.accent,
                     )
                 } else {
                     (
-                        egui::Color32::from_rgba_unmultiplied(100, 180, 255, 20),
-                        egui::Color32::from_rgba_unmultiplied(100, 180, 255, 70),
-                        egui::Color32::from_rgb(140, 200, 255),
+                        theme.tab_inactive_bg,
+                        theme.border_subtle,
+                        theme.accent_text,
                     )
                 };
 
@@ -1652,6 +1655,7 @@ fn render_table_cell(
     col_width: f32,
     dwell_state: &mut DwellState,
     cell_id: &str,
+    theme: &ThemeColors,
 ) -> Option<String> {
     let mut clicked_action = None;
     let resp = ui.scope(|ui| {
@@ -1676,7 +1680,7 @@ fn render_table_cell(
                 }
             });
         } else {
-            clicked_action = render_line_spans(ui, cell, 11.5, false, text_color, dwell_state, cell_id);
+            clicked_action = render_line_spans(ui, cell, 11.5, false, text_color, dwell_state, cell_id, theme);
         }
     });
 
@@ -1707,7 +1711,7 @@ fn render_table_cell(
     clicked_action
 }
 
-pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state: &mut DwellState) -> Option<String> {
+pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state: &mut DwellState, theme: &ThemeColors) -> Option<String> {
     let mut lines = text.lines().peekable();
     let mut block_idx = 0usize;
     let mut clicked_action: Option<String> = None;
@@ -1731,8 +1735,8 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
             ui.add_space(3.0);
             let full_code = code_lines.join("\n");
             egui::Frame::new()
-                .fill(egui::Color32::from_rgb(10, 13, 18))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 60)))
+                .fill(theme.control_bg)
+                .stroke(egui::Stroke::new(1.0, theme.border_subtle))
                 .corner_radius(egui::CornerRadius::same(6))
                 .inner_margin(egui::Margin::symmetric(10, 8))
                 .show(ui, |ui| {
@@ -1741,7 +1745,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
                         ui.label(
                             egui::RichText::new(badge)
                                 .size(10.5)
-                                .color(egui::Color32::from_rgb(0, 200, 255))
+                                .color(theme.accent)
                                 .strong(),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1766,7 +1770,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
                             code_job.wrap.max_width = f32::INFINITY;
                             let mut fmt = TextFormat::default();
                             fmt.font_id = egui::FontId::monospace(11.5);
-                            fmt.color = egui::Color32::from_rgb(215, 230, 245);
+                            fmt.color = theme.text_primary;
                             code_job.append(&full_code, 0.0, fmt);
                             ui.label(code_job);
                         });
@@ -1786,14 +1790,14 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
             if hashes > 0 && trimmed.chars().nth(hashes) == Some(' ') {
                 let content = trimmed[hashes + 1..].trim();
                 let (font_size, color, extra_space) = match hashes {
-                    1 => (16.0, egui::Color32::from_rgb(0, 220, 255), 6.0),
-                    2 => (14.0, egui::Color32::from_rgb(70, 215, 255), 4.0),
-                    3 => (13.0, egui::Color32::from_rgb(130, 210, 255), 3.0),
-                    _ => (12.0, egui::Color32::from_rgb(180, 225, 255), 2.0),
+                    1 => (16.0, theme.accent, 6.0),
+                    2 => (14.0, theme.accent_text, 4.0),
+                    3 => (13.0, theme.accent_text, 3.0),
+                    _ => (12.0, theme.text_primary, 2.0),
                 };
 
                 ui.add_space(extra_space);
-                if let Some(act) = render_line_spans(ui, content, font_size, false, color, dwell_state, &format!("hd_{card_id}_{block_idx}")) {
+                if let Some(act) = render_line_spans(ui, content, font_size, false, color, dwell_state, &format!("hd_{card_id}_{block_idx}"), theme) {
                     clicked_action = Some(act);
                 }
 
@@ -1802,7 +1806,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
                     ui.painter().hline(
                         ui.available_rect_before_wrap().x_range(),
                         ui.cursor().top(),
-                        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 220, 255, 60)),
+                        egui::Stroke::new(1.0, theme.border_subtle),
                     );
                     ui.add_space(3.0);
                 } else {
@@ -1826,14 +1830,14 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
             ui.add_space(2.0);
             let quote_text = quote_lines.join(" ");
             egui::Frame::new()
-                .fill(egui::Color32::from_rgba_unmultiplied(0, 160, 255, 16))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 45)))
+                .fill(theme.tab_active_bg)
+                .stroke(egui::Stroke::new(1.0, theme.border_subtle))
                 .corner_radius(egui::CornerRadius::same(6))
                 .inner_margin(egui::Margin::symmetric(10, 6))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("▍").size(13.0).color(egui::Color32::from_rgb(0, 200, 255)));
-                        if let Some(act) = render_line_spans(ui, &quote_text, 12.0, true, egui::Color32::from_rgb(205, 225, 245), dwell_state, &format!("quote_{card_id}_{block_idx}")) {
+                        ui.label(egui::RichText::new("▍").size(13.0).color(theme.accent));
+                        if let Some(act) = render_line_spans(ui, &quote_text, 12.0, true, theme.text_secondary, dwell_state, &format!("quote_{card_id}_{block_idx}"), theme) {
                             clicked_action = Some(act);
                         }
                     });
@@ -1874,19 +1878,19 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
                 let raw_table_md = table_lines.join("\n");
                 ui.add_space(3.0);
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgba_unmultiplied(10, 14, 20, 180))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 180, 255, 50)))
+                    .fill(theme.control_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.border_subtle))
                     .corner_radius(egui::CornerRadius::same(6))
                     .inner_margin(egui::Margin::symmetric(8, 6))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("📊 Tableau").size(10.5).color(egui::Color32::from_rgb(0, 200, 255)).strong());
+                            ui.label(egui::RichText::new("📊 Tableau").size(10.5).color(theme.accent).strong());
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let copy_tbl_btn = ui.add(
                                     egui::Button::new(
                                         egui::RichText::new("📋 Copier le tableau")
                                             .size(10.0)
-                                            .color(egui::Color32::from_rgb(180, 220, 255)),
+                                            .color(theme.accent_text),
                                     )
                                     .small()
                                     .corner_radius(egui::CornerRadius::same(4)),
@@ -1920,19 +1924,19 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
                                     .show(ui, |ui| {
                                         for (c_idx, h) in headers.iter().enumerate() {
                                             let w = col_widths.get(c_idx).copied().unwrap_or(70.0);
-                                            render_table_cell(ui, h, egui::Color32::from_rgb(0, 215, 255), &headers, &raw_table_md, true, w, dwell_state, &format!("md_th_{table_id}_{c_idx}"));
+                                            render_table_cell(ui, h, theme.accent, &headers, &raw_table_md, true, w, dwell_state, &format!("md_th_{table_id}_{c_idx}"), theme);
                                         }
                                         ui.end_row();
 
                                         for (r_idx, row) in rows.iter().enumerate() {
                                             for (c_idx, cell) in row.iter().enumerate() {
                                                 let text_color = if c_idx == 0 {
-                                                    egui::Color32::from_rgb(240, 245, 255)
+                                                    theme.text_primary
                                                 } else {
-                                                    egui::Color32::from_rgb(205, 220, 235)
+                                                    theme.text_secondary
                                                 };
                                                 let w = col_widths.get(c_idx).copied().unwrap_or(70.0);
-                                                if let Some(act) = render_table_cell(ui, cell, text_color, row, &raw_table_md, false, w, dwell_state, &format!("md_td_{table_id}_{r_idx}_{c_idx}")) {
+                                                if let Some(act) = render_table_cell(ui, cell, text_color, row, &raw_table_md, false, w, dwell_state, &format!("md_td_{table_id}_{r_idx}_{c_idx}"), theme) {
                                                     clicked_action = Some(act);
                                                 }
                                             }
@@ -1964,7 +1968,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 let synthetic_link = format!("[▶ {video_title}]({prompt_target})");
-                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255), dwell_state, &format!("media_vid_{card_id}_{block_idx}")) {
+                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, theme.accent, dwell_state, &format!("media_vid_{card_id}_{block_idx}"), theme) {
                     clicked_action = Some(act);
                 }
             });
@@ -1981,7 +1985,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 let synthetic_link = format!("[🎵 {audio_title}]({prompt_target})");
-                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255), dwell_state, &format!("media_aud_{card_id}_{block_idx}")) {
+                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, theme.accent, dwell_state, &format!("media_aud_{card_id}_{block_idx}"), theme) {
                     clicked_action = Some(act);
                 }
             });
@@ -1997,7 +2001,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 let synthetic_link = format!("[📄 {doc_title}]({prompt_target})");
-                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255), dwell_state, &format!("media_doc_{card_id}_{block_idx}")) {
+                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, theme.accent, dwell_state, &format!("media_doc_{card_id}_{block_idx}"), theme) {
                     clicked_action = Some(act);
                 }
             });
@@ -2013,7 +2017,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 let synthetic_link = format!("[🖼️ {img_title}]({prompt_target})");
-                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, egui::Color32::from_rgb(0, 235, 255), dwell_state, &format!("media_img_{card_id}_{block_idx}")) {
+                if let Some(act) = render_line_spans(ui, &synthetic_link, 12.5, false, theme.accent, dwell_state, &format!("media_img_{card_id}_{block_idx}"), theme) {
                     clicked_action = Some(act);
                 }
             });
@@ -2024,9 +2028,9 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
         if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") || trimmed.starts_with("• ") {
             let item_content = &trimmed[2..].trim();
             let (bullet, bullet_color) = match indent_level {
-                0 => ("•", egui::Color32::from_rgb(0, 215, 255)),
-                1 => ("◦", egui::Color32::from_rgb(0, 190, 235)),
-                _ => ("▪", egui::Color32::from_rgb(0, 165, 215)),
+                0 => ("•", theme.accent),
+                1 => ("◦", theme.accent_text),
+                _ => ("▪", theme.text_secondary),
             };
 
             ui.horizontal(|ui| {
@@ -2034,7 +2038,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
                     ui.add_space(indent_level as f32 * 12.0);
                 }
                 ui.label(egui::RichText::new(bullet).size(12.0).color(bullet_color).strong());
-                if let Some(act) = render_line_spans(ui, item_content, 12.5, false, egui::Color32::from_rgb(225, 235, 245), dwell_state, &format!("li_{card_id}_{block_idx}")) {
+                if let Some(act) = render_line_spans(ui, item_content, 12.5, false, theme.text_primary, dwell_state, &format!("li_{card_id}_{block_idx}"), theme) {
                     clicked_action = Some(act);
                 }
             });
@@ -2047,8 +2051,8 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
                 if indent_level > 0 {
                     ui.add_space(indent_level as f32 * 12.0);
                 }
-                ui.label(egui::RichText::new(num_str).size(12.0).color(egui::Color32::from_rgb(255, 215, 110)).strong());
-                if let Some(act) = render_line_spans(ui, item_content, 12.5, false, egui::Color32::from_rgb(225, 235, 245), dwell_state, &format!("num_{card_id}_{block_idx}")) {
+                ui.label(egui::RichText::new(num_str).size(12.0).color(theme.text_user).strong());
+                if let Some(act) = render_line_spans(ui, item_content, 12.5, false, theme.text_primary, dwell_state, &format!("num_{card_id}_{block_idx}"), theme) {
                     clicked_action = Some(act);
                 }
             });
@@ -2056,7 +2060,7 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
             continue;
         }
 
-        if let Some(act) = render_line_spans(ui, trimmed, 12.5, false, egui::Color32::from_rgb(220, 230, 242), dwell_state, &format!("p_{card_id}_{block_idx}")) {
+        if let Some(act) = render_line_spans(ui, trimmed, 12.5, false, theme.text_primary, dwell_state, &format!("p_{card_id}_{block_idx}"), theme) {
             clicked_action = Some(act);
         }
         ui.add_space(2.0);

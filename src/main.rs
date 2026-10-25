@@ -146,6 +146,10 @@ pub struct DwellState {
     pub hover_start: Option<Instant>,
     pub dwell_duration: Duration,
     pub cooldown_until: Option<Instant>,
+    pub last_triggered_id: Option<egui::Id>,
+    pub last_triggered_time: Option<Instant>,
+    pub unhovered_since: Option<Instant>,
+    pub locked_ids: std::collections::HashMap<egui::Id, Instant>,
 }
 
 impl DwellState {
@@ -155,10 +159,50 @@ impl DwellState {
             hover_start: None,
             dwell_duration: Duration::from_millis(millis),
             cooldown_until: None,
+            last_triggered_id: None,
+            last_triggered_time: None,
+            unhovered_since: None,
+            locked_ids: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        !self.dwell_duration.is_zero()
+    }
+
+    pub fn lock_id(&mut self, id: egui::Id, duration: Duration) {
+        let until = Instant::now() + duration;
+        self.locked_ids.insert(id, until);
+        if self.hovered_id == Some(id) {
+            self.hovered_id = None;
+            self.hover_start = None;
+        }
+    }
+
+    pub fn is_locked(&self, id: egui::Id) -> bool {
+        if let Some(&until) = self.locked_ids.get(&id) {
+            if Instant::now() < until {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn reset_hover(&mut self, id: egui::Id) {
+        if self.hovered_id == Some(id) {
+            self.hovered_id = None;
+            self.hover_start = None;
         }
     }
 
     pub fn get_progress(&self, id: egui::Id) -> Option<f32> {
+        if !self.is_enabled() {
+            return None;
+        }
+        // Protection œil fixe : aucun rendu de jauge si l'élément vient d'être déclenché ou est verrouillé
+        if self.last_triggered_id == Some(id) || self.is_locked(id) {
+            return None;
+        }
         if self.hovered_id == Some(id) {
             if let Some(start) = self.hover_start {
                 let elapsed = Instant::now().duration_since(start);
@@ -170,7 +214,57 @@ impl DwellState {
     }
 
     pub fn update(&mut self, id: egui::Id, is_hovered: bool) -> (bool, f32) {
+        if !self.is_enabled() {
+            return (false, 0.0);
+        }
         let now = Instant::now();
+
+        // 1. Purge des verrous expirés
+        self.locked_ids.retain(|_, until| *until > now);
+
+        // 2. Si l'élément est sous verrouillage étendu (ex: lecture de texte)
+        if self.is_locked(id) {
+            if self.hovered_id == Some(id) {
+                self.hovered_id = None;
+                self.hover_start = None;
+            }
+            return (false, 0.0);
+        }
+
+        // 3. Protection œil fixe : l'élément vient d'être déclenché
+        if self.last_triggered_id == Some(id) {
+            if is_hovered {
+                // Le regard ou pointeur reste fixé : on réinitialise l'absence et on empêche tout redéclenchement
+                self.unhovered_since = None;
+                self.hovered_id = None;
+                self.hover_start = None;
+                return (false, 0.0);
+            } else {
+                // Le regard a quitté l'élément
+                if self.unhovered_since.is_none() {
+                    self.unhovered_since = Some(now);
+                }
+                let unhovered_time = self.unhovered_since.unwrap();
+                let unhovered_long_enough = now.duration_since(unhovered_time) >= Duration::from_millis(600);
+                let refractory_passed = self.last_triggered_time.map_or(true, |t| now.duration_since(t) >= Duration::from_millis(1500));
+
+                if unhovered_long_enough && refractory_passed {
+                    self.last_triggered_id = None;
+                    self.last_triggered_time = None;
+                    self.unhovered_since = None;
+                }
+                return (false, 0.0);
+            }
+        }
+
+        // Si l'utilisateur regarde activement un autre élément, libérer l'ancien ID après un délai raisonnable
+        if is_hovered && self.last_triggered_id.is_some() && self.last_triggered_id != Some(id) {
+            if self.last_triggered_time.map_or(true, |t| now.duration_since(t) >= Duration::from_millis(500)) {
+                self.last_triggered_id = None;
+                self.last_triggered_time = None;
+                self.unhovered_since = None;
+            }
+        }
 
         if let Some(cooldown) = self.cooldown_until {
             if now < cooldown {
@@ -205,6 +299,9 @@ impl DwellState {
             if elapsed >= self.dwell_duration {
                 self.hover_start = None;
                 self.hovered_id = None;
+                self.last_triggered_id = Some(id);
+                self.last_triggered_time = Some(now);
+                self.unhovered_since = None;
                 self.cooldown_until = Some(now + Duration::from_millis(500));
                 return (true, 1.0);
             }
@@ -306,6 +403,16 @@ pub fn apply_dwell_to_response(
     id: egui::Id,
     response: &egui::Response,
 ) -> bool {
+    if !dwell_state.is_enabled() {
+        return response.clicked();
+    }
+    if response.clicked() {
+        dwell_state.reset_hover(id);
+        dwell_state.last_triggered_id = Some(id);
+        dwell_state.last_triggered_time = Some(Instant::now());
+        dwell_state.unhovered_since = None;
+        return true;
+    }
     let (triggered, progress) = dwell_state.update(id, response.hovered());
     if progress > 0.0 && progress <= 1.0 {
         let rect = response.rect;
@@ -317,7 +424,7 @@ pub fn apply_dwell_to_response(
         ui.painter().rect_filled(progress_rect, egui::CornerRadius::same(2), egui::Color32::from_rgb(76, 217, 100));
         ui.ctx().request_repaint();
     }
-    response.clicked() || triggered
+    triggered
 }
 
 pub struct OverlayApp {
@@ -467,6 +574,34 @@ fn is_stop_dictation_command(text: &str) -> bool {
     TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig))
 }
 
+fn is_start_dictation_command(text: &str) -> bool {
+    let norm = normalize_for_command_match(text);
+    const TRIGGERS: &[&str] = &[
+        // FR
+        "active la dictee", "active la dictée", "activer la dictee", "activer la dictée",
+        "lance la dictee", "lance la dictée", "lancer la dictee", "lancer la dictée",
+        "mode dictee", "mode dictée", "demarre la dictee", "démarre la dictée",
+        "demarrer la dictee", "démarrer la dictée", "passer en dictee", "passer en dictée",
+        // EN
+        "start dictation", "enable dictation", "activate dictation", "dictation mode", "begin dictation",
+        // ES
+        "activar dictado", "iniciar dictado", "modo dictado", "comenzar dictado",
+        // DE
+        "diktat aktivieren", "diktat starten", "diktatmodus",
+        // IT
+        "attiva dettatura", "avvia dettatura", "modalita dettatura", "modalità dettatura",
+        // PT
+        "ativar ditado", "iniciar ditado", "modo ditado",
+        // RU
+        "включить диктовку", "начать диктовку", "режим диктовки",
+        // ZH
+        "开启听写", "启动听写", "听写模式",
+        // JA
+        "ディクテーション開始", "音声入力開始", "ディクテーションモード",
+    ];
+    TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig))
+}
+
 fn is_switch_access_command(text: &str) -> bool {
     let norm = normalize_for_command_match(text);
     const TRIGGERS: &[&str] = &[
@@ -481,15 +616,62 @@ fn is_switch_access_command(text: &str) -> bool {
         // IT
         "accesso a interruttori", "modalita cursore", "modalita interruttore", "interruttore",
         // PT
-        "acesso por interruptor", "modo comutador", "comutador", "interruptor",
+        "acesso por interruptor", "modo comutador", "comutador", "interruptor", "modo de sobrevoo",
         // RU
-        "переключатель", "режим переключателя",
+        "переключатель", "режим переключателя", "режим наведения",
         // ZH
-        "切换控制", "开关控制", "悬停控制",
+        "切换控制", "开关控制", "悬停控制", "悬停模式",
         // JA
         "スイッチアクセス", "スイッチ操作", "ホバーモード",
     ];
     TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig))
+}
+
+pub fn is_hover_nav_asked() -> bool {
+    std::env::var("HOVER_NAV_ASKED")
+        .ok()
+        .or_else(|| read_env_var_from_file(".env", "HOVER_NAV_ASKED"))
+        .map(|s| {
+            let t = s.trim();
+            t.eq_ignore_ascii_case("true") || t == "1"
+        })
+        .unwrap_or(false)
+}
+
+pub fn mark_hover_nav_asked() {
+    std::env::set_var("HOVER_NAV_ASKED", "true");
+    let _ = write_env_var_to_file(".env", "HOVER_NAV_ASKED", "true");
+}
+
+fn is_dismiss_hover_command(text: &str) -> bool {
+    let norm = normalize_for_command_match(text);
+    const TRIGGERS: &[&str] = &[
+        // FR
+        "non merci", "pas maintenant", "plus tard", "refuser survol", "pas de survol",
+        // EN
+        "no thanks", "not now", "later", "no thank you", "dismiss hover",
+        // ES
+        "no gracias", "ahora no", "mas tarde", "más tarde",
+        // DE
+        "nein danke", "nicht jetzt", "spater", "später",
+        // IT
+        "no grazie", "non adesso", "piu tardi", "più tardi",
+        // PT
+        "nao obrigado", "não obrigado", "agora nao", "agora não", "mais tarde",
+        // RU
+        "нет спасибо", "не сейчас", "позже",
+        // ZH
+        "不用了", "谢谢不用", "稍后", "暂不", "不需要",
+        // JA
+        "結構です", "あとで", "今はいい",
+    ];
+    if TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.contains(trig)) {
+        return true;
+    }
+    if !is_hover_nav_asked() && (norm == "non" || norm == "no" || norm == "nein" || norm == "nao" || norm == "não" || norm == "нет" || norm == "いいえ") {
+        return true;
+    }
+    false
 }
 
 fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
@@ -1131,10 +1313,58 @@ impl OverlayApp {
         let llm_config = resolve_llm_config();
         let theme = AppTheme::resolve_theme();
         let has_no_key = llm_config.api_key.is_empty();
-        let initial_subtitle = if has_no_key {
-            "Veuillez renseigner votre clé API LLM pour activer l'assistant.".to_string()
+        let hover_asked = is_hover_nav_asked();
+        let (locale, _) = get_system_locale_language();
+        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+
+        let (initial_subtitle, initial_suggestions) = if !hover_asked {
+            let question = localized_speech(
+                lang_prefix,
+                "Voulez-vous activer la navigation au survol ?",
+                "Do you want to enable hover navigation?",
+                "¿Desea activar la navegación al pasar el cursor?",
+                "Möchten Sie die Hover-Navigation aktivieren?",
+                "Vuoi attivare la navigazione al passaggio del mouse?",
+                "Deseja ativar a navegação por cursor?",
+                "Хотите включить навигацию при наведении?",
+                "是否要启用悬停导航？",
+                "ホバーナビゲーションを有効にしますか？",
+            );
+            let btn_hover = localized_speech(
+                lang_prefix,
+                "Mode survol",
+                "Hover mode",
+                "Modo sobrevuelo",
+                "Hover-Modus",
+                "Modalità cursore",
+                "Modo de sobrevoo",
+                "Режим наведения",
+                "悬停模式",
+                "ホバーモード",
+            );
+            let btn_no = localized_speech(
+                lang_prefix,
+                "Non merci",
+                "No thanks",
+                "No, gracias",
+                "Nein danke",
+                "No grazie",
+                "Não, obrigado",
+                "Нет, спасибо",
+                "不用了",
+                "いいえ",
+            );
+            (
+                question,
+                vec![
+                    QuickSuggestionItem::Text(btn_hover),
+                    QuickSuggestionItem::Text(btn_no),
+                ],
+            )
+        } else if has_no_key {
+            ("Veuillez renseigner votre clé API LLM pour activer l'assistant.".to_string(), Vec::new())
         } else {
-            "En attente d'instructions d'exploration...".to_string()
+            ("En attente d'instructions d'exploration...".to_string(), Vec::new())
         };
         let _ = tts_sender.send(TtsCommand::Speak(initial_subtitle.clone()));
 
@@ -1150,7 +1380,7 @@ impl OverlayApp {
                 role: ChatRole::Agent,
                 text: initial_subtitle,
                 timestamp: current_time_str(),
-                quick_suggestions: Vec::new(),
+                quick_suggestions: initial_suggestions,
                 screen_size_kb: None,
             }],
             active_tab: ActiveTab::Assistance,
@@ -1434,6 +1664,46 @@ impl OverlayApp {
         let _ = self.tts_sender.send(TtsCommand::Speak(stop_msg));
     }
 
+    fn enter_dictation_mode(&mut self) {
+        self.dictation_mode = true;
+        self.continuous_mode = true;
+        IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
+        play_earcon(Earcon::Success);
+        let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
+        if self.is_recording {
+            self.stop_recording();
+        }
+        self.live_transcript.clear();
+        self.status = AgentStatus::Speaking;
+        let _ = self.tts_sender.send(TtsCommand::Stop);
+        restore_external_focus();
+        let (locale, _) = get_system_locale_language();
+        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+        let msg = localized_speech(
+            lang_prefix,
+            "Mode dictée activé.",
+            "Dictation mode activated.",
+            "Modo dictado activado.",
+            "Diktatmodus aktiviert.",
+            "Modalità dettatura attivata.",
+            "Modo ditado ativado.",
+            "Режим диктовки включен.",
+            "听写模式已激活。",
+            "音声入力モードが有効になりました。",
+        );
+        self.chat_history.push(ChatEntry {
+            role: ChatRole::Agent,
+            text: msg.clone(),
+            timestamp: current_time_str(),
+            quick_suggestions: vec![
+                QuickSuggestionItem::Text("Désactiver la dictée".to_string()),
+                QuickSuggestionItem::Text("Effacer le texte".to_string()),
+            ],
+            screen_size_kb: None,
+        });
+        let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+    }
+
     fn exit_dictation_mode(&mut self) {
         self.dictation_mode = false;
         self.continuous_mode = false;
@@ -1471,6 +1741,7 @@ impl OverlayApp {
     }
 
     pub fn toggle_switch_access_mode(&mut self) {
+        mark_hover_nav_asked();
         self.switch_access_mode = !self.switch_access_mode;
         SWITCH_HOOK_ENABLED.store(self.switch_access_mode, Ordering::SeqCst);
         automation::reset_switch_keys();
@@ -1734,13 +2005,7 @@ impl eframe::App for OverlayApp {
                     if self.dictation_mode {
                         self.exit_dictation_mode();
                     } else {
-                        self.dictation_mode = true;
-                        IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
-                        restore_external_focus();
-                        if !self.is_recording {
-                            self.start_recording(&ctx, true);
-                        }
-                        play_earcon(Earcon::Success);
+                        self.enter_dictation_mode();
                     }
                     ctx.request_repaint();
                 } else if xbutton2 {
@@ -1901,17 +2166,27 @@ impl eframe::App for OverlayApp {
                     if text.trim().is_empty() && quick_suggestions.is_empty() {
                         continue;
                     }
-                    if !sanitize_for_tts(&text).trim().is_empty() {
-                        self.status = AgentStatus::Speaking;
+                    if text.trim().is_empty() {
+                        if let Some(last) = self.chat_history.last_mut().filter(|e| e.role == ChatRole::Agent) {
+                            for sug in quick_suggestions {
+                                if !last.quick_suggestions.iter().any(|s| s.as_str() == sug.as_str()) {
+                                    last.quick_suggestions.push(sug);
+                                }
+                            }
+                        }
+                    } else {
+                        if !sanitize_for_tts(&text).trim().is_empty() {
+                            self.status = AgentStatus::Speaking;
+                            let _ = self.tts_sender.send(TtsCommand::Speak(text.clone()));
+                        }
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text,
+                            timestamp: current_time_str(),
+                            quick_suggestions,
+                            screen_size_kb: None,
+                        });
                     }
-                    self.chat_history.push(ChatEntry {
-                        role: ChatRole::Agent,
-                        text: text.clone(),
-                        timestamp: current_time_str(),
-                        quick_suggestions,
-                        screen_size_kb: None,
-                    });
-                    let _ = self.tts_sender.send(TtsCommand::Speak(text));
                 }
                 AgentEvent::SilentNarration(full_text) => {
                     self.chat_history.push(ChatEntry {
@@ -2163,7 +2438,11 @@ impl eframe::App for OverlayApp {
                         }
                     }
 
+                    let (locale, _) = get_system_locale_language();
+                    let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+
                     if is_switch_access_command(&prompt) {
+                        mark_hover_nav_asked();
                         self.toggle_switch_access_mode();
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx, false);
@@ -2171,8 +2450,42 @@ impl eframe::App for OverlayApp {
                         return;
                     }
 
-                    let (locale, _) = get_system_locale_language();
-                    let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+                    if is_dismiss_hover_command(&prompt) {
+                        mark_hover_nav_asked();
+                        play_earcon(Earcon::Success);
+                        self.status = AgentStatus::Idle;
+                        let reply = localized_speech(
+                            lang_prefix,
+                            "Très bien. Vous pouvez activer le mode survol à tout moment avec le bouton Survol ou en disant « mode survol ».",
+                            "Understood. You can enable hover mode at any time using the Hover button or by saying \"hover mode\".",
+                            "Entendido. Puede activar el modo sobrevuelo en cualquier momento con el botón Sobrevuelo o diciendo «modo sobrevuelo».",
+                            "Verstanden. Sie können den Hover-Modus jederzeit über die Schaltfläche Hover oder mit dem Befehl „Hover-Modus“ aktivieren.",
+                            "Ricevuto. Puoi attivare la modalità cursore in qualsiasi momento con il pulsante Cursore o dicendo \"modalità cursore\".",
+                            "Entendido. Você pode ativar o modo de sobrevoo a qualquer momento com o botão Sobrevoo ou dizendo «modo de sobrevoo».",
+                            "Понятно. Вы можете включить режим наведения в любое время с помощью кнопки или команды «режим наведения».",
+                            "好的。您可以随时通过“悬停”按钮或语音指令“悬停模式”来启用它。",
+                            "承知しました。「ホバー」ボタンまたは「ホバーモード」の音声コマンドでいつでも有効にできます。",
+                        );
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::User,
+                            text: prompt,
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: reply.clone(),
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx, false);
+                        }
+                        return;
+                    }
 
                     // 1. Arrêt d'urgence local universel (<50ms, sans requête LLM)
                     if is_emergency_stop_command(&prompt) {
@@ -2245,6 +2558,12 @@ impl eframe::App for OverlayApp {
                     // 2. Sortie déterministe immédiate du mode dictée
                     if self.dictation_mode && is_stop_dictation_command(&prompt) {
                         self.exit_dictation_mode();
+                        return;
+                    }
+
+                    // Activation déterministe immédiate du mode dictée
+                    if !self.dictation_mode && is_start_dictation_command(&prompt) {
+                        self.enter_dictation_mode();
                         return;
                     }
 
@@ -2458,6 +2777,7 @@ impl eframe::App for OverlayApp {
                 AgentEvent::ShowFloatingCard(card) => {
                     let vp_id = egui::ViewportId::from_hash_of(&card.id);
                     let card_title = card.title.clone();
+                    let card_speech = card.build_narrator_speech();
                     if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == card.id) {
                         *existing = card;
                     } else {
@@ -2477,6 +2797,10 @@ impl eframe::App for OverlayApp {
                             quick_suggestions: vec![QuickSuggestionItem::Text(read_suggestion)],
                             screen_size_kb: None,
                         });
+                    }
+                    if self.status != AgentStatus::Speaking && !card_speech.trim().is_empty() {
+                        self.status = AgentStatus::Speaking;
+                        let _ = self.tts_sender.send(TtsCommand::Speak(card_speech));
                     }
                     ctx.request_repaint();
                     ctx.request_repaint_of(vp_id);
@@ -2516,6 +2840,34 @@ impl eframe::App for OverlayApp {
         let mut hook_events = Vec::new();
         if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
             hook_events.append(&mut *q);
+        }
+
+        if hook_events.contains(&SwitchKeyEvent::ToggleDictation) {
+            if self.dictation_mode {
+                self.exit_dictation_mode();
+            } else {
+                self.enter_dictation_mode();
+            }
+        }
+        if hook_events.contains(&SwitchKeyEvent::ToggleSwitch) {
+            self.toggle_switch_access_mode();
+        }
+        if hook_events.contains(&SwitchKeyEvent::ToggleVoice) {
+            self.set_voice_gender(self.voice_gender.next());
+        }
+        if hook_events.contains(&SwitchKeyEvent::Clear) {
+            let _ = self.command_sender.send(AgentCommand::ClearHistory);
+            self.chat_history.clear();
+            self.window_analysis_cache.clear();
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: "Mémoire contextuelle réinitialisée.".to_string(),
+                timestamp: current_time_str(),
+                quick_suggestions: Vec::new(),
+                screen_size_kb: None,
+            });
+            self.live_transcript.clear();
+            self.stop_speaking();
         }
 
         #[cfg(windows)]
@@ -4384,12 +4736,7 @@ impl eframe::App for OverlayApp {
                                             if self.dictation_mode {
                                                 self.exit_dictation_mode();
                                             } else {
-                                                self.dictation_mode = true;
-                                                IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
-                                                restore_external_focus();
-                                                if !self.is_recording {
-                                                    self.start_recording(ui.ctx(), true);
-                                                }
+                                                self.enter_dictation_mode();
                                             }
                                         }
 
@@ -4639,7 +4986,7 @@ impl eframe::App for OverlayApp {
                                                 || (entry.text.contains('|') && entry.text.contains('\n'));
 
                                             if entry.role == ChatRole::Agent && has_interactive_md {
-                                                if let Some(prompt) = floating_window::render_markdown(ui, &entry.text, &format!("chat_entry_{idx}"), &mut self.dwell_state) {
+                                                if let Some(prompt) = floating_window::render_markdown(ui, &entry.text, &format!("chat_entry_{idx}"), &mut self.dwell_state, &theme) {
                                                     clicked_quick_suggestion = Some(prompt);
                                                 }
                                             } else {
@@ -4656,6 +5003,7 @@ impl eframe::App for OverlayApp {
                                             let msg_dwell_id = ui.make_persistent_id(format!("dwell_chat_msg_{idx}"));
                                             let dwell_triggered = apply_dwell_to_response(ui, &mut self.dwell_state, msg_dwell_id, &interact_resp);
                                             if dwell_triggered {
+                                                self.dwell_state.lock_id(msg_dwell_id, Duration::from_secs(6));
                                                 speak_message = Some(entry.text.clone());
                                             }
 
@@ -4737,6 +5085,53 @@ impl eframe::App for OverlayApp {
                                         self.status = AgentStatus::Thinking;
                                         self.continuous_mode = true;
                                         self.live_transcript.clear();
+
+                                        if is_switch_access_command(&prompt) {
+                                            mark_hover_nav_asked();
+                                            if !self.switch_access_mode {
+                                                self.toggle_switch_access_mode();
+                                            }
+                                            if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                                                self.start_recording(&ctx, false);
+                                            }
+                                            return;
+                                        }
+
+                                        if is_dismiss_hover_command(&prompt) {
+                                            mark_hover_nav_asked();
+                                            play_earcon(Earcon::Success);
+                                            self.status = AgentStatus::Idle;
+                                            let (locale, _) = get_system_locale_language();
+                                            let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+                                            let reply = localized_speech(
+                                                lang_prefix,
+                                                "Très bien. Vous pouvez activer le mode survol à tout moment avec le bouton Survol ou en disant « mode survol ».",
+                                                "Understood. You can enable hover mode at any time using the Hover button or by saying \"hover mode\".",
+                                                "Entendido. Puede activar el modo sobrevuelo en cualquier momento con el botón Sobrevuelo o diciendo «modo sobrevuelo».",
+                                                "Verstanden. Sie können den Hover-Modus jederzeit über die Schaltfläche Hover oder mit dem Befehl „Hover-Modus“ aktivieren.",
+                                                "Ricevuto. Puoi attivare la modalità cursore in qualsiasi momento con il pulsante Cursore o dicendo \"modalità cursore\".",
+                                                "Entendido. Você pode ativar o modo de sobrevoo a qualquer momento com o botão Sobrevoo ou dizendo «modo de sobrevoo».",
+                                                "Понятно. Вы можете включить режим наведения в любое время с помощью кнопки или команды «режим наведения».",
+                                                "好的。您可以随时通过“悬停”按钮或语音指令“悬停模式”来启用它。",
+                                                "承知しました。「ホバー」ボタンまたは「ホバーモード」の音声コマンドでいつでも有効にできます。",
+                                            );
+                                            self.chat_history.push(ChatEntry {
+                                                role: ChatRole::User,
+                                                text: prompt.clone(),
+                                                timestamp: current_time_str(),
+                                                quick_suggestions: Vec::new(),
+                                                screen_size_kb: None,
+                                            });
+                                            self.chat_history.push(ChatEntry {
+                                                role: ChatRole::Agent,
+                                                text: reply.clone(),
+                                                timestamp: current_time_str(),
+                                                quick_suggestions: Vec::new(),
+                                                screen_size_kb: None,
+                                            });
+                                            let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                                            return;
+                                        }
 
                                         // Interception directe pour faire lire la fenêtre volante par le narrateur
                                         let is_read_card = prompt.starts_with("🔊 Lire : ") || prompt.starts_with("Lire : ");
@@ -4925,6 +5320,7 @@ impl eframe::App for OverlayApp {
 
                                             let t_dwell_id = ui.make_persistent_id(format!("dwell_twitch_msg_{idx}"));
                                             if apply_dwell_to_response(ui, &mut self.dwell_state, t_dwell_id, &resp) {
+                                                self.dwell_state.lock_id(t_dwell_id, Duration::from_secs(6));
                                                 speak_twitch_message = Some(format!("{}: {}", msg.author, msg.text));
                                             }
 
@@ -5558,8 +5954,17 @@ impl eframe::App for OverlayApp {
                             let prev_dwell_ms = current_dwell_ms;
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new("Délai :").size(12.0).strong().color(egui::Color32::WHITE));
-                                ui.add(egui::Slider::new(&mut current_dwell_ms, 600..=2500).suffix(" ms").step_by(50.0))
-                                    .on_hover_text("Délai de maintien du pointeur requis avant déclenchement automatique");
+                                let slider = egui::Slider::new(&mut current_dwell_ms, 0..=2500)
+                                    .step_by(50.0)
+                                    .custom_formatter(|val, _| {
+                                        if val <= 0.0 {
+                                            "Désactivé (0 ms)".to_string()
+                                        } else {
+                                            format!("{:.0} ms", val)
+                                        }
+                                    });
+                                ui.add(slider)
+                                    .on_hover_text("Délai de maintien du pointeur requis avant déclenchement automatique (0 ms pour désactiver)");
                             });
                             if current_dwell_ms != prev_dwell_ms {
                                 self.dwell_state.dwell_duration = Duration::from_millis(current_dwell_ms);
@@ -5588,8 +5993,9 @@ impl eframe::App for OverlayApp {
                 let mut card_speech = None;
                 let prev_card_count = self.floating_cards.len();
                 let dwell_state = &mut self.dwell_state;
+                let theme_colors = self.theme.colors();
                 self.floating_cards.retain_mut(|card| {
-                    if let Some(out) = card.show(&ctx, dwell_state) {
+                    if let Some(out) = card.show(&ctx, dwell_state, &theme_colors) {
                         match out {
                             FloatingCardOutput::Prompt(prompt) => submitted_card_prompts.push(prompt),
                             FloatingCardOutput::Speak(speech) => card_speech = Some(speech),
@@ -6550,10 +6956,15 @@ async fn call_llm_prompt(
             _ => None,
         }).collect();
 
+        let mut card_speeches: Vec<String> = Vec::new();
         for act in &payload.actions {
             match act {
                 AgentAction::ShowFloatingCard { id, title, card_type, data } => {
                     let card = FloatingCard::from_action_data(id.clone(), title.clone(), card_type, data);
+                    let speech = card.build_narrator_speech();
+                    if !speech.trim().is_empty() {
+                        card_speeches.push(speech);
+                    }
                     let _ = event_tx.send(AgentEvent::ShowFloatingCard(card));
                 }
                 AgentAction::CloseFloatingCard { id } => {
@@ -6564,6 +6975,17 @@ async fn call_llm_prompt(
                     }
                 }
                 _ => {}
+            }
+        }
+
+        if !card_speeches.is_empty() {
+            let combined = card_speeches.join("\n\n");
+            let trimmed_narr = payload.narration.trim();
+            if trimmed_narr.is_empty() {
+                payload.narration = combined;
+            } else if !trimmed_narr.contains(&combined) {
+                let sep = if trimmed_narr.ends_with('.') || trimmed_narr.ends_with(':') || trimmed_narr.ends_with('!') { " " } else { ". " };
+                payload.narration = format!("{}{}{}", trimmed_narr, sep, combined);
             }
         }
 
@@ -6786,17 +7208,6 @@ async fn call_llm_prompt(
             pass += 1;
         } else {
             println!("[Agent] Nombre maximal de passes ({max_agent_passes}) atteint.");
-            let screen_for_sug = if !screen_after.trim().is_empty() {
-                screen_after.clone()
-            } else {
-                LAST_SCREEN_SUMMARY.lock().ok().and_then(|s| s.clone()).unwrap_or_default()
-            };
-            let auto_suggestions = generate_fallback_suggestions_from_screen(&screen_for_sug);
-            has_spoken = true;
-            let _ = event_tx.send(AgentEvent::ReplaceNarration {
-                text: "Actions terminées. Voici les suites possibles identifiées à l'écran :".to_string(),
-                quick_suggestions: auto_suggestions,
-            });
             break;
         }
     }
