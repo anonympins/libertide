@@ -1858,6 +1858,14 @@ pub fn setup_custom_fonts(ctx: &egui::Context) {
         let font_candidates = [
             format!(r"{sys_root}\Fonts\seguiemj.ttf"),
             format!(r"{sys_root}\Fonts\seguisym.ttf"),
+            format!(r"{sys_root}\Fonts\msyh.ttc"),
+            format!(r"{sys_root}\Fonts\msyh.ttf"),
+            format!(r"{sys_root}\Fonts\yu-gothic.ttc"),
+            format!(r"{sys_root}\Fonts\yugothm.ttc"),
+            format!(r"{sys_root}\Fonts\meiryo.ttc"),
+            format!(r"{sys_root}\Fonts\msgothic.ttc"),
+            format!(r"{sys_root}\Fonts\malgun.ttf"),
+            format!(r"{sys_root}\Fonts\simsun.ttc"),
         ];
 
         for (idx, path) in font_candidates.iter().enumerate() {
@@ -1886,6 +1894,11 @@ pub fn setup_custom_fonts(ctx: &egui::Context) {
     #[cfg(not(windows))]
     {
         let font_candidates = [
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            "/System/Library/Fonts/Hiragino Sans.ttc",
+            "/System/Library/Fonts/Supplemental/Songti.ttc",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
             "/System/Library/Fonts/Apple Color Emoji.ttc",
             "/System/Library/Fonts/Supplemental/Arial.ttf",
             "/System/Library/Fonts/Helvetica.ttc",
@@ -1893,6 +1906,12 @@ pub fn setup_custom_fonts(ctx: &egui::Context) {
             "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
             "/usr/share/fonts/noto/NotoColorEmoji.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
         ];
         for (idx, path) in font_candidates.iter().enumerate() {
             if let Ok(font_data) = std::fs::read(path) {
@@ -1900,7 +1919,6 @@ pub fn setup_custom_fonts(ctx: &egui::Context) {
                 fonts.font_data.insert(font_name.clone(), Arc::new(egui::FontData::from_owned(font_data)));
                 fonts.families.entry(egui::FontFamily::Proportional).or_default().push(font_name.clone());
                 fonts.families.entry(egui::FontFamily::Monospace).or_default().push(font_name);
-                break;
             }
         }
     }

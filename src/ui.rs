@@ -41,7 +41,7 @@ pub use crate::automation::{AsWindowTarget, NumberedElementTarget, VIRTUAL_KEY};
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetClassNameW, GetWindowRect, GetWindowTextW, SetCursorPos};
 
 pub use crate::automation::{
-    activate_numbered_target, click_numbered_target,
+    activate_numbered_target,
     ActionHistoryManager, UndoOperation, ACTION_HISTORY,
     execute_undo_operation, undo_last_system_action, redo_last_system_action,
 };

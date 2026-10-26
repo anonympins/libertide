@@ -3351,7 +3351,7 @@ impl eframe::App for OverlayApp {
                                 .min_size(egui::vec2(20.0, 18.0))
                                 .corner_radius(egui::CornerRadius::same(4)),
                             );
-                            if close_btn.on_hover_text("Fermer").clicked() {
+                            if close_btn.on_hover_text(t!("ui.btn_close")).clicked() {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             }
 
@@ -3365,7 +3365,7 @@ impl eframe::App for OverlayApp {
                                 .min_size(egui::vec2(20.0, 18.0))
                                 .corner_radius(egui::CornerRadius::same(4)),
                             );
-                            if max_btn.on_hover_text(if is_maximized { "Restaurer" } else { "Agrandir" }).clicked() {
+                            if max_btn.on_hover_text(if is_maximized { t!("ui.btn_restore") } else { t!("ui.btn_maximize") }).clicked() {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
                             }
 
@@ -3378,7 +3378,7 @@ impl eframe::App for OverlayApp {
                                 .min_size(egui::vec2(20.0, 18.0))
                                 .corner_radius(egui::CornerRadius::same(4)),
                             );
-                            if min_btn.on_hover_text("Réduire").clicked() {
+                            if min_btn.on_hover_text(t!("ui.btn_minimize")).clicked() {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                             }
                         });
@@ -3410,7 +3410,7 @@ impl eframe::App for OverlayApp {
                                 if avatar_resp.hovered() {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                 }
-                                if avatar_resp.on_hover_text("Cliquer pour couper la parole (Échap)").clicked() {
+                                if avatar_resp.on_hover_text(t!("ui.avatar_mute_tooltip")).clicked() {
                                     self.stop_speaking();
                                 }
                             }
@@ -3488,14 +3488,14 @@ impl eframe::App for OverlayApp {
                                             if badge_resp.hovered() {
                                                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                             }
-                                            if badge_resp.on_hover_text("Cliquer pour couper la parole (Échap)").clicked() {
+                                            if badge_resp.on_hover_text(t!("ui.avatar_mute_tooltip")).clicked() {
                                                 self.stop_speaking();
                                             }
                                         } else if self.switch_access_mode {
                                             if badge_resp.hovered() {
                                                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                             }
-                                            if badge_resp.on_hover_text("Cliquer pour désactiver le mode survol (Échap)").clicked() {
+                                            if badge_resp.on_hover_text(t!("ui.badge_disable_hover_tooltip")).clicked() {
                                                 self.toggle_switch_access_mode(Some(false));
                                             }
                                         } else {
@@ -3526,7 +3526,7 @@ impl eframe::App for OverlayApp {
                                         ui.horizontal(|ui| {
                                             ui.spacing_mut().item_spacing.x = 4.0;
                                             ui.label(
-                                                egui::RichText::new("💡 Suggestions :")
+                                                egui::RichText::new(t!("ui.app_suggestions_header"))
                                                     .size(10.5)
                                                     .color(theme.accent)
                                                     .strong(),
@@ -3543,13 +3543,13 @@ impl eframe::App for OverlayApp {
                                                 .small();
 
                                                 let resp = ui.add(chip)
-                                                    .on_hover_text(format!("Lancer '{}' (Clic ou maintien au survol)\nTab : compléter dans le champ", sug));
+                                                    .on_hover_text(t!("ui.app_suggestion_tooltip", app = sug));
                                                 let sug_dwell_id = ui.make_persistent_id(format!("dwell_app_sug_{sug}"));
                                                 if apply_dwell_to_response(ui, &mut self.dwell_state, sug_dwell_id, &resp) {
                                                     clicked_app_suggestion = Some(format!("Ouvrir {sug}"));
                                                 }
                                                 resp.context_menu(|ui| {
-                                                    if ui.button("Compléter dans le champ").clicked() {
+                                                    if ui.button(t!("ui.autocomplete_field")).clicked() {
                                                         autocomplete_input_to = Some(format!("Ouvrir {sug}"));
                                                         ui.close();
                                                     }
@@ -3647,7 +3647,7 @@ impl eframe::App for OverlayApp {
                                         }
 
                                         response.context_menu(|ui| {
-                                            if ui.button("📋 Coller (Ctrl+V)").clicked() {
+                                            if ui.button(t!("ui.ctx_paste_shortcut")).clicked() {
                                                 if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
                                                     let clean_clip = clip.replace(['\r', '\n'], " ");
                                                     let trimmed_clean = clean_clip.trim().to_string();
@@ -3660,20 +3660,20 @@ impl eframe::App for OverlayApp {
                                                 ui.memory_mut(|m| m.request_focus(input_id));
                                                 ui.close();
                                             }
-                                            if ui.button("📄 Copier tout (Ctrl+C)").clicked() {
+                                            if ui.button(t!("ui.ctx_copy_all_shortcut")).clicked() {
                                                 set_clipboard_text(&self.input_text);
                                                 ctx.copy_text(self.input_text.clone());
                                                 play_earcon(Earcon::Success);
                                                 ui.close();
                                             }
-                                            if ui.button("✂ Couper tout (Ctrl+X)").clicked() {
+                                            if ui.button(t!("ui.ctx_cut_all_shortcut")).clicked() {
                                                 set_clipboard_text(&self.input_text);
                                                 ctx.copy_text(self.input_text.clone());
                                                 self.input_text.clear();
                                                 play_earcon(Earcon::Success);
                                                 ui.close();
                                             }
-                                            if ui.button("🗑 Effacer").clicked() {
+                                            if ui.button(t!("ui.ctx_clear")).clicked() {
                                                 self.input_text.clear();
                                                 ui.close();
                                             }
@@ -4103,9 +4103,9 @@ impl eframe::App for OverlayApp {
                                                 let (label_name, label_color) = match entry.role {
                                                     ChatRole::User => {
                                                         let name = if let Some(kb) = entry.screen_size_kb {
-                                                            format!("🗣 Vous - {:.1} ko", kb)
+                                                            format!("{} - {:.1} ko", t!("ui.chat_user_label"), kb)
                                                         } else {
-                                                            "🗣 Vous".to_string()
+                                                            t!("ui.chat_user_label").to_string()
                                                         };
                                                         (name, egui::Color32::from_rgb(255, 215, 120))
                                                     }
@@ -4127,14 +4127,14 @@ impl eframe::App for OverlayApp {
                                                     ui.add_space(4.0);
                                                     let stop_btn = ui.add(
                                                         egui::Button::new(
-                                                            egui::RichText::new("🔇 Couper")
+                                                            egui::RichText::new(t!("ui.btn_mute_speech"))
                                                                 .size(9.5)
                                                                 .color(egui::Color32::from_rgb(255, 130, 130)),
                                                         )
                                                         .small()
                                                         .corner_radius(egui::CornerRadius::same(6)),
                                                     );
-                                                    if stop_btn.on_hover_text("Interrompre la lecture vocale (Échap)").clicked() {
+                                                    if stop_btn.on_hover_text(t!("ui.avatar_mute_tooltip")).clicked() {
                                                         request_stop_speaking = true;
                                                     }
                                                 }
@@ -4220,7 +4220,7 @@ impl eframe::App for OverlayApp {
                                             }
 
                                             interact_resp.context_menu(|ui| {
-                                                if ui.button("📋 Copier le texte (Ctrl+C)").clicked() {
+                                                if ui.button(t!("ui.ctx_copy_text")).clicked() {
                                                     set_clipboard_text(&entry.text);
                                                     ctx.copy_text(entry.text.clone());
                                                     play_earcon(Earcon::Success);
@@ -4247,7 +4247,7 @@ impl eframe::App for OverlayApp {
                                                                 .stroke(egui::Stroke::new(1.0, theme.border))
                                                                 .corner_radius(egui::CornerRadius::same(10));
 
-                                                            let resp = ui.add(btn).on_hover_text("Cliquer ou maintenir au survol pour choisir cette suggestion");
+                                                            let resp = ui.add(btn).on_hover_text(t!("ui.quick_suggestion_tooltip"));
                                                             let sug_dwell_id = ui.make_persistent_id(format!("dwell_quick_sug_{idx}_{sug_idx}"));
                                                             if apply_dwell_to_response(ui, &mut self.dwell_state, sug_dwell_id, &resp) {
                                                                 clicked_quick_suggestion = Some(clean_label.to_string());
@@ -4418,7 +4418,7 @@ impl eframe::App for OverlayApp {
                             ui.horizontal(|ui| {
                                 if !self.current_twitch_channel.is_empty() {
                                     ui.label(
-                                        egui::RichText::new("Salon :")
+                                        egui::RichText::new(t!("ui.twitch_channel_label"))
                                             .size(11.0)
                                             .color(egui::Color32::from_rgb(170, 185, 205)),
                                     );
@@ -4435,7 +4435,7 @@ impl eframe::App for OverlayApp {
                                 let search_edit = ui.add_sized(
                                     [110.0, 18.0],
                                     egui::TextEdit::singleline(&mut self.twitch_search_query)
-                                        .hint_text("Chaîne..."),
+                                        .hint_text(t!("ui.twitch_search_hint")),
                                 );
                                 let enter_pressed = search_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                                 if (ui.small_button("🔍").clicked() || enter_pressed) && !self.twitch_search_query.trim().is_empty() {
@@ -4449,16 +4449,16 @@ impl eframe::App for OverlayApp {
                                 ui.add_space(2.0);
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label(
-                                        egui::RichText::new("Résultats :")
+                                        egui::RichText::new(t!("ui.twitch_results_label"))
                                             .size(10.5)
                                             .color(egui::Color32::from_rgb(255, 215, 120)),
                                     );
                                     let mut selected_channel = None;
                                     for ch in &self.twitch_search_results {
-                                        if ui.small_button(format!("▶ {}", ch.display_name)).on_hover_text("Rejoindre ce salon irc").clicked() {
+                                        if ui.small_button(format!("▶ {}", ch.display_name)).on_hover_text(t!("ui.twitch_join_tooltip")).clicked() {
                                             selected_channel = Some(ch.login.clone());
                                         }
-                                        if ui.small_button("↗").on_hover_text("Ouvrir sur twitch").clicked() {
+                                        if ui.small_button("↗").on_hover_text(t!("ui.twitch_open_tooltip")).clicked() {
                                             ui.ctx().open_url(egui::OpenUrl::new_tab(format!("https://twitch.tv/{}", ch.login)));
                                         }
                                     }
@@ -4480,7 +4480,7 @@ impl eframe::App for OverlayApp {
                                 .show(ui, |ui| {
                                     if self.twitch_messages.is_empty() {
                                         ui.label(
-                                            egui::RichText::new("En attente de messages twitch...")
+                                            egui::RichText::new(t!("ui.twitch_waiting"))
                                                 .size(12.0)
                                                 .italics()
                                                 .color(egui::Color32::from_rgba_unmultiplied(180, 190, 205, 150)),
@@ -4700,7 +4700,7 @@ impl eframe::App for OverlayApp {
                                 let is_llm_active = self.settings_tab == SettingsTab::LlmProvider;
                                 let tab_llm = ui.selectable_label(
                                     is_llm_active,
-                                    egui::RichText::new("🔑 Fournisseur LLM")
+                                    egui::RichText::new(t!("ui.settings_tab_llm"))
                                         .size(12.0)
                                         .color(if is_llm_active {
                                             theme.accent
@@ -4721,7 +4721,7 @@ impl eframe::App for OverlayApp {
                                 let is_theme_active = self.settings_tab == SettingsTab::Theme;
                                 let tab_theme = ui.selectable_label(
                                     is_theme_active,
-                                    egui::RichText::new("🎨 Thèmes & Accessibilité")
+                                    egui::RichText::new(t!("ui.settings_tab_theme"))
                                         .size(12.0)
                                         .color(if is_theme_active {
                                             theme.accent
@@ -4742,7 +4742,7 @@ impl eframe::App for OverlayApp {
                                 let is_lang_active = self.settings_tab == SettingsTab::Language;
                                 let tab_lang = ui.selectable_label(
                                     is_lang_active,
-                                    egui::RichText::new("🌐 Langage")
+                                    egui::RichText::new(t!("ui.settings_tab_language"))
                                         .size(12.0)
                                         .color(if is_lang_active {
                                             theme.accent
@@ -4769,7 +4769,7 @@ impl eframe::App for OverlayApp {
                                         )
                                         .min_size(egui::vec2(18.0, 16.0))
                                         .corner_radius(egui::CornerRadius::same(4)),
-                                    ).on_hover_text("Fermer").clicked() {
+                                    ).on_hover_text(t!("ui.btn_close")).clicked() {
                                         self.show_api_key_modal = false;
                                         self.api_key_error = None;
                                     }
@@ -4799,7 +4799,7 @@ impl eframe::App for OverlayApp {
 
                             // --- Section Clé API ---
                             ui.label(
-                                egui::RichText::new(format!("Clé d'API ({env_var_target}) :"))
+                                egui::RichText::new(t!("ui.api_key_label", env = env_var_target))
                                     .size(11.0)
                                     .color(egui::Color32::WHITE)
                                     .strong(),
@@ -4833,28 +4833,28 @@ impl eframe::App for OverlayApp {
                                 let edit_resp = ui.add(edit);
 
                                 let eye_icon = if self.show_api_key_plain { "🔒" } else { "👁" };
-                                if ui.button(eye_icon).on_hover_text("Afficher/Masquer la clé").clicked() {
+                                if ui.button(eye_icon).on_hover_text(t!("ui.toggle_api_key_visibility")).clicked() {
                                     self.show_api_key_plain = !self.show_api_key_plain;
                                 }
 
-                                if ui.button("📋").on_hover_text("Coller depuis le presse-papiers").clicked() {
+                                if ui.button("📋").on_hover_text(t!("ui.paste_from_clipboard")).clicked() {
                                     if let Some(clip) = get_clipboard_text() {
                                         self.api_key_input = clip.trim().to_string();
                                     }
                                 }
 
                                 edit_resp.context_menu(|ui| {
-                                    if ui.button("📋 Coller").clicked() {
+                                    if ui.button(t!("ui.btn_paste")).clicked() {
                                         if let Some(clip) = get_clipboard_text() {
                                             self.api_key_input = clip.trim().to_string();
                                         }
                                         ui.close();
                                     }
-                                    if ui.button("📄 Copier").clicked() {
+                                    if ui.button(t!("ui.btn_copy")).clicked() {
                                         set_clipboard_text(&self.api_key_input);
                                         ui.close();
                                     }
-                                    if ui.button("🗑 Effacer").clicked() {
+                                    if ui.button(t!("ui.btn_clear_short")).clicked() {
                                         self.api_key_input.clear();
                                         ui.close();
                                     }
@@ -4877,14 +4877,14 @@ impl eframe::App for OverlayApp {
                             // --- Section Modèle de raisonnement ---
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    egui::RichText::new(format!("Modèle LLM ({env_model_target}) :"))
+                                    egui::RichText::new(t!("ui.model_label", env = env_model_target))
                                         .size(11.0)
                                         .color(egui::Color32::WHITE)
                                         .strong(),
                                 );
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.small_button("↺ Recommandé")
-                                        .on_hover_text(format!("Rétablir le modèle par défaut ({default_model_name})"))
+                                    if ui.small_button(t!("ui.btn_model_recommended"))
+                                        .on_hover_text(t!("ui.restore_default_model_tooltip", model = default_model_name))
                                         .clicked()
                                     {
                                         self.model_input = default_model_name.to_string();
@@ -4919,21 +4919,21 @@ impl eframe::App for OverlayApp {
                                 let model_resp = ui.add(model_edit);
 
                                 model_resp.context_menu(|ui| {
-                                    if ui.button("📋 Coller").clicked() {
+                                    if ui.button(t!("ui.btn_paste")).clicked() {
                                         if let Some(clip) = get_clipboard_text() {
                                             self.model_input = clip.trim().to_string();
                                         }
                                         ui.close();
                                     }
-                                    if ui.button("📄 Copier").clicked() {
+                                    if ui.button(t!("ui.btn_copy")).clicked() {
                                         set_clipboard_text(&self.model_input);
                                         ui.close();
                                     }
-                                    if ui.button(format!("↺ Rétablir {default_model_name}")).clicked() {
+                                    if ui.button(t!("ui.restore_default_model", model = default_model_name)).clicked() {
                                         self.model_input = default_model_name.to_string();
                                         ui.close();
                                     }
-                                    if ui.button("🗑 Effacer").clicked() {
+                                    if ui.button(t!("ui.btn_clear_short")).clicked() {
                                         self.model_input.clear();
                                         ui.close();
                                     }
@@ -4948,7 +4948,7 @@ impl eframe::App for OverlayApp {
 
                             ui.add_space(5.0);
                             ui.horizontal(|ui| {
-                                if ui.button("💾 Enregistrer & Appliquer").clicked() {
+                                if ui.button(t!("ui.btn_save_apply")).clicked() {
                                     let key = self.api_key_input.trim();
                                     let model = if self.model_input.trim().is_empty() {
                                         default_model_name
@@ -4969,7 +4969,7 @@ impl eframe::App for OverlayApp {
                                         self.show_api_key_modal = false;
                                     }
                                 }
-                                if ui.button("Annuler").clicked() {
+                                if ui.button(t!("ui.btn_cancel")).clicked() {
                                     self.show_api_key_modal = false;
                                     self.api_key_error = None;
                                 }
@@ -4978,7 +4978,7 @@ impl eframe::App for OverlayApp {
                                 SettingsTab::Theme => {
                             // --- Onglet Thèmes & Accessibilité ---
                             ui.label(
-                                egui::RichText::new("Profils de contraste et accessibilité visuelle :")
+                                egui::RichText::new(t!("ui.theme_profiles_label"))
                                     .size(11.5)
                                     .color(theme.text_secondary),
                             );
@@ -4986,7 +4986,7 @@ impl eframe::App for OverlayApp {
 
                             let mut current_theme = self.theme;
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Thème :").size(12.0).strong().color(egui::Color32::WHITE));
+                                ui.label(egui::RichText::new(t!("ui.theme_label")).size(12.0).strong().color(egui::Color32::WHITE));
                                 egui::ComboBox::from_id_salt("settings_theme_combobox")
                                     .selected_text(current_theme.display_name())
                                     .width(260.0)
@@ -5044,7 +5044,7 @@ impl eframe::App for OverlayApp {
                             ui.separator();
                             ui.add_space(4.0);
                             ui.label(
-                                egui::RichText::new("Taille de police et affichage des textes :")
+                                egui::RichText::new(t!("ui.font_size_label"))
                                     .size(11.5)
                                     .color(theme.text_secondary),
                             );
@@ -5053,7 +5053,7 @@ impl eframe::App for OverlayApp {
                             let prev_zoom = current_zoom;
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 8.0;
-                                ui.label(egui::RichText::new("Police :").size(12.0).strong().color(egui::Color32::WHITE));
+                                ui.label(egui::RichText::new(t!("ui.font_label")).size(12.0).strong().color(egui::Color32::WHITE));
 
                                 let btn_minus = egui::Button::new(
                                     egui::RichText::new("A −")
@@ -5063,7 +5063,7 @@ impl eframe::App for OverlayApp {
                                 )
                                 .min_size(egui::vec2(52.0, 30.0))
                                 .corner_radius(egui::CornerRadius::same(6));
-                                let resp_minus = ui.add(btn_minus).on_hover_text("Diminuer la taille de police (−10%)");
+                                let resp_minus = ui.add(btn_minus).on_hover_text(t!("ui.font_minus_tooltip"));
                                 let id_minus = ui.make_persistent_id("dwell_zoom_minus");
                                 if apply_dwell_to_response(ui, &mut self.dwell_state, id_minus, &resp_minus) {
                                     current_zoom = ((current_zoom - 0.10).max(0.70) * 100.0).round() / 100.0;
@@ -5086,7 +5086,7 @@ impl eframe::App for OverlayApp {
                                 )
                                 .min_size(egui::vec2(52.0, 30.0))
                                 .corner_radius(egui::CornerRadius::same(6));
-                                let resp_plus = ui.add(btn_plus).on_hover_text("Agrandir la taille de police (+10%)");
+                                let resp_plus = ui.add(btn_plus).on_hover_text(t!("ui.font_plus_tooltip"));
                                 let id_plus = ui.make_persistent_id("dwell_zoom_plus");
                                 if apply_dwell_to_response(ui, &mut self.dwell_state, id_plus, &resp_plus) {
                                     current_zoom = ((current_zoom + 0.10).min(2.50) * 100.0).round() / 100.0;
@@ -5099,7 +5099,7 @@ impl eframe::App for OverlayApp {
                                 )
                                 .min_size(egui::vec2(52.0, 30.0))
                                 .corner_radius(egui::CornerRadius::same(6));
-                                let resp_reset = ui.add(btn_reset).on_hover_text("Rétablir la taille standard (100%)");
+                                let resp_reset = ui.add(btn_reset).on_hover_text(t!("ui.font_reset_tooltip"));
                                 let id_reset = ui.make_persistent_id("dwell_zoom_reset");
                                 if apply_dwell_to_response(ui, &mut self.dwell_state, id_reset, &resp_reset) {
                                     current_zoom = 1.0;
@@ -5114,7 +5114,7 @@ impl eframe::App for OverlayApp {
                             ui.separator();
                             ui.add_space(4.0);
                             ui.label(
-                                egui::RichText::new("Temporisation du clic au survol (Dwell) :")
+                                egui::RichText::new(t!("ui.dwell_timing_label"))
                                     .size(11.5)
                                     .color(theme.text_secondary),
                             );
@@ -5122,18 +5122,18 @@ impl eframe::App for OverlayApp {
                             let mut current_dwell_ms = self.dwell_state.dwell_duration.as_millis() as u64;
                             let prev_dwell_ms = current_dwell_ms;
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Délai :").size(12.0).strong().color(egui::Color32::WHITE));
+                                ui.label(egui::RichText::new(t!("ui.dwell_delay_label")).size(12.0).strong().color(egui::Color32::WHITE));
                                 let slider = egui::Slider::new(&mut current_dwell_ms, 0..=2500)
                                     .step_by(50.0)
                                     .custom_formatter(|val, _| {
                                         if val <= 0.0 {
-                                            "Désactivé (0 ms)".to_string()
+                                            t!("ui.dwell_disabled").to_string()
                                         } else {
                                             format!("{:.0} ms", val)
                                         }
                                     });
                                 ui.add(slider)
-                                    .on_hover_text("Délai de maintien du pointeur requis avant déclenchement automatique (0 ms pour désactiver)");
+                                    .on_hover_text(t!("ui.dwell_tooltip"));
                             });
                             if current_dwell_ms != prev_dwell_ms {
                                 self.dwell_state.dwell_duration = Duration::from_millis(current_dwell_ms);
@@ -5143,11 +5143,11 @@ impl eframe::App for OverlayApp {
 
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
-                                if ui.button("Fermer").clicked() {
+                                if ui.button(t!("ui.btn_close")).clicked() {
                                     self.show_api_key_modal = false;
                                 }
                                 ui.label(
-                                    egui::RichText::new("Astuce vocale : dites « police plus grande » ou « contraste élevé »")
+                                    egui::RichText::new(t!("ui.theme_voice_tip"))
                                         .size(10.0)
                                         .color(theme.text_secondary),
                                 );
@@ -5155,13 +5155,8 @@ impl eframe::App for OverlayApp {
                                 }
                                 SettingsTab::Language => {
                                     // --- Onglet Langage ---
-                                    let lang_heading = if rust_i18n::locale().starts_with("en") {
-                                        "🌐 Interface & Assistant Language :"
-                                    } else {
-                                        "🌐 Langue de l'interface & de l'assistant :"
-                                    };
                                     ui.label(
-                                        egui::RichText::new(lang_heading)
+                                        egui::RichText::new(t!("ui.language_heading"))
                                             .size(11.5)
                                             .color(theme.text_secondary),
                                     );
@@ -5203,11 +5198,11 @@ impl eframe::App for OverlayApp {
                                     ui.add_space(6.0);
 
                                     ui.horizontal(|ui| {
-                                        if ui.button("Fermer").clicked() {
+                                        if ui.button(t!("ui.btn_close")).clicked() {
                                             self.show_api_key_modal = false;
                                         }
                                         ui.label(
-                                            egui::RichText::new("Astuce vocale : dites « passer en espagnol », « switch to german » ou « passer en anglais »")
+                                            egui::RichText::new(t!("ui.language_voice_tip"))
                                                 .size(10.0)
                                                 .color(theme.text_secondary),
                                         );
