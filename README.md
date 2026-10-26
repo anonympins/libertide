@@ -78,6 +78,7 @@ Complex information is extracted and projected into accessible floating window c
 ### 7. 🎨 Visual Comfort & Custom Accessibility Themes (WCAG AAA)
 The interface adapts dynamically to your eyesight:
 - **Dynamic Zoom**: Say *"Zoom in"*, *"Enlarge text"*, or use UI buttons to scale from 70% to 250%.
+- **Multilingual Accessibility**: Toggle effortlessly between French, English, or Automatic System Language via settings or by voice (*"Passer en anglais"*, *"Passer en français"*).
 - **Specialized Profiles**:
   - *High-Contrast Yellow & Black* (WCAG AAA for low vision and macular degeneration).
   - *High-Contrast White & Black* (crisp, glare-free pure monochrome).
@@ -199,7 +200,7 @@ Libertide understands English, French, and most modern languages:
 | :--- | :--- |
 | **Interface Control** | *"Hide"* • *"Show up"* • *"Emergency stop"* • *"Stop"* |
 | **Pointing & Clicking Help** | *"Hover mode"* • *"Numbers"* / *"Badges"* • *"Click 3"* • *"Switch mode"* |
-| **Display & Sizing** | *"Zoom in"* • *"Zoom out"* • *"Reset zoom"* • *"High contrast"* |
+| **Display & Themes** | *"Zoom in"* • *"Zoom out"* • *"Reset zoom"* • *"High contrast"* • *"Next theme"* • *"Passer en anglais / français"* |
 | **Dictation & Writing** | *"Dictation mode"* • *"New line"* • *"Delete word"* • *"Stop dictation"* |
 | **Reading & Summaries** | *"Summarize this page"* • *"What is this video about?"* • *"Read this text"* |
 | **Workspace & Comfort** | *"Tile windows side by side"* • *"Mute sound"* • *"Close tab"* |

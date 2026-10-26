@@ -11,10 +11,6 @@ use crate::types::*;
 use crate::window_util::*;
 
 #[cfg(windows)]
-use windows::core::Interface;
-#[cfg(windows)]
-use windows::Win32::Foundation::{HWND, RECT};
-#[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
 
 #[derive(Clone, Copy, Debug)]
@@ -23,6 +19,9 @@ pub enum Earcon {
     MicClose,
     Success,
     Emergency,
+    Error,
+    Navigation,
+    Warning,
 }
 
 pub fn play_earcon(earcon: Earcon) {
@@ -49,6 +48,17 @@ pub fn play_earcon(earcon: Earcon) {
                     Beep(800, 60);
                 }
             }
+            Earcon::Error => {
+                Beep(450, 70);
+                Beep(320, 100);
+            }
+            Earcon::Navigation => {
+                Beep(1600, 18);
+            }
+            Earcon::Warning => {
+                Beep(850, 50);
+                Beep(850, 50);
+            }
         }
     });
     #[cfg(target_os = "macos")]
@@ -58,6 +68,9 @@ pub fn play_earcon(earcon: Earcon) {
             Earcon::MicClose => "Tink.aiff",
             Earcon::Success => "Glass.aiff",
             Earcon::Emergency => "Sosumi.aiff",
+            Earcon::Error => "Basso.aiff",
+            Earcon::Navigation => "Tink.aiff",
+            Earcon::Warning => "Frog.aiff",
         };
         let sound_path = format!("/System/Library/Sounds/{}", sound_name);
         if std::path::Path::new(&sound_path).exists() {
@@ -75,6 +88,9 @@ pub fn play_earcon(earcon: Earcon) {
             Earcon::MicClose => "dialog-information",
             Earcon::Success => "complete",
             Earcon::Emergency => "dialog-warning",
+            Earcon::Error => "dialog-error",
+            Earcon::Navigation => "button-pressed",
+            Earcon::Warning => "dialog-warning",
         };
         let played = std::process::Command::new("canberra-gtk-play")
             .args(["-i", sound_id])
@@ -901,7 +917,10 @@ pub fn restart_application() {
 pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static str> {
     let norm = normalize_for_command_match(prompt);
     match norm.as_str() {
-        "clic" | "clic gauche" | "click" | "left click" => {
+        "clic" | "clic gauche" | "click" | "left click"
+        | "hacer clic" | "clic izquierdo" | "klick" | "linksklick"
+        | "clic sinistro" | "clique esquerdo" | "левый клик" | "клик"
+        | "点击" | "左键点击" | "左クリック" | "クリック" => {
             #[cfg(windows)]
             unsafe {
                 windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
@@ -924,7 +943,9 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
             }
             Some("Clic gauche.")
         }
-        "clic droit" | "right click" => {
+        "clic droit" | "right click" | "clic derecho" | "rechtsklick"
+        | "clic destro" | "clique direito" | "правый клик"
+        | "右键点击" | "右键" | "右クリック" => {
             #[cfg(windows)]
             unsafe {
                 windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(
@@ -947,7 +968,9 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
             }
             Some("Clic droit.")
         }
-        "double clic" | "double click" => {
+        "double clic" | "double click" | "doble clic" | "doppelklick"
+        | "doppio clic" | "duplo clique" | "двойной клик"
+        | "双击" | "ダブルクリック" => {
             #[cfg(windows)]
             unsafe {
                 use windows::Win32::UI::Input::KeyboardAndMouse::{mouse_event, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP};
@@ -969,7 +992,9 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
             }
             Some("Double clic.")
         }
-        "enregistre" | "enregistrer" | "sauvegarde" | "sauvegarder" | "save" => {
+        "enregistre" | "enregistrer" | "sauvegarde" | "sauvegarder" | "save"
+        | "guardar" | "speichern" | "salva" | "salvare" | "salvar"
+        | "сохранить" | "保存" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x53));
             #[cfg(target_os = "macos")]
@@ -979,7 +1004,9 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
             let _ = std::process::Command::new("xdotool").args(["key", "ctrl+s"]).status();
             Some("Sauvegardé (Ctrl+S).")
         }
-        "annule" | "annuler" | "undo" => {
+        "annule" | "annuler" | "undo" | "deshacer" | "rückgängig"
+        | "ruckgangig" | "annulla" | "desfazer" | "отменить"
+        | "отмена" | "撤销" | "元に戻す" => {
             if let Some(msg) = undo_last_system_action() {
                 println!("[Undo] Action compensatoire exécutée : {msg}");
             } else {
@@ -992,7 +1019,10 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
             }
             Some("Annulé.")
         }
-        "selectionne tout" | "sélectionne tout" | "select all" | "tout selectionner" => {
+        "selectionne tout" | "sélectionne tout" | "select all" | "tout selectionner"
+        | "seleccionar todo" | "alles auswählen" | "alles auswahlen"
+        | "seleziona tutto" | "selecionar tudo" | "выбрать все" | "выбрать всё"
+        | "全选" | "すべて選択" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x41));
             #[cfg(target_os = "macos")]
@@ -1001,7 +1031,10 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
             let _ = std::process::Command::new("xdotool").args(["key", "ctrl+a"]).status();
             Some("Tout sélectionné.")
         }
-        "entree" | "entrée" | "valide" | "valider" | "enter" => {
+        "entree" | "entrée" | "valide" | "valider" | "enter"
+        | "intro" | "eingabe" | "bestätigen" | "bestatigen" | "invio"
+        | "conferma" | "confirmar" | "ввод" | "подтвердить"
+        | "回车" | "确认" | "決定" | "確定" => {
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x0D));
             #[cfg(target_os = "macos")]
@@ -1010,7 +1043,10 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
             let _ = std::process::Command::new("xdotool").args(["key", "Return"]).status();
             Some("Touche Entrée validée.")
         }
-        "tab" | "tabulation" | "suivant" | "champ suivant" => {
+        "tab" | "tabulation" | "suivant" | "champ suivant" | "next"
+        | "next field" | "siguiente" | "campo siguiente" | "weiter"
+        | "nächstes feld" | "successivo" | "próximo" | "следующий"
+        | "制表" | "下一个" | "次へ" => {
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x09));
             #[cfg(target_os = "macos")]
@@ -1019,7 +1055,10 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
             let _ = std::process::Command::new("xdotool").args(["key", "Tab"]).status();
             Some("Tabulation.")
         }
-        "precedent" | "précédent" | "champ precedent" | "champ précédent" => {
+        "precedent" | "précédent" | "champ precedent" | "champ précédent"
+        | "previous" | "previous field" | "anterior" | "campo anterior"
+        | "zurück feld" | "precedente" | "предыдущий"
+        | "上一个" | "前へ" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x10)], VIRTUAL_KEY(0x09));
             #[cfg(target_os = "macos")]
@@ -1028,7 +1067,10 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
             let _ = std::process::Command::new("xdotool").args(["key", "shift+Tab"]).status();
             Some("Champ précédent.")
         }
-        "descends" | "descendre" | "page suivante" | "scroll down" => {
+        "descends" | "descendre" | "page suivante" | "scroll down"
+        | "bajar" | "nach unten" | "nach unten scrollen" | "scorri giù"
+        | "rolar para baixo" | "прокрутить вниз" | "вниз"
+        | "向下滚动" | "下翻" | "下にスクロール" => {
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x22));
             #[cfg(target_os = "macos")]
@@ -1037,7 +1079,10 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
             let _ = std::process::Command::new("xdotool").args(["key", "Page_Down"]).status();
             Some("Défilement vers le bas.")
         }
-        "monte" | "monter" | "page precedente" | "page précédente" | "scroll up" => {
+        "monte" | "monter" | "page precedente" | "page précédente" | "scroll up"
+        | "subir" | "nach oben" | "nach oben scrollen" | "scorri su"
+        | "rolar para cima" | "прокрутить вверх" | "вверх"
+        | "向上滚动" | "上翻" | "上にスクロール" => {
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x21));
             #[cfg(target_os = "macos")]
@@ -1046,7 +1091,9 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
             let _ = std::process::Command::new("xdotool").args(["key", "Page_Up"]).status();
             Some("Défilement vers le haut.")
         }
-        "copie" | "copier" | "copy" => {
+        "copie" | "copier" | "copy" | "copiar" | "kopieren"
+        | "copia" | "копировать"
+        | "复制" | "コピー" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x43));
             #[cfg(target_os = "macos")]
@@ -1055,7 +1102,9 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
             let _ = std::process::Command::new("xdotool").args(["key", "ctrl+c"]).status();
             Some("Copié.")
         }
-        "colle" | "coller" | "paste" => {
+        "colle" | "coller" | "paste" | "pegar" | "einfügen"
+        | "einfugen" | "incolla" | "colar" | "вставить"
+        | "粘贴" | "貼り付け" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x56));
             #[cfg(target_os = "macos")]
@@ -1064,7 +1113,10 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
             let _ = std::process::Command::new("xdotool").args(["key", "ctrl+v"]).status();
             Some("Collé.")
         }
-        "retour" | "retour arriere" | "retour arrière" | "reculer" | "back" | "browser back" => {
+        "retour" | "retour arriere" | "retour arrière" | "reculer" | "back"
+        | "browser back" | "atrás" | "atras" | "volver" | "zurück"
+        | "indietro" | "voltar" | "назад"
+        | "后退" | "戻る" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x12)], VIRTUAL_KEY(0x25));
             #[cfg(target_os = "macos")]
@@ -1073,7 +1125,9 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
             let _ = std::process::Command::new("xdotool").args(["key", "alt+Left"]).status();
             Some("Page précédente (Retour arrière).")
         }
-        "avance" | "avancer" | "forward" | "browser forward" => {
+        "avance" | "avancer" | "forward" | "browser forward" | "adelante"
+        | "avanzar" | "vorwärts" | "avanti" | "avançar" | "вперед"
+        | "вперёд" | "前进" | "進む" => {
             #[cfg(windows)]
             send_hotkey(&[VIRTUAL_KEY(0x12)], VIRTUAL_KEY(0x27));
             #[cfg(target_os = "macos")]
@@ -1083,6 +1137,8 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
             Some("Page suivante.")
         }
         "omnibox" | "l omnibox" | "omnibar" | "l omnibar" | "barre d adresse" | "barre adresse" | "barre de recherche" | "adresse" | "address bar"
+        | "barra de direcciones" | "adressleiste" | "barra degli indirizzi"
+        | "barra de endereços" | "адресная строка" | "地址栏" | "アドレスバー"
         | "ouvre l omnibox" | "ouvrir l omnibox" | "va sur l omnibox" | "selectionne l omnibox" | "selectionner l omnibox"
         | "focus omnibox" | "focus barre d adresse" => {
             #[cfg(windows)]

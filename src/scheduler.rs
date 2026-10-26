@@ -111,6 +111,13 @@ pub fn is_cancel_scheduled_command(text: &str) -> bool {
         "cancelar comandos diferidos", "cancelar tareas programadas",
         "geplante aufgaben abbrechen", "timer abbrechen",
         "annulla comandi ritardati", "annulla compiti programmati",
+        "cancelar comandos agendados", "cancelar tarefas agendadas",
+        "cancelar temporizadores", "parar timers",
+        "отменить запланированные задачи", "отменить задачи",
+        "отменить таймеры", "остановить таймеры",
+        "取消定时任务", "取消计划任务", "取消定时", "取消计时器", "停止计时器",
+        "スケジュールされたタスクをキャンセル", "予定されたタスクをキャンセル",
+        "タイマーをキャンセル", "タイマー停止",
     ];
     TRIGGERS.iter().any(|&trig| norm.contains(trig) || text.to_lowercase().contains(trig))
 }

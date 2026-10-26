@@ -145,7 +145,9 @@ impl WhisperEngine {
             .map_err(|e| format!("Erreur création état Whisper: {e}"))?;
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(Some("fr"));
+        let active_locale = rust_i18n::locale();
+        let lang_code = active_locale.split(['-', '_']).next().unwrap_or("fr");
+        params.set_language(Some(lang_code));
         params.set_translate(false);
         params.set_no_context(true);
         params.set_single_segment(true);

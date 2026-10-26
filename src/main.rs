@@ -34,7 +34,7 @@ use types::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender as StdSender};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
@@ -55,6 +55,7 @@ pub struct OverlayApp {
     continuous_mode: bool,
     dictation_mode: bool,
     zoom_factor: f32,
+    app_language: String,
     voice_gender: VoiceGender,
     llm_config: LlmConfig,
     theme: AppTheme,
@@ -221,6 +222,24 @@ fn extract_badge_number(text: &str) -> Option<usize> {
 
 /// Détecte la langue principale du système d'exploitation de l'utilisateur
 pub fn get_system_locale_language() -> (String, String) {
+    if let Ok(l) = std::env::var("APP_LANG").or_else(|_| read_env_var_from_file(".env", "APP_LANG").ok_or(())) {
+        let l_clean = l.trim().to_lowercase();
+        if l_clean != "auto" && !l_clean.is_empty() {
+            let name = match l_clean.as_str() {
+                "fr" => "français".to_string(),
+                "en" => "English".to_string(),
+                "es" => "español".to_string(),
+                "de" => "Deutsch".to_string(),
+                "it" => "italiano".to_string(),
+                "pt" => "português".to_string(),
+                "ja" => "日本語 (Japanese)".to_string(),
+                "zh" => "中文 (Chinese)".to_string(),
+                "ru" => "русский".to_string(),
+                _ => l_clean.clone(),
+            };
+            return (l_clean, name);
+        }
+    }
     #[cfg(windows)]
     {
         extern "system" {
@@ -293,9 +312,22 @@ impl OverlayApp {
         let theme = AppTheme::resolve_theme();
         let has_no_key = llm_config.api_key.is_empty();
         let hover_asked = is_hover_nav_asked();
-        let (locale, _) = get_system_locale_language();
-        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr").to_lowercase();
-        rust_i18n::set_locale(if lang_prefix.starts_with("en") { "en" } else { "fr" });
+        let app_language = std::env::var("APP_LANG")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "APP_LANG"))
+            .map(|s| s.trim().to_lowercase())
+            .unwrap_or_else(|| "auto".to_string());
+        let active_locale = if app_language == "en" {
+            "en".to_string()
+        } else if app_language == "fr" {
+            "fr".to_string()
+        } else if app_language != "auto" {
+            app_language.clone()
+        } else {
+            let (locale, _) = get_system_locale_language();
+            locale.split(['-', '_']).next().unwrap_or("fr").to_lowercase()
+        };
+        rust_i18n::set_locale(&active_locale);
 
         let (initial_subtitle, initial_suggestions) = if !hover_asked {
             let question = t!("speech.ask_hover_nav").to_string();
@@ -344,6 +376,7 @@ impl OverlayApp {
             continuous_mode: true,
             dictation_mode: false,
             zoom_factor: initial_zoom,
+            app_language,
             voice_gender: initial_voice,
             llm_config: llm_config.clone(),
             theme,
@@ -448,6 +481,19 @@ impl OverlayApp {
             let _ = write_env_var_to_file(".env", "FONT_SIZE", &val_str);
             std::env::set_var("FONT_SIZE", &val_str);
         }
+    }
+
+    pub fn set_app_language(&mut self, lang: &str) {
+        self.app_language = lang.to_string();
+        std::env::set_var("APP_LANG", lang);
+        let _ = write_env_var_to_file(".env", "APP_LANG", lang);
+        let active_locale = if lang != "auto" {
+            lang.to_string()
+        } else {
+            let (locale, _) = get_system_locale_language();
+            locale.split(['-', '_']).next().unwrap_or("fr").to_lowercase()
+        };
+        rust_i18n::set_locale(&active_locale);
     }
 
     fn draw_avatar(&self, ui: &mut egui::Ui, center: egui::Pos2, base_radius: f32, time: f64) {
@@ -897,6 +943,7 @@ impl OverlayApp {
         } else {
             let max_idx = self.numbered_targets.iter().map(|t| t.index).max()
                 .unwrap_or(0);
+            play_earcon(Earcon::Error);
             let msg = if max_idx > 0 {
                 format!("Numéro {idx} introuvable parmi les badges affichés (1 à {max_idx}).")
             } else {
@@ -1192,6 +1239,39 @@ impl eframe::App for OverlayApp {
                     let norm_prompt = normalize_for_command_match(&prompt);
                     if norm_prompt.trim().is_empty() {
                         println!("[Voice] Bruit parasite ignoré (aucun mot détecté) : aucune requête LLM.");
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx, false);
+                        }
+                        return;
+                    }
+
+                    // Changement de langue à la voix
+                    let target_lang = if norm_prompt.contains("passer en anglais") || norm_prompt.contains("switch to english") || norm_prompt.contains("langue anglaise") || norm_prompt.contains("in english") {
+                        Some("en")
+                    } else if norm_prompt.contains("passer en francais") || norm_prompt.contains("passer en français")
+                        || norm_prompt.contains("switch to french") || norm_prompt.contains("langue francaise") || norm_prompt.contains("langue française") || norm_prompt.contains("en francais") || norm_prompt.contains("en français") {
+                        Some("fr")
+                    } else if norm_prompt.contains("passer en allemand") || norm_prompt.contains("switch to german") || norm_prompt.contains("auf deutsch") || norm_prompt.contains("langue allemande") || norm_prompt.contains("in german") {
+                        Some("de")
+                    } else if norm_prompt.contains("passer en espagnol") || norm_prompt.contains("switch to spanish") || norm_prompt.contains("en español") || norm_prompt.contains("en espanol") || norm_prompt.contains("langue espagnole") || norm_prompt.contains("in spanish") {
+                        Some("es")
+                    } else if norm_prompt.contains("passer en italien") || norm_prompt.contains("switch to italian") || norm_prompt.contains("in italiano") || norm_prompt.contains("langue italienne") {
+                        Some("it")
+                    } else if norm_prompt.contains("passer en portugais") || norm_prompt.contains("switch to portuguese") || norm_prompt.contains("em português") || norm_prompt.contains("em portugues") || norm_prompt.contains("langue portugaise") {
+                        Some("pt")
+                    } else if norm_prompt.contains("passer en russe") || norm_prompt.contains("switch to russian") || norm_prompt.contains("по-русски") || norm_prompt.contains("langue russe") {
+                        Some("ru")
+                    } else if norm_prompt.contains("passer en japonais") || norm_prompt.contains("switch to japanese") || norm_prompt.contains("日本語") || norm_prompt.contains("langue japonaise") {
+                        Some("ja")
+                    } else if norm_prompt.contains("passer en chinois") || norm_prompt.contains("switch to chinese") || norm_prompt.contains("中文") || norm_prompt.contains("langue chinoise") {
+                        Some("zh")
+                    } else {
+                        None
+                    };
+
+                    if let Some(target_code) = target_lang {
+                        play_earcon(Earcon::Success);
+                        self.set_app_language(target_code);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx, false);
                         }
@@ -2107,6 +2187,7 @@ impl eframe::App for OverlayApp {
                             self.switch_last_tick = Instant::now();
                         self.last_switch_input = Instant::now();
                         self.hover_controls_speech_enabled = false;
+                        play_earcon(Earcon::Navigation);
                         self.switch_auto_scroll = false;
                             self.hover_physical_mouse_moved = false;
 
@@ -2294,6 +2375,7 @@ impl eframe::App for OverlayApp {
                             self.switch_focus_index %= num_zones;
                             self.hover_controls_speech_enabled = true;
                             self.switch_last_tick = Instant::now();
+                            play_earcon(Earcon::Navigation);
                             self.hover_physical_mouse_moved = false;
                             if nav_next_hit || nav_prev_hit {
                                 self.last_switch_input = Instant::now();
@@ -2374,6 +2456,7 @@ impl eframe::App for OverlayApp {
                             self.switch_focus_index %= num_targets;
                             self.hover_controls_speech_enabled = true;
                             self.switch_last_tick = Instant::now();
+                            play_earcon(Earcon::Navigation);
                             self.hover_physical_mouse_moved = false;
                             if nav_next_hit || nav_prev_hit {
                                 self.last_switch_input = Instant::now();
@@ -4656,6 +4739,27 @@ impl eframe::App for OverlayApp {
                                 if theme_activated {
                                     self.settings_tab = SettingsTab::Theme;
                                 }
+                                let is_lang_active = self.settings_tab == SettingsTab::Language;
+                                let tab_lang = ui.selectable_label(
+                                    is_lang_active,
+                                    egui::RichText::new("🌐 Langage")
+                                        .size(12.0)
+                                        .color(if is_lang_active {
+                                            theme.accent
+                                        } else {
+                                            theme.text_secondary
+                                        })
+                                        .strong(),
+                                );
+                                let tab_lang_id = ui.make_persistent_id("dwell_tab_language");
+                                let lang_activated = if !is_lang_active {
+                                    apply_dwell_to_response(ui, &mut self.dwell_state, tab_lang_id, &tab_lang)
+                                } else {
+                                    tab_lang.clicked()
+                                };
+                                if lang_activated {
+                                    self.settings_tab = SettingsTab::Language;
+                                }
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if ui.add(
                                         egui::Button::new(
@@ -5043,11 +5147,71 @@ impl eframe::App for OverlayApp {
                                     self.show_api_key_modal = false;
                                 }
                                 ui.label(
-                                    egui::RichText::new("Astuce vocale : dites « police plus grande », « zoom normal » ou « contraste élevé »")
+                                    egui::RichText::new("Astuce vocale : dites « police plus grande » ou « contraste élevé »")
                                         .size(10.0)
                                         .color(theme.text_secondary),
                                 );
                             });
+                                }
+                                SettingsTab::Language => {
+                                    // --- Onglet Langage ---
+                                    let lang_heading = if rust_i18n::locale().starts_with("en") {
+                                        "🌐 Interface & Assistant Language :"
+                                    } else {
+                                        "🌐 Langue de l'interface & de l'assistant :"
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(lang_heading)
+                                            .size(11.5)
+                                            .color(theme.text_secondary),
+                                    );
+                                    ui.add_space(6.0);
+
+                                    let mut selected_lang = self.app_language.clone();
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+
+                                        let options = [
+                                            ("auto", "🌐 Système (Auto)"),
+                                            ("fr", "🇫🇷 Français"),
+                                            ("en", "🇬🇧 English"),
+                                            ("de", "🇩🇪 Deutsch"),
+                                            ("es", "🇪🇸 Español"),
+                                            ("it", "🇮🇹 Italiano"),
+                                            ("pt", "🇵🇹 Português"),
+                                            ("ru", "🇷🇺 Русский"),
+                                            ("ja", "🇯🇵 日本語"),
+                                            ("zh", "🇨🇳 中文"),
+                                        ];
+
+                                        for (code, label) in options {
+                                            let is_selected = selected_lang == code;
+                                            let btn = ui.selectable_label(is_selected, label);
+                                            let btn_id = ui.make_persistent_id(format!("dwell_lang_{code}"));
+                                            if apply_dwell_to_response(ui, &mut self.dwell_state, btn_id, &btn) {
+                                                selected_lang = code.to_string();
+                                            }
+                                        }
+                                    });
+                                    if selected_lang != self.app_language {
+                                        self.set_app_language(&selected_lang);
+                                        ctx.request_repaint();
+                                    }
+
+                                    ui.add_space(8.0);
+                                    ui.separator();
+                                    ui.add_space(6.0);
+
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Fermer").clicked() {
+                                            self.show_api_key_modal = false;
+                                        }
+                                        ui.label(
+                                            egui::RichText::new("Astuce vocale : dites « passer en espagnol », « switch to german » ou « passer en anglais »")
+                                                .size(10.0)
+                                                .color(theme.text_secondary),
+                                        );
+                                    });
                                 }
                             }
                         });
@@ -6039,9 +6203,7 @@ async fn call_llm_prompt(
     }
 }
 
-fn main() -> eframe::Result<()> {
-    // Si l'application est lancée au démarrage de Windows (CWD = System32),
-    // repositionner le répertoire courant sur le dossier du projet ou de l'exécutable.
+fn fix_startup_working_directory() {
     if let Ok(cwd) = std::env::current_dir() {
         let cwd_str = cwd.to_string_lossy().to_lowercase();
         if cwd_str.contains("system32") || cwd_str.contains("syswow64") {
@@ -6054,31 +6216,24 @@ fn main() -> eframe::Result<()> {
             }
         }
     }
+}
 
-    let (event_tx, event_rx) = channel::<AgentEvent>();
-    let (cmd_tx, mut cmd_rx) = unbounded_channel::<AgentCommand>();
-    let initial_voice = resolve_initial_voice();
-    let tts_tx = spawn_tts_worker(event_tx.clone(), initial_voice);
-    let (twitch_ch_tx, twitch_ch_rx) = channel::<String>();
-    spawn_twitch_worker(event_tx.clone(), twitch_ch_rx);
-    let llm_config = resolve_llm_config();
-    let audio_tx = spawn_audio_worker(event_tx.clone(), llm_config.api_key.clone());
-
-    let initial_twitch_channel = std::env::var("TWITCH_CHANNEL").unwrap_or_default();
-
-    #[cfg(windows)]
-    automation::install_switch_keyboard_hook();
-
-    // Horloge d'analyse périodique d'écran toutes les 60 secondes
-    let periodic_cmd_tx = cmd_tx.clone();
+fn spawn_periodic_screen_monitor(cmd_tx: UnboundedSender<AgentCommand>) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(60));
-            let _ = periodic_cmd_tx.send(AgentCommand::PeriodicScreenCheck);
+            let _ = cmd_tx.send(AgentCommand::PeriodicScreenCheck);
         }
     });
+}
 
-    // Runtime Tokio en arrière-plan pour requêter le fournisseur LLM
+fn spawn_agent_backend(
+    mut cmd_rx: UnboundedReceiver<AgentCommand>,
+    cmd_tx: UnboundedSender<AgentCommand>,
+    event_tx: StdSender<AgentEvent>,
+    tts_tx: StdSender<TtsCommand>,
+    llm_config: LlmConfig,
+) {
     let bg_llm_config = llm_config.clone();
     let bg_tts_tx = tts_tx.clone();
     let scheduler_cmd_tx = cmd_tx.clone();
@@ -6398,7 +6553,17 @@ fn main() -> eframe::Result<()> {
             }
         });
     });
+}
 
+fn run_overlay_gui(
+    event_rx: Receiver<AgentEvent>,
+    cmd_tx: UnboundedSender<AgentCommand>,
+    tts_tx: StdSender<TtsCommand>,
+    audio_tx: StdSender<AudioCommand>,
+    twitch_ch_tx: StdSender<String>,
+    initial_twitch_channel: String,
+    initial_voice: VoiceGender,
+) -> eframe::Result<()> {
     // Fenêtre transparente compacte, ferrée en bas à droite
     let mut viewport = egui::ViewportBuilder::default()
         .with_decorations(false)
@@ -6433,5 +6598,36 @@ fn main() -> eframe::Result<()> {
                 initial_voice,
             )))
         }),
+    )
+}
+
+fn main() -> eframe::Result<()> {
+    fix_startup_working_directory();
+
+    let (event_tx, event_rx) = channel::<AgentEvent>();
+    let (cmd_tx, cmd_rx) = unbounded_channel::<AgentCommand>();
+    let initial_voice = resolve_initial_voice();
+    let tts_tx = spawn_tts_worker(event_tx.clone(), initial_voice);
+    let (twitch_ch_tx, twitch_ch_rx) = channel::<String>();
+    spawn_twitch_worker(event_tx.clone(), twitch_ch_rx);
+    let llm_config = resolve_llm_config();
+    let audio_tx = spawn_audio_worker(event_tx.clone(), llm_config.api_key.clone());
+
+    let initial_twitch_channel = std::env::var("TWITCH_CHANNEL").unwrap_or_default();
+
+    #[cfg(windows)]
+    automation::install_switch_keyboard_hook();
+
+    spawn_periodic_screen_monitor(cmd_tx.clone());
+    spawn_agent_backend(cmd_rx, cmd_tx.clone(), event_tx.clone(), tts_tx.clone(), llm_config.clone());
+
+    run_overlay_gui(
+        event_rx,
+        cmd_tx,
+        tts_tx,
+        audio_tx,
+        twitch_ch_tx,
+        initial_twitch_channel,
+        initial_voice,
     )
 }
