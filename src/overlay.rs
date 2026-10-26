@@ -112,8 +112,8 @@ pub fn get_mic_audio_level() -> f32 {
 
 // Constantes ergonomiques d'accessibilité motrice (WCAG 2.2 AAA Target Size)
 pub const ACCESSIBILITY_BTN_SIZE: egui::Vec2 = egui::vec2(50.0, 50.0);
-pub const ACCESSIBILITY_ICON_FONT: egui::FontId = egui::FontId::proportional(22.0);
-pub const ACCESSIBILITY_SUB_FONT: egui::FontId = egui::FontId::proportional(9.0);
+pub const ACCESSIBILITY_ICON_FONT: egui::FontId = egui::FontId::proportional(24.0);
+pub const ACCESSIBILITY_SUB_FONT: egui::FontId = egui::FontId::proportional(10.0);
 pub const ACCESSIBILITY_ITEM_SPACING: f32 = 8.0;
 
 #[derive(Default)]

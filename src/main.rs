@@ -697,7 +697,7 @@ impl OverlayApp {
                 self.switch_focus_index = active_idx.unwrap_or(0);
                 let cur_win = self.switch_windows[self.switch_focus_index].clone();
                 self.switch_active_window_id = Some(cur_win.id);
-                self.switch_step = SwitchAccessStep::Elements;
+                self.switch_step = SwitchAccessStep::Windows;
 
                 #[cfg(windows)]
                 {
@@ -967,7 +967,7 @@ impl OverlayApp {
             self.switch_focus_index = 0;
 
             // Régénération automatique des numéros/badges après le clic pour enchaîner
-            if self.switch_step == SwitchAccessStep::Elements {
+            if self.switch_access_mode {
                 #[cfg(windows)]
                 {
                     let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
@@ -2084,14 +2084,16 @@ impl eframe::App for OverlayApp {
                 if let Some((cx, cy)) = physical_cursor {
                     self.hover_last_cursor_pos = Some((cx, cy));
                     self.hover_cursor_still_since = Instant::now();
-                    if let Some(pos) = self.numbered_targets.iter().position(|t| {
-                        cx >= t.rect[0] && cx <= t.rect[2] && cy >= t.rect[1] && cy <= t.rect[3]
-                    }) {
-                        self.switch_focus_index = pos;
-                    } else if self.switch_focus_index >= self.numbered_targets.len() {
-                        self.switch_focus_index = 0;
+                    if self.switch_step == SwitchAccessStep::Elements {
+                        if let Some(pos) = self.numbered_targets.iter().position(|t| {
+                            cx >= t.rect[0] && cx <= t.rect[2] && cy >= t.rect[1] && cy <= t.rect[3]
+                        }) {
+                            self.switch_focus_index = pos;
+                        } else if self.switch_focus_index >= self.numbered_targets.len() {
+                            self.switch_focus_index = 0;
+                        }
                     }
-                } else if self.switch_focus_index >= self.numbered_targets.len() {
+                } else if self.switch_step == SwitchAccessStep::Elements && self.switch_focus_index >= self.numbered_targets.len() {
                     self.switch_focus_index = 0;
                 }
                 ctx.request_repaint();
@@ -2140,7 +2142,7 @@ impl eframe::App for OverlayApp {
                     if win_changed {
                         // Changement de fenêtre : délégation immédiate au worker
                         self.refresh_numbered_targets_for_window(target_hwnd.0 as isize);
-                    } else if self.switch_step == SwitchAccessStep::Elements && !user_navigating && !self.is_scan_in_progress {
+                    } else if (self.switch_step == SwitchAccessStep::Windows || self.switch_step == SwitchAccessStep::Elements) && !user_navigating && !self.is_scan_in_progress {
                         let min_display_time_passed = self.numbered_last_refresh.elapsed() >= Duration::from_millis(1200);
                         let should_periodic_refresh = (rect_changed && min_display_time_passed)
                             || (self.numbered_last_refresh.elapsed() >= Duration::from_millis(5000));
@@ -2280,7 +2282,7 @@ impl eframe::App for OverlayApp {
                         self.switch_auto_scroll = false;
                             self.hover_physical_mouse_moved = false;
 
-                            let cur_win = &self.switch_windows[self.switch_focus_index % num_windows];
+                            let cur_win = self.switch_windows[self.switch_focus_index % num_windows].clone();
                             #[cfg(windows)]
                             {
                                 let target_hwnd = windows::Win32::Foundation::HWND(cur_win.id as _);
@@ -2295,6 +2297,9 @@ impl eframe::App for OverlayApp {
                                 restore_if_iconic(&cur_win.title);
                                 set_global_cursor_pos(cur_win.click_x, cur_win.click_y);
                             }
+
+                            self.switch_active_window_id = Some(cur_win.id);
+                            self.refresh_numbered_targets_for_window(cur_win.id);
 
                             self.hover_last_cursor_pos = Some((cur_win.click_x, cur_win.click_y));
                             self.hover_cursor_still_since = Instant::now();
@@ -4728,7 +4733,11 @@ impl eframe::App for OverlayApp {
 
                 // Tracé des badges de ciblage numéroté (Click by Number)
                 if self.switch_access_mode && !self.numbered_targets.is_empty() {
-                    let focused_target = self.numbered_targets.get(self.switch_focus_index);
+                    let focused_target = if self.switch_step == SwitchAccessStep::Elements {
+                        self.numbered_targets.get(self.switch_focus_index)
+                    } else {
+                        None
+                    };
                     let focused_idx = focused_target.map(|t| t.index);
                     draw_screen_numbered_badges(&self.numbered_targets, self.zoom_factor, focused_idx);
                     #[cfg(windows)]

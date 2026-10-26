@@ -764,7 +764,8 @@ pub fn ensure_overlay_window() -> Option<*mut std::ffi::c_void> {
         );
 
         if !hwnd.is_null() {
-            let _ = SetLayeredWindowAttributes(hwnd, OVERLAY_COLOR_KEY, 0, 1); // 1 = LWA_COLORKEY
+            // 3 = LWA_COLORKEY (1) | LWA_ALPHA (2) : permet la découpe chromatique + transparence douce à 190/255 (~75%)
+            let _ = SetLayeredWindowAttributes(hwnd, OVERLAY_COLOR_KEY, 190, 3);
             let _ = SetWindowPos(
                 hwnd,
                 -1 as isize as _, // HWND_TOPMOST
@@ -868,8 +869,8 @@ pub fn render_overlay_state(state: &OverlayDrawState) {
             let has_overlay = !overlay_hwnd.0.is_null() && GetWindowRect(overlay_hwnd, &mut ov_r).is_ok();
 
             let z = state.zoom_factor.clamp(0.7, 2.5);
-            let badge_h = ((28.0 * z).round() as i32).max(24);
-            let font_h = -(((15.0 * z).round() as i32).max(13));
+            let badge_h = ((30.0 * z).round() as i32).max(26);
+            let font_h = -(((16.5 * z).round() as i32).max(14));
             let pen_w = ((2.0 * z).round() as i32).max(2);
 
             let font_name: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
@@ -882,7 +883,10 @@ pub fn render_overlay_state(state: &OverlayDrawState) {
             SetBkMode(mem_dc, 1); // TRANSPARENT
             SetTextColor(mem_dc, 0x00000000); // Noir
 
-            let brush_gold = CreateSolidBrush(0x0000D7FF);
+            // Jaune chaud bien ressenti : BGR 0x0014BEFA (RGB: 250, 190, 20)
+            let brush_yellow = CreateSolidBrush(0x0014BEFA);
+            // Jaune or vif pour le badge focalisé : BGR 0x0000DCFF (RGB: 255, 220, 0)
+            let brush_focused = CreateSolidBrush(0x0000DCFF);
             let pen_black = CreatePen(0, pen_w, 0x00000000);
             let pen_focused = CreatePen(0, pen_w + 3, 0x00000000);
 
@@ -917,7 +921,8 @@ pub fn render_overlay_state(state: &OverlayDrawState) {
                 let bx = screen_bx - vx;
                 let by = screen_by - vy;
 
-                SelectObject(mem_dc, brush_gold);
+                let brush = if is_focused { brush_focused } else { brush_yellow };
+                SelectObject(mem_dc, brush);
                 let pen = if is_focused { pen_focused } else { pen_black };
                 SelectObject(mem_dc, pen);
 
@@ -934,7 +939,8 @@ pub fn render_overlay_state(state: &OverlayDrawState) {
             DeleteObject(hfont);
             DeleteObject(pen_black);
             DeleteObject(pen_focused);
-            DeleteObject(brush_gold);
+            DeleteObject(brush_yellow);
+            DeleteObject(brush_focused);
         }
 
         SelectObject(mem_dc, old_brush);
