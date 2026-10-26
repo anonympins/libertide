@@ -26,20 +26,19 @@ use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationScrollPattern, IUIAutomationSelectionItemPattern,
+    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationScrollPattern,
     IUIAutomationTextPattern,
     IUIAutomationValuePattern, TreeScope_Descendants, UIA_DocumentControlTypeId,
-    UIA_EditControlTypeId, UIA_ExpandCollapsePatternId, UIA_GroupControlTypeId,
+    UIA_EditControlTypeId,
     UIA_ScrollPatternId,
     UIA_TextPatternId,
-    UIA_ValuePatternId, UIA_SeparatorControlTypeId,
+    UIA_ValuePatternId,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    mouse_event, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
     SetFocus,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_WHEEL,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT, VIRTUAL_KEY,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{

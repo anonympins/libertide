@@ -1,3 +1,7 @@
+#[macro_use]
+extern crate rust_i18n;
+i18n!("locales", fallback = "en");
+
 mod autostart;
 mod audio;
 mod automation;
@@ -290,45 +294,13 @@ impl OverlayApp {
         let has_no_key = llm_config.api_key.is_empty();
         let hover_asked = is_hover_nav_asked();
         let (locale, _) = get_system_locale_language();
-        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr").to_lowercase();
+        rust_i18n::set_locale(if lang_prefix.starts_with("en") { "en" } else { "fr" });
 
         let (initial_subtitle, initial_suggestions) = if !hover_asked {
-            let question = localized_speech(
-                lang_prefix,
-                "Voulez-vous activer la navigation au survol ?",
-                "Do you want to enable hover navigation?",
-                "¿Desea activar la navegación al pasar el cursor?",
-                "Möchten Sie die Hover-Navigation aktivieren?",
-                "Vuoi attivare la navigazione al passaggio del mouse?",
-                "Deseja ativar a navegação por cursor?",
-                "Хотите включить навигацию при наведении?",
-                "是否要启用悬停导航？",
-                "ホバーナビゲーションを有効にしますか？",
-            );
-            let btn_hover = localized_speech(
-                lang_prefix,
-                "Mode survol",
-                "Hover mode",
-                "Modo sobrevuelo",
-                "Hover-Modus",
-                "Modalità cursore",
-                "Modo de sobrevoo",
-                "Режим наведения",
-                "悬停模式",
-                "ホバーモード",
-            );
-            let btn_no = localized_speech(
-                lang_prefix,
-                "Non merci",
-                "No thanks",
-                "No, gracias",
-                "Nein danke",
-                "No grazie",
-                "Não, obrigado",
-                "Нет, спасибо",
-                "不用了",
-                "いいえ",
-            );
+            let question = t!("speech.ask_hover_nav").to_string();
+            let btn_hover = t!("speech.hover_mode_btn").to_string();
+            let btn_no = t!("speech.no_thanks_btn").to_string();
             (
                 question,
                 vec![
@@ -337,9 +309,9 @@ impl OverlayApp {
                 ],
             )
         } else if has_no_key {
-            ("Veuillez renseigner votre clé API LLM pour activer l'assistant.".to_string(), Vec::new())
+            (t!("speech.please_set_api_key").to_string(), Vec::new())
         } else {
-            ("En attente d'instructions d'exploration...".to_string(), Vec::new())
+            (t!("speech.waiting_instructions").to_string(), Vec::new())
         };
         let _ = tts_sender.send(TtsCommand::Speak(initial_subtitle.clone()));
 
@@ -506,12 +478,12 @@ impl OverlayApp {
         std::env::set_var("VOICE_PROFILE", gender.to_key_str());
         let _ = write_env_var_to_file(".env", "VOICE_PROFILE", gender.to_key_str());
         let confirmation = match gender {
-            VoiceProfile::Denise => "Voix de Denise activée.",
-            VoiceProfile::Henri => "Voix d'Henri activée.",
-            VoiceProfile::Hortense => "Voix d'Hortense activée.",
-            VoiceProfile::Paul => "Voix de Paul activée.",
-            VoiceProfile::Sylvie => "Voix de Sylvie activée.",
-            VoiceProfile::Jean => "Voix de Jean activée.",
+            VoiceProfile::Denise => t!("speech.voice_denise").to_string(),
+            VoiceProfile::Henri => t!("speech.voice_henri").to_string(),
+            VoiceProfile::Hortense => t!("speech.voice_hortense").to_string(),
+            VoiceProfile::Paul => t!("speech.voice_paul").to_string(),
+            VoiceProfile::Sylvie => t!("speech.voice_sylvie").to_string(),
+            VoiceProfile::Jean => t!("speech.voice_jean").to_string(),
         };
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
@@ -552,20 +524,7 @@ impl OverlayApp {
         self.is_hidden = false;
         self.status = AgentStatus::EmergencyStopped;
         play_earcon(Earcon::Emergency);
-        let (locale, _) = get_system_locale_language();
-        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
-        let stop_msg = localized_speech(
-            lang_prefix,
-            "Arrêt d'urgence : contrôle rendu à l'utilisateur.",
-            "Emergency stop: control returned to the user.",
-            "Parada de emergencia: control devuelto al usuario.",
-            "Not-Aus: Kontrolle an den Benutzer zurückgegeben.",
-            "Arresto di emergenza: controllo restituito all'utente.",
-            "Parada de emergência: controle retornado ao usuário.",
-            "Экстренная остановка: управление возвращено пользователю.",
-            "紧急停止：控制权已交还用户。",
-            "緊急停止：操作権がユーザーに返却されました。",
-        );
+        let stop_msg = t!("speech.emergency_stop").to_string();
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
             text: stop_msg.clone(),
@@ -590,20 +549,7 @@ impl OverlayApp {
         self.status = AgentStatus::Speaking;
         let _ = self.tts_sender.send(TtsCommand::Stop);
         restore_external_focus();
-        let (locale, _) = get_system_locale_language();
-        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
-        let msg = localized_speech(
-            lang_prefix,
-            "Mode dictée activé.",
-            "Dictation mode activated.",
-            "Modo dictado activado.",
-            "Diktatmodus aktiviert.",
-            "Modalità dettatura attivata.",
-            "Modo ditado ativado.",
-            "Режим диктовки включен.",
-            "听写模式已激活。",
-            "音声入力モードが有効になりました。",
-        );
+        let msg = t!("speech.dictation_enabled").to_string();
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
             text: msg.clone(),
@@ -629,20 +575,7 @@ impl OverlayApp {
         self.live_transcript.clear();
         self.status = AgentStatus::Idle;
         let _ = self.tts_sender.send(TtsCommand::Stop);
-        let (locale, _) = get_system_locale_language();
-        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
-        let msg = localized_speech(
-            lang_prefix,
-            "Mode dictée désactivé.",
-            "Dictation mode disabled.",
-            "Modo dictado desactivado.",
-            "Diktatmodus deaktiviert.",
-            "Modalità dettatura disattivata.",
-            "Modo ditado desativado.",
-            "Режим диктовки отключен.",
-            "听写模式已停用。",
-            "音声入力モードを解除しました。",
-        );
+        let msg = t!("speech.dictation_disabled").to_string();
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
             text: msg.clone(),
@@ -658,8 +591,6 @@ impl OverlayApp {
         self.switch_access_mode = force_state.unwrap_or(!self.switch_access_mode);
         SWITCH_HOOK_ENABLED.store(self.switch_access_mode, Ordering::SeqCst);
         automation::reset_switch_keys();
-        let (locale, _) = get_system_locale_language();
-        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
         clear_screen_numbered_badges();
 
         if self.switch_access_mode {
@@ -714,7 +645,7 @@ impl OverlayApp {
 
                 self.refresh_numbered_targets_for_window(cur_win.id);
 
-                let speech = format!("Mode survol activé pour {}", cur_win.title);
+                let speech = t!("speech.switch_access_enabled", name = cur_win.title).to_string();
 
                 self.hover_last_announced_target = Some(cur_win.id as usize);
                 self.hover_last_announced_zone = Some(cur_win.title.clone());
@@ -731,18 +662,7 @@ impl OverlayApp {
                 let _ = self.tts_sender.send(TtsCommand::Stop);
                 let _ = self.tts_sender.send(TtsCommand::Speak(speech));
             } else {
-                let msg = localized_speech(
-                    lang_prefix,
-                    "Mode contacteur hiérarchique activé. Aucune fenêtre candidate détectée.",
-                    "Hierarchical switch access enabled. No candidate windows detected.",
-                    "Acceso por conmutador jerárquico activado. No se detectaron ventanas candidatas.",
-                    "Hierarchischer Schalterzugriff aktiviert. Keine Zielfenster erkannt.",
-                    "Accesso a interruttori gerarchico attivato. Nessuna finestra rilevata.",
-                    "Acesso por interruptor hierárquico ativado. Nenhuma janela detectada.",
-                    "Иерархический режим переключателя включен. Подходящих окон не найдено.",
-                    "分层开关控制已启用。未检测到候选窗口。",
-                    "階層スイッチアクセスが有効になりました。対象ウィンドウが見つかりません。",
-                );
+                let msg = t!("speech.switch_no_windows").to_string();
                 self.chat_history.push(ChatEntry {
                     role: ChatRole::Agent,
                     text: msg.clone(),
@@ -769,18 +689,7 @@ impl OverlayApp {
             self.hover_physical_mouse_moved = false;
             self.numbered_input_buffer.clear();
             play_earcon(Earcon::MicClose);
-            let msg = localized_speech(
-                lang_prefix,
-                "Mode survol et contacteur désactivé.",
-                "Hover and switch access mode disabled.",
-                "Modo sobrevuelo y conmutador desactivado.",
-                "Hover- und Schalterzugriffsmodus deaktiviert.",
-                "Modalità cursore e interruttore disattivata.",
-                "Modo de sobrevoo e interruptor desativado.",
-                "Режим наведения и переключателя отключен.",
-                "悬停与开关控制模式已停用。",
-                "ホバーおよびスイッチアクセスモードを解除しました。",
-            );
+            let msg = t!("speech.switch_access_disabled").to_string();
             self.chat_history.push(ChatEntry {
                 role: ChatRole::Agent,
                 text: msg.clone(),
@@ -1468,18 +1377,7 @@ impl eframe::App for OverlayApp {
                         mark_hover_nav_asked();
                         play_earcon(Earcon::Success);
                         self.status = AgentStatus::Idle;
-                        let reply = localized_speech(
-                            lang_prefix,
-                            "Très bien. Vous pouvez activer le mode survol à tout moment avec le bouton Survol ou en disant « mode survol ».",
-                            "Understood. You can enable hover mode at any time using the Hover button or by saying \"hover mode\".",
-                            "Entendido. Puede activar el modo sobrevuelo en cualquier momento con el botón Sobrevuelo o diciendo «modo sobrevuelo».",
-                            "Verstanden. Sie können den Hover-Modus jederzeit über die Schaltfläche Hover oder mit dem Befehl „Hover-Modus“ aktivieren.",
-                            "Ricevuto. Puoi attivare la modalità cursore in qualsiasi momento con il pulsante Cursore o dicendo \"modalità cursore\".",
-                            "Entendido. Você pode ativar o modo de sobrevoo a qualquer momento com o botão Sobrevoo ou dizendo «modo de sobrevoo».",
-                            "Понятно. Вы можете включить режим наведения в любое время с помощью кнопки или команды «режим наведения».",
-                            "好的。您可以随时通过“悬停”按钮或语音指令“悬停模式”来启用它。",
-                            "承知しました。「ホバー」ボタンまたは「ホバーモード」の音声コマンドでいつでも有効にできます。",
-                        );
+                        let reply = t!("speech.dismiss_hover").to_string();
                         self.chat_history.push(ChatEntry {
                             role: ChatRole::User,
                             text: prompt,
@@ -1602,18 +1500,7 @@ impl eframe::App for OverlayApp {
                         self.sync_modal_inputs_for_provider(self.llm_config.provider);
                         self.show_api_key_modal = true;
                         self.is_hidden = false;
-                        let reply = localized_speech(
-                            lang_prefix,
-                            "Boîte de configuration de la clé API ouverte.",
-                            "API key configuration dialog opened.",
-                            "Ventana de configuración de clave API abierta.",
-                            "API-Schlüssel-Konfigurationsdialog geöffnet.",
-                            "Finestra di configurazione chiave API aperta.",
-                            "Caixa de configuração da chave de API aberta.",
-                            "Диалог настройки API-ключа открыт.",
-                            "API密钥配置窗口已打开。",
-                            "APIキー設定ダイアログを開きました。",
-                        );
+                        let reply = t!("speech.api_key_modal_opened").to_string();
                         self.chat_history.push(ChatEntry {
                             role: ChatRole::Agent,
                             text: reply.clone(),
@@ -1638,18 +1525,7 @@ impl eframe::App for OverlayApp {
                                 quick_suggestions: Vec::new(),
                                 screen_size_kb: None,
                             });
-                            let reply = localized_speech(
-                                lang_prefix,
-                                "Me revoilà, overlay réaffiché.",
-                                "I'm back, overlay restored.",
-                                "Aquí estoy de nuevo, interfaz mostrada.",
-                                "Hier bin ich wieder, Overlay eingeblendet.",
-                                "Eccomi di nuovo, interfaccia ripristinata.",
-                                "Estou de volta, overlay restaurado.",
-                                "Снова здесь, оверлей отображён.",
-                                "我回来了，悬浮窗已恢复显示。",
-                                "お待たせしました、オーバーレイを再表示しました。",
-                            );
+                            let reply = t!("speech.overlay_restored").to_string();
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
@@ -1674,18 +1550,7 @@ impl eframe::App for OverlayApp {
                                 quick_suggestions: Vec::new(),
                                 screen_size_kb: None,
                             });
-                            let reply = localized_speech(
-                                lang_prefix,
-                                "Overlay masqué. Je reste à l'écoute.",
-                                "Overlay hidden. Still listening in the background.",
-                                "Interfaz oculta. Sigo escuchando en segundo plano.",
-                                "Overlay ausgeblendet. Ich höre im Hintergrund weiter zu.",
-                                "Interfaccia nascosta. Resto in ascolto in background.",
-                                "Overlay oculto. Continuo ouvindo em segundo plano.",
-                                "Оверлей скрыт. Продолжаю слушать в фоновом режиме.",
-                                "悬浮窗已隐藏，仍在后台监听指令。",
-                                "オーバーレイを非表示にしました。バックグラウンドで待機中です。",
-                            );
+                            let reply = t!("speech.overlay_hidden").to_string();
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
@@ -1696,18 +1561,7 @@ impl eframe::App for OverlayApp {
                             let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                             self.continuous_mode = true;
                         } else if is_show_command(&prompt) {
-                            let reply = localized_speech(
-                                lang_prefix,
-                                "L'overlay est déjà actif et visible.",
-                                "The overlay is already active and visible.",
-                                "La interfaz ya está activa y visible.",
-                                "Das Overlay ist bereits aktiv und sichtbar.",
-                                "L'interfaccia è già attiva e visibile.",
-                                "O overlay já está ativo e visível.",
-                                "Оверлей уже активен и виден.",
-                                "悬浮窗已经处于激活和可见状态。",
-                                "オーバーレイは既に表示されています。",
-                            );
+                            let reply = t!("speech.overlay_already_visible").to_string();
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
@@ -1997,20 +1851,7 @@ impl eframe::App for OverlayApp {
                             }
                         }).collect();
                         let _ = self.tts_sender.send(TtsCommand::Stop);
-                        let (locale, _) = get_system_locale_language();
-                        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
-                        let base_msg = localized_speech(
-                            lang_prefix,
-                            "Retour aux fenêtres",
-                            "Back to windows",
-                            "Volver a las ventanas",
-                            "Zurück zu den Fenstern",
-                            "Torna alle finestre",
-                            "Voltar para as janelas",
-                            "Возврат к окнам",
-                            "返回窗口列表",
-                            "ウィンドウ選択に戻る",
-                        );
+                        let base_msg = t!("speech.back_to_windows").to_string();
                         let msg = if let Some(first_win) = self.switch_windows.first() {
                             format!("{base_msg} : {}", first_win.title)
                         } else {
@@ -2042,20 +1883,7 @@ impl eframe::App for OverlayApp {
                         }
                     }).collect();
                     let _ = self.tts_sender.send(TtsCommand::Stop);
-                    let (locale, _) = get_system_locale_language();
-                    let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
-                    let base_msg = localized_speech(
-                        lang_prefix,
-                        "Retour aux fenêtres",
-                        "Back to windows",
-                        "Volver a las ventanas",
-                        "Zurück zu den Fenstern",
-                        "Torna alle finestre",
-                        "Voltar para as janelas",
-                        "Возврат к окнам",
-                        "返回窗口列表",
-                        "ウィンドウ選択に戻る",
-                    );
+                    let base_msg = t!("speech.back_to_windows").to_string();
                     let msg = if let Some(first_win) = self.switch_windows.first() {
                         format!("{base_msg} : {}", first_win.title)
                     } else {
@@ -3399,7 +3227,7 @@ impl eframe::App for OverlayApp {
                 ui.scope_builder(egui::UiBuilder::new().max_rect(header_rect), |ui| {
                     ui.horizontal(|ui| {
                         let is_assist_active = self.active_tab == ActiveTab::Assistance;
-                        let tab_assist = ui.selectable_label(is_assist_active, "🤖 Assistance");
+                        let tab_assist = ui.selectable_label(is_assist_active, t!("ui.assistance_tab"));
                         let tab_assist_id = ui.make_persistent_id("dwell_tab_assistance");
                         let assist_activated = if !is_assist_active {
                             apply_dwell_to_response(ui, &mut self.dwell_state, tab_assist_id, &tab_assist)
@@ -3410,9 +3238,9 @@ impl eframe::App for OverlayApp {
                             self.active_tab = ActiveTab::Assistance;
                         }
                         let chat_title = if self.twitch_messages.is_empty() {
-                            "💬 Chat twitch".to_string()
+                            t!("ui.twitch_chat_tab").to_string()
                         } else {
-                            format!("💬 Chat ({})", self.twitch_messages.len())
+                            t!("ui.twitch_chat_count", count = self.twitch_messages.len()).to_string()
                         };
                         let is_chat_active = self.active_tab == ActiveTab::Chat;
                         let tab_chat = ui.selectable_label(is_chat_active, chat_title);
@@ -3512,68 +3340,22 @@ impl eframe::App for OverlayApp {
                             ui.scope_builder(egui::UiBuilder::new().max_rect(content_area), |ui| {
                                 ui.vertical(|ui| {
                                     let prov_name = self.llm_config.provider.display_name();
-                                    let (locale, _) = get_system_locale_language();
-                                    let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
                                     let status_badge = if self.dictation_mode {
-                                        format!("✍ Mode dictée actif (Échap pour quitter)")
+                                        t!("ui.dictation_badge").to_string()
                                     } else if self.switch_access_mode {
                                         if self.switch_step == SwitchAccessStep::Windows {
                                             if !self.switch_windows.is_empty() {
                                                 let cur = &self.switch_windows[self.switch_focus_index % self.switch_windows.len()];
-                                                localized_speech(
-                                                    lang_prefix,
-                                                    &format!("🎯 {} : {} (Entrée: choisir)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: select)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Entrar: elegir)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Eingabe: wählen)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Invio: seleziona)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: escolher)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: выбрать)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: 选择)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: 選択)", self.switch_focus_index + 1, cur.title),
-                                                )
+                                                t!("ui.select_window_hint", index = self.switch_focus_index + 1, title = cur.title).to_string()
                                             } else {
-                                                localized_speech(
-                                                    lang_prefix,
-                                                    "🎯 Recherche de fenêtres...",
-                                                    "🎯 Searching for windows...",
-                                                    "🎯 Buscando ventanas...",
-                                                    "🎯 Fenster werden gesucht...",
-                                                    "🎯 Ricerca finestre...",
-                                                    "🎯 Procurando janelas...",
-                                                    "🎯 Поиск окон...",
-                                                    "🎯 正在搜索窗口...",
-                                                    "🎯 ウィンドウを検索中...",
-                                                )
+                                                t!("ui.searching_windows").to_string()
                                             }
                                         } else if self.switch_step == SwitchAccessStep::Zones {
                                             if !self.switch_zones.is_empty() {
                                                 let cur = &self.switch_zones[self.switch_focus_index % self.switch_zones.len()];
-                                                localized_speech(
-                                                    lang_prefix,
-                                                    &format!("🎯 {} : {} (Entrée: ouvrir)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: open)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Entrar: abrir)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Eingabe: öffnen)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Invio: apri)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: abrir)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: открыть)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: 打开)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: 開く)", self.switch_focus_index + 1, cur.title),
-                                                )
+                                                t!("ui.open_zone_hint", index = self.switch_focus_index + 1, title = cur.title).to_string()
                                             } else {
-                                                localized_speech(
-                                                    lang_prefix,
-                                                    "🎯 Analyse des blocs de la fenêtre...",
-                                                    "🎯 Analyzing window zones...",
-                                                    "🎯 Analizando zonas de la ventana...",
-                                                    "🎯 Fensterbereiche werden analysiert...",
-                                                    "🎯 Analisi dei blocchi della finestra...",
-                                                    "🎯 Analisando blocos da janela...",
-                                                    "🎯 Анализ блоков окна...",
-                                                    "🎯 正在分析窗口区域...",
-                                                    "🎯 ウィンドウブロックを解析中...",
-                                                )
+                                                t!("ui.analyzing_zones").to_string()
                                             }
                                         } else if self.switch_step == SwitchAccessStep::Elements {
                                             let buffer_feedback = if !self.numbered_input_buffer.is_empty() {
@@ -3587,26 +3369,15 @@ impl eframe::App for OverlayApp {
                                                 format!("{prov_name} · 🔢 {buffer_feedback}Mode numéros actif ({} badges - Échap pour quitter)", self.numbered_targets.len())
                                             }
                                         } else {
-                                            localized_speech(
-                                                lang_prefix,
-                                                "🎯 Détection des contrôles...",
-                                                "🎯 Detecting controls...",
-                                                "🎯 Detectando controles...",
-                                                "🎯 Steuerelemente werden erkannt...",
-                                                "🎯 Rilevamento controlli...",
-                                                "🎯 Detectando controles...",
-                                                "🎯 Обнаружение элементов...",
-                                                "🎯 正在检测控件...",
-                                                "🎯 コントロールを検出中...",
-                                            )
+                                            t!("ui.detecting_controls").to_string()
                                         }
                                     } else {
                                         match self.status {
-                                            AgentStatus::Idle => format!("{prov_name} · en veille"),
-                                            AgentStatus::Thinking => format!("{prov_name} · réflexion..."),
-                                            AgentStatus::Speaking => format!("{prov_name} · en direct"),
+                                            AgentStatus::Idle => t!("ui.status_idle", provider = prov_name).to_string(),
+                                            AgentStatus::Thinking => t!("ui.status_thinking", provider = prov_name).to_string(),
+                                            AgentStatus::Speaking => t!("ui.status_speaking", provider = prov_name).to_string(),
                                             AgentStatus::Listening => String::new(),
-                                            AgentStatus::EmergencyStopped => "Système verrouillé".to_string(),
+                                            AgentStatus::EmergencyStopped => t!("ui.status_locked").to_string(),
                                         }
                                     };
 
@@ -3779,9 +3550,9 @@ impl eframe::App for OverlayApp {
                                                 .desired_rows(3)
                                                 .id(input_id)
                                                 .hint_text(if self.is_recording {
-                                                    "Écoute Whisper active... parlez ou tapez"
+                                                    t!("ui.prompt_hint_listening")
                                                 } else {
-                                                    "Consigne d'exploration... (entrée)"
+                                                    t!("ui.prompt_hint_idle")
                                                 }),
                                         );
 
@@ -3898,8 +3669,8 @@ impl eframe::App for OverlayApp {
                                         let analyze_resp = render_accessible_icon_button(
                                             ui,
                                             "🔍",
-                                            "Analyser",
-                                            "Analyser : Résumer ce que fait la fenêtre active (ou Entrée pour envoyer)",
+                                            &t!("ui.btn_analyze"),
+                                            &t!("ui.btn_analyze_tooltip"),
                                             false,
                                             analyze_prog,
                                             Some(egui::Color32::from_rgb(0, 140, 220)),
@@ -4053,15 +3824,15 @@ impl eframe::App for OverlayApp {
                                         let mic_id = ui.make_persistent_id("dwell_btn_mic");
                                         let mic_prog = self.dwell_state.get_progress(mic_id);
                                         let (mic_icon, mic_sub, mic_color) = if self.is_recording {
-                                            ("🔴", "Stop", Some(egui::Color32::from_rgb(235, 60, 60)))
+                                            ("🔴", t!("ui.btn_mic_stop").to_string(), Some(egui::Color32::from_rgb(235, 60, 60)))
                                         } else {
-                                            ("🎙", "Micro", None)
+                                            ("🎙", t!("ui.btn_mic").to_string(), None)
                                         };
                                         let mic_resp = render_accessible_icon_button(
                                             ui,
                                             mic_icon,
-                                            mic_sub,
-                                            "Micro (r) : Activer ou couper l'écoute vocale",
+                                            &mic_sub,
+                                            &t!("ui.btn_mic_tooltip"),
                                             self.is_recording,
                                             mic_prog,
                                             mic_color,
@@ -4075,12 +3846,12 @@ impl eframe::App for OverlayApp {
                                         // 3. Bouton Dictée
                                         let dict_id = ui.make_persistent_id("dwell_btn_dict");
                                         let dict_prog = self.dwell_state.get_progress(dict_id);
-                                        let dict_sub = if self.dictation_mode { "Actif" } else { "Dictée" };
+                                        let dict_sub = if self.dictation_mode { t!("ui.btn_dictation_active").to_string() } else { t!("ui.btn_dictation").to_string() };
                                         let dict_resp = render_accessible_icon_button(
                                             ui,
                                             "✍",
-                                            dict_sub,
-                                            "Dictée : Saisie vocale directe dans vos applications (Échap pour quitter)",
+                                            &dict_sub,
+                                            &t!("ui.btn_dictation_tooltip"),
                                             self.dictation_mode,
                                             dict_prog,
                                             Some(egui::Color32::from_rgb(215, 155, 30)),
@@ -4098,12 +3869,12 @@ impl eframe::App for OverlayApp {
                                         // 4. Bouton Survol (Switch Access)
                                         let switch_id = ui.make_persistent_id("dwell_btn_switch");
                                         let switch_prog = self.dwell_state.get_progress(switch_id);
-                                        let switch_sub = if self.switch_access_mode { "Actif" } else { "Survol" };
+                                        let switch_sub = if self.switch_access_mode { t!("ui.btn_hover_active").to_string() } else { t!("ui.btn_hover").to_string() };
                                         let switch_resp = render_accessible_icon_button(
                                             ui,
                                             "🎯",
-                                            switch_sub,
-                                            "Survol : Mode contacteur unique & navigation automatique (Entrée pour valider)",
+                                            &switch_sub,
+                                            &t!("ui.btn_hover_tooltip"),
                                             self.switch_access_mode,
                                             switch_prog,
                                             Some(egui::Color32::from_rgb(235, 115, 0)),
@@ -4160,8 +3931,8 @@ impl eframe::App for OverlayApp {
                                         let settings_resp = render_accessible_icon_button(
                                             ui,
                                             "⚙",
-                                            "Réglages",
-                                            "Réglages : Fournisseurs LLM, clés API, Thèmes & Accessibilité",
+                                            &t!("ui.btn_settings"),
+                                            &t!("ui.btn_settings_tooltip"),
                                             self.show_api_key_modal,
                                             settings_prog,
                                             Some(theme.accent),
@@ -4182,8 +3953,8 @@ impl eframe::App for OverlayApp {
                                         let clear_resp = render_accessible_icon_button(
                                             ui,
                                             "🗑",
-                                            "Effacer",
-                                            "Effacer : Réinitialiser l'historique et la mémoire contextuelle",
+                                            &t!("ui.btn_clear"),
+                                            &t!("ui.btn_clear_tooltip"),
                                             false,
                                             clear_prog,
                                             None,

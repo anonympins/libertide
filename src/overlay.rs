@@ -1767,8 +1767,20 @@ pub fn get_screen_cursor_pos(ctx: &egui::Context) -> Option<egui::Pos2> {
     Some(egui::pos2(x as f32 / ppp, y as f32 / ppp))
 }
 
-pub fn localized_speech(lang_code: &str, fr: &str, en: &str, es: &str, de: &str, it: &str, pt: &str, ru: &str, zh: &str, ja: &str) -> String {
-    match lang_code {
+pub fn localized_speech(
+    lang_code: &str,
+    fr: &str,
+    en: &str,
+    es: &str,
+    de: &str,
+    it: &str,
+    pt: &str,
+    ru: &str,
+    zh: &str,
+    ja: &str,
+) -> String {
+    let prefix = lang_code.split(['-', '_', '.']).next().unwrap_or(lang_code).to_lowercase();
+    match prefix.as_str() {
         "en" => en.to_string(),
         "es" => es.to_string(),
         "de" => de.to_string(),
