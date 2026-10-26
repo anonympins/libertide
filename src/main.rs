@@ -1,3 +1,7 @@
+#[macro_use]
+extern crate rust_i18n;
+i18n!("locales", fallback = "en");
+
 mod autostart;
 mod audio;
 mod automation;
@@ -30,7 +34,7 @@ use types::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender as StdSender};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
@@ -51,6 +55,7 @@ pub struct OverlayApp {
     continuous_mode: bool,
     dictation_mode: bool,
     zoom_factor: f32,
+    app_language: String,
     voice_gender: VoiceGender,
     llm_config: LlmConfig,
     theme: AppTheme,
@@ -217,6 +222,24 @@ fn extract_badge_number(text: &str) -> Option<usize> {
 
 /// Détecte la langue principale du système d'exploitation de l'utilisateur
 pub fn get_system_locale_language() -> (String, String) {
+    if let Ok(l) = std::env::var("APP_LANG").or_else(|_| read_env_var_from_file(".env", "APP_LANG").ok_or(())) {
+        let l_clean = l.trim().to_lowercase();
+        if l_clean != "auto" && !l_clean.is_empty() {
+            let name = match l_clean.as_str() {
+                "fr" => "français".to_string(),
+                "en" => "English".to_string(),
+                "es" => "español".to_string(),
+                "de" => "Deutsch".to_string(),
+                "it" => "italiano".to_string(),
+                "pt" => "português".to_string(),
+                "ja" => "日本語 (Japanese)".to_string(),
+                "zh" => "中文 (Chinese)".to_string(),
+                "ru" => "русский".to_string(),
+                _ => l_clean.clone(),
+            };
+            return (l_clean, name);
+        }
+    }
     #[cfg(windows)]
     {
         extern "system" {
@@ -263,6 +286,50 @@ pub fn get_system_locale_language() -> (String, String) {
     ("fr".to_string(), "français (French)".to_string())
 }
 
+pub fn localized_theme_name(theme: AppTheme) -> String {
+    let key = theme.key().to_lowercase();
+    let name_low = theme.display_name().to_lowercase();
+    if key.contains("cyan") || name_low.contains("cyan") {
+        t!("themes.cyber_cyan.name").to_string()
+    } else if key.contains("emerald") || key.contains("emeraude") || name_low.contains("menthe") || name_low.contains("emerald") || name_low.contains("émeraude") {
+        t!("themes.mint_emerald.name").to_string()
+    } else if key.contains("purple") || key.contains("amethyst") || name_low.contains("améthyste") || name_low.contains("purple") {
+        t!("themes.neon_purple.name").to_string()
+    } else if (key.contains("yellow") || name_low.contains("jaune") || name_low.contains("yellow")) && (key.contains("contrast") || name_low.contains("contraste")) {
+        t!("themes.high_contrast_yellow.name").to_string()
+    } else if (key.contains("white") || name_low.contains("blanc") || name_low.contains("white")) && (key.contains("contrast") || name_low.contains("contraste")) {
+        t!("themes.high_contrast_white.name").to_string()
+    } else if key.contains("amber") || key.contains("ambre") || name_low.contains("ambre") || name_low.contains("amber") {
+        t!("themes.soft_amber.name").to_string()
+    } else if key.contains("colorblind") || key.contains("dalton") || name_low.contains("dalton") || name_low.contains("colorblind") {
+        t!("themes.colorblind_friendly.name").to_string()
+    } else {
+        theme.display_name().to_string()
+    }
+}
+
+pub fn localized_theme_desc(theme: AppTheme) -> String {
+    let key = theme.key().to_lowercase();
+    let name_low = theme.display_name().to_lowercase();
+    if key.contains("cyan") || name_low.contains("cyan") {
+        t!("themes.cyber_cyan.desc").to_string()
+    } else if key.contains("emerald") || key.contains("emeraude") || name_low.contains("menthe") || name_low.contains("emerald") || name_low.contains("émeraude") {
+        t!("themes.mint_emerald.desc").to_string()
+    } else if key.contains("purple") || key.contains("amethyst") || name_low.contains("améthyste") || name_low.contains("purple") {
+        t!("themes.neon_purple.desc").to_string()
+    } else if (key.contains("yellow") || name_low.contains("jaune") || name_low.contains("yellow")) && (key.contains("contrast") || name_low.contains("contraste")) {
+        t!("themes.high_contrast_yellow.desc").to_string()
+    } else if (key.contains("white") || name_low.contains("blanc") || name_low.contains("white")) && (key.contains("contrast") || name_low.contains("contraste")) {
+        t!("themes.high_contrast_white.desc").to_string()
+    } else if key.contains("amber") || key.contains("ambre") || name_low.contains("ambre") || name_low.contains("amber") {
+        t!("themes.soft_amber.desc").to_string()
+    } else if key.contains("colorblind") || key.contains("dalton") || name_low.contains("dalton") || name_low.contains("colorblind") {
+        t!("themes.colorblind_friendly.desc").to_string()
+    } else {
+        theme.description().to_string()
+    }
+}
+
 impl OverlayApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
@@ -289,46 +356,27 @@ impl OverlayApp {
         let theme = AppTheme::resolve_theme();
         let has_no_key = llm_config.api_key.is_empty();
         let hover_asked = is_hover_nav_asked();
-        let (locale, _) = get_system_locale_language();
-        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
+        let app_language = std::env::var("APP_LANG")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "APP_LANG"))
+            .map(|s| s.trim().to_lowercase())
+            .unwrap_or_else(|| "auto".to_string());
+        let active_locale = if app_language == "en" {
+            "en".to_string()
+        } else if app_language == "fr" {
+            "fr".to_string()
+        } else if app_language != "auto" {
+            app_language.clone()
+        } else {
+            let (locale, _) = get_system_locale_language();
+            locale.split(['-', '_']).next().unwrap_or("fr").to_lowercase()
+        };
+        rust_i18n::set_locale(&active_locale);
 
         let (initial_subtitle, initial_suggestions) = if !hover_asked {
-            let question = localized_speech(
-                lang_prefix,
-                "Voulez-vous activer la navigation au survol ?",
-                "Do you want to enable hover navigation?",
-                "¿Desea activar la navegación al pasar el cursor?",
-                "Möchten Sie die Hover-Navigation aktivieren?",
-                "Vuoi attivare la navigazione al passaggio del mouse?",
-                "Deseja ativar a navegação por cursor?",
-                "Хотите включить навигацию при наведении?",
-                "是否要启用悬停导航？",
-                "ホバーナビゲーションを有効にしますか？",
-            );
-            let btn_hover = localized_speech(
-                lang_prefix,
-                "Mode survol",
-                "Hover mode",
-                "Modo sobrevuelo",
-                "Hover-Modus",
-                "Modalità cursore",
-                "Modo de sobrevoo",
-                "Режим наведения",
-                "悬停模式",
-                "ホバーモード",
-            );
-            let btn_no = localized_speech(
-                lang_prefix,
-                "Non merci",
-                "No thanks",
-                "No, gracias",
-                "Nein danke",
-                "No grazie",
-                "Não, obrigado",
-                "Нет, спасибо",
-                "不用了",
-                "いいえ",
-            );
+            let question = t!("speech.ask_hover_nav").to_string();
+            let btn_hover = t!("speech.hover_mode_btn").to_string();
+            let btn_no = t!("speech.no_thanks_btn").to_string();
             (
                 question,
                 vec![
@@ -337,9 +385,9 @@ impl OverlayApp {
                 ],
             )
         } else if has_no_key {
-            ("Veuillez renseigner votre clé API LLM pour activer l'assistant.".to_string(), Vec::new())
+            (t!("speech.please_set_api_key").to_string(), Vec::new())
         } else {
-            ("En attente d'instructions d'exploration...".to_string(), Vec::new())
+            (t!("speech.waiting_instructions").to_string(), Vec::new())
         };
         let _ = tts_sender.send(TtsCommand::Speak(initial_subtitle.clone()));
 
@@ -372,6 +420,7 @@ impl OverlayApp {
             continuous_mode: true,
             dictation_mode: false,
             zoom_factor: initial_zoom,
+            app_language,
             voice_gender: initial_voice,
             llm_config: llm_config.clone(),
             theme,
@@ -478,6 +527,19 @@ impl OverlayApp {
         }
     }
 
+    pub fn set_app_language(&mut self, lang: &str) {
+        self.app_language = lang.to_string();
+        std::env::set_var("APP_LANG", lang);
+        let _ = write_env_var_to_file(".env", "APP_LANG", lang);
+        let active_locale = if lang != "auto" {
+            lang.to_string()
+        } else {
+            let (locale, _) = get_system_locale_language();
+            locale.split(['-', '_']).next().unwrap_or("fr").to_lowercase()
+        };
+        rust_i18n::set_locale(&active_locale);
+    }
+
     fn draw_avatar(&self, ui: &mut egui::Ui, center: egui::Pos2, base_radius: f32, time: f64) {
         draw_avatar(
             ui,
@@ -506,12 +568,12 @@ impl OverlayApp {
         std::env::set_var("VOICE_PROFILE", gender.to_key_str());
         let _ = write_env_var_to_file(".env", "VOICE_PROFILE", gender.to_key_str());
         let confirmation = match gender {
-            VoiceProfile::Denise => "Voix de Denise activée.",
-            VoiceProfile::Henri => "Voix d'Henri activée.",
-            VoiceProfile::Hortense => "Voix d'Hortense activée.",
-            VoiceProfile::Paul => "Voix de Paul activée.",
-            VoiceProfile::Sylvie => "Voix de Sylvie activée.",
-            VoiceProfile::Jean => "Voix de Jean activée.",
+            VoiceProfile::Denise => t!("speech.voice_denise").to_string(),
+            VoiceProfile::Henri => t!("speech.voice_henri").to_string(),
+            VoiceProfile::Hortense => t!("speech.voice_hortense").to_string(),
+            VoiceProfile::Paul => t!("speech.voice_paul").to_string(),
+            VoiceProfile::Sylvie => t!("speech.voice_sylvie").to_string(),
+            VoiceProfile::Jean => t!("speech.voice_jean").to_string(),
         };
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
@@ -552,20 +614,7 @@ impl OverlayApp {
         self.is_hidden = false;
         self.status = AgentStatus::EmergencyStopped;
         play_earcon(Earcon::Emergency);
-        let (locale, _) = get_system_locale_language();
-        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
-        let stop_msg = localized_speech(
-            lang_prefix,
-            "Arrêt d'urgence : contrôle rendu à l'utilisateur.",
-            "Emergency stop: control returned to the user.",
-            "Parada de emergencia: control devuelto al usuario.",
-            "Not-Aus: Kontrolle an den Benutzer zurückgegeben.",
-            "Arresto di emergenza: controllo restituito all'utente.",
-            "Parada de emergência: controle retornado ao usuário.",
-            "Экстренная остановка: управление возвращено пользователю.",
-            "紧急停止：控制权已交还用户。",
-            "緊急停止：操作権がユーザーに返却されました。",
-        );
+        let stop_msg = t!("speech.emergency_stop").to_string();
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
             text: stop_msg.clone(),
@@ -590,27 +639,14 @@ impl OverlayApp {
         self.status = AgentStatus::Speaking;
         let _ = self.tts_sender.send(TtsCommand::Stop);
         restore_external_focus();
-        let (locale, _) = get_system_locale_language();
-        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
-        let msg = localized_speech(
-            lang_prefix,
-            "Mode dictée activé.",
-            "Dictation mode activated.",
-            "Modo dictado activado.",
-            "Diktatmodus aktiviert.",
-            "Modalità dettatura attivata.",
-            "Modo ditado ativado.",
-            "Режим диктовки включен.",
-            "听写模式已激活。",
-            "音声入力モードが有効になりました。",
-        );
+        let msg = t!("speech.dictation_enabled").to_string();
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
             text: msg.clone(),
             timestamp: current_time_str(),
             quick_suggestions: vec![
-                QuickSuggestionItem::Text("Désactiver la dictée".to_string()),
-                QuickSuggestionItem::Text("Effacer le texte".to_string()),
+                QuickSuggestionItem::Text(t!("commands.disable_dictation").to_string()),
+                QuickSuggestionItem::Text(t!("commands.clear_text").to_string()),
             ],
             screen_size_kb: None,
         });
@@ -629,20 +665,7 @@ impl OverlayApp {
         self.live_transcript.clear();
         self.status = AgentStatus::Idle;
         let _ = self.tts_sender.send(TtsCommand::Stop);
-        let (locale, _) = get_system_locale_language();
-        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
-        let msg = localized_speech(
-            lang_prefix,
-            "Mode dictée désactivé.",
-            "Dictation mode disabled.",
-            "Modo dictado desactivado.",
-            "Diktatmodus deaktiviert.",
-            "Modalità dettatura disattivata.",
-            "Modo ditado desativado.",
-            "Режим диктовки отключен.",
-            "听写模式已停用。",
-            "音声入力モードを解除しました。",
-        );
+        let msg = t!("speech.dictation_disabled").to_string();
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
             text: msg.clone(),
@@ -658,8 +681,6 @@ impl OverlayApp {
         self.switch_access_mode = force_state.unwrap_or(!self.switch_access_mode);
         SWITCH_HOOK_ENABLED.store(self.switch_access_mode, Ordering::SeqCst);
         automation::reset_switch_keys();
-        let (locale, _) = get_system_locale_language();
-        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
         clear_screen_numbered_badges();
 
         if self.switch_access_mode {
@@ -714,7 +735,7 @@ impl OverlayApp {
 
                 self.refresh_numbered_targets_for_window(cur_win.id);
 
-                let speech = format!("Mode survol activé pour {}", cur_win.title);
+                let speech = t!("speech.switch_access_enabled", name = cur_win.title).to_string();
 
                 self.hover_last_announced_target = Some(cur_win.id as usize);
                 self.hover_last_announced_zone = Some(cur_win.title.clone());
@@ -731,18 +752,7 @@ impl OverlayApp {
                 let _ = self.tts_sender.send(TtsCommand::Stop);
                 let _ = self.tts_sender.send(TtsCommand::Speak(speech));
             } else {
-                let msg = localized_speech(
-                    lang_prefix,
-                    "Mode contacteur hiérarchique activé. Aucune fenêtre candidate détectée.",
-                    "Hierarchical switch access enabled. No candidate windows detected.",
-                    "Acceso por conmutador jerárquico activado. No se detectaron ventanas candidatas.",
-                    "Hierarchischer Schalterzugriff aktiviert. Keine Zielfenster erkannt.",
-                    "Accesso a interruttori gerarchico attivato. Nessuna finestra rilevata.",
-                    "Acesso por interruptor hierárquico ativado. Nenhuma janela detectada.",
-                    "Иерархический режим переключателя включен. Подходящих окон не найдено.",
-                    "分层开关控制已启用。未检测到候选窗口。",
-                    "階層スイッチアクセスが有効になりました。対象ウィンドウが見つかりません。",
-                );
+                let msg = t!("speech.switch_no_windows").to_string();
                 self.chat_history.push(ChatEntry {
                     role: ChatRole::Agent,
                     text: msg.clone(),
@@ -769,18 +779,7 @@ impl OverlayApp {
             self.hover_physical_mouse_moved = false;
             self.numbered_input_buffer.clear();
             play_earcon(Earcon::MicClose);
-            let msg = localized_speech(
-                lang_prefix,
-                "Mode survol et contacteur désactivé.",
-                "Hover and switch access mode disabled.",
-                "Modo sobrevuelo y conmutador desactivado.",
-                "Hover- und Schalterzugriffsmodus deaktiviert.",
-                "Modalità cursore e interruttore disattivata.",
-                "Modo de sobrevoo e interruptor desativado.",
-                "Режим наведения и переключателя отключен.",
-                "悬停与开关控制模式已停用。",
-                "ホバーおよびスイッチアクセスモードを解除しました。",
-            );
+            let msg = t!("speech.switch_access_disabled").to_string();
             self.chat_history.push(ChatEntry {
                 role: ChatRole::Agent,
                 text: msg.clone(),
@@ -857,27 +856,27 @@ impl OverlayApp {
         self.hover_cursor_still_since = Instant::now();
 
         let role_label = match target.role.as_str() {
-            "bouton" | "button" => "bouton",
-            "lien" | "link" => "lien",
-            "champ de saisie" | "input" => "champ de saisie",
-            "zone de texte" | "textarea" => "zone de texte",
-            "onglet" | "tab" => "onglet",
-            "lecture textuelle" => "lecture de texte",
-            "étiquette" | "label" => "texte",
-            "visuel (ocr)" | "ocr" => "texte",
-            "case à cocher" | "checkbox" => "case à cocher",
-            "liste déroulante" | "select" | "combobox" => "liste déroulante",
-            "curseur" | "slider" => "curseur",
-            "lecteur multimédia" | "media" => "lecteur multimédia",
-            other => other,
+            "bouton" | "button" => t!("roles.button").to_string(),
+            "lien" | "link" => t!("roles.link").to_string(),
+            "champ de saisie" | "input" => t!("roles.input").to_string(),
+            "zone de texte" | "textarea" => t!("roles.textarea").to_string(),
+            "onglet" | "tab" => t!("roles.tab").to_string(),
+            "lecture textuelle" => t!("roles.text_reader").to_string(),
+            "étiquette" | "label" => t!("roles.label").to_string(),
+            "visuel (ocr)" | "ocr" => t!("roles.ocr").to_string(),
+            "case à cocher" | "checkbox" => t!("roles.checkbox").to_string(),
+            "liste déroulante" | "select" | "combobox" => t!("roles.combobox").to_string(),
+            "curseur" | "slider" => t!("roles.slider").to_string(),
+            "lecteur multimédia" | "media" => t!("roles.media").to_string(),
+            other => other.to_string(),
         };
 
         let target_desc = if target.name.trim().is_empty() {
-            format!("Numéro {} : {}", target.index, role_label)
+            t!("commands.target_desc_role", index = target.index, role = role_label).to_string()
         } else if target.value.trim().is_empty() {
-            format!("Numéro {} : {}, {}", target.index, target.name.trim(), role_label)
+            t!("commands.target_desc_name_role", index = target.index, name = target.name.trim(), role = role_label).to_string()
         } else {
-            format!("Numéro {} : {}, {}, valeur : {}", target.index, target.name.trim(), role_label, target.value.trim())
+            t!("commands.target_desc_full", index = target.index, name = target.name.trim(), role = role_label, value = target.value.trim()).to_string()
         };
 
         let speech = if let Some(p) = prefix {
@@ -948,15 +947,15 @@ impl OverlayApp {
             }
             play_earcon(Earcon::Success);
             let target_desc = if !target.name.is_empty() {
-                format!("Clic sur le numéro {} ({})", idx, target.name)
+                t!("commands.click_target_named", index = idx, name = target.name).to_string()
             } else {
-                format!("Clic sur le numéro {}", idx)
+                t!("commands.click_target_num", index = idx).to_string()
             };
             self.chat_history.push(ChatEntry {
                 role: ChatRole::Agent,
                 text: target_desc.clone(),
                 timestamp: current_time_str(),
-                quick_suggestions: vec![QuickSuggestionItem::Text("Fermer les numéros".to_string())],
+                quick_suggestions: vec![QuickSuggestionItem::Text(t!("commands.close_badges").to_string())],
                 screen_size_kb: None,
             });
             let _ = self.tts_sender.send(TtsCommand::Stop);
@@ -988,16 +987,17 @@ impl OverlayApp {
         } else {
             let max_idx = self.numbered_targets.iter().map(|t| t.index).max()
                 .unwrap_or(0);
+            play_earcon(Earcon::Error);
             let msg = if max_idx > 0 {
-                format!("Numéro {idx} introuvable parmi les badges affichés (1 à {max_idx}).")
+                t!("commands.target_not_found_range", index = idx, max = max_idx).to_string()
             } else {
-                format!("Numéro {idx} introuvable : aucun badge affiché.")
+                t!("commands.target_not_found_none", index = idx).to_string()
             };
             self.chat_history.push(ChatEntry {
                 role: ChatRole::Agent,
                 text: msg.clone(),
                 timestamp: current_time_str(),
-                quick_suggestions: vec![QuickSuggestionItem::Text("Fermer les numéros".to_string())],
+                quick_suggestions: vec![QuickSuggestionItem::Text(t!("commands.close_badges").to_string())],
                 screen_size_kb: None,
             });
             let _ = self.tts_sender.send(TtsCommand::Stop);
@@ -1289,6 +1289,39 @@ impl eframe::App for OverlayApp {
                         return;
                     }
 
+                    // Changement de langue à la voix
+                    let target_lang = if norm_prompt.contains("passer en anglais") || norm_prompt.contains("switch to english") || norm_prompt.contains("langue anglaise") || norm_prompt.contains("in english") {
+                        Some("en")
+                    } else if norm_prompt.contains("passer en francais") || norm_prompt.contains("passer en français")
+                        || norm_prompt.contains("switch to french") || norm_prompt.contains("langue francaise") || norm_prompt.contains("langue française") || norm_prompt.contains("en francais") || norm_prompt.contains("en français") {
+                        Some("fr")
+                    } else if norm_prompt.contains("passer en allemand") || norm_prompt.contains("switch to german") || norm_prompt.contains("auf deutsch") || norm_prompt.contains("langue allemande") || norm_prompt.contains("in german") {
+                        Some("de")
+                    } else if norm_prompt.contains("passer en espagnol") || norm_prompt.contains("switch to spanish") || norm_prompt.contains("en español") || norm_prompt.contains("en espanol") || norm_prompt.contains("langue espagnole") || norm_prompt.contains("in spanish") {
+                        Some("es")
+                    } else if norm_prompt.contains("passer en italien") || norm_prompt.contains("switch to italian") || norm_prompt.contains("in italiano") || norm_prompt.contains("langue italienne") {
+                        Some("it")
+                    } else if norm_prompt.contains("passer en portugais") || norm_prompt.contains("switch to portuguese") || norm_prompt.contains("em português") || norm_prompt.contains("em portugues") || norm_prompt.contains("langue portugaise") {
+                        Some("pt")
+                    } else if norm_prompt.contains("passer en russe") || norm_prompt.contains("switch to russian") || norm_prompt.contains("по-русски") || norm_prompt.contains("langue russe") {
+                        Some("ru")
+                    } else if norm_prompt.contains("passer en japonais") || norm_prompt.contains("switch to japanese") || norm_prompt.contains("日本語") || norm_prompt.contains("langue japonaise") {
+                        Some("ja")
+                    } else if norm_prompt.contains("passer en chinois") || norm_prompt.contains("switch to chinese") || norm_prompt.contains("中文") || norm_prompt.contains("langue chinoise") {
+                        Some("zh")
+                    } else {
+                        None
+                    };
+
+                    if let Some(target_code) = target_lang {
+                        play_earcon(Earcon::Success);
+                        self.set_app_language(target_code);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx, false);
+                        }
+                        return;
+                    }
+
                     // Changement de thème d'accessibilité à la voix
                     if norm_prompt.contains("theme suivant") || norm_prompt.contains("thème suivant") || norm_prompt.contains("change de theme") || norm_prompt.contains("change de thème") || norm_prompt.contains("changer de theme") || norm_prompt.contains("changer de thème") {
                         play_earcon(Earcon::Success);
@@ -1468,18 +1501,7 @@ impl eframe::App for OverlayApp {
                         mark_hover_nav_asked();
                         play_earcon(Earcon::Success);
                         self.status = AgentStatus::Idle;
-                        let reply = localized_speech(
-                            lang_prefix,
-                            "Très bien. Vous pouvez activer le mode survol à tout moment avec le bouton Survol ou en disant « mode survol ».",
-                            "Understood. You can enable hover mode at any time using the Hover button or by saying \"hover mode\".",
-                            "Entendido. Puede activar el modo sobrevuelo en cualquier momento con el botón Sobrevuelo o diciendo «modo sobrevuelo».",
-                            "Verstanden. Sie können den Hover-Modus jederzeit über die Schaltfläche Hover oder mit dem Befehl „Hover-Modus“ aktivieren.",
-                            "Ricevuto. Puoi attivare la modalità cursore in qualsiasi momento con il pulsante Cursore o dicendo \"modalità cursore\".",
-                            "Entendido. Você pode ativar o modo de sobrevoo a qualquer momento com o botão Sobrevoo ou dizendo «modo de sobrevoo».",
-                            "Понятно. Вы можете включить режим наведения в любое время с помощью кнопки или команды «режим наведения».",
-                            "好的。您可以随时通过“悬停”按钮或语音指令“悬停模式”来启用它。",
-                            "承知しました。「ホバー」ボタンまたは「ホバーモード」の音声コマンドでいつでも有効にできます。",
-                        );
+                        let reply = t!("speech.dismiss_hover").to_string();
                         self.chat_history.push(ChatEntry {
                             role: ChatRole::User,
                             text: prompt,
@@ -1512,9 +1534,9 @@ impl eframe::App for OverlayApp {
                         let cancelled = cancel_all_scheduled_tasks();
                         play_earcon(Earcon::Success);
                         let reply = if cancelled > 0 {
-                            format!("Toutes les commandes différées ont été annulées ({cancelled} annulée{}).", if cancelled > 1 { "s" } else { "" })
+                            t!("speech.scheduled_tasks_cancelled_count", count = cancelled).to_string()
                         } else {
-                            "Toutes les commandes différées ont été annulées.".to_string()
+                            t!("speech.scheduled_tasks_cancelled").to_string()
                         };
                         self.chat_history.push(ChatEntry {
                             role: ChatRole::User,
@@ -1547,7 +1569,7 @@ impl eframe::App for OverlayApp {
                         send_hotkey(&[windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x11)], windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x5A));
                         #[cfg(not(windows))]
                         let _ = std::process::Command::new("xdotool").args(["key", "ctrl+z"]).status();
-                        "Dernière action annulée.".to_string()
+                        t!("commands.last_action_undone").to_string()
                     };
                     play_earcon(Earcon::Success);
                     self.chat_history.push(ChatEntry {
@@ -1602,18 +1624,7 @@ impl eframe::App for OverlayApp {
                         self.sync_modal_inputs_for_provider(self.llm_config.provider);
                         self.show_api_key_modal = true;
                         self.is_hidden = false;
-                        let reply = localized_speech(
-                            lang_prefix,
-                            "Boîte de configuration de la clé API ouverte.",
-                            "API key configuration dialog opened.",
-                            "Ventana de configuración de clave API abierta.",
-                            "API-Schlüssel-Konfigurationsdialog geöffnet.",
-                            "Finestra di configurazione chiave API aperta.",
-                            "Caixa de configuração da chave de API aberta.",
-                            "Диалог настройки API-ключа открыт.",
-                            "API密钥配置窗口已打开。",
-                            "APIキー設定ダイアログを開きました。",
-                        );
+                        let reply = t!("speech.api_key_modal_opened").to_string();
                         self.chat_history.push(ChatEntry {
                             role: ChatRole::Agent,
                             text: reply.clone(),
@@ -1638,18 +1649,7 @@ impl eframe::App for OverlayApp {
                                 quick_suggestions: Vec::new(),
                                 screen_size_kb: None,
                             });
-                            let reply = localized_speech(
-                                lang_prefix,
-                                "Me revoilà, overlay réaffiché.",
-                                "I'm back, overlay restored.",
-                                "Aquí estoy de nuevo, interfaz mostrada.",
-                                "Hier bin ich wieder, Overlay eingeblendet.",
-                                "Eccomi di nuovo, interfaccia ripristinata.",
-                                "Estou de volta, overlay restaurado.",
-                                "Снова здесь, оверлей отображён.",
-                                "我回来了，悬浮窗已恢复显示。",
-                                "お待たせしました、オーバーレイを再表示しました。",
-                            );
+                            let reply = t!("speech.overlay_restored").to_string();
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
@@ -1674,18 +1674,7 @@ impl eframe::App for OverlayApp {
                                 quick_suggestions: Vec::new(),
                                 screen_size_kb: None,
                             });
-                            let reply = localized_speech(
-                                lang_prefix,
-                                "Overlay masqué. Je reste à l'écoute.",
-                                "Overlay hidden. Still listening in the background.",
-                                "Interfaz oculta. Sigo escuchando en segundo plano.",
-                                "Overlay ausgeblendet. Ich höre im Hintergrund weiter zu.",
-                                "Interfaccia nascosta. Resto in ascolto in background.",
-                                "Overlay oculto. Continuo ouvindo em segundo plano.",
-                                "Оверлей скрыт. Продолжаю слушать в фоновом режиме.",
-                                "悬浮窗已隐藏，仍在后台监听指令。",
-                                "オーバーレイを非表示にしました。バックグラウンドで待機中です。",
-                            );
+                            let reply = t!("speech.overlay_hidden").to_string();
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
@@ -1696,18 +1685,7 @@ impl eframe::App for OverlayApp {
                             let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                             self.continuous_mode = true;
                         } else if is_show_command(&prompt) {
-                            let reply = localized_speech(
-                                lang_prefix,
-                                "L'overlay est déjà actif et visible.",
-                                "The overlay is already active and visible.",
-                                "La interfaz ya está activa y visible.",
-                                "Das Overlay ist bereits aktiv und sichtbar.",
-                                "L'interfaccia è già attiva e visibile.",
-                                "O overlay já está ativo e visível.",
-                                "Оверлей уже активен и виден.",
-                                "悬浮窗已经处于激活和可见状态。",
-                                "オーバーレイは既に表示されています。",
-                            );
+                            let reply = t!("speech.overlay_already_visible").to_string();
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
                                 text: reply.clone(),
@@ -1798,7 +1776,7 @@ impl eframe::App for OverlayApp {
                         self.floating_cards.push(card);
                     }
                     update_open_floating_cards(&self.floating_cards);
-                    let read_suggestion = format!("🔊 Lire : {card_title}");
+                    let read_suggestion = t!("ui.read_card_prefix", title = card_title).to_string();
                     if let Some(last_entry) = self.chat_history.last_mut() {
                         if !last_entry.quick_suggestions.iter().any(|s| s.as_str() == Some(&read_suggestion)) {
                             last_entry.quick_suggestions.insert(0, QuickSuggestionItem::Text(read_suggestion));
@@ -1806,7 +1784,7 @@ impl eframe::App for OverlayApp {
                     } else {
                         self.chat_history.push(ChatEntry {
                             role: ChatRole::Agent,
-                            text: format!("Fenêtre volante affichée : {card_title}"),
+                            text: t!("ui.card_displayed", title = card_title).to_string(),
                             timestamp: current_time_str(),
                             quick_suggestions: vec![QuickSuggestionItem::Text(read_suggestion)],
                             screen_size_kb: None,
@@ -1923,7 +1901,7 @@ impl eframe::App for OverlayApp {
             self.window_analysis_cache.clear();
             self.chat_history.push(ChatEntry {
                 role: ChatRole::Agent,
-                text: "Mémoire contextuelle réinitialisée.".to_string(),
+                text: t!("commands.context_cleared").to_string(),
                 timestamp: current_time_str(),
                 quick_suggestions: Vec::new(),
                 screen_size_kb: None,
@@ -1972,7 +1950,7 @@ impl eframe::App for OverlayApp {
                         self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
                         let _ = self.tts_sender.send(TtsCommand::Stop);
                         let cur_zone = &self.switch_zones[0];
-                        let msg = format!("Retour aux blocs. {}", cur_zone.title);
+                        let msg = t!("commands.back_to_blocks", zone = cur_zone.title).to_string();
                         let _ = self.tts_sender.send(TtsCommand::Speak(msg));
                         play_earcon(Earcon::Success);
                     } else {
@@ -1997,20 +1975,7 @@ impl eframe::App for OverlayApp {
                             }
                         }).collect();
                         let _ = self.tts_sender.send(TtsCommand::Stop);
-                        let (locale, _) = get_system_locale_language();
-                        let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
-                        let base_msg = localized_speech(
-                            lang_prefix,
-                            "Retour aux fenêtres",
-                            "Back to windows",
-                            "Volver a las ventanas",
-                            "Zurück zu den Fenstern",
-                            "Torna alle finestre",
-                            "Voltar para as janelas",
-                            "Возврат к окнам",
-                            "返回窗口列表",
-                            "ウィンドウ選択に戻る",
-                        );
+                        let base_msg = t!("speech.back_to_windows").to_string();
                         let msg = if let Some(first_win) = self.switch_windows.first() {
                             format!("{base_msg} : {}", first_win.title)
                         } else {
@@ -2042,20 +2007,7 @@ impl eframe::App for OverlayApp {
                         }
                     }).collect();
                     let _ = self.tts_sender.send(TtsCommand::Stop);
-                    let (locale, _) = get_system_locale_language();
-                    let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
-                    let base_msg = localized_speech(
-                        lang_prefix,
-                        "Retour aux fenêtres",
-                        "Back to windows",
-                        "Volver a las ventanas",
-                        "Zurück zu den Fenstern",
-                        "Torna alle finestre",
-                        "Voltar para as janelas",
-                        "Возврат к окнам",
-                        "返回窗口列表",
-                        "ウィンドウ選択に戻る",
-                    );
+                    let base_msg = t!("speech.back_to_windows").to_string();
                     let msg = if let Some(first_win) = self.switch_windows.first() {
                         format!("{base_msg} : {}", first_win.title)
                     } else {
@@ -2279,6 +2231,7 @@ impl eframe::App for OverlayApp {
                             self.switch_last_tick = Instant::now();
                         self.last_switch_input = Instant::now();
                         self.hover_controls_speech_enabled = false;
+                        play_earcon(Earcon::Navigation);
                         self.switch_auto_scroll = false;
                             self.hover_physical_mouse_moved = false;
 
@@ -2380,7 +2333,7 @@ impl eframe::App for OverlayApp {
                                 let speech = if !cached.summary.is_empty() {
                                     cached.summary
                                 } else {
-                                    format!("Fenêtre {}.", cur_win.title)
+                                    t!("speech.window_name_announced", name = cur_win.title).to_string()
                                 };
 
                                 self.chat_history.push(ChatEntry {
@@ -2417,7 +2370,7 @@ impl eframe::App for OverlayApp {
                                     let speech = if !summary.is_empty() {
                                         summary
                                     } else {
-                                        format!("Fenêtre {}.", cur_win.title)
+                                        t!("speech.window_name_announced", name = cur_win.title).to_string()
                                     };
 
                                     self.chat_history.push(ChatEntry {
@@ -2438,7 +2391,7 @@ impl eframe::App for OverlayApp {
                                         context_meta: None,
                                     });
                                 } else {
-                                    let msg = format!("Fenêtre sélectionnée : {}. Aucun contrôle interactif direct détecté. Échap pour revenir.", cur_win.title);
+                                    let msg = t!("commands.no_controls_detected", title = cur_win.title).to_string();
                                     let _ = self.tts_sender.send(TtsCommand::Speak(msg));
                                 }
                             };
@@ -2466,6 +2419,7 @@ impl eframe::App for OverlayApp {
                             self.switch_focus_index %= num_zones;
                             self.hover_controls_speech_enabled = true;
                             self.switch_last_tick = Instant::now();
+                            play_earcon(Earcon::Navigation);
                             self.hover_physical_mouse_moved = false;
                             if nav_next_hit || nav_prev_hit {
                                 self.last_switch_input = Instant::now();
@@ -2546,6 +2500,7 @@ impl eframe::App for OverlayApp {
                             self.switch_focus_index %= num_targets;
                             self.hover_controls_speech_enabled = true;
                             self.switch_last_tick = Instant::now();
+                            play_earcon(Earcon::Navigation);
                             self.hover_physical_mouse_moved = false;
                             if nav_next_hit || nav_prev_hit {
                                 self.last_switch_input = Instant::now();
@@ -2626,20 +2581,20 @@ impl eframe::App for OverlayApp {
 
                                 set_clipboard_text(&extracted_text);
 
-                                let display_msg = format!("📖 [Extraction texte - {}] :\n{}", zone_title, extracted_text);
+                                let display_msg = format!("📖 [{}] :\n{}", t!("commands.text_extraction_header", zone = zone_title), extracted_text);
                                 self.chat_history.push(ChatEntry {
                                     role: ChatRole::Agent,
                                     text: display_msg,
                                     timestamp: current_time_str(),
                                     quick_suggestions: vec![
-                                        QuickSuggestionItem::Text("Faire défiler vers le bas".to_string()),
-                                        QuickSuggestionItem::Text("Reprendre la navigation".to_string()),
+                                        QuickSuggestionItem::Text(t!("commands.scroll_down").to_string()),
+                                        QuickSuggestionItem::Text(t!("commands.resume_nav").to_string()),
                                     ],
                                     screen_size_kb: None,
                                 });
 
                                 let _ = self.tts_sender.send(TtsCommand::Stop);
-                                let vocal_read = format!("Lecture du texte de la zone {}. {}", zone_title, extracted_text);
+                                let vocal_read = t!("commands.reading_zone_text", zone = zone_title, text = extracted_text).to_string();
                                 let _ = self.tts_sender.send(TtsCommand::Speak(vocal_read));
                                 ctx.request_repaint();
                             } else if cur_target.role == "étiquette" || cur_target.role == "label" {
@@ -2679,12 +2634,12 @@ impl eframe::App for OverlayApp {
                                 let vocal_read = if !full_label_text.is_empty() {
                                     full_label_text.clone()
                                 } else {
-                                    "Étiquette vide.".to_string()
+                                    t!("commands.empty_label").to_string()
                                 };
 
                                 self.chat_history.push(ChatEntry {
                                     role: ChatRole::Agent,
-                                    text: format!("🏷️ [Texte] : {}", vocal_read),
+                                    text: format!("🏷️ [{}] : {}", t!("roles.label"), vocal_read),
                                     timestamp: current_time_str(),
                                     quick_suggestions: Vec::new(),
                                     screen_size_kb: None,
@@ -2785,25 +2740,12 @@ impl eframe::App for OverlayApp {
                                     }
                                 }
 
-                                let (locale, _) = get_system_locale_language();
-                                let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
-                                let dict_msg = localized_speech(
-                                    lang_prefix,
-                                    "Mode dictée activé.",
-                                    "Dictation mode activated.",
-                                    "Modo dictado activado.",
-                                    "Diktatmodus aktiviert.",
-                                    "Modalità dettatura attivata.",
-                                    "Modo ditado ativado.",
-                                    "Режим диктовки включен.",
-                                    "听写模式已激活。",
-                                    "音声入力モードが有効になりました。",
-                                );
+                                let dict_msg = t!("commands.dictation_activated").to_string();
 
                                 let vocal_read = if !current_val.is_empty() {
-                                    format!("{}, valeur : {}. {}", target_name, current_val, dict_msg)
+                                    t!("commands.field_with_value", name = target_name, value = current_val, dict = dict_msg).to_string()
                                 } else {
-                                    format!("{}, champ vide. {}", target_name, dict_msg)
+                                    t!("commands.field_empty", name = target_name, dict = dict_msg).to_string()
                                 };
 
                                 self.dictation_mode = true;
@@ -2821,11 +2763,11 @@ impl eframe::App for OverlayApp {
 
                                 self.chat_history.push(ChatEntry {
                                     role: ChatRole::Agent,
-                                    text: format!("✍️ [{}] {} :\n{}\n\n*({})*", cur_target.role, target_name, if current_val.is_empty() { "(vide)".to_string() } else { current_val }, dict_msg),
+                                    text: format!("✍️ [{}] {} :\n{}\n\n*({})*", cur_target.role, target_name, if current_val.is_empty() { t!("commands.empty_value").to_string() } else { current_val }, dict_msg),
                                     timestamp: current_time_str(),
                                     quick_suggestions: vec![
-                                        QuickSuggestionItem::Text("Désactiver la dictée".to_string()),
-                                        QuickSuggestionItem::Text("Effacer le texte".to_string()),
+                                        QuickSuggestionItem::Text(t!("commands.disable_dictation").to_string()),
+                                        QuickSuggestionItem::Text(t!("commands.clear_text").to_string()),
                                     ],
                                     screen_size_kb: None,
                                 });
@@ -2892,7 +2834,7 @@ impl eframe::App for OverlayApp {
                                 ui::click_element(click_x, click_y, None, None);
                             }
 
-                            let action_feedback = format!("Action : {}", target_name);
+                            let action_feedback = t!("commands.action_feedback", name = target_name).to_string();
                             let _ = self.tts_sender.send(TtsCommand::Stop);
                             let _ = self.tts_sender.send(TtsCommand::Speak(action_feedback));
 
@@ -2977,7 +2919,7 @@ impl eframe::App for OverlayApp {
                                         self.hover_last_cursor_pos = Some((first.click_x, first.click_y));
                                         self.hover_cursor_still_since = Instant::now();
                                         self.hover_last_announced_target = Some(first.index);
-                                        let menu_announcement = format!("Menu : {}", first.name);
+                                        let menu_announcement = t!("commands.menu_feedback", name = first.name).to_string();
                                         let _ = self.tts_sender.send(TtsCommand::Stop);
                                         let _ = self.tts_sender.send(TtsCommand::Speak(menu_announcement));
                                     }
@@ -3399,7 +3341,7 @@ impl eframe::App for OverlayApp {
                 ui.scope_builder(egui::UiBuilder::new().max_rect(header_rect), |ui| {
                     ui.horizontal(|ui| {
                         let is_assist_active = self.active_tab == ActiveTab::Assistance;
-                        let tab_assist = ui.selectable_label(is_assist_active, "🤖 Assistance");
+                        let tab_assist = ui.selectable_label(is_assist_active, t!("ui.assistance_tab"));
                         let tab_assist_id = ui.make_persistent_id("dwell_tab_assistance");
                         let assist_activated = if !is_assist_active {
                             apply_dwell_to_response(ui, &mut self.dwell_state, tab_assist_id, &tab_assist)
@@ -3410,9 +3352,9 @@ impl eframe::App for OverlayApp {
                             self.active_tab = ActiveTab::Assistance;
                         }
                         let chat_title = if self.twitch_messages.is_empty() {
-                            "💬 Chat twitch".to_string()
+                            t!("ui.twitch_chat_tab").to_string()
                         } else {
-                            format!("💬 Chat ({})", self.twitch_messages.len())
+                            t!("ui.twitch_chat_count", count = self.twitch_messages.len()).to_string()
                         };
                         let is_chat_active = self.active_tab == ActiveTab::Chat;
                         let tab_chat = ui.selectable_label(is_chat_active, chat_title);
@@ -3440,7 +3382,7 @@ impl eframe::App for OverlayApp {
                                 .min_size(egui::vec2(20.0, 18.0))
                                 .corner_radius(egui::CornerRadius::same(4)),
                             );
-                            if close_btn.on_hover_text("Fermer").clicked() {
+                            if close_btn.on_hover_text(t!("ui.btn_close")).clicked() {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             }
 
@@ -3454,7 +3396,7 @@ impl eframe::App for OverlayApp {
                                 .min_size(egui::vec2(20.0, 18.0))
                                 .corner_radius(egui::CornerRadius::same(4)),
                             );
-                            if max_btn.on_hover_text(if is_maximized { "Restaurer" } else { "Agrandir" }).clicked() {
+                            if max_btn.on_hover_text(if is_maximized { t!("ui.btn_restore") } else { t!("ui.btn_maximize") }).clicked() {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
                             }
 
@@ -3467,7 +3409,7 @@ impl eframe::App for OverlayApp {
                                 .min_size(egui::vec2(20.0, 18.0))
                                 .corner_radius(egui::CornerRadius::same(4)),
                             );
-                            if min_btn.on_hover_text("Réduire").clicked() {
+                            if min_btn.on_hover_text(t!("ui.btn_minimize")).clicked() {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                             }
                         });
@@ -3499,7 +3441,7 @@ impl eframe::App for OverlayApp {
                                 if avatar_resp.hovered() {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                 }
-                                if avatar_resp.on_hover_text("Cliquer pour couper la parole (Échap)").clicked() {
+                                if avatar_resp.on_hover_text(t!("ui.avatar_mute_tooltip")).clicked() {
                                     self.stop_speaking();
                                 }
                             }
@@ -3512,101 +3454,44 @@ impl eframe::App for OverlayApp {
                             ui.scope_builder(egui::UiBuilder::new().max_rect(content_area), |ui| {
                                 ui.vertical(|ui| {
                                     let prov_name = self.llm_config.provider.display_name();
-                                    let (locale, _) = get_system_locale_language();
-                                    let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
                                     let status_badge = if self.dictation_mode {
-                                        format!("✍ Mode dictée actif (Échap pour quitter)")
+                                        t!("ui.dictation_badge").to_string()
                                     } else if self.switch_access_mode {
                                         if self.switch_step == SwitchAccessStep::Windows {
                                             if !self.switch_windows.is_empty() {
                                                 let cur = &self.switch_windows[self.switch_focus_index % self.switch_windows.len()];
-                                                localized_speech(
-                                                    lang_prefix,
-                                                    &format!("🎯 {} : {} (Entrée: choisir)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: select)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Entrar: elegir)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Eingabe: wählen)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Invio: seleziona)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: escolher)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: выбрать)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: 选择)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: 選択)", self.switch_focus_index + 1, cur.title),
-                                                )
+                                                t!("ui.select_window_hint", index = self.switch_focus_index + 1, title = cur.title).to_string()
                                             } else {
-                                                localized_speech(
-                                                    lang_prefix,
-                                                    "🎯 Recherche de fenêtres...",
-                                                    "🎯 Searching for windows...",
-                                                    "🎯 Buscando ventanas...",
-                                                    "🎯 Fenster werden gesucht...",
-                                                    "🎯 Ricerca finestre...",
-                                                    "🎯 Procurando janelas...",
-                                                    "🎯 Поиск окон...",
-                                                    "🎯 正在搜索窗口...",
-                                                    "🎯 ウィンドウを検索中...",
-                                                )
+                                                t!("ui.searching_windows").to_string()
                                             }
                                         } else if self.switch_step == SwitchAccessStep::Zones {
                                             if !self.switch_zones.is_empty() {
                                                 let cur = &self.switch_zones[self.switch_focus_index % self.switch_zones.len()];
-                                                localized_speech(
-                                                    lang_prefix,
-                                                    &format!("🎯 {} : {} (Entrée: ouvrir)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: open)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Entrar: abrir)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Eingabe: öffnen)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Invio: apri)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: abrir)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: открыть)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: 打开)", self.switch_focus_index + 1, cur.title),
-                                                    &format!("🎯 {}: {} (Enter: 開く)", self.switch_focus_index + 1, cur.title),
-                                                )
+                                                t!("ui.open_zone_hint", index = self.switch_focus_index + 1, title = cur.title).to_string()
                                             } else {
-                                                localized_speech(
-                                                    lang_prefix,
-                                                    "🎯 Analyse des blocs de la fenêtre...",
-                                                    "🎯 Analyzing window zones...",
-                                                    "🎯 Analizando zonas de la ventana...",
-                                                    "🎯 Fensterbereiche werden analysiert...",
-                                                    "🎯 Analisi dei blocchi della finestra...",
-                                                    "🎯 Analisando blocos da janela...",
-                                                    "🎯 Анализ блоков окна...",
-                                                    "🎯 正在分析窗口区域...",
-                                                    "🎯 ウィンドウブロックを解析中...",
-                                                )
+                                                t!("ui.analyzing_zones").to_string()
                                             }
                                         } else if self.switch_step == SwitchAccessStep::Elements {
                                             let buffer_feedback = if !self.numbered_input_buffer.is_empty() {
-                                                format!("Saisie clavier : {}... | ", self.numbered_input_buffer)
+                                                t!("ui.keyboard_input_buffer", buffer = self.numbered_input_buffer).to_string()
                                             } else {
                                                 String::new()
                                             };
                                             if let Some(target) = self.numbered_targets.get(self.switch_focus_index) {
-                                                format!("{prov_name} · 🔢 {buffer_feedback}N°{} : {} ({} badges - Échap pour quitter)", target.index, target.name, self.numbered_targets.len())
+                                                t!("ui.target_status_item", provider = prov_name, buffer = buffer_feedback, index = target.index, name = target.name, count = self.numbered_targets.len()).to_string()
                                             } else {
-                                                format!("{prov_name} · 🔢 {buffer_feedback}Mode numéros actif ({} badges - Échap pour quitter)", self.numbered_targets.len())
+                                                t!("ui.target_status_active", provider = prov_name, buffer = buffer_feedback, count = self.numbered_targets.len()).to_string()
                                             }
                                         } else {
-                                            localized_speech(
-                                                lang_prefix,
-                                                "🎯 Détection des contrôles...",
-                                                "🎯 Detecting controls...",
-                                                "🎯 Detectando controles...",
-                                                "🎯 Steuerelemente werden erkannt...",
-                                                "🎯 Rilevamento controlli...",
-                                                "🎯 Detectando controles...",
-                                                "🎯 Обнаружение элементов...",
-                                                "🎯 正在检测控件...",
-                                                "🎯 コントロールを検出中...",
-                                            )
+                                            t!("ui.detecting_controls").to_string()
                                         }
                                     } else {
                                         match self.status {
-                                            AgentStatus::Idle => format!("{prov_name} · en veille"),
-                                            AgentStatus::Thinking => format!("{prov_name} · réflexion..."),
-                                            AgentStatus::Speaking => format!("{prov_name} · en direct"),
+                                            AgentStatus::Idle => t!("ui.status_idle", provider = prov_name).to_string(),
+                                            AgentStatus::Thinking => t!("ui.status_thinking", provider = prov_name).to_string(),
+                                            AgentStatus::Speaking => t!("ui.status_speaking", provider = prov_name).to_string(),
                                             AgentStatus::Listening => String::new(),
-                                            AgentStatus::EmergencyStopped => "Système verrouillé".to_string(),
+                                            AgentStatus::EmergencyStopped => t!("ui.status_locked").to_string(),
                                         }
                                     };
 
@@ -3634,14 +3519,14 @@ impl eframe::App for OverlayApp {
                                             if badge_resp.hovered() {
                                                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                             }
-                                            if badge_resp.on_hover_text("Cliquer pour couper la parole (Échap)").clicked() {
+                                            if badge_resp.on_hover_text(t!("ui.avatar_mute_tooltip")).clicked() {
                                                 self.stop_speaking();
                                             }
                                         } else if self.switch_access_mode {
                                             if badge_resp.hovered() {
                                                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                             }
-                                            if badge_resp.on_hover_text("Cliquer pour désactiver le mode survol (Échap)").clicked() {
+                                            if badge_resp.on_hover_text(t!("ui.badge_disable_hover_tooltip")).clicked() {
                                                 self.toggle_switch_access_mode(Some(false));
                                             }
                                         } else {
@@ -3672,7 +3557,7 @@ impl eframe::App for OverlayApp {
                                         ui.horizontal(|ui| {
                                             ui.spacing_mut().item_spacing.x = 4.0;
                                             ui.label(
-                                                egui::RichText::new("💡 Suggestions :")
+                                                egui::RichText::new(t!("ui.app_suggestions_header"))
                                                     .size(10.5)
                                                     .color(theme.accent)
                                                     .strong(),
@@ -3689,14 +3574,14 @@ impl eframe::App for OverlayApp {
                                                 .small();
 
                                                 let resp = ui.add(chip)
-                                                    .on_hover_text(format!("Lancer '{}' (Clic ou maintien au survol)\nTab : compléter dans le champ", sug));
+                                                    .on_hover_text(t!("ui.app_suggestion_tooltip", app = sug));
                                                 let sug_dwell_id = ui.make_persistent_id(format!("dwell_app_sug_{sug}"));
                                                 if apply_dwell_to_response(ui, &mut self.dwell_state, sug_dwell_id, &resp) {
-                                                    clicked_app_suggestion = Some(format!("Ouvrir {sug}"));
+                                                    clicked_app_suggestion = Some(t!("ui.open_app_cmd", app = sug).to_string());
                                                 }
                                                 resp.context_menu(|ui| {
-                                                    if ui.button("Compléter dans le champ").clicked() {
-                                                        autocomplete_input_to = Some(format!("Ouvrir {sug}"));
+                                                    if ui.button(t!("ui.autocomplete_field")).clicked() {
+                                                        autocomplete_input_to = Some(t!("ui.open_app_cmd", app = sug).to_string());
                                                         ui.close();
                                                     }
                                                 });
@@ -3720,7 +3605,7 @@ impl eframe::App for OverlayApp {
                                         // Autocomplétion de la première suggestion via la touche Tab
                                         if let Some(top_sug) = self.input_suggestions.first() {
                                             if is_input_focused && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
-                                                autocomplete_input_to = Some(format!("Ouvrir {top_sug}"));
+                                                autocomplete_input_to = Some(t!("ui.open_app_cmd", app = top_sug).to_string());
                                                 ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
                                             }
                                         }
@@ -3779,9 +3664,9 @@ impl eframe::App for OverlayApp {
                                                 .desired_rows(3)
                                                 .id(input_id)
                                                 .hint_text(if self.is_recording {
-                                                    "Écoute Whisper active... parlez ou tapez"
+                                                    t!("ui.prompt_hint_listening")
                                                 } else {
-                                                    "Consigne d'exploration... (entrée)"
+                                                    t!("ui.prompt_hint_idle")
                                                 }),
                                         );
 
@@ -3793,7 +3678,7 @@ impl eframe::App for OverlayApp {
                                         }
 
                                         response.context_menu(|ui| {
-                                            if ui.button("📋 Coller (Ctrl+V)").clicked() {
+                                            if ui.button(t!("ui.ctx_paste_shortcut")).clicked() {
                                                 if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
                                                     let clean_clip = clip.replace(['\r', '\n'], " ");
                                                     let trimmed_clean = clean_clip.trim().to_string();
@@ -3806,20 +3691,20 @@ impl eframe::App for OverlayApp {
                                                 ui.memory_mut(|m| m.request_focus(input_id));
                                                 ui.close();
                                             }
-                                            if ui.button("📄 Copier tout (Ctrl+C)").clicked() {
+                                            if ui.button(t!("ui.ctx_copy_all_shortcut")).clicked() {
                                                 set_clipboard_text(&self.input_text);
                                                 ctx.copy_text(self.input_text.clone());
                                                 play_earcon(Earcon::Success);
                                                 ui.close();
                                             }
-                                            if ui.button("✂ Couper tout (Ctrl+X)").clicked() {
+                                            if ui.button(t!("ui.ctx_cut_all_shortcut")).clicked() {
                                                 set_clipboard_text(&self.input_text);
                                                 ctx.copy_text(self.input_text.clone());
                                                 self.input_text.clear();
                                                 play_earcon(Earcon::Success);
                                                 ui.close();
                                             }
-                                            if ui.button("🗑 Effacer").clicked() {
+                                            if ui.button(t!("ui.ctx_clear")).clicked() {
                                                 self.input_text.clear();
                                                 ui.close();
                                             }
@@ -3898,8 +3783,8 @@ impl eframe::App for OverlayApp {
                                         let analyze_resp = render_accessible_icon_button(
                                             ui,
                                             "🔍",
-                                            "Analyser",
-                                            "Analyser : Résumer ce que fait la fenêtre active (ou Entrée pour envoyer)",
+                                            &t!("ui.btn_analyze"),
+                                            &t!("ui.btn_analyze_tooltip"),
                                             false,
                                             analyze_prog,
                                             Some(egui::Color32::from_rgb(0, 140, 220)),
@@ -3919,7 +3804,7 @@ impl eframe::App for OverlayApp {
                                             self.last_suggestion_query.clear();
                                             let typed_raw = std::mem::take(&mut self.input_text).trim().to_string();
                                             let prompt = if analyze_btn_hit && typed_raw.is_empty() {
-                                                "Analyse l'écran et résume ce que fait la fenêtre en cours.".to_string()
+                                                t!("commands.analyze_screen_prompt").to_string()
                                             } else {
                                                 typed_raw
                                             };
@@ -3954,7 +3839,7 @@ impl eframe::App for OverlayApp {
                                                     send_hotkey(&[windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x11)], windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x5A));
                                                     #[cfg(not(windows))]
                                                     let _ = std::process::Command::new("xdotool").args(["key", "ctrl+z"]).status();
-                                                    "Dernière action annulée.".to_string()
+                                                    t!("commands.last_action_undone").to_string()
                                                 };
                                                 play_earcon(Earcon::Success);
                                                 self.chat_history.push(ChatEntry {
@@ -4000,9 +3885,9 @@ impl eframe::App for OverlayApp {
                                                 let cancelled = cancel_all_scheduled_tasks();
                                                 play_earcon(Earcon::Success);
                                                 let reply = if cancelled > 0 {
-                                                    format!("Toutes les commandes différées ont été annulées ({cancelled} annulée{}).", if cancelled > 1 { "s" } else { "" })
+                                                    t!("speech.scheduled_tasks_cancelled_count", count = cancelled).to_string()
                                                 } else {
-                                                    "Toutes les commandes différées ont été annulées.".to_string()
+                                                    t!("speech.scheduled_tasks_cancelled").to_string()
                                                 };
                                                 self.chat_history.push(ChatEntry {
                                                     role: ChatRole::Agent,
@@ -4019,7 +3904,7 @@ impl eframe::App for OverlayApp {
                                             if is_api_key_command(&prompt) {
                                                 self.sync_modal_inputs_for_provider(self.llm_config.provider);
                                                 self.show_api_key_modal = true;
-                                                let reply = "Boîte de configuration de la clé API ouverte.".to_string();
+                                                let reply = t!("speech.api_key_modal_opened").to_string();
                                                 self.chat_history.push(ChatEntry {
                                                     role: ChatRole::Agent,
                                                     text: reply.clone(),
@@ -4033,7 +3918,7 @@ impl eframe::App for OverlayApp {
                                             } else if is_hide_command(&prompt) {
                                                 self.is_hidden = true;
                                                 self.status = AgentStatus::Idle;
-                                                let reply = "Overlay masqué. Je reste à l'écoute pour « deepseek ouvre toi ».".to_string();
+                                                let reply = t!("speech.overlay_hidden").to_string();
                                                 self.chat_history.push(ChatEntry {
                                                     role: ChatRole::Agent,
                                                     text: reply.clone(),
@@ -4053,15 +3938,15 @@ impl eframe::App for OverlayApp {
                                         let mic_id = ui.make_persistent_id("dwell_btn_mic");
                                         let mic_prog = self.dwell_state.get_progress(mic_id);
                                         let (mic_icon, mic_sub, mic_color) = if self.is_recording {
-                                            ("🔴", "Stop", Some(egui::Color32::from_rgb(235, 60, 60)))
+                                            ("🔴", t!("ui.btn_mic_stop").to_string(), Some(egui::Color32::from_rgb(235, 60, 60)))
                                         } else {
-                                            ("🎙", "Micro", None)
+                                            ("🎙", t!("ui.btn_mic").to_string(), None)
                                         };
                                         let mic_resp = render_accessible_icon_button(
                                             ui,
                                             mic_icon,
-                                            mic_sub,
-                                            "Micro (r) : Activer ou couper l'écoute vocale",
+                                            &mic_sub,
+                                            &t!("ui.btn_mic_tooltip"),
                                             self.is_recording,
                                             mic_prog,
                                             mic_color,
@@ -4075,12 +3960,12 @@ impl eframe::App for OverlayApp {
                                         // 3. Bouton Dictée
                                         let dict_id = ui.make_persistent_id("dwell_btn_dict");
                                         let dict_prog = self.dwell_state.get_progress(dict_id);
-                                        let dict_sub = if self.dictation_mode { "Actif" } else { "Dictée" };
+                                        let dict_sub = if self.dictation_mode { t!("ui.btn_dictation_active").to_string() } else { t!("ui.btn_dictation").to_string() };
                                         let dict_resp = render_accessible_icon_button(
                                             ui,
                                             "✍",
-                                            dict_sub,
-                                            "Dictée : Saisie vocale directe dans vos applications (Échap pour quitter)",
+                                            &dict_sub,
+                                            &t!("ui.btn_dictation_tooltip"),
                                             self.dictation_mode,
                                             dict_prog,
                                             Some(egui::Color32::from_rgb(215, 155, 30)),
@@ -4098,12 +3983,12 @@ impl eframe::App for OverlayApp {
                                         // 4. Bouton Survol (Switch Access)
                                         let switch_id = ui.make_persistent_id("dwell_btn_switch");
                                         let switch_prog = self.dwell_state.get_progress(switch_id);
-                                        let switch_sub = if self.switch_access_mode { "Actif" } else { "Survol" };
+                                        let switch_sub = if self.switch_access_mode { t!("ui.btn_hover_active").to_string() } else { t!("ui.btn_hover").to_string() };
                                         let switch_resp = render_accessible_icon_button(
                                             ui,
                                             "🎯",
-                                            switch_sub,
-                                            "Survol : Mode contacteur unique & navigation automatique (Entrée pour valider)",
+                                            &switch_sub,
+                                            &t!("ui.btn_hover_tooltip"),
                                             self.switch_access_mode,
                                             switch_prog,
                                             Some(egui::Color32::from_rgb(235, 115, 0)),
@@ -4130,11 +4015,11 @@ impl eframe::App for OverlayApp {
                                             ui,
                                             voice_icon,
                                             voice_sub,
-                                            &format!(
-                                                "Voix : {}\nClic ou survol : basculer vers {}\nClic droit : menu des voix",
-                                                self.voice_gender.display_name(),
-                                                next_gender.display_name()
-                                            ),
+                                            &t!(
+                                                "ui.btn_voice_tooltip",
+                                                current = self.voice_gender.display_name(),
+                                                next = next_gender.display_name()
+                                            ).to_string(),
                                             self.status == AgentStatus::Speaking,
                                             voice_prog,
                                             Some(theme.accent),
@@ -4160,8 +4045,8 @@ impl eframe::App for OverlayApp {
                                         let settings_resp = render_accessible_icon_button(
                                             ui,
                                             "⚙",
-                                            "Réglages",
-                                            "Réglages : Fournisseurs LLM, clés API, Thèmes & Accessibilité",
+                                            &t!("ui.btn_settings"),
+                                            &t!("ui.btn_settings_tooltip"),
                                             self.show_api_key_modal,
                                             settings_prog,
                                             Some(theme.accent),
@@ -4182,8 +4067,8 @@ impl eframe::App for OverlayApp {
                                         let clear_resp = render_accessible_icon_button(
                                             ui,
                                             "🗑",
-                                            "Effacer",
-                                            "Effacer : Réinitialiser l'historique et la mémoire contextuelle",
+                                            &t!("ui.btn_clear"),
+                                            &t!("ui.btn_clear_tooltip"),
                                             false,
                                             clear_prog,
                                             None,
@@ -4196,7 +4081,7 @@ impl eframe::App for OverlayApp {
                                             self.window_analysis_cache.clear();
                                             self.chat_history.push(ChatEntry {
                                                 role: ChatRole::Agent,
-                                                text: "Mémoire contextuelle réinitialisée.".to_string(),
+                                                text: t!("commands.context_cleared").to_string(),
                                                 timestamp: current_time_str(),
                                                 quick_suggestions: Vec::new(),
                                                 screen_size_kb: None,
@@ -4249,9 +4134,9 @@ impl eframe::App for OverlayApp {
                                                 let (label_name, label_color) = match entry.role {
                                                     ChatRole::User => {
                                                         let name = if let Some(kb) = entry.screen_size_kb {
-                                                            format!("🗣 Vous - {:.1} ko", kb)
+                                                            format!("{} - {:.1} ko", t!("ui.chat_user_label"), kb)
                                                         } else {
-                                                            "🗣 Vous".to_string()
+                                                            t!("ui.chat_user_label").to_string()
                                                         };
                                                         (name, egui::Color32::from_rgb(255, 215, 120))
                                                     }
@@ -4273,14 +4158,14 @@ impl eframe::App for OverlayApp {
                                                     ui.add_space(4.0);
                                                     let stop_btn = ui.add(
                                                         egui::Button::new(
-                                                            egui::RichText::new("🔇 Couper")
+                                                            egui::RichText::new(t!("ui.btn_mute_speech"))
                                                                 .size(9.5)
                                                                 .color(egui::Color32::from_rgb(255, 130, 130)),
                                                         )
                                                         .small()
                                                         .corner_radius(egui::CornerRadius::same(6)),
                                                     );
-                                                    if stop_btn.on_hover_text("Interrompre la lecture vocale (Échap)").clicked() {
+                                                    if stop_btn.on_hover_text(t!("ui.avatar_mute_tooltip")).clicked() {
                                                         request_stop_speaking = true;
                                                     }
                                                 }
@@ -4366,7 +4251,7 @@ impl eframe::App for OverlayApp {
                                             }
 
                                             interact_resp.context_menu(|ui| {
-                                                if ui.button("📋 Copier le texte (Ctrl+C)").clicked() {
+                                                if ui.button(t!("ui.ctx_copy_text")).clicked() {
                                                     set_clipboard_text(&entry.text);
                                                     ctx.copy_text(entry.text.clone());
                                                     play_earcon(Earcon::Success);
@@ -4393,7 +4278,7 @@ impl eframe::App for OverlayApp {
                                                                 .stroke(egui::Stroke::new(1.0, theme.border))
                                                                 .corner_radius(egui::CornerRadius::same(10));
 
-                                                            let resp = ui.add(btn).on_hover_text("Cliquer ou maintenir au survol pour choisir cette suggestion");
+                                                            let resp = ui.add(btn).on_hover_text(t!("ui.quick_suggestion_tooltip"));
                                                             let sug_dwell_id = ui.make_persistent_id(format!("dwell_quick_sug_{idx}_{sug_idx}"));
                                                             if apply_dwell_to_response(ui, &mut self.dwell_state, sug_dwell_id, &resp) {
                                                                 clicked_quick_suggestion = Some(clean_label.to_string());
@@ -4441,20 +4326,7 @@ impl eframe::App for OverlayApp {
                                             mark_hover_nav_asked();
                                             play_earcon(Earcon::Success);
                                             self.status = AgentStatus::Idle;
-                                            let (locale, _) = get_system_locale_language();
-                                            let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
-                                            let reply = localized_speech(
-                                                lang_prefix,
-                                                "Très bien. Vous pouvez activer le mode survol à tout moment avec le bouton Survol ou en disant « mode survol ».",
-                                                "Understood. You can enable hover mode at any time using the Hover button or by saying \"hover mode\".",
-                                                "Entendido. Puede activar el modo sobrevuelo en cualquier momento con el botón Sobrevuelo o diciendo «modo sobrevuelo».",
-                                                "Verstanden. Sie können den Hover-Modus jederzeit über die Schaltfläche Hover oder mit dem Befehl „Hover-Modus“ aktivieren.",
-                                                "Ricevuto. Puoi attivare la modalità cursore in qualsiasi momento con il pulsante Cursore o dicendo \"modalità cursore\".",
-                                                "Entendido. Você pode ativar o modo de sobrevoo a qualquer momento com o botão Sobrevoo ou dizendo «modo de sobrevoo».",
-                                                "Понятно. Вы можете включить режим наведения в любое время с помощью кнопки или команды «режим наведения».",
-                                                "好的。您可以随时通过“悬停”按钮或语音指令“悬停模式”来启用它。",
-                                                "承知しました。「ホバー」ボタンまたは「ホバーモード」の音声コマンドでいつでも有効にできます。",
-                                            );
+                                            let reply = t!("speech.dismiss_hover").to_string();
                                             self.chat_history.push(ChatEntry {
                                                 role: ChatRole::User,
                                                 text: prompt.clone(),
@@ -4564,7 +4436,7 @@ impl eframe::App for OverlayApp {
                             ui.horizontal(|ui| {
                                 if !self.current_twitch_channel.is_empty() {
                                     ui.label(
-                                        egui::RichText::new("Salon :")
+                                        egui::RichText::new(t!("ui.twitch_channel_label"))
                                             .size(11.0)
                                             .color(egui::Color32::from_rgb(170, 185, 205)),
                                     );
@@ -4581,7 +4453,7 @@ impl eframe::App for OverlayApp {
                                 let search_edit = ui.add_sized(
                                     [110.0, 18.0],
                                     egui::TextEdit::singleline(&mut self.twitch_search_query)
-                                        .hint_text("Chaîne..."),
+                                        .hint_text(t!("ui.twitch_search_hint")),
                                 );
                                 let enter_pressed = search_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                                 if (ui.small_button("🔍").clicked() || enter_pressed) && !self.twitch_search_query.trim().is_empty() {
@@ -4595,16 +4467,16 @@ impl eframe::App for OverlayApp {
                                 ui.add_space(2.0);
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label(
-                                        egui::RichText::new("Résultats :")
+                                        egui::RichText::new(t!("ui.twitch_results_label"))
                                             .size(10.5)
                                             .color(egui::Color32::from_rgb(255, 215, 120)),
                                     );
                                     let mut selected_channel = None;
                                     for ch in &self.twitch_search_results {
-                                        if ui.small_button(format!("▶ {}", ch.display_name)).on_hover_text("Rejoindre ce salon irc").clicked() {
+                                        if ui.small_button(format!("▶ {}", ch.display_name)).on_hover_text(t!("ui.twitch_join_tooltip")).clicked() {
                                             selected_channel = Some(ch.login.clone());
                                         }
-                                        if ui.small_button("↗").on_hover_text("Ouvrir sur twitch").clicked() {
+                                        if ui.small_button("↗").on_hover_text(t!("ui.twitch_open_tooltip")).clicked() {
                                             ui.ctx().open_url(egui::OpenUrl::new_tab(format!("https://twitch.tv/{}", ch.login)));
                                         }
                                     }
@@ -4626,7 +4498,7 @@ impl eframe::App for OverlayApp {
                                 .show(ui, |ui| {
                                     if self.twitch_messages.is_empty() {
                                         ui.label(
-                                            egui::RichText::new("En attente de messages twitch...")
+                                            egui::RichText::new(t!("ui.twitch_waiting"))
                                                 .size(12.0)
                                                 .italics()
                                                 .color(egui::Color32::from_rgba_unmultiplied(180, 190, 205, 150)),
@@ -4846,7 +4718,7 @@ impl eframe::App for OverlayApp {
                                 let is_llm_active = self.settings_tab == SettingsTab::LlmProvider;
                                 let tab_llm = ui.selectable_label(
                                     is_llm_active,
-                                    egui::RichText::new("🔑 Fournisseur LLM")
+                                    egui::RichText::new(t!("ui.settings_tab_llm"))
                                         .size(12.0)
                                         .color(if is_llm_active {
                                             theme.accent
@@ -4867,7 +4739,7 @@ impl eframe::App for OverlayApp {
                                 let is_theme_active = self.settings_tab == SettingsTab::Theme;
                                 let tab_theme = ui.selectable_label(
                                     is_theme_active,
-                                    egui::RichText::new("🎨 Thèmes & Accessibilité")
+                                    egui::RichText::new(t!("ui.settings_tab_theme"))
                                         .size(12.0)
                                         .color(if is_theme_active {
                                             theme.accent
@@ -4885,6 +4757,27 @@ impl eframe::App for OverlayApp {
                                 if theme_activated {
                                     self.settings_tab = SettingsTab::Theme;
                                 }
+                                let is_lang_active = self.settings_tab == SettingsTab::Language;
+                                let tab_lang = ui.selectable_label(
+                                    is_lang_active,
+                                    egui::RichText::new(t!("ui.settings_tab_language"))
+                                        .size(12.0)
+                                        .color(if is_lang_active {
+                                            theme.accent
+                                        } else {
+                                            theme.text_secondary
+                                        })
+                                        .strong(),
+                                );
+                                let tab_lang_id = ui.make_persistent_id("dwell_tab_language");
+                                let lang_activated = if !is_lang_active {
+                                    apply_dwell_to_response(ui, &mut self.dwell_state, tab_lang_id, &tab_lang)
+                                } else {
+                                    tab_lang.clicked()
+                                };
+                                if lang_activated {
+                                    self.settings_tab = SettingsTab::Language;
+                                }
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if ui.add(
                                         egui::Button::new(
@@ -4894,7 +4787,7 @@ impl eframe::App for OverlayApp {
                                         )
                                         .min_size(egui::vec2(18.0, 16.0))
                                         .corner_radius(egui::CornerRadius::same(4)),
-                                    ).on_hover_text("Fermer").clicked() {
+                                    ).on_hover_text(t!("ui.btn_close")).clicked() {
                                         self.show_api_key_modal = false;
                                         self.api_key_error = None;
                                     }
@@ -4924,7 +4817,7 @@ impl eframe::App for OverlayApp {
 
                             // --- Section Clé API ---
                             ui.label(
-                                egui::RichText::new(format!("Clé d'API ({env_var_target}) :"))
+                                egui::RichText::new(t!("ui.api_key_label", env = env_var_target))
                                     .size(11.0)
                                     .color(egui::Color32::WHITE)
                                     .strong(),
@@ -4958,28 +4851,28 @@ impl eframe::App for OverlayApp {
                                 let edit_resp = ui.add(edit);
 
                                 let eye_icon = if self.show_api_key_plain { "🔒" } else { "👁" };
-                                if ui.button(eye_icon).on_hover_text("Afficher/Masquer la clé").clicked() {
+                                if ui.button(eye_icon).on_hover_text(t!("ui.toggle_api_key_visibility")).clicked() {
                                     self.show_api_key_plain = !self.show_api_key_plain;
                                 }
 
-                                if ui.button("📋").on_hover_text("Coller depuis le presse-papiers").clicked() {
+                                if ui.button("📋").on_hover_text(t!("ui.paste_from_clipboard")).clicked() {
                                     if let Some(clip) = get_clipboard_text() {
                                         self.api_key_input = clip.trim().to_string();
                                     }
                                 }
 
                                 edit_resp.context_menu(|ui| {
-                                    if ui.button("📋 Coller").clicked() {
+                                    if ui.button(t!("ui.btn_paste")).clicked() {
                                         if let Some(clip) = get_clipboard_text() {
                                             self.api_key_input = clip.trim().to_string();
                                         }
                                         ui.close();
                                     }
-                                    if ui.button("📄 Copier").clicked() {
+                                    if ui.button(t!("ui.btn_copy")).clicked() {
                                         set_clipboard_text(&self.api_key_input);
                                         ui.close();
                                     }
-                                    if ui.button("🗑 Effacer").clicked() {
+                                    if ui.button(t!("ui.btn_clear_short")).clicked() {
                                         self.api_key_input.clear();
                                         ui.close();
                                     }
@@ -5002,14 +4895,14 @@ impl eframe::App for OverlayApp {
                             // --- Section Modèle de raisonnement ---
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    egui::RichText::new(format!("Modèle LLM ({env_model_target}) :"))
+                                    egui::RichText::new(t!("ui.model_label", env = env_model_target))
                                         .size(11.0)
                                         .color(egui::Color32::WHITE)
                                         .strong(),
                                 );
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.small_button("↺ Recommandé")
-                                        .on_hover_text(format!("Rétablir le modèle par défaut ({default_model_name})"))
+                                    if ui.small_button(t!("ui.btn_model_recommended"))
+                                        .on_hover_text(t!("ui.restore_default_model_tooltip", model = default_model_name))
                                         .clicked()
                                     {
                                         self.model_input = default_model_name.to_string();
@@ -5044,21 +4937,21 @@ impl eframe::App for OverlayApp {
                                 let model_resp = ui.add(model_edit);
 
                                 model_resp.context_menu(|ui| {
-                                    if ui.button("📋 Coller").clicked() {
+                                    if ui.button(t!("ui.btn_paste")).clicked() {
                                         if let Some(clip) = get_clipboard_text() {
                                             self.model_input = clip.trim().to_string();
                                         }
                                         ui.close();
                                     }
-                                    if ui.button("📄 Copier").clicked() {
+                                    if ui.button(t!("ui.btn_copy")).clicked() {
                                         set_clipboard_text(&self.model_input);
                                         ui.close();
                                     }
-                                    if ui.button(format!("↺ Rétablir {default_model_name}")).clicked() {
+                                    if ui.button(t!("ui.restore_default_model", model = default_model_name)).clicked() {
                                         self.model_input = default_model_name.to_string();
                                         ui.close();
                                     }
-                                    if ui.button("🗑 Effacer").clicked() {
+                                    if ui.button(t!("ui.btn_clear_short")).clicked() {
                                         self.model_input.clear();
                                         ui.close();
                                     }
@@ -5073,7 +4966,7 @@ impl eframe::App for OverlayApp {
 
                             ui.add_space(5.0);
                             ui.horizontal(|ui| {
-                                if ui.button("💾 Enregistrer & Appliquer").clicked() {
+                                if ui.button(t!("ui.btn_save_apply")).clicked() {
                                     let key = self.api_key_input.trim();
                                     let model = if self.model_input.trim().is_empty() {
                                         default_model_name
@@ -5082,11 +4975,11 @@ impl eframe::App for OverlayApp {
                                     };
 
                                     if key.is_empty() {
-                                        self.api_key_error = Some("La clé API ne peut pas être vide.".to_string());
+                                        self.api_key_error = Some(t!("ui.api_key_empty").to_string());
                                     } else if let Err(e) = write_env_var_to_file(".env", env_var_target, key) {
-                                        self.api_key_error = Some(format!("Erreur d'écriture clé : {e}"));
+                                        self.api_key_error = Some(t!("ui.api_key_write_err", err = e).to_string());
                                     } else if let Err(e) = write_env_var_to_file(".env", env_model_target, model) {
-                                        self.api_key_error = Some(format!("Erreur d'écriture modèle : {e}"));
+                                        self.api_key_error = Some(t!("ui.model_write_err", err = e).to_string());
                                     } else {
                                         let _ = write_env_var_to_file(".env", "LLM_PROVIDER", self.selected_provider_modal.display_name());
                                         #[cfg(windows)]
@@ -5094,7 +4987,7 @@ impl eframe::App for OverlayApp {
                                         self.show_api_key_modal = false;
                                     }
                                 }
-                                if ui.button("Annuler").clicked() {
+                                if ui.button(t!("ui.btn_cancel")).clicked() {
                                     self.show_api_key_modal = false;
                                     self.api_key_error = None;
                                 }
@@ -5103,7 +4996,7 @@ impl eframe::App for OverlayApp {
                                 SettingsTab::Theme => {
                             // --- Onglet Thèmes & Accessibilité ---
                             ui.label(
-                                egui::RichText::new("Profils de contraste et accessibilité visuelle :")
+                                egui::RichText::new(t!("ui.theme_profiles_label"))
                                     .size(11.5)
                                     .color(theme.text_secondary),
                             );
@@ -5111,15 +5004,15 @@ impl eframe::App for OverlayApp {
 
                             let mut current_theme = self.theme;
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Thème :").size(12.0).strong().color(egui::Color32::WHITE));
+                                ui.label(egui::RichText::new(t!("ui.theme_label")).size(12.0).strong().color(egui::Color32::WHITE));
                                 egui::ComboBox::from_id_salt("settings_theme_combobox")
-                                    .selected_text(current_theme.display_name())
+                                    .selected_text(localized_theme_name(current_theme))
                                     .width(260.0)
                                     .show_ui(ui, |ui| {
                                         for &t in AppTheme::ALL {
                                             let t_colors = t.colors();
                                             ui.horizontal(|ui| {
-                                                if ui.selectable_value(&mut current_theme, t, t.display_name()).clicked() {
+                                                if ui.selectable_value(&mut current_theme, t, localized_theme_name(t)).clicked() {
                                                     self.set_theme(t);
                                                 }
                                                 let (rect, _) = ui.allocate_exact_size(egui::vec2(44.0, 12.0), egui::Sense::hover());
@@ -5146,7 +5039,7 @@ impl eframe::App for OverlayApp {
                                 .inner_margin(egui::Margin::symmetric(10, 8))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new(self.theme.display_name()).strong().size(12.0).color(cur_colors.accent));
+                                        ui.label(egui::RichText::new(localized_theme_name(self.theme)).strong().size(12.0).color(cur_colors.accent));
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             let (rect, _) = ui.allocate_exact_size(egui::vec2(58.0, 14.0), egui::Sense::hover());
                                             let p = ui.painter();
@@ -5158,7 +5051,7 @@ impl eframe::App for OverlayApp {
                                     });
                                     ui.add_space(3.0);
                                     ui.label(
-                                        egui::RichText::new(self.theme.description())
+                                        egui::RichText::new(localized_theme_desc(self.theme))
                                             .size(10.5)
                                             .color(cur_colors.text_secondary)
                                             .italics(),
@@ -5169,7 +5062,7 @@ impl eframe::App for OverlayApp {
                             ui.separator();
                             ui.add_space(4.0);
                             ui.label(
-                                egui::RichText::new("Taille de police et affichage des textes :")
+                                egui::RichText::new(t!("ui.font_size_label"))
                                     .size(11.5)
                                     .color(theme.text_secondary),
                             );
@@ -5178,7 +5071,7 @@ impl eframe::App for OverlayApp {
                             let prev_zoom = current_zoom;
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 8.0;
-                                ui.label(egui::RichText::new("Police :").size(12.0).strong().color(egui::Color32::WHITE));
+                                ui.label(egui::RichText::new(t!("ui.font_label")).size(12.0).strong().color(egui::Color32::WHITE));
 
                                 let btn_minus = egui::Button::new(
                                     egui::RichText::new("A −")
@@ -5188,7 +5081,7 @@ impl eframe::App for OverlayApp {
                                 )
                                 .min_size(egui::vec2(52.0, 30.0))
                                 .corner_radius(egui::CornerRadius::same(6));
-                                let resp_minus = ui.add(btn_minus).on_hover_text("Diminuer la taille de police (−10%)");
+                                let resp_minus = ui.add(btn_minus).on_hover_text(t!("ui.font_minus_tooltip"));
                                 let id_minus = ui.make_persistent_id("dwell_zoom_minus");
                                 if apply_dwell_to_response(ui, &mut self.dwell_state, id_minus, &resp_minus) {
                                     current_zoom = ((current_zoom - 0.10).max(0.70) * 100.0).round() / 100.0;
@@ -5211,7 +5104,7 @@ impl eframe::App for OverlayApp {
                                 )
                                 .min_size(egui::vec2(52.0, 30.0))
                                 .corner_radius(egui::CornerRadius::same(6));
-                                let resp_plus = ui.add(btn_plus).on_hover_text("Agrandir la taille de police (+10%)");
+                                let resp_plus = ui.add(btn_plus).on_hover_text(t!("ui.font_plus_tooltip"));
                                 let id_plus = ui.make_persistent_id("dwell_zoom_plus");
                                 if apply_dwell_to_response(ui, &mut self.dwell_state, id_plus, &resp_plus) {
                                     current_zoom = ((current_zoom + 0.10).min(2.50) * 100.0).round() / 100.0;
@@ -5224,7 +5117,7 @@ impl eframe::App for OverlayApp {
                                 )
                                 .min_size(egui::vec2(52.0, 30.0))
                                 .corner_radius(egui::CornerRadius::same(6));
-                                let resp_reset = ui.add(btn_reset).on_hover_text("Rétablir la taille standard (100%)");
+                                let resp_reset = ui.add(btn_reset).on_hover_text(t!("ui.font_reset_tooltip"));
                                 let id_reset = ui.make_persistent_id("dwell_zoom_reset");
                                 if apply_dwell_to_response(ui, &mut self.dwell_state, id_reset, &resp_reset) {
                                     current_zoom = 1.0;
@@ -5239,7 +5132,7 @@ impl eframe::App for OverlayApp {
                             ui.separator();
                             ui.add_space(4.0);
                             ui.label(
-                                egui::RichText::new("Temporisation du clic au survol (Dwell) :")
+                                egui::RichText::new(t!("ui.dwell_timing_label"))
                                     .size(11.5)
                                     .color(theme.text_secondary),
                             );
@@ -5247,18 +5140,18 @@ impl eframe::App for OverlayApp {
                             let mut current_dwell_ms = self.dwell_state.dwell_duration.as_millis() as u64;
                             let prev_dwell_ms = current_dwell_ms;
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Délai :").size(12.0).strong().color(egui::Color32::WHITE));
+                                ui.label(egui::RichText::new(t!("ui.dwell_delay_label")).size(12.0).strong().color(egui::Color32::WHITE));
                                 let slider = egui::Slider::new(&mut current_dwell_ms, 0..=2500)
                                     .step_by(50.0)
                                     .custom_formatter(|val, _| {
                                         if val <= 0.0 {
-                                            "Désactivé (0 ms)".to_string()
+                                            t!("ui.dwell_disabled").to_string()
                                         } else {
                                             format!("{:.0} ms", val)
                                         }
                                     });
                                 ui.add(slider)
-                                    .on_hover_text("Délai de maintien du pointeur requis avant déclenchement automatique (0 ms pour désactiver)");
+                                    .on_hover_text(t!("ui.dwell_tooltip"));
                             });
                             if current_dwell_ms != prev_dwell_ms {
                                 self.dwell_state.dwell_duration = Duration::from_millis(current_dwell_ms);
@@ -5268,15 +5161,70 @@ impl eframe::App for OverlayApp {
 
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
-                                if ui.button("Fermer").clicked() {
+                                if ui.button(t!("ui.btn_close")).clicked() {
                                     self.show_api_key_modal = false;
                                 }
                                 ui.label(
-                                    egui::RichText::new("Astuce vocale : dites « police plus grande », « zoom normal » ou « contraste élevé »")
+                                    egui::RichText::new(t!("ui.theme_voice_tip"))
                                         .size(10.0)
                                         .color(theme.text_secondary),
                                 );
                             });
+                                }
+                                SettingsTab::Language => {
+                                    // --- Onglet Langage ---
+                                    ui.label(
+                                        egui::RichText::new(t!("ui.language_heading"))
+                                            .size(11.5)
+                                            .color(theme.text_secondary),
+                                    );
+                                    ui.add_space(6.0);
+
+                                    let mut selected_lang = self.app_language.clone();
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+
+                                        let options = [
+                                            ("auto", "🌐 Système (Auto)"),
+                                            ("fr", "🇫🇷 Français"),
+                                            ("en", "🇬🇧 English"),
+                                            ("de", "🇩🇪 Deutsch"),
+                                            ("es", "🇪🇸 Español"),
+                                            ("it", "🇮🇹 Italiano"),
+                                            ("pt", "🇵🇹 Português"),
+                                            ("ru", "🇷🇺 Русский"),
+                                            ("ja", "🇯🇵 日本語"),
+                                            ("zh", "🇨🇳 中文"),
+                                        ];
+
+                                        for (code, label) in options {
+                                            let is_selected = selected_lang == code;
+                                            let btn = ui.selectable_label(is_selected, label);
+                                            let btn_id = ui.make_persistent_id(format!("dwell_lang_{code}"));
+                                            if apply_dwell_to_response(ui, &mut self.dwell_state, btn_id, &btn) {
+                                                selected_lang = code.to_string();
+                                            }
+                                        }
+                                    });
+                                    if selected_lang != self.app_language {
+                                        self.set_app_language(&selected_lang);
+                                        ctx.request_repaint();
+                                    }
+
+                                    ui.add_space(8.0);
+                                    ui.separator();
+                                    ui.add_space(6.0);
+
+                                    ui.horizontal(|ui| {
+                                        if ui.button(t!("ui.btn_close")).clicked() {
+                                            self.show_api_key_modal = false;
+                                        }
+                                        ui.label(
+                                            egui::RichText::new(t!("ui.language_voice_tip"))
+                                                .size(10.0)
+                                                .color(theme.text_secondary),
+                                        );
+                                    });
                                 }
                             }
                         });
@@ -6268,9 +6216,7 @@ async fn call_llm_prompt(
     }
 }
 
-fn main() -> eframe::Result<()> {
-    // Si l'application est lancée au démarrage de Windows (CWD = System32),
-    // repositionner le répertoire courant sur le dossier du projet ou de l'exécutable.
+fn fix_startup_working_directory() {
     if let Ok(cwd) = std::env::current_dir() {
         let cwd_str = cwd.to_string_lossy().to_lowercase();
         if cwd_str.contains("system32") || cwd_str.contains("syswow64") {
@@ -6283,31 +6229,24 @@ fn main() -> eframe::Result<()> {
             }
         }
     }
+}
 
-    let (event_tx, event_rx) = channel::<AgentEvent>();
-    let (cmd_tx, mut cmd_rx) = unbounded_channel::<AgentCommand>();
-    let initial_voice = resolve_initial_voice();
-    let tts_tx = spawn_tts_worker(event_tx.clone(), initial_voice);
-    let (twitch_ch_tx, twitch_ch_rx) = channel::<String>();
-    spawn_twitch_worker(event_tx.clone(), twitch_ch_rx);
-    let llm_config = resolve_llm_config();
-    let audio_tx = spawn_audio_worker(event_tx.clone(), llm_config.api_key.clone());
-
-    let initial_twitch_channel = std::env::var("TWITCH_CHANNEL").unwrap_or_default();
-
-    #[cfg(windows)]
-    automation::install_switch_keyboard_hook();
-
-    // Horloge d'analyse périodique d'écran toutes les 60 secondes
-    let periodic_cmd_tx = cmd_tx.clone();
+fn spawn_periodic_screen_monitor(cmd_tx: UnboundedSender<AgentCommand>) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(60));
-            let _ = periodic_cmd_tx.send(AgentCommand::PeriodicScreenCheck);
+            let _ = cmd_tx.send(AgentCommand::PeriodicScreenCheck);
         }
     });
+}
 
-    // Runtime Tokio en arrière-plan pour requêter le fournisseur LLM
+fn spawn_agent_backend(
+    mut cmd_rx: UnboundedReceiver<AgentCommand>,
+    cmd_tx: UnboundedSender<AgentCommand>,
+    event_tx: StdSender<AgentEvent>,
+    tts_tx: StdSender<TtsCommand>,
+    llm_config: LlmConfig,
+) {
     let bg_llm_config = llm_config.clone();
     let bg_tts_tx = tts_tx.clone();
     let scheduler_cmd_tx = cmd_tx.clone();
@@ -6614,7 +6553,7 @@ fn main() -> eframe::Result<()> {
                             send_hotkey(&[windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x11)], windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x5A));
                             #[cfg(not(windows))]
                             let _ = std::process::Command::new("xdotool").args(["key", "ctrl+z"]).status();
-                            "Dernière action annulée.".to_string()
+                            t!("commands.last_action_undone").to_string()
                         };
                         let _ = event_tx.send(AgentEvent::ReplaceNarration {
                             text: feedback.clone(),
@@ -6627,7 +6566,17 @@ fn main() -> eframe::Result<()> {
             }
         });
     });
+}
 
+fn run_overlay_gui(
+    event_rx: Receiver<AgentEvent>,
+    cmd_tx: UnboundedSender<AgentCommand>,
+    tts_tx: StdSender<TtsCommand>,
+    audio_tx: StdSender<AudioCommand>,
+    twitch_ch_tx: StdSender<String>,
+    initial_twitch_channel: String,
+    initial_voice: VoiceGender,
+) -> eframe::Result<()> {
     // Fenêtre transparente compacte, ferrée en bas à droite
     let mut viewport = egui::ViewportBuilder::default()
         .with_decorations(false)
@@ -6662,5 +6611,36 @@ fn main() -> eframe::Result<()> {
                 initial_voice,
             )))
         }),
+    )
+}
+
+fn main() -> eframe::Result<()> {
+    fix_startup_working_directory();
+
+    let (event_tx, event_rx) = channel::<AgentEvent>();
+    let (cmd_tx, cmd_rx) = unbounded_channel::<AgentCommand>();
+    let initial_voice = resolve_initial_voice();
+    let tts_tx = spawn_tts_worker(event_tx.clone(), initial_voice);
+    let (twitch_ch_tx, twitch_ch_rx) = channel::<String>();
+    spawn_twitch_worker(event_tx.clone(), twitch_ch_rx);
+    let llm_config = resolve_llm_config();
+    let audio_tx = spawn_audio_worker(event_tx.clone(), llm_config.api_key.clone());
+
+    let initial_twitch_channel = std::env::var("TWITCH_CHANNEL").unwrap_or_default();
+
+    #[cfg(windows)]
+    automation::install_switch_keyboard_hook();
+
+    spawn_periodic_screen_monitor(cmd_tx.clone());
+    spawn_agent_backend(cmd_rx, cmd_tx.clone(), event_tx.clone(), tts_tx.clone(), llm_config.clone());
+
+    run_overlay_gui(
+        event_rx,
+        cmd_tx,
+        tts_tx,
+        audio_tx,
+        twitch_ch_tx,
+        initial_twitch_channel,
+        initial_voice,
     )
 }

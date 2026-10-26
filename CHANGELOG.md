@@ -5,6 +5,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [0.6.3] - 2026-11-02
+
+### 🌐 Full Multilingual Localization & Internationalization (`main.rs`, `locales/`)
+- **Native `rust_i18n` Engine Integration**:
+  - Embedded compile-time internationalization engine (`i18n!("locales", fallback = "en")`) supporting key-based translations (`t!(...)`).
+  - Comprehensive UI text externalization across tabs, action buttons, tooltips, dialogs, status badges, contextual menus, and floating card narrator actions.
+  - **System & Automation Commands Internationalization (`commands.*`, `roles.*`)**:
+    - Externalized all element role descriptions (*button, link, input field, textarea, tab, text reader, checkbox, dropdown, slider, media*).
+    - Localized spoken target narration, badge feedback, and search failure alerts.
+    - Fully localized quick action suggestions (*"Disable dictation"*, *"Clear text"*, *"Close badges"*, *"Scroll down"*).
+    - Localized execution feedbacks for undo actions, context memory clearing, scheduled task cancellations, and screen analysis prompts.
+    - Replaced hardcoded multilingual helper routines (`localized_speech`) with direct compiled `t!(...)` calls.
+    - **Theme Profiles Internationalization (`themes.*`)**: Fully translated theme display names and accessibility descriptions across the settings combo-box and live preview cards for all 9 supported languages.
+  - Dynamic system language detection (`get_system_locale_language`) with precedence resolution: `.env` / `APP_LANG` variable ➔ Win32 `GetUserDefaultLocaleName` ➔ POSIX `LC_ALL` / `LC_MESSAGES` / `LANG`.
+  - Real-time voice-driven language switching: speak commands like *"passer en anglais"*, *"switch to english"*, *"passer en français"*, *"auf deutsch"*, *"en español"*, *"in italiano"*, *"em português"*, *"по-русски"*, *"日本語"*, or *"中文"*.
+
+### ⚙️ Dedicated Language Settings Tab (`main.rs`, `theme.rs`)
+- **Interactive Language Configuration Modal (`SettingsTab::Language`)**:
+  - Added a dedicated **Language** tab in the main settings modal alongside *LLM Provider* and *Theme*.
+  - Visual language selector supporting 10 options:
+    - `auto`: System Default (Auto-detect)
+    - `fr`: 🇫🇷 Français
+    - `en`: 🇬🇧 English
+    - `de`: 🇩🇪 Deutsch
+    - `es`: 🇪🇸 Español
+    - `it`: 🇮🇹 Italiano
+    - `pt`: 🇵🇹 Português
+    - `ru`: 🇷🇺 Русский
+    - `ja`: 🇯🇵 日本語
+    - `zh`: 🇨🇳 中文
+  - Accessibility-compliant: compatible with direct mouse clicks and dwell-pointer triggers (`apply_dwell_to_response`).
+  - Instant locale re-indexing and persistence into `.env` (`APP_LANG=<locale>`).
+
+### 🔔 Locales & Acoustic Feedback / Earcons (`audio.rs`, `main.rs`)
+- **Refined Auditory Cues (Earcons)**:
+  - Added and refined acoustic notifications for language changes, microphone state transitions, and setting commits.
+  - Non-visual auditory feedback confirming language adjustments in real-time without visual focus interruption.
+
+### 📖 Documentation & Localization Guides (`README.md`)
+- **Updated README & Accessibility Guides**:
+  - Documented multilingual voice controls and automatic locale detection.
+  - Updated setup steps and feature descriptions to reflect cross-language voice accessibility and WCAG AAA compliance.
+
+---
 ## [0.6.2] - 2026-10-31
 
 ### 🔍 Dynamic Adaptive Zoom & Multi-Viewport Synchronization (`main.rs`, `floating_window.rs`, `overlay.rs`)

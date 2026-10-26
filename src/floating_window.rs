@@ -524,14 +524,14 @@ impl FloatingCard {
                             ui.add_space(8.0);
                             let read_btn = ui.add(
                                 egui::Button::new(
-                                    egui::RichText::new("🔊 Lire")
+                                    egui::RichText::new(t!("ui.card_read_button"))
                                         .size(10.5)
                                         .color(theme.text_user)
                                         .strong(),
                                 )
                                 .small()
                                 .corner_radius(egui::CornerRadius::same(4)),
-                            ).on_hover_text("Faire lire le contenu et les interactions possibles par le narrateur");
+                            ).on_hover_text(t!("ui.card_read_tooltip"));
                             let read_btn_id = ui.make_persistent_id(format!("dwell_read_card_{}", self.id));
                             if apply_dwell_to_response(ui, dwell_state, read_btn_id, &read_btn) {
                                 dwell_state.lock_id(read_btn_id, std::time::Duration::from_secs(6));
@@ -555,7 +555,7 @@ impl FloatingCard {
 
                                 let copy_btn = ui.add(
                                     egui::Button::new(
-                                        egui::RichText::new("📋 Copier tout")
+                                        egui::RichText::new(t!("ui.card_copy_all_btn"))
                                             .size(10.5)
                                             .color(theme.accent_text),
                                     )
@@ -576,7 +576,7 @@ impl FloatingCard {
                                 egui::RichText::new("✕")
                                     .size(12.5)
                                     .color(egui::Color32::from_rgb(255, 130, 130)),
-                            ).on_hover_text("Fermer cette fenêtre volante");
+                            ).on_hover_text(t!("ui.btn_close"));
                             let close_id = ui.make_persistent_id(format!("dwell_close_card_{}", self.id));
                             if apply_dwell_to_response(ui, dwell_state, close_id, &close_btn) {
                                 self.open = false;
@@ -587,7 +587,7 @@ impl FloatingCard {
                                 egui::RichText::new(max_icon)
                                     .size(11.0)
                                     .color(theme.text_secondary),
-                            ).on_hover_text(if is_maximized { "Restaurer" } else { "Agrandir" });
+                            ).on_hover_text(if is_maximized { t!("ui.btn_restore") } else { t!("ui.btn_maximize") });
                             let max_id = ui.make_persistent_id(format!("dwell_max_card_{}", self.id));
                             if apply_dwell_to_response(ui, dwell_state, max_id, &max_btn) {
                                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
@@ -849,7 +849,7 @@ impl FloatingCard {
                                                 form_submitted = true;
                                             }
 
-                                            let cancel_resp = ui.button("Annuler");
+                                            let cancel_resp = ui.button(t!("ui.btn_cancel"));
                                             let cancel_id = ui.make_persistent_id(format!("dwell_form_cancel_{}", self.id));
                                             if apply_dwell_to_response(ui, dwell_state, cancel_id, &cancel_resp) {
                                                 close_window = true;
