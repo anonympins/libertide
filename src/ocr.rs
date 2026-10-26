@@ -91,8 +91,8 @@ pub fn capture_window_rgba(hwnd: HWND, rect: [i32; 4]) -> Option<(Vec<u8>, u32, 
         );
 
         SelectObject(hdc_mem, old_bm);
-        DeleteObject(hbm);
-        DeleteDC(hdc_mem);
+        let _ = DeleteObject(hbm);
+        let _ = DeleteDC(hdc_mem);
         ReleaseDC(HWND(std::ptr::null_mut()), hdc_screen);
 
         if lines > 0 {

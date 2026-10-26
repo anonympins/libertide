@@ -59,8 +59,14 @@ pub struct OverlayApp {
     last_trackball_input: Instant,
 
     // Accessibilité : Ciblage par numéros & Mode contacteur unique (Switch Access)
+    all_numbered_targets: Vec<NumberedElementTarget>,
+    numbered_chunk_index: usize,
     numbered_targets: Vec<NumberedElementTarget>,
     show_numbered_targets: bool,
+    numbered_last_refresh: Instant,
+    numbered_last_hwnd: Option<isize>,
+    numbered_last_win_rect: Option<[i32; 4]>,
+    numbered_focus_index: Option<usize>,
     switch_access_mode: bool,
     switch_step: SwitchAccessStep,
     switch_windows: Vec<SwitchWindowTarget>,
@@ -114,6 +120,137 @@ pub struct OverlayApp {
     // Suggestions d'applications en direct (PATH & Levenshtein)
     input_suggestions: Vec<String>,
     last_suggestion_query: String,
+}
+
+fn extract_badge_number(text: &str) -> Option<usize> {
+    let lower = text.trim().to_lowercase();
+    let clean = lower
+        .trim_start_matches('#')
+        .trim_start_matches("n°")
+        .trim_start_matches("no.")
+        .trim_start_matches("no ")
+        .trim();
+
+    if let Ok(n) = clean.parse::<usize>() {
+        return Some(n);
+    }
+
+    match clean {
+        "un" => return Some(1),
+        "deux" => return Some(2),
+        "trois" => return Some(3),
+        "quatre" => return Some(4),
+        "cinq" => return Some(5),
+        "six" => return Some(6),
+        "sept" => return Some(7),
+        "huit" => return Some(8),
+        "neuf" => return Some(9),
+        "dix" => return Some(10),
+        "onze" => return Some(11),
+        "douze" => return Some(12),
+        "treize" => return Some(13),
+        "quatorze" => return Some(14),
+        "quinze" => return Some(15),
+        "seize" => return Some(16),
+        "dix-sept" => return Some(17),
+        "dix-huit" => return Some(18),
+        "dix-neuf" => return Some(19),
+        "vingt" => return Some(20),
+        _ => {}
+    }
+
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    let is_badge_command = words.len() <= 6
+        && (words.contains(&"badge")
+            || words.contains(&"badges")
+            || words.contains(&"numero")
+            || words.contains(&"numéro")
+            || words.contains(&"cible")
+            || words.contains(&"element")
+            || words.contains(&"élément")
+            || words.contains(&"clic")
+            || words.contains(&"clique")
+            || words.contains(&"cliquer")
+            || words.contains(&"click"));
+
+    if is_badge_command || words.len() <= 2 {
+        for word in words {
+            let w_clean = word
+                .trim_start_matches('#')
+                .trim_start_matches("n°")
+                .trim_start_matches("no.")
+                .trim_end_matches('.')
+                .trim_end_matches(',');
+            if let Ok(n) = w_clean.parse::<usize>() {
+                return Some(n);
+            }
+            match w_clean {
+                "un" => return Some(1),
+                "deux" => return Some(2),
+                "trois" => return Some(3),
+                "quatre" => return Some(4),
+                "cinq" => return Some(5),
+                "six" => return Some(6),
+                "sept" => return Some(7),
+                "huit" => return Some(8),
+                "neuf" => return Some(9),
+                "dix" => return Some(10),
+                "onze" => return Some(11),
+                "douze" => return Some(12),
+                "treize" => return Some(13),
+                "quatorze" => return Some(14),
+                "quinze" => return Some(15),
+                "seize" => return Some(16),
+                "dix-sept" => return Some(17),
+                "dix-huit" => return Some(18),
+                "dix-neuf" => return Some(19),
+                "vingt" => return Some(20),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn is_numbers_mode_toggle_command(norm: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "numeros", "numéros", "badges", "badge",
+        "click by number", "click by numbers", "clic par numero", "clic par numéro",
+        "mode numbers", "numbers", "number mode", "show numbers",
+        "stop numbers", "exit numbers", "quit numbers", "fermer les numeros", "fermer les numéros",
+        "fermer les badges", "ferme les badges", "ferme les numeros", "ferme les numéros",
+        "quitter les numeros", "quitter les numéros", "desactiver les numeros", "désactiver les numéros",
+    ];
+    if EXACT.iter().any(|&t| norm == t) {
+        return true;
+    }
+    let has_action = norm.contains("affiche")
+        || norm.contains("afficher")
+        || norm.contains("active")
+        || norm.contains("activer")
+        || norm.contains("mode")
+        || norm.contains("bascule")
+        || norm.contains("basculer")
+        || norm.contains("ferme")
+        || norm.contains("fermer")
+        || norm.contains("masque")
+        || norm.contains("masquer")
+        || norm.contains("cache")
+        || norm.contains("cacher")
+        || norm.contains("quitte")
+        || norm.contains("quitter")
+        || norm.contains("arrete")
+        || norm.contains("arrête")
+        || norm.contains("stop")
+        || norm.contains("desactive")
+        || norm.contains("désactive")
+        || norm.contains("desactiver")
+        || norm.contains("désactiver");
+    let has_target = norm.contains("numero")
+        || norm.contains("numéro")
+        || norm.contains("badge")
+        || norm.contains("numbers");
+    has_action && has_target
 }
 
 /// Détecte la langue principale du système d'exploitation de l'utilisateur
@@ -276,8 +413,14 @@ impl OverlayApp {
             dwell_state: DwellState::new(dwell_millis),
             last_trackball_input: Instant::now() - Duration::from_secs(1),
 
+            all_numbered_targets: Vec::new(),
+            numbered_chunk_index: 0,
             numbered_targets: Vec::new(),
             show_numbered_targets: false,
+            numbered_last_refresh: Instant::now(),
+            numbered_last_hwnd: None,
+            numbered_last_win_rect: None,
+            numbered_focus_index: None,
             switch_access_mode: false,
             switch_step: SwitchAccessStep::Windows,
             switch_windows: Vec::new(),
@@ -425,6 +568,12 @@ impl OverlayApp {
         self.dictation_mode = false;
         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
         cancel_all_scheduled_tasks();
+        self.show_numbered_targets = false;
+        self.all_numbered_targets.clear();
+        self.numbered_chunk_index = 0;
+        self.numbered_targets.clear();
+        self.numbered_focus_index = None;
+        clear_screen_numbered_badges();
         self.switch_access_mode = false;
         SWITCH_HOOK_ENABLED.store(false, Ordering::SeqCst);
         automation::reset_switch_keys();
@@ -734,6 +883,317 @@ impl OverlayApp {
             self.stop_recording();
         } else {
             self.start_recording(ctx, true);
+        }
+    }
+
+    pub const BADGES_CHUNK_SIZE: usize = 150;
+
+    pub fn is_next_chunk_command(norm: &str) -> bool {
+        norm.contains("prochain")
+            || norm.contains("suivant")
+            || norm.contains("suite")
+            || norm.contains("next")
+            || norm.contains("100")
+            || norm.contains("50")
+            || norm.contains("50")
+            || norm.contains("plus")
+    }
+
+    pub fn is_prev_chunk_command(norm: &str) -> bool {
+        norm.contains("precedent")
+            || norm.contains("précédent")
+            || norm.contains("retour")
+            || norm.contains("previous")
+            || norm.contains("avant")
+    }
+
+    pub fn apply_numbered_chunk(&mut self, chunk_idx: usize, focus_last: bool) {
+        if self.all_numbered_targets.is_empty() {
+            self.numbered_targets.clear();
+            self.numbered_focus_index = None;
+            return;
+        }
+        let total = self.all_numbered_targets.len();
+        let num_chunks = (total + Self::BADGES_CHUNK_SIZE - 1) / Self::BADGES_CHUNK_SIZE;
+        let safe_chunk = chunk_idx % num_chunks;
+        self.numbered_chunk_index = safe_chunk;
+
+        let start = safe_chunk * Self::BADGES_CHUNK_SIZE;
+        let end = (start + Self::BADGES_CHUNK_SIZE).min(total);
+        self.numbered_targets = self.all_numbered_targets[start..end].to_vec();
+
+        let new_focus = if focus_last {
+            self.numbered_targets.len().saturating_sub(1)
+        } else {
+            0
+        };
+        self.numbered_focus_index = Some(new_focus);
+        clear_screen_numbered_badges();
+    }
+
+    pub fn next_numbered_chunk(&mut self) {
+        if self.all_numbered_targets.is_empty() {
+            return;
+        }
+        let total = self.all_numbered_targets.len();
+        let num_chunks = (total + Self::BADGES_CHUNK_SIZE - 1) / Self::BADGES_CHUNK_SIZE;
+        let next_chunk = (self.numbered_chunk_index + 1) % num_chunks;
+        self.apply_numbered_chunk(next_chunk, false);
+        play_earcon(Earcon::Success);
+
+        let start_num = self.numbered_chunk_index * Self::BADGES_CHUNK_SIZE + 1;
+        let end_num = (start_num + self.numbered_targets.len()).saturating_sub(1);
+        let announce = format!("Badges {start_num} à {end_num} sur {total}.");
+        let _ = self.tts_sender.send(TtsCommand::Stop);
+        let _ = self.tts_sender.send(TtsCommand::Speak(announce));
+        if let Some(target) = self.numbered_targets.first() {
+            self.narrate_numbered_target(&target.clone());
+        }
+    }
+
+    pub fn prev_numbered_chunk(&mut self) {
+        if self.all_numbered_targets.is_empty() {
+            return;
+        }
+        let total = self.all_numbered_targets.len();
+        let num_chunks = (total + Self::BADGES_CHUNK_SIZE - 1) / Self::BADGES_CHUNK_SIZE;
+        let prev_chunk = if self.numbered_chunk_index == 0 {
+            num_chunks.saturating_sub(1)
+        } else {
+            self.numbered_chunk_index - 1
+        };
+        self.apply_numbered_chunk(prev_chunk, true);
+        play_earcon(Earcon::Success);
+
+        let start_num = self.numbered_chunk_index * Self::BADGES_CHUNK_SIZE + 1;
+        let end_num = (start_num + self.numbered_targets.len()).saturating_sub(1);
+        let announce = format!("Badges {start_num} à {end_num} sur {total}.");
+        let _ = self.tts_sender.send(TtsCommand::Stop);
+        let _ = self.tts_sender.send(TtsCommand::Speak(announce));
+        if let Some(target) = self.numbered_targets.last() {
+            self.narrate_numbered_target(&target.clone());
+        }
+    }
+
+    pub fn toggle_numbered_targets_mode(&mut self, ctx: &egui::Context, force: Option<bool>) {
+        let new_state = force.unwrap_or(!self.show_numbered_targets);
+        if !new_state {
+            self.show_numbered_targets = false;
+            self.all_numbered_targets.clear();
+            self.numbered_chunk_index = 0;
+            self.numbered_targets.clear();
+            self.numbered_focus_index = None;
+            self.numbered_last_hwnd = None;
+            self.numbered_last_win_rect = None;
+            clear_screen_numbered_badges();
+            if !self.switch_access_mode {
+                SWITCH_HOOK_ENABLED.store(false, Ordering::SeqCst);
+                automation::reset_switch_keys();
+            }
+            play_earcon(Earcon::MicClose);
+            let msg = "Mode numéros désactivé.".to_string();
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: msg.clone(),
+                timestamp: current_time_str(),
+                quick_suggestions: Vec::new(),
+                screen_size_kb: None,
+            });
+            let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+        } else {
+            self.all_numbered_targets = collect_numbered_targets_for_active_window();
+            self.numbered_chunk_index = 0;
+            self.apply_numbered_chunk(0, false);
+            self.show_numbered_targets = !self.all_numbered_targets.is_empty();
+            self.numbered_last_refresh = Instant::now();
+            #[cfg(windows)]
+            {
+                let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+                self.numbered_last_hwnd = if !fg.0.is_null() { Some(fg.0 as isize) } else { None };
+                let mut r = windows::Win32::Foundation::RECT::default();
+                if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(fg, &mut r).is_ok() } {
+                    self.numbered_last_win_rect = Some([r.left, r.top, r.right, r.bottom]);
+                } else {
+                    self.numbered_last_win_rect = None;
+                }
+            }
+            SWITCH_HOOK_ENABLED.store(true, Ordering::SeqCst);
+            play_earcon(Earcon::Success);
+            let count = self.all_numbered_targets.len();
+            let chunk_count = self.numbered_targets.len();
+            let msg = if count > 0 {
+                if let Some(first) = self.numbered_targets.first() {
+                    let role_desc = if first.name.is_empty() {
+                        first.role.clone()
+                    } else {
+                        format!("{}, {}", first.name, first.role)
+                    };
+                    if count > Self::BADGES_CHUNK_SIZE {
+                        format!("{count} éléments détectés. Affichage des {chunk_count} premiers badges (1 à {chunk_count}). Numéro 1 : {role_desc}.")
+                    } else {
+                        format!("{count} badges affichés. Numéro 1 : {role_desc}.")
+                    }
+                } else {
+                    format!("{count} badges affichés. Naviguez avec le contacteur ou dites un numéro.")
+                }
+            } else {
+                "Aucun élément interactif détecté sur la fenêtre active.".to_string()
+            };
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: msg.clone(),
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Fermer les numéros".to_string())],
+                screen_size_kb: None,
+            });
+            let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+            if let Some(first) = self.numbered_targets.first() {
+                focus_element_target(first);
+            }
+        }
+        ctx.request_repaint();
+    }
+
+    pub fn narrate_numbered_target(&mut self, target: &NumberedElementTarget) {
+        #[cfg(windows)]
+        {
+            if let Some(wid) = target.window_id {
+                let hwnd = windows::Win32::Foundation::HWND(wid as _);
+                if !hwnd.0.is_null() && !is_window_hung(hwnd) {
+                    force_foreground_window(hwnd);
+                    restore_if_iconic(hwnd);
+                }
+            }
+            focus_element_target(target);
+            draw_screen_control_border(target.rect, target.role == "lecture textuelle");
+        }
+        #[cfg(not(windows))]
+        {
+            focus_element_target(target);
+        }
+
+        let role_label = match target.role.as_str() {
+            "bouton" | "button" => "bouton",
+            "lien" | "link" => "lien",
+            "champ de saisie" | "input" => "champ de saisie",
+            "zone de texte" | "textarea" => "zone de texte",
+            "onglet" | "tab" => "onglet",
+            "lecture textuelle" => "lecture de texte",
+            "étiquette" | "label" => "texte",
+            "case à cocher" | "checkbox" => "case à cocher",
+            "liste déroulante" | "select" | "combobox" => "liste déroulante",
+            "curseur" | "slider" => "curseur",
+            "lecteur multimédia" | "media" => "lecteur multimédia",
+            other => other,
+        };
+
+        let speech = if target.name.trim().is_empty() {
+            format!("Numéro {} : {}", target.index, role_label)
+        } else if target.value.trim().is_empty() {
+            format!("Numéro {} : {}, {}", target.index, target.name.trim(), role_label)
+        } else {
+            format!("Numéro {} : {}, {}, valeur : {}", target.index, target.name.trim(), role_label, target.value.trim())
+        };
+
+        let _ = self.tts_sender.send(TtsCommand::Stop);
+        let _ = self.tts_sender.send(TtsCommand::Speak(speech));
+    }
+
+    pub fn click_numbered_target_by_index(&mut self, idx: usize) {
+        if self.all_numbered_targets.is_empty() {
+            self.all_numbered_targets = collect_numbered_targets_for_active_window();
+            self.apply_numbered_chunk(0, false);
+        }
+        let found_target = self.all_numbered_targets.iter().find(|t| t.index == idx).cloned()
+            .or_else(|| self.numbered_targets.iter().find(|t| t.index == idx).cloned());
+        if let Some(target) = found_target {
+            let chunk = target.index.saturating_sub(1) / Self::BADGES_CHUNK_SIZE;
+            if chunk != self.numbered_chunk_index {
+                self.apply_numbered_chunk(chunk, false);
+            }
+            #[cfg(windows)]
+            {
+                clear_screen_numbered_badges();
+                if let Some(wid) = target.window_id {
+                    let hwnd = windows::Win32::Foundation::HWND(wid as _);
+                    if !hwnd.0.is_null() && !is_window_hung(hwnd) {
+                        force_foreground_window(hwnd);
+                        restore_if_iconic(hwnd);
+                    }
+                }
+                let pt = windows::Win32::Foundation::POINT { x: target.click_x, y: target.click_y };
+                unsafe {
+                    let target_child = windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt);
+                    if !target_child.is_invalid() {
+                        let root = windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+                            target_child,
+                            windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+                        );
+                        let top_hwnd = if !root.is_invalid() { root } else { target_child };
+                        force_foreground_window(top_hwnd);
+                        restore_if_iconic(top_hwnd);
+                    }
+                }
+                let mut uia_elem = None;
+                let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) };
+                if let Ok(automation) = unsafe {
+                    windows::Win32::System::Com::CoCreateInstance::<_, windows::Win32::UI::Accessibility::IUIAutomation>(
+                        &windows::Win32::UI::Accessibility::CUIAutomation,
+                        None,
+                        windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
+                    )
+                } {
+                    if let Ok(elem) = unsafe { automation.ElementFromPoint(pt) } {
+                        uia_elem = Some(elem);
+                    }
+                }
+                ui::click_element(target.click_x, target.click_y, uia_elem.as_ref(), None);
+            }
+            #[cfg(not(windows))]
+            {
+                clear_screen_numbered_badges();
+                ui::click_element(target.click_x, target.click_y, None, None);
+            }
+            play_earcon(Earcon::Success);
+            let target_desc = if !target.name.is_empty() {
+                format!("Clic sur le numéro {} ({})", idx, target.name)
+            } else {
+                format!("Clic sur le numéro {}", idx)
+            };
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: target_desc.clone(),
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Fermer les numéros".to_string())],
+                screen_size_kb: None,
+            });
+            let _ = self.tts_sender.send(TtsCommand::Speak(target_desc));
+
+            // Laisser le temps à l'application cible de réagir au clic (navigation, menu, etc.)
+            std::thread::sleep(Duration::from_millis(250));
+
+            // Régénération automatique des numéros/badges après le clic pour enchaîner
+            self.all_numbered_targets = collect_numbered_targets_for_active_window();
+            self.show_numbered_targets = !self.all_numbered_targets.is_empty();
+            self.apply_numbered_chunk(self.numbered_chunk_index, false);
+            clear_screen_numbered_badges();
+        } else {
+            let max_idx = self.all_numbered_targets.iter().map(|t| t.index).max()
+                .or_else(|| self.numbered_targets.iter().map(|t| t.index).max())
+                .unwrap_or(0);
+            let msg = if max_idx > 0 {
+                format!("Numéro {idx} introuvable parmi les badges affichés (1 à {max_idx}).")
+            } else {
+                format!("Numéro {idx} introuvable : aucun badge affiché.")
+            };
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: msg.clone(),
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Fermer les numéros".to_string())],
+                screen_size_kb: None,
+            });
+            let _ = self.tts_sender.send(TtsCommand::Speak(msg));
         }
     }
 }
@@ -1087,75 +1547,48 @@ impl eframe::App for OverlayApp {
                     }
 
                     // Bascule / activation du ciblage par numéros
-                    if norm_prompt == "numeros" || norm_prompt == "numéros" || norm_prompt == "badges" || norm_prompt == "afficher les numeros" || norm_prompt == "click by number" {
-                        self.numbered_targets = collect_numbered_targets_for_active_window();
-                        self.show_numbered_targets = !self.numbered_targets.is_empty();
-                        play_earcon(Earcon::Success);
+                    if is_numbers_mode_toggle_command(&norm_prompt) {
+                        self.toggle_numbered_targets_mode(&ctx, None);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx, false);
                         }
                         return;
                     }
 
+                    // Demande vocale des 50 prochains badges ou des badges précédents
+                    if self.show_numbered_targets {
+                        if Self::is_next_chunk_command(&norm_prompt) {
+                            self.next_numbered_chunk();
+                            if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                                self.start_recording(&ctx, false);
+                            }
+                            return;
+                        }
+                        if Self::is_prev_chunk_command(&norm_prompt) {
+                            self.prev_numbered_chunk();
+                            if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                                self.start_recording(&ctx, false);
+                            }
+                            return;
+                        }
+                    }
+
                     // Sélection directe d'un badge numéroté
                     if self.show_numbered_targets {
-                        let parsed_idx = match norm_prompt.as_str() {
-                            "un" | "1" => Some(1),
-                            "deux" | "2" => Some(2),
-                            "trois" | "3" => Some(3),
-                            "quatre" | "4" => Some(4),
-                            "cinq" | "5" => Some(5),
-                            "six" | "6" => Some(6),
-                            "sept" | "7" => Some(7),
-                            "huit" | "8" => Some(8),
-                            "neuf" | "9" => Some(9),
-                            "dix" | "10" => Some(10),
-                            other => other.split_whitespace().find_map(|s| s.parse::<usize>().ok()),
-                        };
+                        let parsed_idx = extract_badge_number(&norm_prompt);
                         if let Some(idx) = parsed_idx {
-                            if let Some(target) = self.numbered_targets.iter().find(|t| t.index == idx) {
-                                #[cfg(windows)]
-                                {
-                                    let pt = windows::Win32::Foundation::POINT { x: target.click_x, y: target.click_y };
-                                    unsafe {
-                                        let target_child = windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt);
-                                        if !target_child.is_invalid() {
-                                            let root = windows::Win32::UI::WindowsAndMessaging::GetAncestor(
-                                                target_child,
-                                                windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
-                                            );
-                                            let top_hwnd = if !root.is_invalid() { root } else { target_child };
-                                            force_foreground_window(top_hwnd);
-                                            restore_if_iconic(top_hwnd);
-                                        }
-                                    }
-                                    let mut uia_elem = None;
-                                    let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) };
-                                    if let Ok(automation) = unsafe {
-                                        windows::Win32::System::Com::CoCreateInstance::<_, windows::Win32::UI::Accessibility::IUIAutomation>(
-                                            &windows::Win32::UI::Accessibility::CUIAutomation,
-                                            None,
-                                            windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
-                                        )
-                                    } {
-                                        if let Ok(elem) = unsafe { automation.ElementFromPoint(pt) } {
-                                            uia_elem = Some(elem);
-                                        }
-                                    }
-                                    ui::click_element(target.click_x, target.click_y, uia_elem.as_ref(), None);
-                                }
-                                #[cfg(not(windows))]
-                                {
-                                    ui::click_element(target.click_x, target.click_y, None, None);
-                                }
-                                play_earcon(Earcon::Success);
-                                self.show_numbered_targets = false;
-                                self.numbered_targets.clear();
-                                if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
-                                    self.start_recording(&ctx, false);
-                                }
-                                return;
+                            self.chat_history.push(ChatEntry {
+                                role: ChatRole::User,
+                                text: prompt,
+                                timestamp: current_time_str(),
+                                quick_suggestions: Vec::new(),
+                                screen_size_kb: None,
+                            });
+                            self.click_numbered_target_by_index(idx);
+                            if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                                self.start_recording(&ctx, false);
                             }
+                            return;
                         }
                     }
 
@@ -1562,6 +1995,18 @@ impl eframe::App for OverlayApp {
                     ctx.request_repaint();
                     ctx.request_repaint_of(vp_id);
                 }   
+                AgentEvent::ToggleNumberedTargets(opt_enabled) => {
+                    self.toggle_numbered_targets_mode(&ctx, opt_enabled);
+                }
+                AgentEvent::ClickNumberedTarget(idx) => {
+                    self.click_numbered_target_by_index(idx);
+                }
+                AgentEvent::NextNumberedChunk => {
+                    self.next_numbered_chunk();
+                }
+                AgentEvent::PreviousNumberedChunk => {
+                    self.prev_numbered_chunk();
+                }
                 AgentEvent::NavigationZonesReady { window_id, window_title, summary, zones } => {
                     self.window_analysis_cache.insert(window_id, CachedWindowAnalysis {
                         summary: summary.clone(),
@@ -1635,6 +2080,16 @@ impl eframe::App for OverlayApp {
             self.last_switch_input = Instant::now();
             if self.status == AgentStatus::Speaking {
                 self.stop_speaking();
+            } else if self.show_numbered_targets {
+                self.show_numbered_targets = false;
+                self.numbered_targets.clear();
+                self.numbered_focus_index = None;
+                clear_screen_numbered_badges();
+                if !self.switch_access_mode {
+                    SWITCH_HOOK_ENABLED.store(false, Ordering::SeqCst);
+                    automation::reset_switch_keys();
+                }
+                play_earcon(Earcon::MicClose);
             } else if self.dictation_mode {
                 self.exit_dictation_mode();
             } else if self.switch_access_mode {
@@ -1722,8 +2177,164 @@ impl eframe::App for OverlayApp {
             }
         }
 
+        // Actualisation automatique avec debounce (400 ms) pour le mode numéros (UIA + OCR)
+        if self.show_numbered_targets && !self.dictation_mode && !self.switch_access_mode {
+            #[cfg(windows)]
+            {
+                let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+                let mut r = windows::Win32::Foundation::RECT::default();
+                let has_rect = unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(fg, &mut r).is_ok() };
+
+                let cur_rect = if has_rect { Some([r.left, r.top, r.right, r.bottom]) } else { None };
+                let cur_hwnd_id = if !fg.0.is_null() { Some(fg.0 as isize) } else { None };
+
+                let win_changed = cur_hwnd_id != self.numbered_last_hwnd;
+                let rect_changed = cur_rect != self.numbered_last_win_rect;
+                let debounce_passed = self.numbered_last_refresh.elapsed() >= Duration::from_millis(400);
+
+                if (win_changed || rect_changed || debounce_passed) && !is_window_hung(fg) {
+                    self.numbered_last_refresh = Instant::now();
+                    self.numbered_last_hwnd = cur_hwnd_id;
+                    self.numbered_last_win_rect = cur_rect;
+
+                    let previous = self.all_numbered_targets.clone();
+                    let mut updated = collect_numbered_targets_for_active_window();
+                    if !updated.is_empty() {
+                        reconcile_numbered_targets(&mut updated, &previous);
+                        if updated != self.all_numbered_targets {
+                            clear_screen_numbered_badges();
+                            self.all_numbered_targets = updated;
+                            self.apply_numbered_chunk(self.numbered_chunk_index, false);
+                        }
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                if self.numbered_last_refresh.elapsed() >= Duration::from_millis(500) {
+                    self.numbered_last_refresh = Instant::now();
+                    let previous = self.all_numbered_targets.clone();
+                    let mut updated = collect_numbered_targets_for_active_window();
+                    if !updated.is_empty() {
+                        reconcile_numbered_targets(&mut updated, &previous);
+                        if updated != self.all_numbered_targets {
+                            clear_screen_numbered_badges();
+                            self.all_numbered_targets = updated;
+                            self.apply_numbered_chunk(self.numbered_chunk_index, false);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Navigation et narration au contacteur ou au clavier en mode numéros
+        if self.show_numbered_targets && !self.numbered_targets.is_empty() && !is_typing {
+            let is_shift = ctx.input(|i| i.modifiers.shift);
+            let egui_enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+            let egui_space = ctx.input(|i| i.key_pressed(egui::Key::Space));
+            let egui_tab = ctx.input(|i| i.key_pressed(egui::Key::Tab));
+            let egui_nav_next = ctx.input(|i| {
+                i.key_pressed(egui::Key::ArrowRight)
+                    || i.key_pressed(egui::Key::ArrowDown)
+                    || i.key_pressed(egui::Key::Num2)
+                    || i.key_pressed(egui::Key::Num6)
+            }) || (egui_tab && !is_shift);
+            let egui_nav_prev = ctx.input(|i| {
+                i.key_pressed(egui::Key::ArrowLeft)
+                    || i.key_pressed(egui::Key::ArrowUp)
+                    || i.key_pressed(egui::Key::Num3)
+                    || i.key_pressed(egui::Key::Num4)
+            }) || (egui_tab && is_shift);
+
+            let hook_enter_or_space = hook_events.contains(&SwitchKeyEvent::Select);
+            let hook_nav_next = hook_events.contains(&SwitchKeyEvent::Next);
+            let hook_nav_prev = hook_events.contains(&SwitchKeyEvent::Prev);
+
+            let switch_input_hit = (egui_enter || egui_space || hook_enter_or_space)
+                && self.last_switch_input.elapsed() >= Duration::from_millis(180);
+
+            let nav_next_hit = (egui_nav_next || hook_nav_next)
+                && self.last_switch_input.elapsed() >= Duration::from_millis(150);
+            let nav_prev_hit = (egui_nav_prev || hook_nav_prev)
+                && self.last_switch_input.elapsed() >= Duration::from_millis(150);
+
+            // Accès direct en tapant le chiffre au clavier (touches 1 à 9)
+            let direct_digit = ctx.input(|i| {
+                let digit_keys = [
+                    (egui::Key::Num1, 1), (egui::Key::Num2, 2), (egui::Key::Num3, 3),
+                    (egui::Key::Num4, 4), (egui::Key::Num5, 5), (egui::Key::Num6, 6),
+                    (egui::Key::Num7, 7), (egui::Key::Num8, 8), (egui::Key::Num9, 9),
+                ];
+                for (k, n) in digit_keys {
+                    if i.key_pressed(k) {
+                        return Some(n);
+                    }
+                }
+                None
+            });
+
+            if egui_enter || egui_space || egui_tab || egui_nav_next || egui_nav_prev {
+                ctx.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Space);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                    i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Num6);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Num4);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Num2);
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Num3);
+                });
+            }
+
+            let num_targets = self.numbered_targets.len();
+            if let Some(digit) = direct_digit {
+                if let Some(pos) = self.numbered_targets.iter().position(|t| t.index == digit) {
+                    self.numbered_focus_index = Some(pos);
+                    let target = self.numbered_targets[pos].clone();
+                    self.narrate_numbered_target(&target);
+                    ctx.request_repaint();
+                }
+            } else if nav_next_hit || nav_prev_hit {
+                self.last_switch_input = Instant::now();
+                let cur = self.numbered_focus_index.unwrap_or(0);
+                let total_all = self.all_numbered_targets.len();
+                let num_chunks = (total_all + Self::BADGES_CHUNK_SIZE - 1) / Self::BADGES_CHUNK_SIZE;
+
+                if nav_next_hit {
+                    if cur + 1 >= num_targets && num_chunks > 1 {
+                        self.next_numbered_chunk();
+                    } else {
+                        let next_idx = (cur + 1) % num_targets;
+                        self.numbered_focus_index = Some(next_idx);
+                        let target = self.numbered_targets[next_idx].clone();
+                        self.narrate_numbered_target(&target);
+                    }
+                } else {
+                    if cur == 0 && num_chunks > 1 {
+                        self.prev_numbered_chunk();
+                    } else {
+                        let next_idx = if cur == 0 { num_targets - 1 } else { cur - 1 };
+                        self.numbered_focus_index = Some(next_idx);
+                        let target = self.numbered_targets[next_idx].clone();
+                        self.narrate_numbered_target(&target);
+                    }
+                }
+                ctx.request_repaint();
+            } else if switch_input_hit {
+                self.last_switch_input = Instant::now();
+                let cur = self.numbered_focus_index.unwrap_or(0) % num_targets;
+                let target_index = self.numbered_targets[cur].index;
+                self.click_numbered_target_by_index(target_index);
+                ctx.request_repaint();
+            }
+        }
+
         // Gestion du Switch Access & Survol : défilement séquentiel périodique et validation sur Entrée / Espace
-        if self.switch_access_mode && !is_typing {
+        if self.switch_access_mode && !self.show_numbered_targets && !is_typing {
             let is_shift = ctx.input(|i| i.modifiers.shift);
             let egui_enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
             let egui_space = ctx.input(|i| i.key_pressed(egui::Key::Space));
@@ -2574,6 +3185,38 @@ impl eframe::App for OverlayApp {
             let physical_cursor = get_global_cursor_pos();
 
             if let Some((cur_x, cur_y)) = physical_cursor {
+                let is_over_overlay = {
+                    #[cfg(windows)]
+                    {
+                        let overlay_hwnd = unsafe {
+                            windows::Win32::UI::WindowsAndMessaging::FindWindowW(None, windows::core::w!("Libertide overlay")).unwrap_or(windows::Win32::Foundation::HWND(std::ptr::null_mut()))
+                        };
+                        if !overlay_hwnd.0.is_null() {
+                            let mut r = windows::Win32::Foundation::RECT::default();
+                            if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(overlay_hwnd, &mut r).is_ok() } {
+                                cur_x >= r.left && cur_x <= r.right && cur_y >= r.top && cur_y <= r.bottom
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        if let Some(pos) = self.window_pos {
+                            let ppp = ctx.pixels_per_point().max(0.5);
+                            let rx = pos.x * ppp;
+                            let ry = pos.y * ppp;
+                            let rw = self.current_win_w * ppp;
+                            let rh = self.current_win_h * ppp;
+                            (cur_x as f32) >= rx && (cur_x as f32) <= rx + rw && (cur_y as f32) >= ry && (cur_y as f32) <= ry + rh
+                        } else {
+                            false
+                        }
+                    }
+                };
+
                 let has_moved = match self.hover_last_cursor_pos {
                     Some((lx, ly)) => (lx - cur_x).abs() > 4 || (ly - cur_y).abs() > 4,
                     None => false,
@@ -2581,7 +3224,11 @@ impl eframe::App for OverlayApp {
 
                 let is_recent_switch_nav = self.last_switch_input.elapsed() < Duration::from_millis(500);
 
-                if has_moved {
+                if is_over_overlay {
+                    self.hover_physical_mouse_moved = false;
+                    self.hover_pending_speech = None;
+                    self.hover_speech_deadline = None;
+                } else if has_moved {
                     self.hover_physical_mouse_moved = true;
                     self.hover_cursor_still_since = Instant::now();
                     self.hover_last_cursor_pos = Some((cur_x, cur_y));
@@ -2612,7 +3259,8 @@ impl eframe::App for OverlayApp {
                             }
                         }
                     }
-                } else if self.hover_physical_mouse_moved
+                } else if !is_over_overlay
+                    && self.hover_physical_mouse_moved
                     && !is_recent_switch_nav
                     && self.hover_cursor_still_since.elapsed() >= Duration::from_millis(200) {
                     // Le curseur est immobilisé depuis au moins 200 ms : annonce détaillée selon l'étape
@@ -2988,6 +3636,13 @@ impl eframe::App for OverlayApp {
                                     let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
                                     let status_badge = if self.dictation_mode {
                                         format!("{prov_name} · ✍ Mode dictée actif (Échap pour quitter)")
+                                    } else if self.show_numbered_targets {
+                                        let count = self.numbered_targets.len();
+                                        if let Some(target) = self.numbered_focus_index.and_then(|idx| self.numbered_targets.get(idx)) {
+                                            format!("{prov_name} · 🔢 N°{} : {} ({count} badges - Échap pour quitter)", target.index, target.name)
+                                        } else {
+                                            format!("{prov_name} · 🔢 Mode numéros actif ({count} badges - Échap pour quitter)")
+                                        }
                                     } else if self.switch_access_mode {
                                         if self.switch_step == SwitchAccessStep::Windows {
                                             if !self.switch_windows.is_empty() {
@@ -3097,6 +3752,8 @@ impl eframe::App for OverlayApp {
 
                                     let badge_color = if self.dictation_mode {
                                         egui::Color32::from_rgb(255, 205, 70)
+                                    } else if self.show_numbered_targets {
+                                        egui::Color32::from_rgb(0, 215, 255)
                                     } else if self.switch_access_mode {
                                         egui::Color32::from_rgb(255, 140, 0)
                                     } else if self.status == AgentStatus::Listening {
@@ -3104,6 +3761,36 @@ impl eframe::App for OverlayApp {
                                     } else {
                                         theme.accent
                                     };
+
+                                    if !status_badge.is_empty() {
+                                        let badge_resp = ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&status_badge)
+                                                    .size(10.5)
+                                                    .color(badge_color),
+                                            )
+                                            .truncate()
+                                            .sense(if self.status == AgentStatus::Speaking || self.show_numbered_targets { egui::Sense::click() } else { egui::Sense::hover() }),
+                                        );
+                                        if self.status == AgentStatus::Speaking {
+                                            if badge_resp.hovered() {
+                                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                            }
+                                            if badge_resp.on_hover_text("Cliquer pour couper la parole (Échap)").clicked() {
+                                                self.stop_speaking();
+                                            }
+                                        } else if self.show_numbered_targets {
+                                            if badge_resp.hovered() {
+                                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                            }
+                                            if badge_resp.on_hover_text("Cliquer pour désactiver le mode numéros (Échap)").clicked() {
+                                                self.toggle_numbered_targets_mode(&ctx, Some(false));
+                                            }
+                                        } else {
+                                            badge_resp.on_hover_text(&status_badge);
+                                        }
+                                        ui.add_space(2.0);
+                                    }
 
                                     if self.is_recording && !self.live_transcript.is_empty() {
                                         ui.add(
@@ -3372,19 +4059,90 @@ impl eframe::App for OverlayApp {
                                             self.continuous_mode = true;
                                             self.input_suggestions.clear();
                                             self.last_suggestion_query.clear();
-                                            let prompt = if analyze_btn_hit {
-                                                let typed = std::mem::take(&mut self.input_text).trim().to_string();
-                                                if typed.is_empty() {
-                                                    "Analyse l'écran et résume ce que fait la fenêtre en cours.".to_string()
-                                                } else if typed.to_lowercase().contains("analyse") || typed.to_lowercase().contains("résum") {
-                                                    typed
-                                                } else {
-                                                    format!("Analyse l'écran et résume ce que fait la fenêtre en cours : {}", typed)
-                                                }
+                                            let typed_raw = std::mem::take(&mut self.input_text).trim().to_string();
+                                            let prompt = if analyze_btn_hit && typed_raw.is_empty() {
+                                                "Analyse l'écran et résume ce que fait la fenêtre en cours.".to_string()
                                             } else {
-                                                std::mem::take(&mut self.input_text).trim().to_string()
+                                                typed_raw
                                             };
                                             self.live_transcript.clear();
+
+                                            let norm_prompt = normalize_for_command_match(&prompt);
+
+                                            // 1. Bascule du mode badges
+                                            if is_numbers_mode_toggle_command(&norm_prompt) {
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::User,
+                                                    text: prompt,
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                self.toggle_numbered_targets_mode(&ctx, None);
+                                                self.status = AgentStatus::Idle;
+                                                return;
+                                            }
+
+                                            // 2. Détection directe du numéro en mode badges actif
+                                            if self.show_numbered_targets {
+                                                if let Some(idx) = extract_badge_number(&norm_prompt) {
+                                                    self.chat_history.push(ChatEntry {
+                                                        role: ChatRole::User,
+                                                        text: prompt,
+                                                        timestamp: current_time_str(),
+                                                        quick_suggestions: Vec::new(),
+                                                        screen_size_kb: None,
+                                                    });
+                                                    self.click_numbered_target_by_index(idx);
+                                                    self.status = AgentStatus::Idle;
+                                                    return;
+                                                }
+                                            }
+
+                                            // 3. Raccourcis de navigation immédiate
+                                            if norm_prompt == "annule" || norm_prompt == "annuler" || norm_prompt == "undo" {
+                                                let undo_feedback = if let Some(fb) = undo_last_system_action() {
+                                                    fb
+                                                } else {
+                                                    #[cfg(windows)]
+                                                    send_hotkey(&[windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x11)], windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x5A));
+                                                    #[cfg(not(windows))]
+                                                    let _ = std::process::Command::new("xdotool").args(["key", "ctrl+z"]).status();
+                                                    "Dernière action annulée.".to_string()
+                                                };
+                                                play_earcon(Earcon::Success);
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::User,
+                                                    text: prompt,
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::Agent,
+                                                    text: undo_feedback.clone(),
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(undo_feedback));
+                                                self.status = AgentStatus::Idle;
+                                                return;
+                                            }
+
+                                            if let Some(feedback) = try_execute_local_navigation_shortcut(&prompt) {
+                                                play_earcon(Earcon::Success);
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::User,
+                                                    text: prompt,
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                self.status = AgentStatus::Idle;
+                                                return;
+                                            }
+
                                             self.chat_history.push(ChatEntry {
                                                 role: ChatRole::User,
                                                 text: prompt.clone(),
@@ -3601,33 +4359,7 @@ impl eframe::App for OverlayApp {
                                         }
 
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            ui.vertical(|ui| {
-                                                ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                                                    if !status_badge.is_empty() {
-                                                        let badge_resp = ui.add(
-                                                            egui::Label::new(
-                                                                egui::RichText::new(&status_badge)
-                                                                    .size(10.0)
-                                                                    .color(badge_color),
-                                                            )
-                                                            .truncate()
-                                                            .sense(if self.status == AgentStatus::Speaking { egui::Sense::click() } else { egui::Sense::hover() }),
-                                                        );
-                                                        if self.status == AgentStatus::Speaking {
-                                                            if badge_resp.hovered() {
-                                                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                                            }
-                                                            if badge_resp.on_hover_text("Cliquer pour couper la parole (Échap)").clicked() {
-                                                                self.stop_speaking();
-                                                            }
-                                                        } else {
-                                                            badge_resp.on_hover_text(&status_badge);
-                                                        }
-                                                    }
-                                                    ui.add_space(2.0);
-                                                    self.draw_mini_equalizer(ui, time);
-                                                });
-                                            });
+                                            self.draw_mini_equalizer(ui, time);
                                         });
                                     });
                                 });
@@ -3835,6 +4567,29 @@ impl eframe::App for OverlayApp {
                                         self.status = AgentStatus::Thinking;
                                         self.continuous_mode = true;
                                         self.live_transcript.clear();
+
+                                        let norm_prompt = normalize_for_command_match(&prompt);
+
+                                        if is_numbers_mode_toggle_command(&norm_prompt) {
+                                            self.toggle_numbered_targets_mode(&ctx, None);
+                                            self.status = AgentStatus::Idle;
+                                            return;
+                                        }
+
+                                        if self.show_numbered_targets {
+                                            if let Some(idx) = extract_badge_number(&norm_prompt) {
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::User,
+                                                    text: prompt,
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                self.click_numbered_target_by_index(idx);
+                                                self.status = AgentStatus::Idle;
+                                                return;
+                                            }
+                                        }
 
                                         if is_switch_access_command(&prompt) {
                                             mark_hover_nav_asked();
@@ -4142,44 +4897,14 @@ impl eframe::App for OverlayApp {
                 let painter = ui.painter();
 
                 // Tracé des badges de ciblage numéroté (Click by Number)
-                if self.show_numbered_targets {
-                    for target in &self.numbered_targets {
-                        let ppp = ctx.pixels_per_point().max(0.5);
-                        let window_origin = self.window_pos.unwrap_or_default();
-                        let left = (target.rect[0] as f32 / ppp) - window_origin.x;
-                        let top = (target.rect[1] as f32 / ppp) - window_origin.y;
-                        let badge_rect = egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(22.0, 18.0));
-                        
-                        let badge_bg = if target.role == "lecture textuelle" {
-                            egui::Color32::from_rgb(0, 215, 255)
-                        } else {
-                            egui::Color32::from_rgb(255, 215, 0)
-                        };
-
-                        painter.rect_filled(
-                            badge_rect,
-                            egui::CornerRadius::same(4),
-                            badge_bg,
-                        );
-                        painter.rect_stroke(
-                            badge_rect,
-                            egui::CornerRadius::same(4),
-                            egui::Stroke::new(1.2, egui::Color32::BLACK),
-                            egui::StrokeKind::Outside,
-                        );
-                        let badge_lbl = if target.role == "lecture textuelle" {
-                            "📖".to_string()
-                        } else {
-                            target.index.to_string()
-                        };
-                        painter.text(
-                            badge_rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            badge_lbl,
-                            egui::FontId::monospace(11.0),
-                            egui::Color32::BLACK,
-                        );
+                if self.show_numbered_targets && !self.numbered_targets.is_empty() {
+                    let focused_idx = self.numbered_focus_index.and_then(|idx| self.numbered_targets.get(idx)).map(|t| t.index);
+                    draw_screen_numbered_badges(&self.numbered_targets, self.zoom_factor, focused_idx);
+                    #[cfg(windows)]
+                    if let Some(target) = self.numbered_focus_index.and_then(|idx| self.numbered_targets.get(idx)) {
+                        draw_screen_control_border(target.rect, target.role == "lecture textuelle");
                     }
+                    ctx.request_repaint_after(Duration::from_millis(40));
                 }
 
 
@@ -5070,6 +5795,10 @@ Règles principales :
    - Dictée : "activate_dictation", "deactivate_dictation", "toggle_dictation", "dictate".
    - Démarrage : "enable_autostart", "disable_autostart", "check_autostart", "set_autostart".
    - Sélection : "select_text_between" (from, to).
+   - Mode numéros / badges ("toggle_numbered_targets", "click_numbered_target") :
+     * Dès que l'utilisateur demande d'afficher, basculer ou masquer les numéros/badges ("affiche les numéros", "mode numbers", "badges", "fermer les badges", "quitter les numéros", "désactiver les numéros"), utilise STRICTEMENT l'action `{{"action": "toggle_numbered_targets", "enabled": true|false}}`. NE SIMULE JAMAIS de touche "space" ou de faux raccourci !
+     * Pour cliquer directement sur un numéro ou badge visible, utilise l'action `{{"action": "click_numbered_target", "index": N}}` (ex: 1, 2, 3...).
+     * En mode numéros, chaque clic régénère automatiquement les numéros pour permettre d'enchaîner les clics. Pour quitter ce mode, utilise `{{"action": "toggle_numbered_targets", "enabled": false}}`.
    - Immersion : "activate_immersion" (Win+Ctrl+D), "deactivate_immersion".
    - Temporisation & Différé : "schedule_prompt" (delay_seconds: 1..3600, prompt: "...") ou "schedule_prompts" (tasks: [{{"delay_seconds": 10, "prompt": "..."}}]) pour différer des consignes futures (téléchargement en cours, rappel, temporisation). "cancel_scheduled_tasks" pour annuler immédiatement toutes les commandes différées / timers en attente.
    - Fichiers & Documents : "open_file" (path: "chemin/fichier.ext") pour ouvrir directement toute image, vidéo, PDF, tableur ou document dans son application système par défaut (selon extension / MIME type).
@@ -5116,6 +5845,8 @@ Format JSON obligatoire :
     {{"action": "cancel_scheduled_tasks"}},
     {{"action": "mute_audio"}},
     {{"action": "set_volume", "command": "mute"|"unmute"|"down"|"up"|"min"}},
+    {{"action": "toggle_numbered_targets", "enabled": true}},
+    {{"action": "click_numbered_target", "index": 1}},
     {{"action": "open_file", "path": "chemin/vers/image_ou_doc.png"}},
     {{"action": "show_floating_card", "id": "stats_1", "title": "Tableau comparatif", "card_type": "markdown", "data": {{"text": "| Modèle | Lien / Action | Prix |\n| --- | --- | --- |\n| Produit A | [link=\"action:Commander Produit A\"]⚡ Commander[/link] | 49€ |\n| Produit B | [link=\"action:Commander Produit B\"]⚡ Commander[/link] | 59€ |"}}}},
     {{"action": "show_floating_card", "id": "vol_search", "title": "Filtres Billet d'Avion", "card_type": "form", "data": {{"submit_label": "Rechercher les vols", "prompt_prefix": "Recherche de vol avec les critères suivants :", "fields": [{{"id": "depart", "label": "Ville de départ", "type": "text", "value": "Paris"}}, {{"id": "destination", "label": "Destination", "type": "text", "value": "Tokyo"}}, {{"id": "prix_max", "label": "Budget maximum", "type": "number_slider", "min": 200, "max": 3000, "step": 50, "value": 900, "unit": "€"}}, {{"id": "classe", "label": "Classe", "type": "select", "options": ["Économique", "Premium", "Affaires"], "selected": "Économique"}}, {{"id": "direct", "label": "Vols directs seulement", "type": "checkbox", "checked": true}}, {{"id": "bagage", "label": "Bagages", "type": "radio", "options": ["Cabine seul", "1 bagage en soute", "2 bagages en soute"], "selected": "1 bagage en soute"}}]}}}},
@@ -5441,6 +6172,18 @@ async fn call_llm_prompt(
                     } else {
                         let _ = event_tx.send(AgentEvent::CloseFloatingCard(id.clone()));
                     }
+                }
+                AgentAction::ToggleNumberedTargets { enabled } => {
+                    let _ = event_tx.send(AgentEvent::ToggleNumberedTargets(*enabled));
+                }
+                AgentAction::ClickNumberedTarget { index } => {
+                    let _ = event_tx.send(AgentEvent::ClickNumberedTarget(*index));
+                }
+                AgentAction::NextNumberedChunk => {
+                    let _ = event_tx.send(AgentEvent::NextNumberedChunk);
+                }
+                AgentAction::PreviousNumberedChunk => {
+                    let _ = event_tx.send(AgentEvent::PreviousNumberedChunk);
                 }
                 _ => {}
             }

@@ -170,7 +170,7 @@ pub fn click_element(
             if let Ok(rect) = elem.CurrentBoundingRectangle() {
                 let width = rect.right - rect.left;
                 let height = rect.bottom - rect.top;
-                if width > 0 && height > 0 {
+                if width > 0 && height > 0 && (width <= 400 && height <= 160 || click_x <= 0 || click_y <= 0) {
                     click_x = rect.left + (width / 2);
                     click_y = rect.top + (height / 2);
                 }
@@ -227,8 +227,11 @@ pub fn click_element(
             if !programmatic_success {
                 if let Ok(unk) = elem.GetCurrentPattern(UIA_LegacyIAccessiblePatternId) {
                     if let Ok(legacy) = unk.cast::<IUIAutomationLegacyIAccessiblePattern>() {
-                        if legacy.DoDefaultAction().is_ok() {
-                            programmatic_success = true;
+                        if let Ok(action_name) = legacy.CurrentDefaultAction() {
+                            let act_str = action_name.to_string();
+                            if !act_str.trim().is_empty() && legacy.DoDefaultAction().is_ok() {
+                                programmatic_success = true;
+                            }
                         }
                     }
                 }

@@ -166,6 +166,12 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     feedback.push("Aucune action à annuler dans l'historique.".to_string());
                 }
             }
+            AgentAction::NextNumberedChunk => {
+                feedback.push("Affichage des 50 badges suivants.".to_string());
+            }
+            AgentAction::PreviousNumberedChunk => {
+                feedback.push("Affichage des 50 badges précédents.".to_string());
+            }
             AgentAction::Redo => {
                 if let Some(msg) = redo_last_system_action() {
                     feedback.push(msg);
@@ -2351,6 +2357,17 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 }
                 feedback.push(format!("Fenêtre volante '{id}' fermée."));
             }
+            AgentAction::ToggleNumberedTargets { enabled } => {
+                let desc = match enabled {
+                    Some(true) => "activé (badges affichés)",
+                    Some(false) => "désactivé (badges masqués)",
+                    None => "basculé",
+                };
+                feedback.push(format!("Mode de ciblage par numéros {desc}."));
+            }
+            AgentAction::ClickNumberedTarget { index } => {
+                feedback.push(format!("Clic sur le badge numéro {index} déclenché."));
+            }
         }
     }
 
@@ -2618,6 +2635,17 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
             }
             AgentAction::CloseFloatingCard { id } => {
                 feedback.push(format!("Fenêtre volante '{id}' fermée."));
+            }
+            AgentAction::ToggleNumberedTargets { enabled } => {
+                let desc = match enabled {
+                    Some(true) => "activé (badges affichés)",
+                    Some(false) => "désactivé",
+                    None => "basculé",
+                };
+                feedback.push(format!("Mode de ciblage par numéros {desc}."));
+            }
+            AgentAction::ClickNumberedTarget { index } => {
+                feedback.push(format!("Clic sur le badge numéro {index} déclenché."));
             }
             AgentAction::ClickElement { target_name, .. } => {
                 let elements = list_interactive_elements("");

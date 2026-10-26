@@ -11,6 +11,7 @@ use crate::fs_util::{
 };
 use crate::pattern::{clean_words, extract_target_propositions, matches_pattern};
 use crate::types::{AgentAction, QuickSuggestionItem};
+pub use crate::types::{NavigationZone, NumberedElementTarget, SwitchAccessStep};
 use crate::window_util::*;
 
 use crate::ui::*;
@@ -25,16 +26,11 @@ use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationElement2,
-    IUIAutomationExpandCollapsePattern, IUIAutomationInvokePattern, IUIAutomationLegacyIAccessiblePattern,
-    IUIAutomationScrollItemPattern, IUIAutomationScrollPattern, IUIAutomationSelectionItemPattern,
-    IUIAutomationTextPattern, IUIAutomationTogglePattern,
-    IUIAutomationValuePattern, TreeScope_Descendants, UIA_ButtonControlTypeId,
-    UIA_DataGridControlTypeId, UIA_DataItemControlTypeId, UIA_DocumentControlTypeId,
+    CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationScrollPattern, IUIAutomationSelectionItemPattern,
+    IUIAutomationTextPattern,
+    IUIAutomationValuePattern, TreeScope_Descendants, UIA_DocumentControlTypeId,
     UIA_EditControlTypeId, UIA_ExpandCollapsePatternId, UIA_GroupControlTypeId,
-    UIA_InvokePatternId, UIA_LegacyIAccessiblePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
-    UIA_ScrollBarControlTypeId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
-    UIA_SelectionItemPatternId, UIA_SelectionPatternId, UIA_SliderControlTypeId,
+    UIA_ScrollPatternId,
     UIA_TextPatternId, UIA_TogglePatternId, UIA_ToolBarControlTypeId,
     UIA_ValuePatternId, UIA_SeparatorControlTypeId,
 };
@@ -63,13 +59,6 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 #[derive(Clone, Default)]
 pub struct UiaElementInfo;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SwitchAccessStep {
-    Windows,
-    Zones,
-    Elements,
-}
-
 #[derive(Clone, Debug)]
 pub struct SwitchWindowTarget {
     pub id: isize,
@@ -77,33 +66,6 @@ pub struct SwitchWindowTarget {
     pub click_x: i32,
     pub click_y: i32,
     pub rect: [i32; 4],
-}
-
-#[derive(Clone, Debug, serde::Serialize, PartialEq, serde::Deserialize)]
-pub struct NumberedElementTarget {
-    pub index: usize,
-    pub click_x: i32,
-    pub click_y: i32,
-    pub rect: [i32; 4],
-    pub name: String,
-    #[serde(default)]
-    pub role: String,
-    #[serde(default)]
-    pub shortcut: String,
-    #[serde(default)]
-    pub value: String,
-    #[serde(default)]
-    pub window_id: Option<isize>,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct NavigationZone {
-    pub title: String,
-    pub description: String,
-    pub click_x: i32,
-    pub click_y: i32,
-    pub rect: [i32; 4],
-    pub targets: Vec<NumberedElementTarget>,
 }
 
 #[cfg(windows)]
@@ -293,6 +255,18 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
 pub fn find_switch_window_at_point(windows: &[SwitchWindowTarget], x: i32, y: i32) -> Option<usize> {
     #[cfg(windows)]
     {
+        let overlay_hwnd = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::FindWindowW(None, windows::core::w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()))
+        };
+        if !overlay_hwnd.0.is_null() {
+            let mut r = windows::Win32::Foundation::RECT::default();
+            if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(overlay_hwnd, &mut r).is_ok() } {
+                if x >= r.left && x <= r.right && y >= r.top && y <= r.bottom {
+                    return None;
+                }
+            }
+        }
+
         let pt = windows::Win32::Foundation::POINT { x, y };
         let child = unsafe { windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt) };
         if !child.is_invalid() {
@@ -303,6 +277,9 @@ pub fn find_switch_window_at_point(windows: &[SwitchWindowTarget], x: i32, y: i3
                 )
             };
             let top_hwnd = if !root.is_invalid() { root } else { child };
+            if !overlay_hwnd.0.is_null() && (top_hwnd == overlay_hwnd || child == overlay_hwnd) {
+                return None;
+            }
             if let Some(pos) = windows.iter().position(|w| w.id == top_hwnd.0 as isize) {
                 return Some(pos);
             }
@@ -356,7 +333,7 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
                 || e.is_label
                 || e.has_action_pattern
         })
-        .take(50)
+        .take(300)
         .enumerate()
         .map(|(i, e)| {
             let display_name = if !e.name.is_empty() {
@@ -477,7 +454,7 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
         }
     }
 
-    if has_rect && targets.len() < 3 {
+    if has_rect {
         let window_rect = [wr.left, wr.top, wr.right, wr.bottom];
         crate::ocr::enrich_targets_with_ocr(hwnd, window_rect, &mut targets);
         for (i, t) in targets.iter_mut().enumerate() {
@@ -488,6 +465,105 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
     targets
 }
 
+/// Réconcilie les nouvelles cibles détectées avec les anciennes afin de conserver les mêmes numéros
+pub fn reconcile_numbered_targets(
+    new_targets: &mut [NumberedElementTarget],
+    previous_targets: &[NumberedElementTarget],
+) {
+    if previous_targets.is_empty() || new_targets.is_empty() {
+        return;
+    }
+
+    let mut used_indices = std::collections::HashSet::new();
+    let mut matched_indices = vec![None; new_targets.len()];
+
+    // Passe 1A : correspondance stricte sur nom exact, même rôle et proximité physique (<= 15 px)
+    for (new_idx, new_t) in new_targets.iter().enumerate() {
+        if matched_indices[new_idx].is_some() {
+            continue;
+        }
+        if let Some(old_t) = previous_targets.iter().find(|ot| {
+            !used_indices.contains(&ot.index)
+                && (ot.click_x - new_t.click_x).abs() <= 15
+                && (ot.click_y - new_t.click_y).abs() <= 15
+                && ot.role == new_t.role
+                && (ot.name.is_empty() || ot.name.eq_ignore_ascii_case(&new_t.name))
+        }) {
+            used_indices.insert(old_t.index);
+            matched_indices[new_idx] = Some(old_t.index);
+        }
+    }
+
+    // Passe 1B : correspondance par nom exact et rôle même si légèrement déplacé (tolérance <= 35 px)
+    for (new_idx, new_t) in new_targets.iter().enumerate() {
+        if matched_indices[new_idx].is_some() {
+            continue;
+        }
+        if !new_t.name.trim().is_empty() {
+            if let Some(old_t) = previous_targets.iter().find(|ot| {
+                !used_indices.contains(&ot.index)
+                    && ot.role == new_t.role
+                    && ot.name.eq_ignore_ascii_case(&new_t.name)
+                    && (ot.click_x - new_t.click_x).abs() <= 35
+                    && (ot.click_y - new_t.click_y).abs() <= 35
+            }) {
+                used_indices.insert(old_t.index);
+                matched_indices[new_idx] = Some(old_t.index);
+            }
+        }
+    }
+
+    // Passe 2 : correspondance sémantique sur nom et rôle (ex: fenêtre ou liste décalée/scrollée <= 120 px)
+    for (new_idx, new_t) in new_targets.iter().enumerate() {
+        if matched_indices[new_idx].is_some() {
+            continue;
+        }
+        if !new_t.name.trim().is_empty() {
+            if let Some(old_t) = previous_targets.iter().find(|ot| {
+                !used_indices.contains(&ot.index)
+                    && ot.name.eq_ignore_ascii_case(&new_t.name)
+                    && ot.role == new_t.role
+                    && (ot.click_y - new_t.click_y).abs() <= 120
+            }) {
+                used_indices.insert(old_t.index);
+                matched_indices[new_idx] = Some(old_t.index);
+            }
+        }
+    }
+
+    // Passe 3 : stricte proximité spatiale (<= 8 px) pour icônes ou boutons sans libellé
+    for (new_idx, new_t) in new_targets.iter().enumerate() {
+        if matched_indices[new_idx].is_some() {
+            continue;
+        }
+        if let Some(old_t) = previous_targets.iter().find(|ot| {
+            !used_indices.contains(&ot.index)
+                && (ot.click_x - new_t.click_x).abs() <= 8
+                && (ot.click_y - new_t.click_y).abs() <= 8
+                && ot.role == new_t.role
+        }) {
+            used_indices.insert(old_t.index);
+            matched_indices[new_idx] = Some(old_t.index);
+        }
+    }
+
+    // Attribution des numéros conservés et allocation séquentielle des nouveaux badges
+    let mut next_avail = 1;
+    for (new_idx, opt_index) in matched_indices.iter().enumerate() {
+        if let Some(idx) = opt_index {
+            new_targets[new_idx].index = *idx;
+        } else {
+            while used_indices.contains(&next_avail) {
+                next_avail += 1;
+            }
+            new_targets[new_idx].index = next_avail;
+            used_indices.insert(next_avail);
+            next_avail += 1;
+        }
+    }
+
+    new_targets.sort_by_key(|t| t.index);
+}
 #[cfg(not(windows))]
 pub fn collect_numbered_targets_for_window(_target: impl AsWindowTarget) -> Vec<NumberedElementTarget> {
     collect_numbered_targets_for_active_window()
@@ -500,6 +576,24 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
         return Vec::new();
     };
     collect_numbered_targets_for_window(active_hwnd)
+}
+
+#[cfg(windows)]
+pub fn collect_numbered_targets_for_active_window_reconciled(
+    previous: &[NumberedElementTarget],
+) -> Vec<NumberedElementTarget> {
+    let mut targets = collect_numbered_targets_for_active_window();
+    reconcile_numbered_targets(&mut targets, previous);
+    targets
+}
+
+#[cfg(not(windows))]
+pub fn collect_numbered_targets_for_active_window_reconciled(
+    previous: &[NumberedElementTarget],
+) -> Vec<NumberedElementTarget> {
+    let mut targets = collect_numbered_targets_for_active_window();
+    reconcile_numbered_targets(&mut targets, previous);
+    targets
 }
 
 #[cfg(target_os = "macos")]
@@ -598,7 +692,7 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
     let items = query_macos_ax_elements();
     items
         .into_iter()
-        .take(30)
+        .take(300)
         .enumerate()
         .map(|(i, e)| NumberedElementTarget {
             index: i + 1,
@@ -715,7 +809,7 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
     let items = query_atspi_elements();
     items
         .into_iter()
-        .take(30)
+        .take(300)
         .enumerate()
         .map(|(i, e)| NumberedElementTarget {
             index: i + 1,
@@ -838,7 +932,7 @@ pub fn inject_text_reader_target(zone: &mut NavigationZone) {
     }
 }
 
-/// Active et clique sur une cible numérotée (refocus de la fenêtre hôte + clic au centre physique)
+/// Active et clique sur une cible numérotée (refocus de la fenêtre hôte + positionnement physique du curseur + clic)
 pub fn activate_numbered_target(target: &NumberedElementTarget) -> bool {
     #[cfg(windows)]
     {
@@ -847,14 +941,19 @@ pub fn activate_numbered_target(target: &NumberedElementTarget) -> bool {
             if !hwnd.0.is_null() && !is_window_hung(hwnd) {
                 force_foreground_window(hwnd);
                 restore_if_iconic(hwnd);
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(40));
             }
         }
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(target.click_x, target.click_y);
+        }
+        std::thread::sleep(Duration::from_millis(20));
         click_element(target.click_x, target.click_y, None, None);
         true
     }
     #[cfg(not(windows))]
     {
+        set_global_cursor_pos(target.click_x, target.click_y);
         crate::ui::click_element(target.click_x, target.click_y, None, None);
         true
     }

@@ -647,11 +647,19 @@ pub fn draw_screen_orange_border(rect: [i32; 4]) {
         fn LineTo(hdc: *mut c_void, x: i32, y: i32) -> i32;
         fn GetDC(hwnd: *mut c_void) -> *mut c_void;
         fn ReleaseDC(hwnd: *mut c_void, hdc: *mut c_void) -> i32;
+        fn ExcludeClipRect(hdc: *mut c_void, nLeftRect: i32, nTopRect: i32, nRightRect: i32, nBottomRect: i32) -> i32;
     }
 
     unsafe {
         let hdc = GetDC(std::ptr::null_mut());
         if !hdc.is_null() {
+            let overlay_hwnd = FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()));
+            if !overlay_hwnd.0.is_null() {
+                let mut ov_r = RECT::default();
+                if GetWindowRect(overlay_hwnd, &mut ov_r).is_ok() {
+                    ExcludeClipRect(hdc, ov_r.left, ov_r.top, ov_r.right, ov_r.bottom);
+                }
+            }
             // Jaune d'or haute visibilité RGB(255, 215, 0) -> BGR: 0x0000D7FF
             let pen_width = 5;
             let half_pen = pen_width / 2;
@@ -699,11 +707,19 @@ pub fn draw_screen_control_border(rect: [i32; 4], is_cyan: bool) {
         fn LineTo(hdc: *mut c_void, x: i32, y: i32) -> i32;
         fn GetDC(hwnd: *mut c_void) -> *mut c_void;
         fn ReleaseDC(hwnd: *mut c_void, hdc: *mut c_void) -> i32;
+        fn ExcludeClipRect(hdc: *mut c_void, nLeftRect: i32, nTopRect: i32, nRightRect: i32, nBottomRect: i32) -> i32;
     }
 
     unsafe {
         let hdc = GetDC(std::ptr::null_mut());
         if !hdc.is_null() {
+            let overlay_hwnd = FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()));
+            if !overlay_hwnd.0.is_null() {
+                let mut ov_r = RECT::default();
+                if GetWindowRect(overlay_hwnd, &mut ov_r).is_ok() {
+                    ExcludeClipRect(hdc, ov_r.left, ov_r.top, ov_r.right, ov_r.bottom);
+                }
+            }
             // Cyan RGB(0, 230, 255) -> BGR: 0x00FFE600 ou Orange vif RGB(255, 140, 0) -> BGR: 0x00008CFF
             let color = if is_cyan { 0x00FFE600 } else { 0x00008CFF };
             let pen = CreatePen(0 /* PS_SOLID */, 3, color);
@@ -729,6 +745,162 @@ pub fn draw_screen_control_border(_rect: [i32; 4], _is_cyan: bool) {}
 
 #[cfg(not(windows))]
 pub fn draw_screen_orange_border(_rect: [i32; 4]) {}
+
+#[cfg(windows)]
+pub fn draw_screen_numbered_badges(
+    targets: &[crate::types::NumberedElementTarget],
+    zoom_factor: f32,
+    focused_index: Option<usize>,
+) {
+    use std::ffi::c_void;
+    extern "system" {
+        fn CreateSolidBrush(color: u32) -> *mut c_void;
+        fn CreatePen(iStyle: i32, cWidth: i32, color: u32) -> *mut c_void;
+        fn SelectObject(hdc: *mut c_void, hgdiobj: *mut c_void) -> *mut c_void;
+        fn DeleteObject(ho: *mut c_void) -> i32;
+        fn RoundRect(hdc: *mut c_void, left: i32, top: i32, right: i32, bottom: i32, width: i32, height: i32) -> i32;
+        fn SetBkMode(hdc: *mut c_void, mode: i32) -> i32;
+        fn SetTextColor(hdc: *mut c_void, color: u32) -> u32;
+        fn CreateFontW(
+            cHeight: i32, cWidth: i32, cEscapement: i32, cOrientation: i32, cWeight: i32,
+            bItalic: u32, bUnderline: u32, bStrikeOut: u32, iCharSet: u32, iOutPrecision: u32,
+            iClipPrecision: u32, iQuality: u32, iPitchAndFamily: u32, pszFaceName: *const u16,
+        ) -> *mut c_void;
+        fn DrawTextW(hdc: *mut c_void, lpchText: *const u16, cchText: i32, lprc: *mut RECT, format: u32) -> i32;
+        fn GetDC(hwnd: *mut c_void) -> *mut c_void;
+        fn ReleaseDC(hwnd: *mut c_void, hdc: *mut c_void) -> i32;
+        fn ExcludeClipRect(hdc: *mut c_void, nLeftRect: i32, nTopRect: i32, nRightRect: i32, nBottomRect: i32) -> i32;
+    }
+
+    if targets.is_empty() {
+        return;
+    }
+
+    unsafe {
+        let hdc = GetDC(std::ptr::null_mut());
+        if hdc.is_null() {
+            return;
+        }
+
+        let overlay_hwnd = FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()));
+        let mut ov_r = RECT::default();
+        let has_overlay = !overlay_hwnd.0.is_null() && GetWindowRect(overlay_hwnd, &mut ov_r).is_ok();
+        if has_overlay {
+            ExcludeClipRect(hdc, ov_r.left, ov_r.top, ov_r.right, ov_r.bottom);
+        }
+
+        const TRANSPARENT: i32 = 1;
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, 0x00000000); // Noir
+
+        let z = zoom_factor.clamp(0.7, 2.5);
+        let badge_h = ((28.0 * z).round() as i32).max(24);
+        let font_h = -(((15.0 * z).round() as i32).max(13));
+        let pen_w = ((2.0 * z).round() as i32).max(2);
+
+        let font_name: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
+        let hfont = CreateFontW(
+            font_h, 0, 0, 0, 700 /* FW_BOLD */, 0, 0, 0, 1,
+            0, 0, 5 /* CLEARTYPE_QUALITY */, 0, font_name.as_ptr(),
+        );
+        let old_font = SelectObject(hdc, hfont);
+
+        let pen_black = CreatePen(0, pen_w, 0x00000000);
+        let pen_focused = CreatePen(0, pen_w + 3, 0x00000000); // Contour renforcé et net pour le focus
+        let old_pen = SelectObject(hdc, pen_black);
+
+        // Couleur uniforme Jaune d'Or (BGR: 0x0000D7FF) pour tous les badges afin d'éliminer la confusion
+        let brush_gold = CreateSolidBrush(0x0000D7FF);
+
+        const DT_CENTER: u32 = 0x00000001;
+        const DT_VCENTER: u32 = 0x00000004;
+        const DT_SINGLELINE: u32 = 0x00000020;
+
+        for (i, target) in targets.iter().enumerate() {
+            let is_focused = focused_index == Some(target.index) || focused_index == Some(i);
+            let is_reader = target.role == "lecture textuelle";
+            // Teinte jaune d'or unifiée sur tous les badges
+            let brush = brush_gold;
+            SelectObject(hdc, brush);
+
+            let pen = if is_focused { pen_focused } else { pen_black };
+            SelectObject(hdc, pen);
+
+            let label = if is_reader {
+                "📖".to_string()
+            } else {
+                target.index.to_string()
+            };
+
+            let h_val = if is_focused { badge_h + 4 } else { badge_h };
+
+            // Rond pour les chiffres simples ou icônes, pilule aux extrémités rondes pour les nombres à plusieurs chiffres
+            let badge_w = if is_reader || target.index < 10 {
+                h_val
+            } else if target.index < 100 {
+                ((h_val as f32 * 1.30).round() as i32).max(h_val)
+            } else {
+                ((h_val as f32 * 1.65).round() as i32).max(h_val)
+            };
+
+            let bx = target.rect[0].max(2);
+            let by = (target.rect[1] - h_val / 2).max(2);
+
+            // Respect strict du z-index : si le badge ou sa cible est sous la fenêtre Libertide, ne pas le dessiner
+            if has_overlay {
+                let badge_intersects = bx < ov_r.right && (bx + badge_w) > ov_r.left && by < ov_r.bottom && (by + h_val) > ov_r.top;
+                let target_covered = target.click_x >= ov_r.left && target.click_x <= ov_r.right && target.click_y >= ov_r.top && target.click_y <= ov_r.bottom;
+                if badge_intersects || target_covered {
+                    continue;
+                }
+            }
+
+            RoundRect(hdc, bx, by, bx + badge_w, by + h_val, h_val, h_val);
+            let label_utf16: Vec<u16> = label.encode_utf16().collect();
+            let mut text_rc = RECT {
+                left: bx,
+                top: by,
+                right: bx + badge_w,
+                bottom: by + h_val,
+            };
+
+            DrawTextW(
+                hdc,
+                label_utf16.as_ptr(),
+                label_utf16.len() as i32,
+                &mut text_rc,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+        }
+
+        SelectObject(hdc, old_font);
+        SelectObject(hdc, old_pen);
+        DeleteObject(hfont);
+        DeleteObject(pen_black);
+        DeleteObject(pen_focused);
+        DeleteObject(brush_gold);
+        ReleaseDC(std::ptr::null_mut(), hdc);
+    }
+}
+
+#[cfg(windows)]
+pub fn clear_screen_numbered_badges() {
+    extern "system" {
+        fn InvalidateRect(hwnd: HWND, lpRect: *const RECT, bErase: BOOL) -> BOOL;
+    }
+    unsafe {
+        InvalidateRect(HWND(std::ptr::null_mut()), std::ptr::null(), BOOL(1));
+    }
+}
+
+#[cfg(not(windows))]
+pub fn draw_screen_numbered_badges(
+    _targets: &[crate::types::NumberedElementTarget],
+    _zoom_factor: f32,
+    _focused_index: Option<usize>,
+) {}
+#[cfg(not(windows))]
+pub fn clear_screen_numbered_badges() {}
 
 #[cfg(windows)]
 pub fn get_window_process_info(hwnd: HWND) -> (u32, String) {
