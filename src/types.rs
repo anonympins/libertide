@@ -1,6 +1,67 @@
 use serde::{Deserialize, Serialize};
 pub use crate::floating_window::FloatingCard;
-pub use crate::automation::{NavigationZone, NumberedElementTarget, SwitchAccessStep};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwitchAccessStep {
+    Windows,
+    Zones,
+    Elements,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct NumberedElementTarget {
+    pub index: usize,
+    pub click_x: i32,
+    pub click_y: i32,
+    pub rect: [i32; 4],
+    pub name: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub shortcut: String,
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub window_id: Option<isize>,
+}
+
+impl NumberedElementTarget {
+    pub fn is_text_reading(&self) -> bool {
+        self.role == "lecture textuelle"
+    }
+
+    pub fn is_editable(&self) -> bool {
+        self.role == "champ de saisie" || self.role == "zone de texte"
+    }
+
+    pub fn is_label(&self) -> bool {
+        self.role == "étiquette" || self.role == "label" || self.role == "texte"
+    }
+
+    pub fn is_ocr(&self) -> bool {
+        self.role == "visuel (ocr)" || self.role == "ocr"
+    }
+
+    /// Vérifie si deux cibles partagent la même signature logique (nom et rôle)
+    pub fn has_same_signature(&self, other: &Self) -> bool {
+        self.role == other.role && self.name.eq_ignore_ascii_case(&other.name)
+    }
+
+    /// Proximité physique entre deux cibles (tolérance en pixels)
+    pub fn is_near(&self, other: &Self, tolerance: i32) -> bool {
+        (self.click_x - other.click_x).abs() <= tolerance && (self.click_y - other.click_y).abs() <= tolerance
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NavigationZone {
+    pub title: String,
+    pub description: String,
+    pub click_x: i32,
+    pub click_y: i32,
+    pub rect: [i32; 4],
+    pub targets: Vec<NumberedElementTarget>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwitchKeyEvent {
@@ -166,8 +227,8 @@ pub enum VoiceProfile {
 pub type VoiceGender = VoiceProfile;
 
 impl VoiceProfile {
-    pub const Female: Self = Self::Denise;
-    pub const Male: Self = Self::Henri;
+    pub const FEMALE: Self = Self::Denise;
+    pub const MALE: Self = Self::Henri;
 
     pub const ALL: &'static [Self] = &[
         Self::Denise,
@@ -296,6 +357,10 @@ pub enum AgentEvent {
     RequestApiKey,
     ShowFloatingCard(FloatingCard),
     CloseFloatingCard(String),
+    ToggleNumberedTargets(Option<bool>),
+    ClickNumberedTarget(usize),
+    NextNumberedChunk,
+    PreviousNumberedChunk,
     NavigationZonesReady {
         window_id: isize,
         window_title: String,
@@ -559,6 +624,19 @@ pub enum AgentAction {
     CloseFloatingCard {
         id: String,
     },
+    #[serde(alias = "toggle_numbers", alias = "show_numbers", alias = "show_numbered_badges", alias = "numbers", alias = "display_numbered_badges")]
+    ToggleNumberedTargets {
+        #[serde(default)]
+        enabled: Option<bool>,
+    },
+    #[serde(alias = "click_badge", alias = "select_number", alias = "click_number")]
+    ClickNumberedTarget {
+        index: usize,
+    },
+    #[serde(alias = "next_badges", alias = "prochains_badges", alias = "badges_suivants")]
+    NextNumberedChunk,
+    #[serde(alias = "prev_badges", alias = "badges_precedents")]
+    PreviousNumberedChunk,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -638,6 +716,14 @@ impl QuickSuggestionItem {
                 AgentAction::SetVolume { command } => Some(format!("Volume : {command}")),
                 AgentAction::ShowFloatingCard { title, .. } => Some(format!("Afficher : {title}")),
                 AgentAction::CloseFloatingCard { id } => Some(format!("Fermer {id}")),
+                AgentAction::ToggleNumberedTargets { enabled } => match enabled {
+                    Some(true) => Some("Afficher les numéros".to_string()),
+                    Some(false) => Some("Masquer les numéros".to_string()),
+                    None => Some("Basculer les numéros".to_string()),
+                },
+                AgentAction::ClickNumberedTarget { index } => Some(format!("Cliquer sur le numéro {index}")),
+                AgentAction::NextNumberedChunk => Some("50 badges suivants".to_string()),
+                AgentAction::PreviousNumberedChunk => Some("50 badges précédents".to_string()),
                 _ => None,
             },
         }

@@ -5,6 +5,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [0.6.2] - 2026-10-31
+
+### 🔍 Dynamic Adaptive Zoom & Multi-Viewport Synchronization (`main.rs`, `floating_window.rs`, `overlay.rs`)
+- **Global Scale Propagation (`zoom_factor`)**:
+  - Instant scale factor synchronization between the primary container and all secondary floating OS viewports (`vp_ctx.set_zoom_factor(ctx.zoom_factor())`).
+  - Real-time scale integration in native GDI accessibility badge rendering (`draw_screen_numbered_badges`): proportional sizing of badges, fonts (`Segoe UI`), border strokes, and relative offsets.
+  - Interactive font size controls in the *Themes & Accessibility* settings tab (`A -`, `A +`, `100 %`) fully compatible with physical click and dwell pointer, persisted into `.env` (`FONT_SIZE` / `ZOOM_FACTOR`).
+  - Maintained voice-driven adaptive zoom commands (*"zoom in"*, *"zoom out"*, *"larger text"*, *"reset zoom"*).
+
+### 🔢 Numbered Target Navigation & AABB Anti-Overlap Engine (`automation.rs`, `main.rs`)
+- **Spatial Deduplication & Element Importance Scoring (`score_element_importance`)**:
+  - Introduced Axis-Aligned Bounding Box (AABB `38 × 30 px`) collision detection to eliminate overlapping badges in dense UI layouts.
+  - Weighted importance ranking: text input fields and textareas take precedence over buttons, hyperlinks, tabs, and static labels.
+- **Direct Numpad & Digit Queue Ingestion (`NUMBER_KEY_QUEUE`)**:
+  - Low-level system-wide hook interception of numpad digits (`0x60..=0x69`) and top row numeric keys (`0x30..=0x39`) via `switch_keyboard_hook_proc`.
+  - Numeric composition buffer (`numbered_input_buffer`) allowing single or multi-digit target selection, confirmed via Enter/Space or auto-committed after a 900 ms inactivity delay.
+  - Backspace support (`Backspace`) to erase the last entered digit without canceling or resetting the current switch navigation step.
+  - Conservative target reconciliation (`reconcile_numbered_targets`) to preserve stable badge indices across background scans, scrolls, and UI updates.
+
+### 🪟 Window Selection Stability & Navigation Fixes (`main.rs`, `automation.rs`, `window_util.rs`)
+- **First Window Selection Fix (*Go to first window fix*)**:
+  - Resolved index offsetting when entering switch access mode or stepping backward to window selection (`SwitchAccessStep::Windows`).
+  - The first candidate window is now reliably selected, brought into the foreground (`force_foreground_window`, `restore_if_iconic`), and outlined with the high-visibility orange frame without skipping.
+  - Stabilized Escape key and single-switch long-press traversal when stepping upward through the hierarchy (Element ➔ Zone ➔ Window) while maintaining target focus.
+
+### 🌐 Cross-Platform Parity & Robustness (`automation.rs`, `commands.rs`)
+- Aligned numbered element target structures and collision avoidance mechanisms across Windows (UI Automation), macOS (JXA/Accessibility), and Linux (X11 / Wayland / AT-SPI2).
+- Streamlined background target scanner pipeline (`spawn_targets_worker`) to eliminate blank frames and visual flicker during window transitions.
+
+---
 ## [0.6.1] - 2026-10-29
 
 ### 🚀 First-Launch Onboarding & Hover Navigation Detection (`main.rs`)

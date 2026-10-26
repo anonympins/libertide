@@ -1,3 +1,4 @@
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -9,8 +10,8 @@ use crate::fs_util::{
     create_temp_note_file, find_executable_in_path, find_file_in_workspace,
     open_path_with_default_app,
 };
-use crate::pattern::{clean_words, extract_target_propositions, matches_pattern};
 use crate::types::{AgentAction, QuickSuggestionItem};
+pub use crate::types::{NavigationZone, NumberedElementTarget};
 use crate::window_util::*;
 
 use crate::ui::*;
@@ -25,17 +26,12 @@ use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationElement2,
-    IUIAutomationExpandCollapsePattern, IUIAutomationInvokePattern, IUIAutomationLegacyIAccessiblePattern,
-    IUIAutomationScrollItemPattern, IUIAutomationScrollPattern, IUIAutomationSelectionItemPattern,
-    IUIAutomationTextPattern, IUIAutomationTogglePattern,
-    IUIAutomationValuePattern, TreeScope_Descendants, UIA_ButtonControlTypeId,
-    UIA_DataGridControlTypeId, UIA_DataItemControlTypeId, UIA_DocumentControlTypeId,
+    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationScrollPattern, IUIAutomationSelectionItemPattern,
+    IUIAutomationTextPattern,
+    IUIAutomationValuePattern, TreeScope_Descendants, UIA_DocumentControlTypeId,
     UIA_EditControlTypeId, UIA_ExpandCollapsePatternId, UIA_GroupControlTypeId,
-    UIA_InvokePatternId, UIA_LegacyIAccessiblePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
-    UIA_ScrollBarControlTypeId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
-    UIA_SelectionItemPatternId, UIA_SelectionPatternId, UIA_SliderControlTypeId,
-    UIA_TextPatternId, UIA_TogglePatternId, UIA_ToolBarControlTypeId,
+    UIA_ScrollPatternId,
+    UIA_TextPatternId,
     UIA_ValuePatternId, UIA_SeparatorControlTypeId,
 };
 #[cfg(windows)]
@@ -48,10 +44,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow,
-    FindWindowW, GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    FindWindowW, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
     GetGUIThreadInfo, GUITHREADINFO,
-    PostMessageW, SendMessageW, SetCursorPos, SetForegroundWindow, ShowWindow,
-    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE,
+    PostMessageW, SendMessageW, SetForegroundWindow, ShowWindow,
+    SW_RESTORE, WM_CLOSE,
 };
 
 #[cfg(windows)]
@@ -63,13 +59,6 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 #[derive(Clone, Default)]
 pub struct UiaElementInfo;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SwitchAccessStep {
-    Windows,
-    Zones,
-    Elements,
-}
-
 #[derive(Clone, Debug)]
 pub struct SwitchWindowTarget {
     pub id: isize,
@@ -77,33 +66,6 @@ pub struct SwitchWindowTarget {
     pub click_x: i32,
     pub click_y: i32,
     pub rect: [i32; 4],
-}
-
-#[derive(Clone, Debug, serde::Serialize, PartialEq, serde::Deserialize)]
-pub struct NumberedElementTarget {
-    pub index: usize,
-    pub click_x: i32,
-    pub click_y: i32,
-    pub rect: [i32; 4],
-    pub name: String,
-    #[serde(default)]
-    pub role: String,
-    #[serde(default)]
-    pub shortcut: String,
-    #[serde(default)]
-    pub value: String,
-    #[serde(default)]
-    pub window_id: Option<isize>,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct NavigationZone {
-    pub title: String,
-    pub description: String,
-    pub click_x: i32,
-    pub click_y: i32,
-    pub rect: [i32; 4],
-    pub targets: Vec<NumberedElementTarget>,
 }
 
 #[cfg(windows)]
@@ -293,6 +255,18 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
 pub fn find_switch_window_at_point(windows: &[SwitchWindowTarget], x: i32, y: i32) -> Option<usize> {
     #[cfg(windows)]
     {
+        let overlay_hwnd = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::FindWindowW(None, windows::core::w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()))
+        };
+        if !overlay_hwnd.0.is_null() {
+            let mut r = windows::Win32::Foundation::RECT::default();
+            if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(overlay_hwnd, &mut r).is_ok() } {
+                if x >= r.left && x <= r.right && y >= r.top && y <= r.bottom {
+                    return None;
+                }
+            }
+        }
+
         let pt = windows::Win32::Foundation::POINT { x, y };
         let child = unsafe { windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt) };
         if !child.is_invalid() {
@@ -303,6 +277,9 @@ pub fn find_switch_window_at_point(windows: &[SwitchWindowTarget], x: i32, y: i3
                 )
             };
             let top_hwnd = if !root.is_invalid() { root } else { child };
+            if !overlay_hwnd.0.is_null() && (top_hwnd == overlay_hwnd || child == overlay_hwnd) {
+                return None;
+            }
             if let Some(pos) = windows.iter().position(|w| w.id == top_hwnd.0 as isize) {
                 return Some(pos);
             }
@@ -311,6 +288,23 @@ pub fn find_switch_window_at_point(windows: &[SwitchWindowTarget], x: i32, y: i3
     windows.iter().position(|w| {
         x >= w.rect[0] && x <= w.rect[2] && y >= w.rect[1] && y <= w.rect[3]
     })
+}
+
+#[cfg(windows)]
+fn score_element_importance(e: &UiaElementInfo) -> i32 {
+    let mut score = 0;
+    if e.is_edit_or_textarea { score += 100; }
+    else if e.is_button { score += 90; }
+    else if e.is_link { score += 80; }
+    else if e.is_tab { score += 70; }
+    else if e.is_option { score += 60; }
+    else if e.is_toggle { score += 50; }
+    else if e.is_slider { score += 40; }
+    else if e.is_media { score += 30; }
+    else if e.is_tabindex { score += 20; }
+    else if e.is_focusable { score += 10; }
+    else if e.is_label { score += 1; }
+    score
 }
 
 #[cfg(windows)]
@@ -328,7 +322,7 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
     };
 
     let elements = list_interactive_elements(hwnd);
-    let mut targets: Vec<NumberedElementTarget> = elements
+    let potential_targets: Vec<UiaElementInfo> = elements
         .into_iter()
         .filter(|e| {
             if e.is_offscreen {
@@ -355,8 +349,51 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
                 || e.is_option
                 || e.is_label
                 || e.has_action_pattern
+                || !e.name.is_empty()
         })
-        .take(50)
+        .collect();
+
+    let mut final_targets_info: Vec<UiaElementInfo> = Vec::new();
+    const BADGE_W: i32 = 38;
+    const BADGE_H: i32 = 30;
+
+    for elem in potential_targets {
+        let badge_x = elem.rect.left;
+        let badge_y = elem.rect.top - BADGE_H / 2;
+
+        let mut overlapping_index = None;
+        for (i, final_elem) in final_targets_info.iter().enumerate() {
+            let final_badge_x = final_elem.rect.left;
+            let final_badge_y = final_elem.rect.top - BADGE_H / 2;
+
+            // AABB collision check for badges
+            if badge_x < final_badge_x + BADGE_W &&
+               badge_x + BADGE_W > final_badge_x &&
+               badge_y < final_badge_y + BADGE_H &&
+               badge_y + BADGE_H > final_badge_y
+            {
+                overlapping_index = Some(i);
+                break;
+            }
+        }
+
+        if let Some(idx) = overlapping_index {
+            let existing_score = score_element_importance(&final_targets_info[idx]);
+            let new_score = score_element_importance(&elem);
+            if new_score > existing_score {
+                final_targets_info[idx] = elem;
+            } else if new_score == existing_score {
+                if elem.area > final_targets_info[idx].area {
+                    final_targets_info[idx] = elem;
+                }
+            }
+        } else {
+            final_targets_info.push(elem);
+        }
+    }
+
+    let mut targets: Vec<NumberedElementTarget> = final_targets_info.into_iter()
+        .take(300)
         .enumerate()
         .map(|(i, e)| {
             let display_name = if !e.name.is_empty() {
@@ -488,6 +525,177 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
     targets
 }
 
+/// Réconcilie les nouvelles cibles détectées avec les anciennes afin de conserver les mêmes numéros
+pub fn reconcile_numbered_targets(
+    new_targets: &mut [NumberedElementTarget],
+    previous_targets: &[NumberedElementTarget],
+) {
+    if previous_targets.is_empty() || new_targets.is_empty() {
+        return;
+    }
+
+    // Si les cibles proviennent de fenêtres différentes, ne pas réconcilier
+    let prev_win = previous_targets.iter().find_map(|t| t.window_id);
+    let new_win = new_targets.iter().find_map(|t| t.window_id);
+    if let (Some(pw), Some(nw)) = (prev_win, new_win) {
+        if pw != nw {
+            return;
+        }
+    }
+
+    let mut used_indices = std::collections::HashSet::new();
+    let mut matched_indices = vec![None; new_targets.len()];
+
+    // Passe 1A : correspondance stricte sur nom exact, même rôle et proximité physique (<= 15 px)
+    for (new_idx, new_t) in new_targets.iter().enumerate() {
+        if matched_indices[new_idx].is_some() {
+            continue;
+        }
+        if let Some(old_t) = previous_targets.iter().find(|ot| {
+            !used_indices.contains(&ot.index)
+                && (ot.click_x - new_t.click_x).abs() <= 15
+                && (ot.click_y - new_t.click_y).abs() <= 15
+                && ot.role == new_t.role
+                && (ot.name.is_empty() || ot.name.eq_ignore_ascii_case(&new_t.name))
+        }) {
+            used_indices.insert(old_t.index);
+            matched_indices[new_idx] = Some(old_t.index);
+        }
+    }
+
+    // Passe 1B : correspondance par nom exact et rôle même si légèrement déplacé (tolérance <= 35 px)
+    for (new_idx, new_t) in new_targets.iter().enumerate() {
+        if matched_indices[new_idx].is_some() {
+            continue;
+        }
+        if !new_t.name.trim().is_empty() {
+            if let Some(old_t) = previous_targets.iter().find(|ot| {
+                !used_indices.contains(&ot.index)
+                    && ot.role == new_t.role
+                    && ot.name.eq_ignore_ascii_case(&new_t.name)
+                    && (ot.click_x - new_t.click_x).abs() <= 35
+                    && (ot.click_y - new_t.click_y).abs() <= 35
+            }) {
+                used_indices.insert(old_t.index);
+                matched_indices[new_idx] = Some(old_t.index);
+            }
+        }
+    }
+
+    // Passe 2 : correspondance sémantique sur nom et rôle (ex: fenêtre ou liste décalée/scrollée <= 120 px)
+    for (new_idx, new_t) in new_targets.iter().enumerate() {
+        if matched_indices[new_idx].is_some() {
+            continue;
+        }
+        if !new_t.name.trim().is_empty() {
+            if let Some(old_t) = previous_targets.iter().find(|ot| {
+                !used_indices.contains(&ot.index)
+                    && ot.name.eq_ignore_ascii_case(&new_t.name)
+                    && ot.role == new_t.role
+                    && (ot.click_y - new_t.click_y).abs() <= 120
+            }) {
+                used_indices.insert(old_t.index);
+                matched_indices[new_idx] = Some(old_t.index);
+            }
+        }
+    }
+
+    // Passe 3 : stricte proximité spatiale (<= 8 px) pour icônes ou boutons sans libellé
+    for (new_idx, new_t) in new_targets.iter().enumerate() {
+        if matched_indices[new_idx].is_some() {
+            continue;
+        }
+        if let Some(old_t) = previous_targets.iter().find(|ot| {
+            !used_indices.contains(&ot.index)
+                && (ot.click_x - new_t.click_x).abs() <= 8
+                && (ot.click_y - new_t.click_y).abs() <= 8
+                && ot.role == new_t.role
+        }) {
+            used_indices.insert(old_t.index);
+            matched_indices[new_idx] = Some(old_t.index);
+        }
+    }
+
+    // Attribution des numéros conservés et allocation séquentielle des nouveaux badges
+    let mut next_avail = 1;
+    for (new_idx, opt_index) in matched_indices.iter().enumerate() {
+        if let Some(idx) = opt_index {
+            new_targets[new_idx].index = *idx;
+        } else {
+            while used_indices.contains(&next_avail) {
+                next_avail += 1;
+            }
+            new_targets[new_idx].index = next_avail;
+            used_indices.insert(next_avail);
+            next_avail += 1;
+        }
+    }
+
+    new_targets.sort_by_key(|t| t.index);
+}
+
+#[derive(Clone, Debug)]
+pub struct TargetsScanRequest {
+    pub hwnd: isize,
+    pub win_rect: Option<[i32; 4]>,
+    pub previous: Vec<NumberedElementTarget>,
+    pub sequence: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct TargetsScanResult {
+    pub hwnd: isize,
+    pub win_rect: Option<[i32; 4]>,
+    pub targets: Vec<NumberedElementTarget>,
+    pub sequence: u64,
+}
+
+pub fn spawn_targets_worker(
+    request_rx: Receiver<TargetsScanRequest>,
+    result_tx: Sender<TargetsScanResult>,
+) {
+    std::thread::Builder::new()
+        .name("targets_scan_worker".to_string())
+        .spawn(move || {
+            #[cfg(windows)]
+            unsafe {
+                let _ = windows::Win32::System::Com::CoInitializeEx(
+                    None,
+                    windows::Win32::System::Com::COINIT_MULTITHREADED,
+                );
+            }
+
+            while let Ok(mut req) = request_rx.recv() {
+                // Si plusieurs requêtes ont été empilées, consommer pour ne traiter que la dernière
+                while let Ok(newer) = request_rx.try_recv() {
+                    req = newer;
+                }
+
+                #[cfg(windows)]
+                let mut targets = {
+                    let hwnd = HWND(req.hwnd as _);
+                    if !hwnd.0.is_null() && !is_window_hung(hwnd) {
+                        collect_numbered_targets_for_window(hwnd)
+                    } else {
+                        Vec::new()
+                    }
+                };
+                #[cfg(not(windows))]
+                let mut targets = collect_numbered_targets_for_active_window();
+
+                reconcile_numbered_targets(&mut targets, &req.previous);
+
+                let _ = result_tx.send(TargetsScanResult {
+                    hwnd: req.hwnd,
+                    win_rect: req.win_rect,
+                    targets,
+                    sequence: req.sequence,
+                });
+            }
+        })
+        .expect("Échec du lancement du worker de ciblage des numéros");
+}
+
 #[cfg(not(windows))]
 pub fn collect_numbered_targets_for_window(_target: impl AsWindowTarget) -> Vec<NumberedElementTarget> {
     collect_numbered_targets_for_active_window()
@@ -495,11 +703,45 @@ pub fn collect_numbered_targets_for_window(_target: impl AsWindowTarget) -> Vec<
 
 #[cfg(windows)]
 pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget> {
-    let user_windows = list_user_windows();
-    let Some(active_hwnd) = get_active_or_best_window(&user_windows) else {
-        return Vec::new();
+    let fg = unsafe { GetForegroundWindow() };
+    let current_pid = std::process::id();
+    let mut fg_pid = 0u32;
+    let _ = unsafe { GetWindowThreadProcessId(fg, Some(&mut fg_pid)) };
+
+    let target_hwnd = if !fg.0.is_null() && fg_pid != current_pid && !is_window_hung(fg) {
+        Some(fg)
+    } else {
+        LAST_EXTERNAL_HWND.lock().ok().and_then(|g| *g).map(|raw| HWND(raw as _)).filter(|&h| !h.0.is_null() && !is_window_hung(h))
     };
-    collect_numbered_targets_for_window(active_hwnd)
+
+    let target = target_hwnd.or_else(|| {
+        let user_windows = list_user_windows();
+        get_active_or_best_window(&user_windows)
+    });
+
+    if let Some(active_hwnd) = target {
+        collect_numbered_targets_for_window(active_hwnd)
+    } else {
+        Vec::new()
+    }
+}
+
+#[cfg(windows)]
+pub fn collect_numbered_targets_for_active_window_reconciled(
+    previous: &[NumberedElementTarget],
+) -> Vec<NumberedElementTarget> {
+    let mut targets = collect_numbered_targets_for_active_window();
+    reconcile_numbered_targets(&mut targets, previous);
+    targets
+}
+
+#[cfg(not(windows))]
+pub fn collect_numbered_targets_for_active_window_reconciled(
+    previous: &[NumberedElementTarget],
+) -> Vec<NumberedElementTarget> {
+    let mut targets = collect_numbered_targets_for_active_window();
+    reconcile_numbered_targets(&mut targets, previous);
+    targets
 }
 
 #[cfg(target_os = "macos")]
@@ -598,7 +840,7 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
     let items = query_macos_ax_elements();
     items
         .into_iter()
-        .take(30)
+        .take(300)
         .enumerate()
         .map(|(i, e)| NumberedElementTarget {
             index: i + 1,
@@ -715,7 +957,7 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
     let items = query_atspi_elements();
     items
         .into_iter()
-        .take(30)
+        .take(300)
         .enumerate()
         .map(|(i, e)| NumberedElementTarget {
             index: i + 1,
@@ -838,7 +1080,7 @@ pub fn inject_text_reader_target(zone: &mut NavigationZone) {
     }
 }
 
-/// Active et clique sur une cible numérotée (refocus de la fenêtre hôte + clic au centre physique)
+/// Active et clique sur une cible numérotée (refocus de la fenêtre hôte + positionnement physique du curseur + clic)
 pub fn activate_numbered_target(target: &NumberedElementTarget) -> bool {
     #[cfg(windows)]
     {
@@ -847,14 +1089,19 @@ pub fn activate_numbered_target(target: &NumberedElementTarget) -> bool {
             if !hwnd.0.is_null() && !is_window_hung(hwnd) {
                 force_foreground_window(hwnd);
                 restore_if_iconic(hwnd);
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(40));
             }
         }
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(target.click_x, target.click_y);
+        }
+        std::thread::sleep(Duration::from_millis(20));
         click_element(target.click_x, target.click_y, None, None);
         true
     }
     #[cfg(not(windows))]
     {
+        set_global_cursor_pos(target.click_x, target.click_y);
         crate::ui::click_element(target.click_x, target.click_y, None, None);
         true
     }
@@ -867,7 +1114,7 @@ pub fn click_numbered_target(target: &NumberedElementTarget) -> bool {
 pub fn build_targeted_hover_speech(
     _macro_zone_title: Option<&str>,
     _zone_targets: &[NumberedElementTarget],
-    _index_in_zone: Option<usize>,
+    target_index: usize,
     target_name: &str,
     target_role: &str,
     _target_shortcut: &str,
@@ -876,45 +1123,39 @@ pub fn build_targeted_hover_speech(
     let clean_name = target_name.trim();
     let clean_role = target_role.trim();
 
-    if clean_role.eq_ignore_ascii_case("lecture textuelle") {
+    let base_speech = if clean_role.eq_ignore_ascii_case("lecture textuelle") {
         if !clean_name.is_empty() {
-            return clean_name.to_string();
+            clean_name.to_string()
         } else {
-            return "Lecture textuelle".to_string();
+            "Lecture textuelle".to_string()
         }
-    }
-
-    if clean_role.eq_ignore_ascii_case("visuel (ocr)") || clean_role.eq_ignore_ascii_case("ocr") {
+    } else if clean_role.eq_ignore_ascii_case("visuel (ocr)") || clean_role.eq_ignore_ascii_case("ocr") {
         if !clean_name.is_empty() {
-            return clean_name.to_string();
+            format!("Texte : {clean_name}")
         } else {
-            return "Zone visuelle".to_string();
+            "Zone visuelle".to_string()
         }
-    }
-
-    if clean_role.eq_ignore_ascii_case("étiquette") || clean_role.eq_ignore_ascii_case("label") {
+    } else if clean_role.eq_ignore_ascii_case("étiquette") || clean_role.eq_ignore_ascii_case("label") {
         if !clean_name.is_empty() {
-            return format!("Texte : {clean_name}");
+            format!("Texte : {clean_name}")
         } else {
-            return "Texte".to_string();
+            "Texte".to_string()
         }
-    }
-
-    if clean_role.eq_ignore_ascii_case("champ de saisie") || clean_role.eq_ignore_ascii_case("zone de texte") {
+    } else if clean_role.eq_ignore_ascii_case("champ de saisie") || clean_role.eq_ignore_ascii_case("zone de texte") {
         if !clean_name.is_empty() {
-            return format!("{clean_role} : {clean_name}");
+            format!("{clean_role} : {clean_name}")
         } else {
-            return clean_role.to_string();
+            clean_role.to_string()
         }
-    }
-
-    if !clean_name.is_empty() {
+    } else if !clean_name.is_empty() {
         clean_name.to_string()
     } else if !clean_role.is_empty() {
         clean_role.to_string()
     } else {
         "Contrôle".to_string()
-    }
+    };
+
+    format!("{} : {}", target_index, base_speech)
 }
 
 #[cfg(not(windows))]
@@ -1024,6 +1265,7 @@ pub static IMMERSION_SCREEN_HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new())
 
 pub static SWITCH_HOOK_ENABLED: AtomicBool = AtomicBool::new(false);
 pub static SWITCH_KEY_QUEUE: Mutex<Vec<crate::types::SwitchKeyEvent>> = Mutex::new(Vec::new());
+pub static NUMBER_KEY_QUEUE: Mutex<Vec<char>> = Mutex::new(Vec::new());
 
 #[cfg(windows)]
 pub mod accessibility_keys {
@@ -1048,6 +1290,9 @@ static HOOK_KEYS_DOWN_TIME: Mutex<[Option<Instant>; 256]> = Mutex::new([None; 25
 pub fn reset_switch_keys() {
     if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
         q.clear();
+    }
+    if let Ok(mut nq) = NUMBER_KEY_QUEUE.lock() {
+        nq.clear();
     }
     #[cfg(windows)]
     if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
@@ -1094,7 +1339,41 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         let is_up = wparam.0 == WM_KEYUP as usize || wparam.0 == WM_SYSKEYUP as usize;
 
         let is_shift = (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x10) as u16 & 0x8000) != 0;
+        let is_ctrl = (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x11) as u16 & 0x8000) != 0;
+        let is_alt = (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x12) as u16 & 0x8000) != 0;
         let is_switch_hook_on = SWITCH_HOOK_ENABLED.load(Ordering::Relaxed);
+
+        // Interception globale du pavé numérique (0x60..=0x69) et des touches chiffres (0x30..=0x39) en mode survol
+        if is_switch_hook_on && !is_ctrl && !is_alt {
+            let digit_char = match vk {
+                0x60..=0x69 => Some((b'0' + (vk as u8 - 0x60)) as char),
+                0x30..=0x39 => Some((b'0' + (vk as u8 - 0x30)) as char),
+                _ => None,
+            };
+
+            if let Some(digit) = digit_char {
+                let vk_idx = (vk as usize) & 0xFF;
+                if is_down {
+                    let mut already_down = false;
+                    if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
+                        already_down = keys[vk_idx];
+                        keys[vk_idx] = true;
+                    }
+                    if !already_down {
+                        if let Ok(mut nq) = NUMBER_KEY_QUEUE.lock() {
+                            nq.push(digit);
+                        }
+                    }
+                } else if is_up {
+                    if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
+                        keys[vk_idx] = false;
+                    }
+                }
+                if is_down || is_up {
+                    return windows::Win32::Foundation::LRESULT(1);
+                }
+            }
+        }
 
         let switch_event = match vk {
             0x76 => Some(SwitchKeyEvent::ToggleSwitch),             // F7 -> Toggle Survol
@@ -1102,14 +1381,14 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
             0x78 => Some(SwitchKeyEvent::ToggleVoice),              // F9 -> Toggle Voix
             0x73 => Some(SwitchKeyEvent::Clear),                    // F4 -> Effacer / Trash
             0x09 if is_switch_hook_on => Some(if is_shift { SwitchKeyEvent::Prev } else { SwitchKeyEvent::Next }), // Tab / Shift+Tab
-            // Précédent : Flèche Gauche, Flèche Haut, Pavé Num 4, Touche 3, Pavé Num 3 (profil boîtier)
-            0x25 | 0x26 | 0x64 | 0x33 | 0x63 if is_switch_hook_on => Some(SwitchKeyEvent::Prev),
-            // Suivant : Flèche Droite, Flèche Bas, Pavé Num 6, Touche 2, Pavé Num 2 (profil boîtier)
-            0x27 | 0x28 | 0x66 | 0x32 | 0x62 if is_switch_hook_on => Some(SwitchKeyEvent::Next),
-            // Sélection : Entrée, Espace, Touche 1, Pavé Num 1, Pavé Num 5
-            0x0D | 0x20 | 0x31 | 0x61 | 0x65 if is_switch_hook_on => Some(SwitchKeyEvent::Select),
-            // Retour / Sortie : Backspace (Retour arrière), Échap, Pavé Num 0, Touche 0
-            0x08 | 0x60 | 0x30 if is_switch_hook_on => Some(SwitchKeyEvent::Back),
+            // Précédent : Flèche Gauche (0x25), Flèche Haut (0x26)
+            0x25 | 0x26 if is_switch_hook_on => Some(SwitchKeyEvent::Prev),
+            // Suivant : Flèche Droite (0x27), Flèche Bas (0x28)
+            0x27 | 0x28 if is_switch_hook_on => Some(SwitchKeyEvent::Next),
+            // Sélection : Entrée, Espace
+            0x0D | 0x20 if is_switch_hook_on => Some(SwitchKeyEvent::Select),
+            // Retour / Sortie : Backspace (Retour arrière)
+            0x08 if is_switch_hook_on => Some(SwitchKeyEvent::Back),
             0x1B if is_switch_hook_on => Some(SwitchKeyEvent::Escape),
             _ => None,
         };
@@ -2093,10 +2372,11 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
             return true;
         }
 
-        // Contournement de l'inhibition de focus Windows via simulation de la touche Alt
-        const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
-        send_key_event(VK_MENU, KEYBD_EVENT_FLAGS(0));
-        send_key_event(VK_MENU, KEYEVENTF_KEYUP);
+        let _ = windows::Win32::UI::WindowsAndMessaging::LockSetForegroundWindow(
+            windows::Win32::UI::WindowsAndMessaging::LSFW_UNLOCK,
+        );
+        const ASFW_ANY: u32 = 0xFFFFFFFF;
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
 
         let current_thread_id = GetCurrentThreadId();
         let mut target_pid = 0u32;
@@ -2107,12 +2387,6 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
             0
         };
 
-        let (_pid, exe_name) = get_window_process_info(hwnd);
-        let is_browser = is_browser_executable(&exe_name);
-
-        const ASFW_ANY: u32 = 0xFFFFFFFF;
-        let _ = AllowSetForegroundWindow(ASFW_ANY);
-
         if current_thread_id != target_thread_id && target_thread_id != 0 {
             let _ = AttachThreadInput(current_thread_id, target_thread_id, 1);
             if fg_thread_id != 0 && fg_thread_id != target_thread_id {
@@ -2120,15 +2394,6 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
             }
             let _ = BringWindowToTop(hwnd);
             let _ = SetForegroundWindow(hwnd);
-
-            // Pour les navigateurs, ne pas forcer le focus sur le widget de rendu interne de la page web
-            if !is_browser {
-                let mut gti = GUITHREADINFO::default();
-                gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
-                if GetGUIThreadInfo(target_thread_id, &mut gti).is_ok() && !gti.hwndFocus.0.is_null() {
-                    let _ = SetFocus(gti.hwndFocus);
-                }
-            }
 
             if fg_thread_id != 0 && fg_thread_id != target_thread_id {
                 let _ = AttachThreadInput(fg_thread_id, target_thread_id, 0);
@@ -2138,11 +2403,6 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
             let _ = BringWindowToTop(hwnd);
             let _ = SetForegroundWindow(hwnd);
         }
-
-        // Désactive immédiatement le mode menu Windows s'il a été enclenché par la touche Alt
-        const VK_ESCAPE: VIRTUAL_KEY = VIRTUAL_KEY(0x1B);
-        send_key_event(VK_ESCAPE, KEYBD_EVENT_FLAGS(0));
-        send_key_event(VK_ESCAPE, KEYEVENTF_KEYUP);
     }
     true
 }
@@ -3611,8 +3871,6 @@ pub fn generate_fallback_suggestions_from_screen(screen_summary: &str) -> Vec<Qu
 #[cfg(windows)]
 pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) -> String {
     let work_area = get_desktop_work_area();
-    let wa_x = work_area.left;
-    let wa_y = work_area.top;
     let wa_w = work_area.right - work_area.left;
     let wa_h = work_area.bottom - work_area.top;
 
