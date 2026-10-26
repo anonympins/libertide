@@ -290,6 +290,7 @@ pub fn find_switch_window_at_point(windows: &[SwitchWindowTarget], x: i32, y: i3
     })
 }
 
+#[cfg(windows)]
 fn score_element_importance(e: &UiaElementInfo) -> i32 {
     let mut score = 0;
     if e.is_edit_or_textarea { score += 100; }
