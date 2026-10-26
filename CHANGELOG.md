@@ -5,6 +5,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [0.6.2] - 2026-10-31
+
+### 🔍 Zoom Dynamique Adaptatif & Synchronisation Multi-Viewports (`main.rs`, `floating_window.rs`, `overlay.rs`)
+- **Propagation globale du zoom (`zoom_factor`)** :
+  - Synchronisation instantanée du facteur d'échelle entre le conteneur principal et toutes les fenêtres volantes secondaires (`vp_ctx.set_zoom_factor(ctx.zoom_factor())`).
+  - Prise en compte immédiate du zoom dans le rendu GDI natif des badges d'accessibilité (`draw_screen_numbered_badges`) : ajustement proportionnel de la hauteur des pastilles, des polices (`Segoe UI`), des contours et du positionnement relatif.
+  - Contrôles de taille de police dans l'onglet *Thèmes & Accessibilité* (`A -`, `A +`, `100 %`) compatibles avec le clic/dwell, avec persistance dans `.env` (`FONT_SIZE` / `ZOOM_FACTOR`).
+  - Raccourcis et commandes vocales adaptatives conservés et stabilisés (*"zoom plus"*, *"police plus grande"*, *"zoom normal"*).
+
+### 🔢 Ciblage par Numéros & Anti-Chevauchement AABB (`automation.rs`, `main.rs`)
+- **Déduplication spatiale et arbitrage d'importance (`score_element_importance`)** :
+  - Introduction d'une détection de collision par boîtes englobantes (AABB `38 × 30 px`) pour éliminer les badges qui se superposent sur des éléments denses.
+  - Arbitrage pondéré par type de contrôle (champs de saisie et textareas prioritaires sur les boutons, liens, onglets et étiquettes statiques).
+- **Saisie directe au pavé numérique & File de chiffres (`NUMBER_KEY_QUEUE`)** :
+  - Interception bas niveau globale des chiffres du pavé numérique (`0x60..=0x69`) et de la rangée supérieure (`0x30..=0x39`) via `switch_keyboard_hook_proc`.
+  - Buffer de composition numérique (`numbered_input_buffer`) avec confirmation explicite via Entrée/Espace ou validation automatique après 900 ms de temporisation.
+  - Gestion de l'effacement du dernier chiffre via Retour arrière (`Backspace`) sans quitter le mode de navigation en cours.
+  - Réconciliation conservatrice des numéros (`reconcile_numbered_targets`) pour préserver l'attribution des index lors des rafraîchissements périodiques.
+
+### 🪟 Navigation & Stabilité de Sélection de Fenêtre (`main.rs`, `automation.rs`, `window_util.rs`)
+- **Correction du ciblage de la première fenêtre (*Go to first window fix*)** :
+  - Résolution du décalage d'indexation lors de l'activation initiale du mode contacteur ou du retour au niveau supérieur (`SwitchAccessStep::Windows`).
+  - La première fenêtre candidate est désormais systématiquement sélectionnée, mise au premier plan (`force_foreground_window`, `restore_if_iconic`) et entourée de sa bordure orange sans sauter d'élément.
+  - Stabilisation de la touche Échap et de l'appui long sur contacteur pour revenir en arrière dans l'arborescence (Élément ➔ Zone ➔ Fenêtre) en préservant le focus correct.
+
+### 🌐 Robustesse & Parité Multiplateforme (`automation.rs`, `commands.rs`)
+- Alignement des structures de cibles numérotées et des mécanismes d'évitement de superposition sur Windows (UIA), macOS (JXA/Accessibility) et Linux (X11 / Wayland / AT-SPI2).
+- Optimisation du cycle de rafraîchissement d'affichage et suppression des frames parasites lors des transitions de fenêtres.
+
+---
 ## [0.6.1] - 2026-10-29
 
 ### 🚀 First-Launch Onboarding & Hover Navigation Detection (`main.rs`)
