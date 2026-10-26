@@ -14,7 +14,7 @@ use windows::Win32::UI::Accessibility::{
     IUIAutomationExpandCollapsePattern, IUIAutomationInvokePattern,
     IUIAutomationLegacyIAccessiblePattern, IUIAutomationRangeValuePattern,
     IUIAutomationScrollItemPattern, IUIAutomationScrollPattern,
-    IUIAutomationSelectionItemPattern, IUIAutomationSelectionPattern, IUIAutomationTextPattern,
+    IUIAutomationSelectionItemPattern, IUIAutomationTextPattern,
     IUIAutomationTogglePattern, IUIAutomationValuePattern, TreeScope_Descendants,
     UIA_ButtonControlTypeId, UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId,
     UIA_DataGridControlTypeId, UIA_DataItemControlTypeId, UIA_DocumentControlTypeId,
@@ -23,7 +23,7 @@ use windows::Win32::UI::Accessibility::{
     UIA_LegacyIAccessiblePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
     UIA_MenuItemControlTypeId, UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId,
     UIA_RangeValuePatternId, UIA_ScrollBarControlTypeId, UIA_ScrollItemPatternId,
-    UIA_ScrollPatternId, UIA_SelectionItemPatternId, UIA_SelectionPatternId,
+    UIA_ScrollPatternId, UIA_SelectionItemPatternId,
     UIA_SliderControlTypeId, UIA_SpinnerControlTypeId, UIA_TabControlTypeId,
     UIA_TabItemControlTypeId, UIA_TextPatternId, UIA_TogglePatternId, IUIAutomationTreeWalker,
     UIA_ToolBarControlTypeId, UIA_TreeItemControlTypeId, UIA_ValuePatternId,
@@ -440,7 +440,7 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let (aria_label_opt, aria_desc_opt, indications_vec) = extract_aria_details(&aria_properties);
                     let aria_label = aria_label_opt.unwrap_or_default();
                     let aria_description = aria_desc_opt.unwrap_or_default();
-                    let mut aria_indications = indications_vec.join(", ");
+                    let aria_indications = indications_vec.join(", ");
 
                     // Exclusion stricte des séparateurs de menu / barres d'outils
                     let is_separator = ctype == UIA_SeparatorControlTypeId
@@ -806,7 +806,7 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || loc_type.contains("hyperlink")
                         || is_role_link;
 
-                    let mut is_tab = is_tab_candidate;
+                    let is_tab = is_tab_candidate;
 
                     let (is_web_content, is_browser_chrome) = match doc_rect {
                         Some(dr) => {
@@ -1041,7 +1041,7 @@ pub fn has_focused_textarea(_target: impl AsWindowTarget) -> bool {
 
 #[cfg(windows)]
 pub fn refocus_largest_textarea_or_fallback(hwnd: HWND) -> bool {
-    let mut elements = list_interactive_elements(hwnd);
+    let elements = list_interactive_elements(hwnd);
     if elements.is_empty() {
         return false;
     }
@@ -1587,7 +1587,7 @@ pub unsafe fn mute_other_audio_sessions() -> usize {
 
 #[cfg(windows)]
 pub fn find_largest_textarea(hwnd: HWND) -> Option<UiaElementInfo> {
-    let mut elements = list_interactive_elements(hwnd);
+    let elements = list_interactive_elements(hwnd);
     if elements.is_empty() {
         return None;
     }
