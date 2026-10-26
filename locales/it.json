@@ -22,7 +22,81 @@
     "voice_sylvie": "Voce di Sylvie attivata.",
     "voice_jean": "Voce di Jean attivata.",
     "waiting_instructions": "In attesa di istruzioni di esplorazione...",
-    "please_set_api_key": "Inserisci la tua chiave API LLM per attivare l'assistente."
+    "please_set_api_key": "Inserisci la tua chiave API LLM per attivare l'assistente.",
+    "scheduled_tasks_cancelled": "Tutti i comandi differiti sono stati annullati.",
+    "scheduled_tasks_cancelled_count": "Tutti i comandi differiti sono stati annullati (%{count} annullato/i)."
+  },
+  "roles": {
+    "button": "pulsante",
+    "link": "link",
+    "input": "campo di testo",
+    "textarea": "area di testo",
+    "tab": "scheda",
+    "text_reader": "lettura testo",
+    "label": "testo",
+    "ocr": "testo",
+    "checkbox": "casella di spunta",
+    "combobox": "menu a tendina",
+    "slider": "cursore",
+    "media": "lettore multimediale"
+  },
+  "commands": {
+    "disable_dictation": "Disattiva dettatura",
+    "clear_text": "Cancella testo",
+    "close_badges": "Chiudi numeri",
+    "scroll_down": "Scorri verso il basso",
+    "resume_nav": "Riprendi navigazione",
+    "target_desc_role": "Numero %{index}: %{role}",
+    "target_desc_name_role": "Numero %{index}: %{name}, %{role}",
+    "target_desc_full": "Numero %{index}: %{name}, %{role}, valore: %{value}",
+    "click_target_named": "Clic sul numero %{index} (%{name})",
+    "click_target_num": "Clic sul numero %{index}",
+    "target_not_found_range": "Numero %{index} non trovato tra i badge visualizzati (da 1 a %{max}).",
+    "target_not_found_none": "Numero %{index} non trovato: nessun badge visualizzato.",
+    "last_action_undone": "Ultima azione annullata.",
+    "context_cleared": "Memoria contestuale reimpostata.",
+    "back_to_blocks": "Torna ai blocchi. %{zone}",
+    "no_controls_detected": "Finestra selezionata: %{title}. Nessun controllo interattivo diretto rilevato. Esc per tornare.",
+    "text_extraction_header": "Estrazione testo - %{zone}",
+    "reading_zone_text": "Lettura del testo della zona %{zone}. %{text}",
+    "empty_label": "Etichetta vuota.",
+    "dictation_activated": "Modalità dettatura attivata.",
+    "field_with_value": "%{name}, valore: %{value}. %{dict}",
+    "field_empty": "%{name}, campo vuoto. %{dict}",
+    "empty_value": "(vuoto)",
+    "action_feedback": "Azione: %{name}",
+    "menu_feedback": "Menu: %{name}",
+    "analyze_screen_prompt": "Analizza lo schermo e riassumi ciò che fa la finestra corrente."
+  },
+  "themes": {
+    "cyber_cyan": {
+      "name": "Cyber Ciano",
+      "desc": "Tema scuro neon predefinito con accenti ciano moderni."
+    },
+    "mint_emerald": {
+      "name": "Smeraldo Menta",
+      "desc": "Palette rilassante verde foresta e menta per ridurre l'affaticamento visivo."
+    },
+    "neon_purple": {
+      "name": "Ametista Neon",
+      "desc": "Atmosfera synthwave viola e magenta ad alta leggibilità."
+    },
+    "high_contrast_yellow": {
+      "name": "Alto Contrasto Giallo (WCAG AAA)",
+      "desc": "Nero puro e oro ad alta visibilità per ipovedenti e maculopatie."
+    },
+    "high_contrast_white": {
+      "name": "Alto Contrasto Bianco",
+      "desc": "Monocromatico nitido con testo e bordi bianco puro, senza riflessi."
+    },
+    "soft_amber": {
+      "name": "Ambra Morbida",
+      "desc": "Luce blu ridotta e calde tonalità ambrate per fotofobia ed emicranie."
+    },
+    "colorblind_friendly": {
+      "name": "Adatto ai Daltonici",
+      "desc": "Contrasto blu cobalto e oro ottimizzato per deuteranopia e protanopia."
+    }
   },
   "ui": {
     "assistance_tab": "🤖 Assistenza",
@@ -105,6 +179,9 @@
     "dwell_disabled": "Disattivato (0 ms)",
     "dwell_tooltip": "Tempo di permanenza del puntatore richiesto prima dell'attivazione (0 ms per disattivare)",
     "theme_voice_tip": "Suggerimento vocale: di' \"carattere più grande\" o \"contrasto elevato\"",
+    "avatar_mute_tooltip": "Clicca per interrompere la voce (Esc)",
+    "badge_disable_hover_tooltip": "Clicca per disattivare la modalità cursore (Esc)",
+    "chat_user_label": "Tu",
     "language_heading": "🌐 Lingua dell'interfaccia e dell'assistente:",
     "language_voice_tip": "Suggerimento vocale: di' \"passer en anglais\", \"in italiano\" o \"switch to german\""
   }

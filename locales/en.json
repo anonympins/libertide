@@ -22,7 +22,82 @@
     "voice_sylvie": "Sylvie's voice activated.",
     "voice_jean": "Jean's voice activated.",
     "waiting_instructions": "Waiting for exploration instructions...",
-    "please_set_api_key": "Please provide your LLM API key to enable the assistant."
+    "please_set_api_key": "Please provide your LLM API key to enable the assistant.",
+    "scheduled_tasks_cancelled": "All scheduled tasks have been cancelled.",
+    "scheduled_tasks_cancelled_count": "All scheduled tasks have been cancelled (%{count} cancelled)."
+    ,"window_name_announced": "Window %{name}."
+  },
+  "roles": {
+    "button": "button",
+    "link": "link",
+    "input": "input field",
+    "textarea": "text area",
+    "tab": "tab",
+    "text_reader": "text reader",
+    "label": "text",
+    "ocr": "text",
+    "checkbox": "checkbox",
+    "combobox": "drop-down list",
+    "slider": "slider",
+    "media": "media player"
+  },
+  "commands": {
+    "disable_dictation": "Disable dictation",
+    "clear_text": "Clear text",
+    "close_badges": "Close badges",
+    "scroll_down": "Scroll down",
+    "resume_nav": "Resume navigation",
+    "target_desc_role": "Number %{index}: %{role}",
+    "target_desc_name_role": "Number %{index}: %{name}, %{role}",
+    "target_desc_full": "Number %{index}: %{name}, %{role}, value: %{value}",
+    "click_target_named": "Click on number %{index} (%{name})",
+    "click_target_num": "Click on number %{index}",
+    "target_not_found_range": "Number %{index} not found among displayed badges (1 to %{max}).",
+    "target_not_found_none": "Number %{index} not found: no badges displayed.",
+    "last_action_undone": "Last action undone.",
+    "context_cleared": "Context memory reset.",
+    "back_to_blocks": "Back to blocks. %{zone}",
+    "no_controls_detected": "Selected window: %{title}. No direct interactive controls detected. Escape to return.",
+    "text_extraction_header": "Text extraction - %{zone}",
+    "reading_zone_text": "Reading text from zone %{zone}. %{text}",
+    "empty_label": "Empty label.",
+    "dictation_activated": "Dictation mode activated.",
+    "field_with_value": "%{name}, value: %{value}. %{dict}",
+    "field_empty": "%{name}, empty field. %{dict}",
+    "empty_value": "(empty)",
+    "action_feedback": "Action: %{name}",
+    "menu_feedback": "Menu: %{name}",
+    "analyze_screen_prompt": "Analyze the screen and summarize what the current window is doing."
+  },
+  "themes": {
+    "cyber_cyan": {
+      "name": "Cyber Cyan",
+      "desc": "Default modern neon dark theme with cyan accents."
+    },
+    "mint_emerald": {
+      "name": "Mint Emerald",
+      "desc": "Calming forest and mint green palette to reduce eye strain."
+    },
+    "neon_purple": {
+      "name": "Neon Purple",
+      "desc": "Synthwave violet and magenta aesthetic with high readability."
+    },
+    "high_contrast_yellow": {
+      "name": "High Contrast Yellow (WCAG AAA)",
+      "desc": "Pure black and high-visibility gold for low vision and AMD."
+    },
+    "high_contrast_white": {
+      "name": "High Contrast White",
+      "desc": "Crisp monochrome with pure white text and borders, glare-free."
+    },
+    "soft_amber": {
+      "name": "Soft Amber",
+      "desc": "Blue-light reduced warm amber tones for photophobia and headaches."
+    },
+    "colorblind_friendly": {
+      "name": "Colorblind Friendly",
+      "desc": "Cobalt blue and gold contrast optimized for deuteranopia and protanopia."
+    }
   },
   "ui": {
     "assistance_tab": "🤖 Assistant",
@@ -56,6 +131,15 @@
     "detecting_controls": "🎯 Detecting controls...",
     "select_window_hint": "🎯 %{index}: %{title} (Enter: select)",
     "open_zone_hint": "🎯 %{index}: %{title} (Enter: open)",
+    "target_status_item": "%{provider} · 🔢 %{buffer}#%{index}: %{name} (%{count} badges - Esc to exit)",
+    "target_status_active": "%{provider} · 🔢 %{buffer}Numbers mode active (%{count} badges - Esc to exit)",
+    "keyboard_input_buffer": "Keypad input: %{buffer}... | ",
+    "card_displayed": "Floating window displayed: %{title}",
+    "read_card_prefix": "🔊 Read: %{title}",
+    "open_app_cmd": "Open %{app}",
+    "api_key_empty": "API key cannot be empty.",
+    "api_key_write_err": "Error writing key: %{err}",
+    "model_write_err": "Error writing model: %{err}",
     "status_idle": "%{provider} · idle",
     "status_thinking": "%{provider} · thinking...",
     "status_speaking": "%{provider} · live",
@@ -105,6 +189,9 @@
     "dwell_disabled": "Disabled (0 ms)",
     "dwell_tooltip": "Pointer hold delay required before automatic triggering (0 ms to disable)",
     "theme_voice_tip": "Voice tip: say \"bigger font\" or \"high contrast\"",
+    "avatar_mute_tooltip": "Click to stop speaking (Esc)",
+    "badge_disable_hover_tooltip": "Click to disable hover mode (Esc)",
+    "chat_user_label": "You",
     "language_heading": "🌐 Interface & Assistant Language:",
     "language_voice_tip": "Voice tip: say \"switch to spanish\", \"switch to german\" or \"switch to english\""
   }

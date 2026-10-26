@@ -22,7 +22,82 @@
     "voice_sylvie": "Stimme von Sylvie aktiviert.",
     "voice_jean": "Stimme von Jean aktiviert.",
     "waiting_instructions": "Warte auf Erkundungsanweisungen...",
-    "please_set_api_key": "Bitte geben Sie Ihren LLM-API-Schlüssel ein, um den Assistenten zu aktivieren."
+    "please_set_api_key": "Bitte geben Sie Ihren LLM-API-Schlüssel ein, um den Assistenten zu aktivieren.",
+    "scheduled_tasks_cancelled": "Alle verzögerten Befehle wurden abgebrochen.",
+    "scheduled_tasks_cancelled_count": "Alle verzögerten Befehle wurden abgebrochen (%{count} abgebrochen)."
+    ,"window_name_announced": "Fenster %{name}."
+  },
+  "roles": {
+    "button": "Schaltfläche",
+    "link": "Link",
+    "input": "Eingabefeld",
+    "textarea": "Textbereich",
+    "tab": "Tab",
+    "text_reader": "Textleser",
+    "label": "Text",
+    "ocr": "Text",
+    "checkbox": "Kontrollkästchen",
+    "combobox": "Dropdown-Liste",
+    "slider": "Schieberegler",
+    "media": "Mediaplayer"
+  },
+  "commands": {
+    "disable_dictation": "Diktat deaktivieren",
+    "clear_text": "Text löschen",
+    "close_badges": "Nummern schließen",
+    "scroll_down": "Nach unten scrollen",
+    "resume_nav": "Navigation fortsetzen",
+    "target_desc_role": "Nummer %{index}: %{role}",
+    "target_desc_name_role": "Nummer %{index}: %{name}, %{role}",
+    "target_desc_full": "Nummer %{index}: %{name}, %{role}, Wert: %{value}",
+    "click_target_named": "Klick auf Nummer %{index} (%{name})",
+    "click_target_num": "Klick auf Nummer %{index}",
+    "target_not_found_range": "Nummer %{index} nicht unter den angezeigten Badges gefunden (1 bis %{max}).",
+    "target_not_found_none": "Nummer %{index} nicht gefunden: keine Badges angezeigt.",
+    "last_action_undone": "Letzte Aktion rückgängig gemacht.",
+    "context_cleared": "Kontextspeicher zurückgesetzt.",
+    "back_to_blocks": "Zurück zu den Blöcken. %{zone}",
+    "no_controls_detected": "Ausgewähltes Fenster: %{title}. Keine direkten interaktiven Steuerelemente erkannt. Esc zum Zurückkehren.",
+    "text_extraction_header": "Textextraktion - %{zone}",
+    "reading_zone_text": "Text des Bereichs %{zone} vorlesen. %{text}",
+    "empty_label": "Leere Beschriftung.",
+    "dictation_activated": "Diktatmodus aktiviert.",
+    "field_with_value": "%{name}, Wert: %{value}. %{dict}",
+    "field_empty": "%{name}, leeres Feld. %{dict}",
+    "empty_value": "(leer)",
+    "action_feedback": "Aktion: %{name}",
+    "menu_feedback": "Menü: %{name}",
+    "analyze_screen_prompt": "Den Bildschirm analysieren und das aktive Fenster zusammenfassen."
+  },
+  "themes": {
+    "cyber_cyan": {
+      "name": "Cyber Cyan",
+      "desc": "Standard-Dunkeldesign mit modernen Cyan-Akzenten."
+    },
+    "mint_emerald": {
+      "name": "Minz-Smaragd",
+      "desc": "Beruhigende Wald- und Minzgrün-Palette zur Schonung der Augen."
+    },
+    "neon_purple": {
+      "name": "Neon-Violett",
+      "desc": "Synthwave-Atmosphäre in Violett und Magenta mit hoher Lesbarkeit."
+    },
+    "high_contrast_yellow": {
+      "name": "Hoher Kontrast Gelb (WCAG AAA)",
+      "desc": "Reines Schwarz und gut sichtbares Gold für Sehbehinderte und AMD."
+    },
+    "high_contrast_white": {
+      "name": "Hoher Kontrast Weiß",
+      "desc": "Klares Monochrom mit reinweißen Texten und Rahmen ohne Blendung."
+    },
+    "soft_amber": {
+      "name": "Sanftes Bernstein",
+      "desc": "Blaulichtreduzierte warme Bernsteintöne bei Photophobie und Kopfschmerzen."
+    },
+    "colorblind_friendly": {
+      "name": "Farbenblind-freundlich",
+      "desc": "Kobaltblau- und Goldkontrast, optimiert für Deuteranopie und Protanopie."
+    }
   },
   "ui": {
     "assistance_tab": "🤖 Assistent",
@@ -56,6 +131,15 @@
     "detecting_controls": "🎯 Steuerelemente werden erkannt...",
     "select_window_hint": "🎯 %{index} : %{title} (Eingabe: wählen)",
     "open_zone_hint": "🎯 %{index} : %{title} (Eingabe: öffnen)",
+    "target_status_item": "%{provider} · 🔢 %{buffer}Nr. %{index}: %{name} (%{count} Badges - Esc zum Beenden)",
+    "target_status_active": "%{provider} · 🔢 %{buffer}Nummern-Modus aktiv (%{count} Badges - Esc zum Beenden)",
+    "keyboard_input_buffer": "Tastatureingabe: %{buffer}... | ",
+    "card_displayed": "Schwebendes Fenster angezeigt: %{title}",
+    "read_card_prefix": "🔊 Vorlesen: %{title}",
+    "open_app_cmd": "Öffne %{app}",
+    "api_key_empty": "Der API-Schlüssel darf nicht leer sein.",
+    "api_key_write_err": "Fehler beim Schreiben des Schlüssels: %{err}",
+    "model_write_err": "Fehler beim Schreiben des Modells: %{err}",
     "status_idle": "%{provider} · im Ruhezustand",
     "status_thinking": "%{provider} · denkt nach...",
     "status_speaking": "%{provider} · spricht",
@@ -105,6 +189,9 @@
     "dwell_disabled": "Deaktiviert (0 ms)",
     "dwell_tooltip": "Erforderliche Haltezeit des Zeigers vor automatischem Auslösen (0 ms zum Deaktivieren)",
     "theme_voice_tip": "Sprachtipp: Sagen Sie „größere Schrift“ oder „hoher Kontrast“",
+    "avatar_mute_tooltip": "Klicken, um die Sprachausgabe zu stoppen (Esc)",
+    "badge_disable_hover_tooltip": "Klicken, um den Hover-Modus zu deaktivieren (Esc)",
+    "chat_user_label": "Sie",
     "language_heading": "🌐 Sprache für Oberfläche & Assistent:",
     "language_voice_tip": "Sprachtipp: Sagen Sie „switch to french“, „auf deutsch“ oder „switch to english“"
   }

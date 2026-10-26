@@ -22,7 +22,81 @@
     "voice_sylvie": "西尔维（Sylvie）语音已激活。",
     "voice_jean": "让（Jean）语音已激活。",
     "waiting_instructions": "等待探索指令中...",
-    "please_set_api_key": "请填写您的大模型 API 密钥以激活助手。"
+    "please_set_api_key": "请填写您的大模型 API 密钥以激活助手。",
+    "scheduled_tasks_cancelled": "已取消所有计划命令。",
+    "scheduled_tasks_cancelled_count": "已取消所有计划命令（共 %{count} 项）。"
+  },
+  "roles": {
+    "button": "按钮",
+    "link": "链接",
+    "input": "输入框",
+    "textarea": "文本区域",
+    "tab": "标签页",
+    "text_reader": "文本朗读",
+    "label": "文本",
+    "ocr": "文本",
+    "checkbox": "复选框",
+    "combobox": "下拉列表",
+    "slider": "滑块",
+    "media": "媒体播放器"
+  },
+  "commands": {
+    "disable_dictation": "停用听写",
+    "clear_text": "清除文本",
+    "close_badges": "关闭编号",
+    "scroll_down": "向下滚动",
+    "resume_nav": "恢复导航",
+    "target_desc_role": "编号 %{index} : %{role}",
+    "target_desc_name_role": "编号 %{index} : %{name}，%{role}",
+    "target_desc_full": "编号 %{index} : %{name}，%{role}，当前值 : %{value}",
+    "click_target_named": "点击编号 %{index}（%{name}）",
+    "click_target_num": "点击编号 %{index}",
+    "target_not_found_range": "在当前显示的角标（1 至 %{max}）中未找到编号 %{index}。",
+    "target_not_found_none": "未找到编号 %{index}：当前未显示任何角标。",
+    "last_action_undone": "已撤销上一步操作。",
+    "context_cleared": "已重置上下文记忆。",
+    "back_to_blocks": "返回区域列表：%{zone}",
+    "no_controls_detected": "当前窗口：%{title}。未检测到可直接交互的控件。按 Esc 返回。",
+    "text_extraction_header": "文本提取 - %{zone}",
+    "reading_zone_text": "正在朗读 %{zone} 区域的内容。%{text}",
+    "empty_label": "空标签。",
+    "dictation_activated": "听写模式已激活。",
+    "field_with_value": "%{name}，内容为 : %{value}。%{dict}",
+    "field_empty": "%{name}，空白字段。%{dict}",
+    "empty_value": "（空）",
+    "action_feedback": "操作 : %{name}",
+    "menu_feedback": "菜单 : %{name}",
+    "analyze_screen_prompt": "分析当前屏幕并总结活动窗口的操作内容。"
+  },
+  "themes": {
+    "cyber_cyan": {
+      "name": "赛博青",
+      "desc": "默认现代霓虹暗色主题，带有青色点缀。"
+    },
+    "mint_emerald": {
+      "name": "薄荷翡翠",
+      "desc": "舒缓的森林与薄荷绿配色，减少视觉疲劳。"
+    },
+    "neon_purple": {
+      "name": "霓虹紫",
+      "desc": "高可读性的复古合成波紫与洋红风格。"
+    },
+    "high_contrast_yellow": {
+      "name": "高对比度黄 (WCAG AAA)",
+      "desc": "纯黑底色与高对比金黄色，专为低视力与黄斑病变优化。"
+    },
+    "high_contrast_white": {
+      "name": "高对比度白",
+      "desc": "纯正白字与白边框单色调，清晰无反光。"
+    },
+    "soft_amber": {
+      "name": "柔和琥珀",
+      "desc": "过滤蓝光的温暖琥珀色调，缓解畏光与头痛。"
+    },
+    "colorblind_friendly": {
+      "name": "色盲友好",
+      "desc": "针对红绿色盲与弱色差优化的钴蓝与金黄高辨识度对比。"
+    }
   },
   "ui": {
     "assistance_tab": "🤖 智能助手",
@@ -105,6 +179,9 @@
     "dwell_disabled": "已禁用 (0 ms)",
     "dwell_tooltip": "自动触发点击前所需的指针停留时间（设为 0 ms 则禁用）",
     "theme_voice_tip": "语音提示：可说“放大字体”或“高对比度”",
+    "avatar_mute_tooltip": "点击停止说话 (Esc)",
+    "badge_disable_hover_tooltip": "点击退出悬停模式 (Esc)",
+    "chat_user_label": "用户",
     "language_heading": "🌐 界面与助手语言：",
     "language_voice_tip": "语音提示：可说“中文”、“switch to english”或“passer en francais”"
   }

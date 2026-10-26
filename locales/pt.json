@@ -22,7 +22,81 @@
     "voice_sylvie": "Voz de Sylvie ativada.",
     "voice_jean": "Voz de Jean ativada.",
     "waiting_instructions": "Aguardando instruções de exploração...",
-    "please_set_api_key": "Por favor, informe sua chave de API LLM para ativar o assistente."
+    "please_set_api_key": "Por favor, informe sua chave de API LLM para ativar o assistente.",
+    "scheduled_tasks_cancelled": "Todos os comandos agendados foram cancelados.",
+    "scheduled_tasks_cancelled_count": "Todos os comandos agendados foram cancelados (%{count} cancelado(s))."
+  },
+  "roles": {
+    "button": "botão",
+    "link": "link",
+    "input": "campo de entrada",
+    "textarea": "área de texto",
+    "tab": "aba",
+    "text_reader": "leitor de texto",
+    "label": "texto",
+    "ocr": "texto",
+    "checkbox": "caixa de seleção",
+    "combobox": "lista suspensa",
+    "slider": "controle deslizante",
+    "media": "reprodutor de mídia"
+  },
+  "commands": {
+    "disable_dictation": "Desativar ditado",
+    "clear_text": "Limpar texto",
+    "close_badges": "Fechar números",
+    "scroll_down": "Rolar para baixo",
+    "resume_nav": "Retomar navegação",
+    "target_desc_role": "Número %{index}: %{role}",
+    "target_desc_name_role": "Número %{index}: %{name}, %{role}",
+    "target_desc_full": "Número %{index}: %{name}, %{role}, valor: %{value}",
+    "click_target_named": "Clique no número %{index} (%{name})",
+    "click_target_num": "Clique no número %{index}",
+    "target_not_found_range": "Número %{index} não encontrado entre os distintivos exibidos (1 a %{max}).",
+    "target_not_found_none": "Número %{index} não encontrado: nenhum distintivo exibido.",
+    "last_action_undone": "Última ação desfeita.",
+    "context_cleared": "Memória contextual redefinida.",
+    "back_to_blocks": "Voltar aos blocos. %{zone}",
+    "no_controls_detected": "Janela selecionada: %{title}. Nenhum controle interativo direto detectado. Esc para voltar.",
+    "text_extraction_header": "Extração de texto - %{zone}",
+    "reading_zone_text": "Lendo texto da zona %{zone}. %{text}",
+    "empty_label": "Rótulo vazio.",
+    "dictation_activated": "Modo ditado ativado.",
+    "field_with_value": "%{name}, valor: %{value}. %{dict}",
+    "field_empty": "%{name}, campo vazio. %{dict}",
+    "empty_value": "(vazio)",
+    "action_feedback": "Ação: %{name}",
+    "menu_feedback": "Menu: %{name}",
+    "analyze_screen_prompt": "Analise a tela e resuma o que a janela atual está fazendo."
+  },
+  "themes": {
+    "cyber_cyan": {
+      "name": "Cyber Ciano",
+      "desc": "Tema escuro padrão com destaques modernos em ciano."
+    },
+    "mint_emerald": {
+      "name": "Esmeralda Menta",
+      "desc": "Paleta repousante verde floresta e menta para aliviar o cansaço visual."
+    },
+    "neon_purple": {
+      "name": "Ametista Neon",
+      "desc": "Visual synthwave violeta e magenta com alta legibilidade."
+    },
+    "high_contrast_yellow": {
+      "name": "Alto Contraste Amarelo (WCAG AAA)",
+      "desc": "Preto puro e dourado de alta visibilidade para baixa visão e DMRI."
+    },
+    "high_contrast_white": {
+      "name": "Alto Contraste Branco",
+      "desc": "Monocromático nítido com textos e bordas brancas puras, sem reflexos."
+    },
+    "soft_amber": {
+      "name": "Âmbar Suave",
+      "desc": "Luz azul reduzida e tons quentes de âmbar para fotofobia e enxaquecas."
+    },
+    "colorblind_friendly": {
+      "name": "Amigável para Daltônicos",
+      "desc": "Contraste azul cobalto e ouro otimizado para deuteranopia e protanopia."
+    }
   },
   "ui": {
     "assistance_tab": "🤖 Assistência",
@@ -105,6 +179,9 @@
     "dwell_disabled": "Desativado (0 ms)",
     "dwell_tooltip": "Tempo de permanência do ponteiro necessário antes do disparo automático (0 ms para desativar)",
     "theme_voice_tip": "Dica de voz: diga «fonte maior» ou «alto contraste»",
+    "avatar_mute_tooltip": "Clique para interromper a fala (Esc)",
+    "badge_disable_hover_tooltip": "Clique para desativar o modo sobrevoo (Esc)",
+    "chat_user_label": "Você",
     "language_heading": "🌐 Idioma da interface e do assistente:",
     "language_voice_tip": "Dica de voz: diga «em português», «switch to english» ou «passer en francais»"
   }
