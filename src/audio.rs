@@ -744,8 +744,9 @@ fn run_live_subtitles_loop(
 
         #[cfg(windows)]
         {
-            if let Ok(mut lock) = LIVE_SUBTITLES_TARGET.lock() {
-                if lock.is_none() {
+            let need_target = LIVE_SUBTITLES_TARGET.lock().map(|l| l.is_none()).unwrap_or(false);
+            if need_target {
+                // Énumération des fenêtres effectuée hors du verrou pour éviter tout blocage de l'UI
                     let user_wins = crate::window_util::list_user_windows();
                     let found = user_wins.iter()
                         .find(|(_, t)| {
@@ -763,47 +764,84 @@ fn run_live_subtitles_loop(
                                 .and_then(|h| user_wins.iter().find(|(win_h, _)| *win_h == h).map(|(_, t)| t.clone()))
                         });
                     if let Some(src) = found {
+                    if let Ok(mut lock) = LIVE_SUBTITLES_TARGET.lock() {
                         *lock = Some(src);
                     }
                 }
             }
         }
 
-        // Construction résiliente du flux audio : tentative loopback sortie, sinon repli sur l'entrée
+        // Construction résiliente du flux audio : tentative loopback, sinon repli sur le micro.
         let host = cpal::default_host();
         let (loopback_tx, loopback_rx) = channel::<Vec<f32>>();
-        let mut stream_opt = None;
+        let mut stream_opt: Option<cpal::Stream> = None;
         let mut sample_rate = 44100;
         let mut channels = 2;
+        let mut source_name = "Inconnu".to_string();
 
-        if let Some(out_dev) = host.default_output_device() {
-            if let Ok(config) = out_dev.default_output_config() {
-                let sr = config.sample_rate();
-                let ch = config.channels();
-                let fmt = config.sample_format();
-                let s_cfg: cpal::StreamConfig = config.into();
-                if let Some(s) = build_input_stream(&out_dev, &s_cfg, fmt, loopback_tx.clone()) {
-                    if s.play().is_ok() {
-                        stream_opt = Some(s);
-                        sample_rate = sr;
-                        channels = ch;
+        // Stratégie de sélection de l'appareil de capture audio :
+        // 1. (Linux/macOS uniquement) Recherche d'un appareil virtuel explicite (.monitor, BlackHole, etc.)
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Ok(devices) = host.input_devices() {
+            for device in devices {
+                if let Ok(name) = device.name() {
+                    let lower_name = name.to_lowercase();
+                    #[cfg(target_os = "linux")]
+                    let is_match = lower_name.contains(".monitor");
+                    #[cfg(target_os = "macos")]
+                    let is_match = lower_name.contains("blackhole") || lower_name.contains("soundflower");
+
+                    if is_match {
+                        println!("[Audio] Périphérique de loopback détecté : {}", name);
+                        if let Ok(config) = device.default_input_config() {
+                            sample_rate = config.sample_rate();
+                            channels = config.channels();
+                            let fmt = config.sample_format();
+                            let s_cfg: cpal::StreamConfig = config.into();
+                            if let Some(s) = build_input_stream(&device, &s_cfg, fmt, loopback_tx.clone()) {
+                                if s.play().is_ok() {
+                                    source_name = name;
+                                    stream_opt = Some(s);
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
+        // 2. (Windows) Capture loopback WASAPI directe sur le périphérique de sortie par défaut
+        #[cfg(target_os = "windows")]
+        if stream_opt.is_none() {
+            if let Some(out_dev) = host.default_output_device() {
+                source_name = out_dev.to_string();
+                if let Ok(config) = out_dev.default_output_config() {
+                    sample_rate = config.sample_rate();
+                    channels = config.channels();
+                    let fmt = config.sample_format();
+                    let s_cfg: cpal::StreamConfig = config.into();
+                    if let Some(s) = build_input_stream(&out_dev, &s_cfg, fmt, loopback_tx.clone()) {
+                        if s.play().is_ok() {
+                            stream_opt = Some(s);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Repli sur le microphone par défaut si aucune option de loopback n'a fonctionné
         if stream_opt.is_none() {
             if let Some(in_dev) = host.default_input_device() {
+                source_name = in_dev.to_string();
                 if let Ok(config) = in_dev.default_input_config() {
-                    let sr = config.sample_rate();
-                    let ch = config.channels();
+                    sample_rate = config.sample_rate();
+                    channels = config.channels();
                     let fmt = config.sample_format();
                     let s_cfg: cpal::StreamConfig = config.into();
                     if let Some(s) = build_input_stream(&in_dev, &s_cfg, fmt, loopback_tx.clone()) {
                         if s.play().is_ok() {
                             stream_opt = Some(s);
-                            sample_rate = sr;
-                            channels = ch;
                         }
                     }
                 }
@@ -812,11 +850,11 @@ fn run_live_subtitles_loop(
 
         let Some(stream) = stream_opt else {
             eprintln!("[Live Subtitles] Aucun flux audio disponible.");
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(1000));
             continue;
         };
 
-        println!("[Live Subtitles] Flux de capture loopback audio actif ({} Hz, {} canaux).", sample_rate, channels);
+        println!("[Live Subtitles] Flux de capture actif sur '{}' ({} Hz, {} canaux).", source_name, sample_rate, channels);
 
         let mut resampler = ContinuousResampler::new(sample_rate, channels, 16000);
         let mut raw_mono_buffer: Vec<f32> = Vec::with_capacity(1024);
