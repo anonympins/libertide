@@ -24,7 +24,10 @@
     "waiting_instructions": "В ожидании инструкций исследования...",
     "please_set_api_key": "Пожалуйста, укажите ваш API-ключ LLM для активации ассистента.",
     "scheduled_tasks_cancelled": "Все отложенные команды отменены.",
-    "scheduled_tasks_cancelled_count": "Все отложенные команды отменены (%{count} отменено)."
+    "scheduled_tasks_cancelled_count": "Все отложенные команды отменены (%{count} отменено).",
+    "subtitles_enabled": "Живые субтитры включены (%{source}).",
+    "subtitles_disabled": "Живые субтитры отключены.",
+    "window_name_announced": "Окно %{name}."
   },
   "roles": {
     "button": "кнопка",
@@ -66,6 +69,12 @@
     "empty_value": "(пусто)",
     "action_feedback": "Действие: %{name}",
     "menu_feedback": "Меню: %{name}",
+    "start_subtitles": "Включить субтитры",
+    "stop_subtitles": "Остановить субтитры",
+    "subtitles_title": "Живые субтитры",
+    "subtitles_system_audio": "Системный звук",
+    "start_subtitles_keywords": "живые субтитры,субтитры,субтитр,транскрипция,включить субтитры,запустить субтитры,показать субтитры,включи субтитры",
+    "stop_subtitles_keywords": "остановить субтитры,отключить субтитры,выключить субтитры,скрыть субтитры,закрыть субтитры,стоп субтитры",
     "analyze_screen_prompt": "Проанализируйте экран и кратко опишите, что делает текущее окно."
   },
   "themes": {
@@ -130,6 +139,12 @@
     "detecting_controls": "🎯 Обнаружение элементов...",
     "select_window_hint": "🎯 %{index} : %{title} (Enter: выбрать)",
     "open_zone_hint": "🎯 %{index} : %{title} (Enter: открыть)",
+    "target_status_item": "%{provider} · 🔢 %{buffer}№%{index}: %{name} (%{count} значков - Esc для выхода)",
+    "target_status_active": "%{provider} · 🔢 %{buffer}Режим номеров активен (%{count} значков - Esc для выхода)",
+    "keyboard_input_buffer": "Ввод с клавиатуры: %{buffer}... | ",
+    "card_displayed": "Плавающее окно отображено: %{title}",
+    "read_card_prefix": "🔊 Читать: %{title}",
+    "open_app_cmd": "Открыть %{app}",
     "status_idle": "%{provider} · ожидание",
     "status_thinking": "%{provider} · размышление...",
     "status_speaking": "%{provider} · говорит",

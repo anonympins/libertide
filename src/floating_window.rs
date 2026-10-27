@@ -16,6 +16,50 @@ pub struct OpenCardSummary {
     pub content_preview: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct LiveSubtitlesState {
+    pub current_text: String,
+    pub spectrum: [f32; 16],
+    pub history: Vec<String>,
+}
+
+/// Registre de l'état en direct des sous-titres (texte courant, égaliseur spectral et historique)
+pub static LIVE_SUBTITLES_STATE: Mutex<Option<LiveSubtitlesState>> = Mutex::new(None);
+
+pub fn get_live_subtitles_state() -> Option<LiveSubtitlesState> {
+    LIVE_SUBTITLES_STATE.lock().ok().and_then(|g| g.clone())
+}
+
+pub fn update_live_subtitles(text: String, spectrum: [f32; 16]) {
+    if let Ok(mut g) = LIVE_SUBTITLES_STATE.lock() {
+        if let Some(state) = g.as_mut() {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() && state.current_text != trimmed {
+                if !state.current_text.trim().is_empty() {
+                    state.history.push(state.current_text.clone());
+                    if state.history.len() > 30 {
+                        state.history.remove(0);
+                    }
+                }
+                state.current_text = trimmed.to_string();
+            }
+            state.spectrum = spectrum;
+        } else {
+            *g = Some(LiveSubtitlesState {
+                current_text: text,
+                spectrum,
+                history: Vec::new(),
+            });
+        }
+    }
+}
+
+pub fn stop_live_subtitles() {
+    if let Ok(mut g) = LIVE_SUBTITLES_STATE.lock() {
+        *g = None;
+    }
+}
+
 /// Registre global en temps réel des fenêtres volantes ouvertes
 pub static OPEN_FLOATING_CARDS: Mutex<Vec<OpenCardSummary>> = Mutex::new(Vec::new());
 
@@ -37,6 +81,10 @@ pub fn update_open_floating_cards(cards: &[FloatingCard]) {
                     }
                     FloatingContentType::Markdown { text } => {
                         ("markdown", text.clone())
+                    }
+                    FloatingContentType::Subtitles { text, target_window, .. } => {
+                        let win = target_window.as_deref().unwrap_or("Audio loopback");
+                        ("subtitles", format!("Window: {win} | Text: {text}"))
                     }
                     FloatingContentType::Form { fields, .. } => {
                         let f_summary = fields.iter().map(|f| f.label.clone()).collect::<Vec<_>>().join(", ");
@@ -128,6 +176,14 @@ pub enum FloatingContentType {
         submit_label: String,
         #[serde(default)]
         prompt_prefix: Option<String>,
+    },
+    Subtitles {
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        target_window: Option<String>,
+        #[serde(default)]
+        history: Vec<String>,
     },
 }
 
@@ -343,6 +399,15 @@ impl FloatingCard {
                     FloatingContentType::Form { fields, submit_label, prompt_prefix }
                 }
             }
+            "subtitles" | "live_subtitles" | "transcription" => {
+                let text = data.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let target_window = data.get("target_window").and_then(|v| v.as_str()).map(String::from);
+                FloatingContentType::Subtitles {
+                    text,
+                    target_window,
+                    history: Vec::new(),
+                }
+            }
             _ => {
                 let text = if let Some(s) = data.as_str() {
                     s.to_string()
@@ -449,6 +514,18 @@ impl FloatingCard {
                 speech.push_str(&format!("Ce formulaire contient {} options. ", fields.len()));
                 speech.push_str(&format!("Interactions possibles : vous pouvez modifier ces critères puis cliquer sur le bouton {} pour lancer la requête.", submit_label));
             }
+            FloatingContentType::Subtitles { text, target_window, history } => {
+                let target = target_window.as_deref().unwrap_or("la sortie audio");
+                speech.push_str(&format!("Sous-titres en direct de {target}. "));
+                if !history.is_empty() {
+                    let recent: Vec<&str> = history.iter().rev().take(3).map(|s| s.as_str()).collect();
+                    speech.push_str(&recent.into_iter().rev().collect::<Vec<_>>().join(" "));
+                    speech.push(' ');
+                }
+                if !text.is_empty() {
+                    speech.push_str(text);
+                }
+            }
         }
         speech
     }
@@ -464,10 +541,12 @@ impl FloatingCard {
             FloatingContentType::Table { .. } => "📊",
             FloatingContentType::Stats { .. } => "📈",
             FloatingContentType::Markdown { .. } => "📄",
+            FloatingContentType::Subtitles { .. } => "🎙️",
         };
         let viewport_title = format!("{icon_prefix} {}", self.title);
 
         let default_size = match &self.content {
+            FloatingContentType::Subtitles { .. } => [620.0, 310.0],
             FloatingContentType::Form { .. } => [460.0, 390.0],
             FloatingContentType::Markdown { .. } => [560.0, 380.0],
             FloatingContentType::Table { .. } => [580.0, 340.0],
@@ -480,7 +559,7 @@ impl FloatingCard {
             .with_decorations(false)
             .with_always_on_top()
             .with_inner_size(default_size)
-            .with_min_inner_size([280.0, 160.0])
+            .with_min_inner_size([320.0, 180.0])
             .with_resizable(true);
 
         let mut requested_output = None;
@@ -494,14 +573,20 @@ impl FloatingCard {
 
             let is_maximized = vp_ctx.input(|i| i.viewport().maximized.unwrap_or(false));
 
+            let is_subtitles = matches!(self.content, FloatingContentType::Subtitles { .. });
+            let bg_fill = if is_subtitles {
+                egui::Color32::from_rgb(8, 8, 12)
+            } else {
+                theme.modal_bg
+            };
+            let panel_frame = egui::Frame::new()
+                .fill(bg_fill)
+                .stroke(egui::Stroke::new(1.2, theme.border))
+                .corner_radius(egui::CornerRadius::same(12))
+                .inner_margin(egui::Margin::symmetric(12, 10));
+
             egui::CentralPanel::default()
-                .frame(
-                    egui::Frame::new()
-                        .fill(theme.modal_bg)
-                        .stroke(egui::Stroke::new(1.2, theme.border))
-                        .corner_radius(egui::CornerRadius::same(12))
-                        .inner_margin(egui::Margin::symmetric(12, 10)),
-                )
+                .frame(panel_frame)
                 .show(vp_ctx, |ui| {
                     // Barre d'en-tête volante : déplaçable par clic-glissé avec bouton fermer
                     let header_resp = ui.horizontal(|ui| {
@@ -899,6 +984,141 @@ impl FloatingCard {
                                         close_window = true;
                                         requested_output = Some(FloatingCardOutput::Prompt(prompt_lines.join("\n")));
                                     }
+                                }
+                                FloatingContentType::Subtitles { text: card_text, target_window, history } => {
+                                    let live_state = get_live_subtitles_state();
+                                    let spectrum = live_state.as_ref().map(|s| s.spectrum).unwrap_or([0.0; 16]);
+                                    let active_text = live_state.as_ref().map(|s| s.current_text.clone()).unwrap_or_else(|| card_text.clone());
+                                    let all_history = live_state.as_ref().map(|s| s.history.clone()).unwrap_or_else(|| history.clone());
+
+                                    ui.vertical(|ui| {
+                                        // 1. Barre d'état live avec indicateur clignotant
+                                        ui.horizontal(|ui| {
+                                            let pulse = (ui.input(|i| i.time) * 4.5).sin().abs() as f32;
+                                            let dot_color = egui::Color32::from_rgb(255, (40.0 + 40.0 * pulse) as u8, 40);
+                                            ui.label(egui::RichText::new("●").size(14.0).color(dot_color));
+                                            ui.label(egui::RichText::new("EN DIRECT").size(11.0).color(dot_color).strong());
+
+                                            let live_target = crate::audio::LIVE_SUBTITLES_TARGET.lock().ok().and_then(|g| g.clone());
+                                            if target_window.is_none() && live_target.is_some() {
+                                                *target_window = live_target.clone();
+                                            }
+                                            let target_label = target_window.as_deref().or(live_target.as_deref()).unwrap_or("Sortie audio (Loopback)");
+                                            ui.label(egui::RichText::new(format!("— Source : {target_label}")).size(11.0).color(theme.text_secondary));
+
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                let stop_btn = ui.add(
+                                                    egui::Button::new(
+                                                        egui::RichText::new("⏹ Arrêter")
+                                                            .size(10.5)
+                                                            .color(egui::Color32::from_rgb(255, 120, 120)),
+                                                    )
+                                                    .small()
+                                                    .corner_radius(egui::CornerRadius::same(4)),
+                                                );
+                                                if stop_btn.clicked() {
+                                                    stop_live_subtitles();
+                                                    crate::audio::stop_live_subtitles();
+                                                    close_window = true;
+                                                }
+
+                                                let copy_txt_btn = ui.add(
+                                                    egui::Button::new(
+                                                        egui::RichText::new("📋 Copier")
+                                                            .size(10.5)
+                                                            .color(theme.accent_text),
+                                                    )
+                                                    .small()
+                                                    .corner_radius(egui::CornerRadius::same(4)),
+                                                );
+                                                if copy_txt_btn.clicked() {
+                                                    let mut full_sub = all_history.join("\n");
+                                                    if !active_text.is_empty() {
+                                                        full_sub.push('\n');
+                                                        full_sub.push_str(&active_text);
+                                                    }
+                                                    set_clipboard_text(&full_sub);
+                                                    play_earcon(Earcon::Success);
+                                                }
+                                            });
+                                        });
+
+                                        ui.add_space(6.0);
+
+                                        // 2. Égaliseur de flux spectral (16 barres néon animées)
+                                        let (spec_rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), egui::Sense::hover());
+                                        let painter = ui.painter();
+                                        let num_bars = 16;
+                                        let spacing = 3.0;
+                                        let bar_w = ((spec_rect.width() - (num_bars as f32 - 1.0) * spacing) / num_bars as f32).max(2.0);
+
+                                        // Ligne de sol
+                                        painter.hline(spec_rect.x_range(), spec_rect.bottom(), egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30)));
+
+                                        for b in 0..num_bars {
+                                            let mag = spectrum[b].clamp(0.0, 1.0);
+                                            let bar_h = (spec_rect.height() * mag).max(2.5);
+                                            let bx = spec_rect.min.x + b as f32 * (bar_w + spacing);
+                                            let by = spec_rect.bottom() - bar_h;
+                                            let bar_r = egui::Rect::from_min_max(egui::pos2(bx, by), egui::pos2(bx + bar_w, spec_rect.bottom()));
+
+                                            // Dégradé de couleurs en fonction des fréquences
+                                            let bar_color = if b < 5 {
+                                                egui::Color32::from_rgb(0, 210, 255) // Basses / Cyan
+                                            } else if b < 11 {
+                                                egui::Color32::from_rgb(40, 230, 150) // Médiums / Émeraude
+                                            } else {
+                                                egui::Color32::from_rgb(255, 195, 50) // Aigus / Doré
+                                            };
+
+                                            painter.rect_filled(bar_r, egui::CornerRadius::same(2), bar_color);
+                                        }
+
+                                        ui.add_space(8.0);
+                                        ui.separator();
+                                        ui.add_space(6.0);
+
+                                        // 3. Zone de texte des sous-titres (Fond noir, typographie grand format)
+                                        egui::Frame::new()
+                                            .fill(egui::Color32::from_rgb(4, 4, 6))
+                                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 20)))
+                                            .corner_radius(egui::CornerRadius::same(8))
+                                            .inner_margin(egui::Margin::symmetric(12, 10))
+                                            .show(ui, |ui| {
+                                                egui::ScrollArea::vertical()
+                                                    .id_salt("subtitles_text_scroll")
+                                                    .stick_to_bottom(true)
+                                                    .auto_shrink([false, false])
+                                                    .show(ui, |ui| {
+                                                        // Lignes passées
+                                                        for past in all_history.iter().rev().take(6).rev() {
+                                                            ui.label(
+                                                                egui::RichText::new(past)
+                                                                    .size(13.5)
+                                                                    .color(egui::Color32::from_rgb(140, 155, 175)),
+                                                            );
+                                                            ui.add_space(2.0);
+                                                        }
+
+                                                        // Ligne active courante
+                                                        if !active_text.is_empty() {
+                                                            ui.label(
+                                                                egui::RichText::new(&active_text)
+                                                                    .size(18.5)
+                                                                    .color(egui::Color32::from_rgb(255, 240, 140))
+                                                                    .strong(),
+                                                            );
+                                                        } else if all_history.is_empty() {
+                                                            ui.label(
+                                                                egui::RichText::new("En attente de voix dans le flux audio capturé...")
+                                                                    .size(14.0)
+                                                                    .italics()
+                                                                    .color(egui::Color32::from_rgb(100, 115, 135)),
+                                                            );
+                                                        }
+                                                    });
+                                            });
+                                    });
                                 }
                             }
                         });

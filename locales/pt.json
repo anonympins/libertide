@@ -24,7 +24,10 @@
     "waiting_instructions": "Aguardando instruções de exploração...",
     "please_set_api_key": "Por favor, informe sua chave de API LLM para ativar o assistente.",
     "scheduled_tasks_cancelled": "Todos os comandos agendados foram cancelados.",
-    "scheduled_tasks_cancelled_count": "Todos os comandos agendados foram cancelados (%{count} cancelado(s))."
+    "scheduled_tasks_cancelled_count": "Todos os comandos agendados foram cancelados (%{count} cancelado(s)).",
+    "subtitles_enabled": "Legendas ao vivo ativadas (%{source}).",
+    "subtitles_disabled": "Legendas ao vivo desativadas.",
+    "window_name_announced": "Janela %{name}."
   },
   "roles": {
     "button": "botão",
@@ -66,6 +69,12 @@
     "empty_value": "(vazio)",
     "action_feedback": "Ação: %{name}",
     "menu_feedback": "Menu: %{name}",
+    "start_subtitles": "Ativar legendas",
+    "stop_subtitles": "Parar legendas",
+    "subtitles_title": "Legendas ao vivo",
+    "subtitles_system_audio": "Áudio do sistema",
+    "start_subtitles_keywords": "legendas ao vivo,legendas,legenda,transcricao ao vivo,transcricao audio,ativar legendas,iniciar legendas,ligar legendas,mostrar legendas",
+    "stop_subtitles_keywords": "parar legendas,desativar legendas,desligar legendas,fechar legendas,ocultar legendas,stop legendas",
     "analyze_screen_prompt": "Analise a tela e resuma o que a janela atual está fazendo."
   },
   "themes": {
@@ -130,6 +139,12 @@
     "detecting_controls": "🎯 Detectando controles...",
     "select_window_hint": "🎯 %{index} : %{title} (Enter: escolher)",
     "open_zone_hint": "🎯 %{index} : %{title} (Enter: abrir)",
+    "target_status_item": "%{provider} · 🔢 %{buffer}Nº %{index}: %{name} (%{count} distintivos - Esc para sair)",
+    "target_status_active": "%{provider} · 🔢 %{buffer}Modo de números ativo (%{count} distintivos - Esc para sair)",
+    "keyboard_input_buffer": "Entrada de teclado: %{buffer}... | ",
+    "card_displayed": "Janela flutuante exibida: %{title}",
+    "read_card_prefix": "🔊 Ler: %{title}",
+    "open_app_cmd": "Abrir %{app}",
     "status_idle": "%{provider} · em espera",
     "status_thinking": "%{provider} · pensando...",
     "status_speaking": "%{provider} · ao vivo",

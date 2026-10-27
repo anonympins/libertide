@@ -24,7 +24,10 @@
     "waiting_instructions": "等待探索指令中...",
     "please_set_api_key": "请填写您的大模型 API 密钥以激活助手。",
     "scheduled_tasks_cancelled": "已取消所有计划命令。",
-    "scheduled_tasks_cancelled_count": "已取消所有计划命令（共 %{count} 项）。"
+    "scheduled_tasks_cancelled_count": "已取消所有计划命令（共 %{count} 项）。",
+    "subtitles_enabled": "实时字幕已启用（%{source}）。",
+    "subtitles_disabled": "实时字幕已停用。",
+    "window_name_announced": "窗口 %{name}。"
   },
   "roles": {
     "button": "按钮",
@@ -66,6 +69,12 @@
     "empty_value": "（空）",
     "action_feedback": "操作 : %{name}",
     "menu_feedback": "菜单 : %{name}",
+    "start_subtitles": "启用字幕",
+    "stop_subtitles": "停止字幕",
+    "subtitles_title": "实时字幕",
+    "subtitles_system_audio": "系统音频",
+    "start_subtitles_keywords": "实时字幕,字幕,开启字幕,启用字幕,显示字幕,打开字幕,语音转录,文字记录",
+    "stop_subtitles_keywords": "停止字幕,关闭字幕,停用字幕,隐藏字幕,取消字幕",
     "analyze_screen_prompt": "分析当前屏幕并总结活动窗口的操作内容。"
   },
   "themes": {
@@ -130,6 +139,12 @@
     "detecting_controls": "🎯 正在检测控件...",
     "select_window_hint": "🎯 %{index} : %{title} (回车: 选择)",
     "open_zone_hint": "🎯 %{index} : %{title} (回车: 打开)",
+    "target_status_item": "%{provider} · 🔢 %{buffer}#%{index} : %{name} (%{count} 个角标 - Esc退出)",
+    "target_status_active": "%{provider} · 🔢 %{buffer}编号模式已激活 (%{count} 个角标 - Esc退出)",
+    "keyboard_input_buffer": "键盘输入 : %{buffer}... | ",
+    "card_displayed": "已显示浮动卡片 : %{title}",
+    "read_card_prefix": "🔊 朗读 : %{title}",
+    "open_app_cmd": "打开 %{app}",
     "status_idle": "%{provider} · 待机",
     "status_thinking": "%{provider} · 思考中...",
     "status_speaking": "%{provider} · 直播语音",

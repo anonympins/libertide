@@ -147,6 +147,10 @@ impl WhisperEngine {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         let active_locale = rust_i18n::locale();
         let lang_code = active_locale.split(['-', '_']).next().unwrap_or("fr");
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| (n.get() as i32 / 3).clamp(1, 2))
+            .unwrap_or(2);
+        params.set_n_threads(num_threads);
         params.set_language(Some(lang_code));
         params.set_translate(false);
         params.set_no_context(true);
@@ -336,6 +340,15 @@ fn build_input_stream(
             handle_cpal_stream_err,
             None,
         ).ok(),
+        cpal::SampleFormat::I32 => device.build_input_stream(
+            config.clone(),
+            move |data: &[i32], _| {
+                let converted: Vec<f32> = data.iter().map(|&s| s as f32 / i32::MAX as f32).collect();
+                let _ = audio_tx.send(converted);
+            },
+            handle_cpal_stream_err,
+            None,
+        ).ok(),
         cpal::SampleFormat::U16 => device.build_input_stream(
             config.clone(),
             move |data: &[u16], _| {
@@ -402,6 +415,19 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                 }
             }
         });
+    }
+
+    // 3. Thread de sous-titrage en direct (Loopback audio du système / fenêtres applicatives)
+    {
+        let event_tx = event_tx.clone();
+        let whisper_instance = Arc::clone(&whisper_instance);
+        let is_model_ready = Arc::clone(&is_model_ready);
+        std::thread::Builder::new()
+            .name("live_subtitles_worker".to_string())
+            .spawn(move || {
+                run_live_subtitles_loop(event_tx, whisper_instance, is_model_ready);
+            })
+            .expect("Échec lancement worker live_subtitles");
     }
 
     // 2. Thread de capture audio : traite les commandes utilisateur
@@ -597,4 +623,307 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
         }
     });
     cmd_tx
+}
+
+// ============================================================================
+// 6. Gestion du sous-titrage en direct (Live Subtitles)
+// ============================================================================
+
+pub static LIVE_SUBTITLES_RUNNING: AtomicBool = AtomicBool::new(false);
+pub static LIVE_SUBTITLES_TARGET: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn start_live_subtitles(target_window: Option<String>) {
+    LIVE_SUBTITLES_RUNNING.store(true, Ordering::SeqCst);
+    if let Ok(mut lock) = LIVE_SUBTITLES_TARGET.lock() {
+        *lock = target_window;
+    }
+}
+
+pub fn stop_live_subtitles() {
+    LIVE_SUBTITLES_RUNNING.store(false, Ordering::SeqCst);
+    if let Ok(mut lock) = LIVE_SUBTITLES_TARGET.lock() {
+        *lock = None;
+    }
+}
+
+pub fn is_live_subtitles_active() -> bool {
+    LIVE_SUBTITLES_RUNNING.load(Ordering::SeqCst)
+}
+
+const FREQ_BANDS: [f32; 16] = [
+    80.0, 150.0, 250.0, 400.0, 600.0, 850.0, 1200.0, 1600.0,
+    2100.0, 2700.0, 3400.0, 4200.0, 5200.0, 6400.0, 7800.0, 9500.0,
+];
+
+fn compute_spectrum_16(samples: &[f32], sample_rate: f32, current: &mut [f32; 16]) {
+    if samples.len() < 128 || sample_rate <= 0.0 {
+        for b in current.iter_mut() {
+            *b *= 0.82;
+        }
+        return;
+    }
+    let n = samples.len().min(512);
+    let slice = &samples[samples.len() - n..];
+    for (i, &center_f) in FREQ_BANDS.iter().enumerate() {
+        let omega = 2.0 * std::f32::consts::PI * center_f / sample_rate;
+        let mut sum_cos = 0.0f32;
+        let mut sum_sin = 0.0f32;
+        for (idx, &s) in slice.iter().enumerate() {
+            let val = if s.is_finite() { s } else { 0.0 };
+            let w = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * idx as f32 / n as f32).cos());
+            let ws = val * w;
+            let angle = omega * idx as f32;
+            sum_cos += ws * angle.cos();
+            sum_sin += ws * angle.sin();
+        }
+        let mag = (sum_cos * sum_cos + sum_sin * sum_sin).sqrt() / (n as f32 * 0.15);
+        let band_boost = 1.0 + (i as f32 * 0.18);
+        let target = (mag * 2.5 * band_boost).clamp(0.0, 1.0);
+        if target > current[i] {
+            current[i] += (target - current[i]) * 0.65;
+        } else {
+            current[i] += (target - current[i]) * 0.25;
+        }
+    }
+}
+
+fn run_live_subtitles_loop(
+    event_tx: Sender<AgentEvent>,
+    whisper_instance: Arc<Mutex<Option<WhisperEngine>>>,
+    is_model_ready: Arc<AtomicBool>,
+) {
+    while !is_model_ready.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let (transcribe_tx, transcribe_rx) = channel::<Vec<f32>>();
+    let is_transcribing = Arc::new(AtomicBool::new(false));
+    let current_sub_text = Arc::new(Mutex::new(String::new()));
+
+    // Worker dédié à l'inférence Whisper pour ne jamais bloquer la capture ni l'égaliseur
+    {
+        let whisper_instance = Arc::clone(&whisper_instance);
+        let is_transcribing = Arc::clone(&is_transcribing);
+        let current_sub_text = Arc::clone(&current_sub_text);
+        let event_tx = event_tx.clone();
+        std::thread::Builder::new()
+            .name("live_subtitles_inference".to_string())
+            .spawn(move || {
+                while let Ok(samples) = transcribe_rx.recv() {
+                    let transcribe_res = {
+                        let mut guard = whisper_instance.lock().unwrap();
+                        if let Some(ref mut whisper) = *guard {
+                            whisper.transcribe(&samples)
+                        } else {
+                            Err("Moteur Whisper non disponible.".to_string())
+                        }
+                    };
+                    if let Ok(text) = transcribe_res {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty()
+                            && trimmed.chars().any(|c| c.is_alphanumeric())
+                            && !is_hallucination_or_noise(trimmed)
+                        {
+                            if let Ok(mut lock) = current_sub_text.lock() {
+                                *lock = trimmed.to_string();
+                            }
+                        }
+                    }
+                    is_transcribing.store(false, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(60));
+                }
+            })
+            .expect("Échec lancement worker live_subtitles_inference");
+    }
+
+    loop {
+        if !LIVE_SUBTITLES_RUNNING.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(80));
+            continue;
+        }
+
+        #[cfg(windows)]
+        {
+            if let Ok(mut lock) = LIVE_SUBTITLES_TARGET.lock() {
+                if lock.is_none() {
+                    let user_wins = crate::window_util::list_user_windows();
+                    let found = user_wins.iter()
+                        .find(|(_, t)| {
+                            let low = t.to_lowercase();
+                            low.contains("youtube")
+                                || low.contains("spotify")
+                                || low.contains("twitch")
+                                || low.contains("netflix")
+                                || low.contains("deezer")
+                                || low.contains("vlc")
+                        })
+                        .map(|(_, t)| t.clone())
+                        .or_else(|| {
+                            crate::window_util::find_best_browser_window(&user_wins, None)
+                                .and_then(|h| user_wins.iter().find(|(win_h, _)| *win_h == h).map(|(_, t)| t.clone()))
+                        });
+                    if let Some(src) = found {
+                        *lock = Some(src);
+                    }
+                }
+            }
+        }
+
+        // Construction résiliente du flux audio : tentative loopback sortie, sinon repli sur l'entrée
+        let host = cpal::default_host();
+        let (loopback_tx, loopback_rx) = channel::<Vec<f32>>();
+        let mut stream_opt = None;
+        let mut sample_rate = 44100;
+        let mut channels = 2;
+
+        if let Some(out_dev) = host.default_output_device() {
+            if let Ok(config) = out_dev.default_output_config() {
+                let sr = config.sample_rate();
+                let ch = config.channels();
+                let fmt = config.sample_format();
+                let s_cfg: cpal::StreamConfig = config.into();
+                if let Some(s) = build_input_stream(&out_dev, &s_cfg, fmt, loopback_tx.clone()) {
+                    if s.play().is_ok() {
+                        stream_opt = Some(s);
+                        sample_rate = sr;
+                        channels = ch;
+                    }
+                }
+            }
+        }
+
+        if stream_opt.is_none() {
+            if let Some(in_dev) = host.default_input_device() {
+                if let Ok(config) = in_dev.default_input_config() {
+                    let sr = config.sample_rate();
+                    let ch = config.channels();
+                    let fmt = config.sample_format();
+                    let s_cfg: cpal::StreamConfig = config.into();
+                    if let Some(s) = build_input_stream(&in_dev, &s_cfg, fmt, loopback_tx.clone()) {
+                        if s.play().is_ok() {
+                            stream_opt = Some(s);
+                            sample_rate = sr;
+                            channels = ch;
+                        }
+                    }
+                }
+            }
+        }
+
+        let Some(stream) = stream_opt else {
+            eprintln!("[Live Subtitles] Aucun flux audio disponible.");
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
+        };
+
+        println!("[Live Subtitles] Flux de capture loopback audio actif ({} Hz, {} canaux).", sample_rate, channels);
+
+        let mut resampler = ContinuousResampler::new(sample_rate, channels, 16000);
+        let mut raw_mono_buffer: Vec<f32> = Vec::with_capacity(1024);
+        let mut audio_16k_buffer: Vec<f32> = Vec::with_capacity(16000 * 10);
+        let mut current_spectrum = [0.0f32; 16];
+        let mut speech_detected = false;
+        let mut last_sound_time = Instant::now();
+        let mut speech_start = Instant::now();
+        let mut last_spectrum_send = Instant::now();
+        let mut last_transcribe_time = Instant::now();
+
+        while LIVE_SUBTITLES_RUNNING.load(Ordering::SeqCst) {
+            while let Ok(chunk) = loopback_rx.try_recv() {
+                let ch = channels as usize;
+                for frame in chunk.chunks(ch) {
+                    let mono: f32 = frame.iter().sum::<f32>() / ch as f32;
+                    let clean_mono = if mono.is_finite() { mono } else { 0.0 };
+                    raw_mono_buffer.push(clean_mono);
+                }
+                if raw_mono_buffer.len() > 1024 {
+                    let overflow = raw_mono_buffer.len() - 1024;
+                    raw_mono_buffer.drain(0..overflow);
+                }
+                resampler.push_interleaved_f32(&chunk);
+            }
+
+            compute_spectrum_16(&raw_mono_buffer, sample_rate as f32, &mut current_spectrum);
+
+            if last_spectrum_send.elapsed() >= Duration::from_millis(50) {
+                last_spectrum_send = Instant::now();
+                let text = current_sub_text.lock().map(|g| g.clone()).unwrap_or_default();
+                let _ = event_tx.send(AgentEvent::LiveSubtitleUpdate {
+                    text,
+                    spectrum: current_spectrum,
+                });
+            }
+
+            let mut new_16k = Vec::new();
+            resampler.drain_resampled(&mut new_16k);
+
+            if !new_16k.is_empty() {
+                let sum_sq: f32 = new_16k.iter().map(|&s| s * s).sum();
+                let rms = (sum_sq / new_16k.len() as f32).sqrt();
+
+                if rms > 0.007 {
+                    if !speech_detected {
+                        speech_detected = true;
+                        speech_start = Instant::now();
+                    }
+                    last_sound_time = Instant::now();
+                    audio_16k_buffer.extend_from_slice(&new_16k);
+                } else if speech_detected {
+                    audio_16k_buffer.extend_from_slice(&new_16k);
+                }
+            }
+
+            if speech_detected {
+                let silence_dur = last_sound_time.elapsed();
+                let total_dur = speech_start.elapsed();
+
+                let has_natural_pause = silence_dur >= Duration::from_millis(650) && audio_16k_buffer.len() >= 14000;
+                let max_duration_reached = total_dur >= Duration::from_millis(4200) && audio_16k_buffer.len() >= 16000;
+
+                // Cooldown d'au moins 1,2 seconde pour laisser respirer le processeur
+                if (has_natural_pause || max_duration_reached)
+                    && !is_transcribing.load(Ordering::SeqCst)
+                    && last_transcribe_time.elapsed() >= Duration::from_millis(1200)
+                {
+                    last_transcribe_time = Instant::now();
+                    // Ne pas dépasser 4 secondes d'audio transmises d'un coup à Whisper
+                    let transcribe_buf = if audio_16k_buffer.len() > 16000 * 4 {
+                        audio_16k_buffer[audio_16k_buffer.len() - (16000 * 4)..].to_vec()
+                    } else {
+                        audio_16k_buffer.clone()
+                    };
+
+                    if has_natural_pause {
+                        speech_detected = false;
+                        audio_16k_buffer.clear();
+                    } else {
+                        let keep = 5600.min(audio_16k_buffer.len());
+                        let drain_len = audio_16k_buffer.len() - keep;
+                        audio_16k_buffer.drain(0..drain_len);
+                        speech_start = Instant::now();
+                    }
+
+                    is_transcribing.store(true, Ordering::SeqCst);
+                    let _ = transcribe_tx.send(transcribe_buf);
+                } else if audio_16k_buffer.len() > 16000 * 6 {
+                    // Purge proactive pour éviter les longs décalages
+                    let overflow = audio_16k_buffer.len() - (16000 * 4);
+                    audio_16k_buffer.drain(0..overflow);
+                    speech_start = Instant::now();
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(15));
+        }
+
+        drop(stream);
+        if let Ok(mut lock) = current_sub_text.lock() {
+            lock.clear();
+        }
+        let _ = event_tx.send(AgentEvent::LiveSubtitleUpdate {
+            text: String::new(),
+            spectrum: [0.0; 16],
+        });
+        println!("[Live Subtitles] Flux de capture loopback arrêté.");
+    }
 }

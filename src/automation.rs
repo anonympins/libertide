@@ -4983,6 +4983,10 @@ pub fn execute_undo_operation(op: UndoOperation) -> (String, Option<UndoOperatio
             )
         }
         UndoOperation::CloseFloatingCard(id) => {
+            if id == "live_subtitles" {
+                crate::floating_window::stop_live_subtitles();
+                crate::audio::stop_live_subtitles();
+            }
             if let Ok(mut cards) = crate::floating_window::OPEN_FLOATING_CARDS.lock() {
                 cards.retain(|c| c.id != id);
             }

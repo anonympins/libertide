@@ -21,7 +21,7 @@ mod ui;
 mod ocr;
 
 use audio::spawn_audio_worker;
-use floating_window::{update_open_floating_cards, FloatingCard, FloatingCardOutput, OPEN_FLOATING_CARDS};
+use floating_window::{update_open_floating_cards, FloatingCard, FloatingCardOutput, FloatingContentType, OPEN_FLOATING_CARDS};
 use automation::*;
 use fs_util::*;
 use theme::{AppTheme, SettingsTab};
@@ -216,6 +216,98 @@ fn extract_badge_number(text: &str) -> Option<usize> {
                 _ => {}
             }
         }
+    }
+    None
+}
+
+fn is_start_subtitles_command(norm: &str) -> bool {
+    let localized_cmd = normalize_for_command_match(&t!("commands.start_subtitles").to_string());
+    let localized_title = normalize_for_command_match(&t!("commands.subtitles_title").to_string());
+    if !localized_cmd.is_empty() && (norm == localized_cmd || norm.contains(&localized_cmd)) {
+        return true;
+    }
+    if !localized_title.is_empty() && (norm == localized_title || norm.contains(&localized_title)) {
+        return true;
+    }
+
+    let kw_str = t!("commands.start_subtitles_keywords").to_string();
+    for kw in kw_str.split(',') {
+        let norm_kw = normalize_for_command_match(kw.trim());
+        if !norm_kw.is_empty() && (norm == norm_kw || norm.contains(&norm_kw)) {
+            return true;
+        }
+    }
+
+    (norm.contains("active") || norm.contains("activer") || norm.contains("lance") || norm.contains("lancer") || norm.contains("met") || norm.contains("mettre") || norm.contains("affiche") || norm.contains("afficher") || norm.contains("ouvre") || norm.contains("ouvrir") || norm.contains("enable") || norm.contains("start") || norm.contains("turn on") || norm.contains("show"))
+        && (norm.contains("sous titre") || norm.contains("sous-titre") || norm.contains("soustitre") || norm.contains("subtitles") || norm.contains("subtitle") || norm.contains("transcription en direct") || norm.contains("transcription live") || norm.contains("transcription audio"))
+        || norm == "sous titres en direct" || norm == "sous-titres en direct" || norm == "sous titres" || norm == "sous-titres" || norm == "live subtitles"
+        || norm.starts_with("sous titre") || norm.starts_with("sous-titre")
+}
+
+fn is_stop_subtitles_command(norm: &str) -> bool {
+    let localized_cmd = normalize_for_command_match(&t!("commands.stop_subtitles").to_string());
+    if !localized_cmd.is_empty() && (norm == localized_cmd || norm.contains(&localized_cmd)) {
+        return true;
+    }
+
+    let kw_str = t!("commands.stop_subtitles_keywords").to_string();
+    for kw in kw_str.split(',') {
+        let norm_kw = normalize_for_command_match(kw.trim());
+        if !norm_kw.is_empty() && (norm == norm_kw || norm.contains(&norm_kw)) {
+            return true;
+        }
+    }
+
+    (norm.contains("arrete") || norm.contains("arrête") || norm.contains("arreter") || norm.contains("arrêter")
+        || norm.contains("stop") || norm.contains("stopper") || norm.contains("coupe") || norm.contains("couper")
+        || norm.contains("ferme") || norm.contains("fermer") || norm.contains("desactive") || norm.contains("désactive")
+        || norm.contains("desactiver") || norm.contains("désactiver") || norm.contains("quitte") || norm.contains("quitter")
+        || norm.contains("disable") || norm.contains("turn off") || norm.contains("hide") || norm.contains("close"))
+        && (norm.contains("sous titre") || norm.contains("sous-titre") || norm.contains("soustitre") || norm.contains("subtitles") || norm.contains("subtitle") || norm.contains("transcription"))
+        || norm == "stop sous titres" || norm == "stop sous-titres" || norm == "stop subtitles"
+}
+
+fn is_read_card_intent(prompt: &str, floating_cards: &[FloatingCard]) -> Option<FloatingCard> {
+    if floating_cards.is_empty() {
+        return None;
+    }
+    let norm = prompt.trim();
+    let lower = norm.to_lowercase();
+
+    if lower == "lis la fenetre"
+        || lower == "lis la fenêtre"
+        || lower == "lis le resume"
+        || lower == "lis le résumé"
+        || lower == "lis la carte"
+        || lower.starts_with("lis la fen")
+        || lower.starts_with("lire la fen")
+        || lower == "read window"
+        || lower == "read card"
+        || lower == "read the card"
+        || lower == "read the window"
+        || lower == "karte vorlesen"
+        || lower == "fenster vorlesen"
+        || lower == "leer ventana"
+        || lower == "leer tarjeta"
+    {
+        return floating_cards.last().cloned();
+    }
+
+    if norm.starts_with('🔊') || norm.starts_with('🔉') || lower.starts_with("lire :") || lower.starts_with("read:") || lower.starts_with("leer:") || lower.starts_with("vorlesen:") || lower.starts_with("leggi:") || lower.starts_with("ler:") {
+        let clean = norm.trim_start_matches(['🔊', '🔉']).trim();
+        let target_title = if let Some((_, after)) = clean.split_once(':') {
+            after.trim()
+        } else if let Some((_, after)) = clean.split_once('：') {
+            after.trim()
+        } else {
+            clean
+        };
+        if !target_title.is_empty() {
+            if let Some(card) = floating_cards.iter().find(|c| c.title.eq_ignore_ascii_case(target_title) || c.id.eq_ignore_ascii_case(target_title)) {
+                return Some(card.clone());
+            }
+        }
+        return floating_cards.last().cloned();
     }
     None
 }
@@ -599,6 +691,8 @@ impl OverlayApp {
         self.dictation_mode = false;
         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
         cancel_all_scheduled_tasks();
+        floating_window::stop_live_subtitles();
+        crate::audio::stop_live_subtitles();
         self.toggle_switch_access_mode(Some(false));
         clear_screen_numbered_badges();
         self.switch_access_mode = false;
@@ -624,6 +718,61 @@ impl OverlayApp {
         });
         let _ = self.tts_sender.send(TtsCommand::Stop);
         let _ = self.tts_sender.send(TtsCommand::Speak(stop_msg));
+    }
+
+    pub fn start_live_subtitles(&mut self, target_window: Option<String>) {
+        crate::audio::start_live_subtitles(target_window.clone());
+        if self.is_recording {
+            self.stop_recording();
+        }
+        self.continuous_mode = false;
+        let default_title = t!("commands.subtitles_title").to_string();
+        let title_name = target_window.clone().unwrap_or(default_title);
+        let card = FloatingCard::new(
+            "live_subtitles",
+            title_name.clone(),
+            FloatingContentType::Subtitles {
+                text: String::new(),
+                target_window: target_window.clone(),
+                history: Vec::new(),
+            },
+        );
+        if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == "live_subtitles") {
+            existing.open = true;
+            existing.title = title_name;
+        } else {
+            self.floating_cards.push(card);
+        }
+        update_open_floating_cards(&self.floating_cards);
+        play_earcon(Earcon::Success);
+        let default_source = t!("commands.subtitles_system_audio").to_string();
+        let source_desc = target_window.as_deref().unwrap_or(&default_source);
+        let msg = t!("speech.subtitles_enabled", source = source_desc).to_string();
+        self.chat_history.push(ChatEntry {
+            role: ChatRole::Agent,
+            text: msg.clone(),
+            timestamp: current_time_str(),
+            quick_suggestions: vec![QuickSuggestionItem::Text(t!("commands.stop_subtitles").to_string())],
+            screen_size_kb: None,
+        });
+        let _ = self.tts_sender.send(TtsCommand::Stop);
+        let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+    }
+
+    pub fn stop_live_subtitles(&mut self) {
+        floating_window::stop_live_subtitles();
+        crate::audio::stop_live_subtitles();
+        self.floating_cards.retain(|c| !matches!(c.content, FloatingContentType::Subtitles { .. }));
+        update_open_floating_cards(&self.floating_cards);
+        play_earcon(Earcon::MicClose);
+        let msg = t!("speech.subtitles_disabled").to_string();
+        self.chat_history.push(ChatEntry {
+            role: ChatRole::Agent,
+            text: msg,
+            timestamp: current_time_str(),
+            quick_suggestions: Vec::new(),
+            screen_size_kb: None,
+        });
     }
 
     fn enter_dictation_mode(&mut self) {
@@ -1183,6 +1332,7 @@ impl eframe::App for OverlayApp {
                             if (self.dictation_mode
                                 || (prev_status == AgentStatus::Thinking && self.continuous_mode)
                                 || (prev_status == AgentStatus::Speaking && self.continuous_mode))
+                                && !crate::audio::is_live_subtitles_active()
                                 && self.whisper_ready
                                 && !self.show_api_key_modal
                                 && self.status != AgentStatus::EmergencyStopped
@@ -1457,8 +1607,7 @@ impl eframe::App for OverlayApp {
                     }
 
                     // Raccourci vocal pour faire lire la fenêtre volante active
-                    if norm_prompt == "lis la fenetre" || norm_prompt == "lis la fenêtre" || norm_prompt == "lis le resume" || norm_prompt == "lis le résumé" || norm_prompt == "lis la carte" || norm_prompt.starts_with("lis la fenetre") || norm_prompt.starts_with("lis la fenêtre") {
-                        if let Some(card) = self.floating_cards.last() {
+                    if let Some(card) = is_read_card_intent(&norm_prompt, &self.floating_cards) {
                             let speech = card.build_narrator_speech();
                             self.stop_speaking();
                             play_earcon(Earcon::Success);
@@ -1482,7 +1631,6 @@ impl eframe::App for OverlayApp {
                                 self.start_recording(&ctx, false);
                             }
                             return;
-                        }
                     }
 
                     let (locale, _) = get_system_locale_language();
@@ -1494,6 +1642,18 @@ impl eframe::App for OverlayApp {
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx, false);
                         }
+                        return;
+                    }
+
+                    if is_start_subtitles_command(&norm_prompt) {
+                        self.start_live_subtitles(None);
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx, false);
+                        }
+                        return;
+                    }
+                    if is_stop_subtitles_command(&norm_prompt) {
+                        self.stop_live_subtitles();
                         return;
                     }
 
@@ -1714,6 +1874,7 @@ impl eframe::App for OverlayApp {
                 }
                 AgentEvent::TtsFinished => {
                     if self.continuous_mode
+                        && !crate::audio::is_live_subtitles_active()
                         && self.status != AgentStatus::EmergencyStopped
                         && !self.show_api_key_modal
                         && !AGENT_BUSY.load(Ordering::SeqCst)
@@ -1799,6 +1960,12 @@ impl eframe::App for OverlayApp {
                 }
                 AgentEvent::CloseFloatingCard(id) => {
                     let vp_id = egui::ViewportId::from_hash_of(&id);
+                    if let Some(card) = self.floating_cards.iter().find(|c| c.id == id) {
+                        if matches!(card.content, FloatingContentType::Subtitles { .. }) {
+                            floating_window::stop_live_subtitles();
+                            crate::audio::stop_live_subtitles();
+                        }
+                    }
                     self.floating_cards.retain(|c| c.id != id);
                     update_open_floating_cards(&self.floating_cards);
                     ctx.request_repaint();
@@ -1815,6 +1982,39 @@ impl eframe::App for OverlayApp {
                 }
                 AgentEvent::PreviousNumberedChunk => {
                     // TODO: Implement badge pagination logic
+                }
+                AgentEvent::LiveSubtitleUpdate { text, spectrum } => {
+                    floating_window::update_live_subtitles(text, spectrum);
+                    let mut found_sub_card = false;
+                    for card in &self.floating_cards {
+                        if matches!(card.content, FloatingContentType::Subtitles { .. }) {
+                            found_sub_card = true;
+                            let vp_id = egui::ViewportId::from_hash_of(&card.id);
+                            ctx.request_repaint_of(vp_id);
+                        }
+                    }
+                    if !found_sub_card {
+                        let card = FloatingCard::new(
+                            "live_subtitles",
+                            t!("commands.subtitles_title").to_string(),
+                            FloatingContentType::Subtitles {
+                                text: String::new(),
+                                target_window: None,
+                                history: Vec::new(),
+                            },
+                        );
+                        let vp_id = egui::ViewportId::from_hash_of(&card.id);
+                        self.floating_cards.push(card);
+                        update_open_floating_cards(&self.floating_cards);
+                        ctx.request_repaint_of(vp_id);
+                    }
+                }
+                AgentEvent::LiveSubtitlesClosed => {
+                    floating_window::stop_live_subtitles();
+                    crate::audio::stop_live_subtitles();
+                    self.floating_cards.retain(|c| !matches!(c.content, FloatingContentType::Subtitles { .. }));
+                    update_open_floating_cards(&self.floating_cards);
+                    ctx.request_repaint();
                 }
                 AgentEvent::NavigationZonesReady { window_id, window_title, summary, zones } => {
                     self.window_analysis_cache.insert(window_id, CachedWindowAnalysis {
@@ -3678,7 +3878,7 @@ impl eframe::App for OverlayApp {
                                         }
 
                                         response.context_menu(|ui| {
-                                            if ui.button(t!("ui.ctx_paste_shortcut")).clicked() {
+                                            if ui.button(t!("ui.ctx_paste")).clicked() {
                                                 if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
                                                     let clean_clip = clip.replace(['\r', '\n'], " ");
                                                     let trimmed_clean = clean_clip.trim().to_string();
@@ -3691,13 +3891,13 @@ impl eframe::App for OverlayApp {
                                                 ui.memory_mut(|m| m.request_focus(input_id));
                                                 ui.close();
                                             }
-                                            if ui.button(t!("ui.ctx_copy_all_shortcut")).clicked() {
+                                            if ui.button(t!("ui.ctx_copy_all")).clicked() {
                                                 set_clipboard_text(&self.input_text);
                                                 ctx.copy_text(self.input_text.clone());
                                                 play_earcon(Earcon::Success);
                                                 ui.close();
                                             }
-                                            if ui.button(t!("ui.ctx_cut_all_shortcut")).clicked() {
+                                            if ui.button(t!("ui.ctx_cut_all")).clicked() {
                                                 set_clipboard_text(&self.input_text);
                                                 ctx.copy_text(self.input_text.clone());
                                                 self.input_text.clear();
@@ -3811,6 +4011,35 @@ impl eframe::App for OverlayApp {
                                             self.live_transcript.clear();
 
                                             let norm_prompt = normalize_for_command_match(&prompt);
+                                            if is_start_subtitles_command(&norm_prompt) {
+                                                self.start_live_subtitles(None);
+                                                return;
+                                            } else if is_stop_subtitles_command(&norm_prompt) {
+                                                self.stop_live_subtitles();
+                                                return;
+                                            }
+
+                                            if let Some(card) = is_read_card_intent(&prompt, &self.floating_cards) {
+                                                let speech = card.build_narrator_speech();
+                                                play_earcon(Earcon::Success);
+                                                self.status = AgentStatus::Speaking;
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::User,
+                                                    text: prompt.clone(),
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                self.chat_history.push(ChatEntry {
+                                                    role: ChatRole::Agent,
+                                                    text: speech.clone(),
+                                                    timestamp: current_time_str(),
+                                                    quick_suggestions: Vec::new(),
+                                                    screen_size_kb: None,
+                                                });
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(speech));
+                                                return;
+                                            }
 
                                             // 1. Bascule du mode survol/numéros
                                             if is_switch_access_command(&norm_prompt) {
@@ -4302,6 +4531,15 @@ impl eframe::App for OverlayApp {
 
                                         let norm_prompt = normalize_for_command_match(&prompt);
 
+                                        if is_start_subtitles_command(&norm_prompt) {
+                                            self.start_live_subtitles(None);
+                                            return;
+                                        }
+                                        if is_stop_subtitles_command(&norm_prompt) {
+                                            self.stop_live_subtitles();
+                                            return;
+                                        }
+
                                         if self.switch_access_mode {
                                             if let Some(idx) = extract_badge_number(&norm_prompt) {
                                                 // User feedback is already pushed by the caller
@@ -4346,21 +4584,7 @@ impl eframe::App for OverlayApp {
                                         }
 
                                         // Interception directe pour faire lire la fenêtre volante par le narrateur
-                                        let is_read_card = prompt.starts_with("🔊 Lire : ") || prompt.starts_with("Lire : ");
-                                        let matching_card = if is_read_card {
-                                            let target_title = prompt
-                                                .strip_prefix("🔊 Lire : ")
-                                                .or_else(|| prompt.strip_prefix("Lire : "))
-                                                .unwrap_or(&prompt)
-                                                .trim();
-                                            self.floating_cards.iter().find(|c| c.title.eq_ignore_ascii_case(target_title) || c.id.eq_ignore_ascii_case(target_title))
-                                                .cloned()
-                                                .or_else(|| self.floating_cards.last().cloned())
-                                        } else {
-                                            None
-                                        };
-
-                                        if let Some(card) = matching_card {
+                                        if let Some(card) = is_read_card_intent(&prompt, &self.floating_cards) {
                                             let speech = card.build_narrator_speech();
                                             play_earcon(Earcon::Success);
                                             self.status = AgentStatus::Speaking;
@@ -4381,28 +4605,6 @@ impl eframe::App for OverlayApp {
                                             let _ = self.tts_sender.send(TtsCommand::Speak(speech));
                                             return;
                                         }
-
-
-                                            let is_read_card_prompt = prompt.to_lowercase().starts_with("lis la fen")
-                                                || prompt.to_lowercase().starts_with("lire la fen")
-                                                || prompt.starts_with("🔊 Lire : ");
-                                            if is_read_card_prompt {
-                                                if let Some(card) = self.floating_cards.last() {
-                                                    let speech = card.build_narrator_speech();
-                                                    play_earcon(Earcon::Success);
-                                                    self.status = AgentStatus::Speaking;
-                                                    self.chat_history.push(ChatEntry {
-                                                        role: ChatRole::Agent,
-                                                        text: speech.clone(),
-                                                        timestamp: current_time_str(),
-                                                        quick_suggestions: Vec::new(),
-                                                        screen_size_kb: None,
-                                                    });
-                                                    let _ = self.tts_sender.send(TtsCommand::Speak(speech));
-                                                    self.continuous_mode = false;
-                                                    return;
-                                                }
-                                            }
 
                                         self.chat_history.push(ChatEntry {
                                             role: ChatRole::User,
@@ -5234,6 +5436,7 @@ impl eframe::App for OverlayApp {
                 let mut submitted_card_prompts = Vec::new();
                 let mut card_speech = None;
                 let prev_card_count = self.floating_cards.len();
+                let had_subtitles = self.floating_cards.iter().any(|c| matches!(c.content, FloatingContentType::Subtitles { .. }));
                 let dwell_state = &mut self.dwell_state;
                 let theme_colors = self.theme.colors();
                 self.floating_cards.retain_mut(|card| {
@@ -5245,6 +5448,11 @@ impl eframe::App for OverlayApp {
                     }
                     card.open
                 });
+                let has_subtitles = self.floating_cards.iter().any(|c| matches!(c.content, FloatingContentType::Subtitles { .. }));
+                if had_subtitles && !has_subtitles {
+                    floating_window::stop_live_subtitles();
+                    crate::audio::stop_live_subtitles();
+                }
                 if self.floating_cards.len() != prev_card_count {
                     update_open_floating_cards(&self.floating_cards);
                     ctx.request_repaint();
@@ -5270,6 +5478,38 @@ impl eframe::App for OverlayApp {
                     self.status = AgentStatus::Thinking;
                     self.continuous_mode = true;
                     self.live_transcript.clear();
+
+                    if let Some(card) = is_read_card_intent(&prompt, &self.floating_cards) {
+                        let speech = card.build_narrator_speech();
+                        play_earcon(Earcon::Success);
+                        self.status = AgentStatus::Speaking;
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::User,
+                            text: prompt.clone(),
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: speech.clone(),
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(speech));
+                        continue;
+                    }
+
+                    let norm_prompt = normalize_for_command_match(&prompt);
+                    if is_start_subtitles_command(&norm_prompt) {
+                        self.start_live_subtitles(None);
+                        continue;
+                    }
+                    if is_stop_subtitles_command(&norm_prompt) {
+                        self.stop_live_subtitles();
+                        continue;
+                    }
                     self.chat_history.push(ChatEntry {
                         role: ChatRole::User,
                         text: prompt.clone(),
@@ -5590,6 +5830,7 @@ Règles principales :
    - Fichiers & Documents : "open_file" (path: "chemin/fichier.ext") pour ouvrir directement toute image, vidéo, PDF, tableur ou document dans son application système par défaut (selon extension / MIME type).
    - Fenêtres volantes d'analyse & formulaires de requête interactifs : "show_floating_card" (id: "...", title: "...", card_type: "form"|"table"|"stats"|"markdown", data: {{...}}) pour projeter une fenêtre volante avec un formulaire interactif de filtres/requête (inputs, jauges/sliders numériques, selectbox, radio, checkbox pour recherche personnalisée de vols, hôtels, shopping), un tableau comparatif, des données chiffrées ou une fiche technique. Pour "markdown", insère des liens cliquables `[link="action:..."]⚡ Libellé[/link]` pour permettre à l'utilisateur de piloter les choix ou actions directement depuis la fenêtre volante.
    - Fermeture carte : "close_floating_card" (id: "..."). Formate tous les choix, suggestions et références sous forme de liens cliquables cliquables au clic dans le chat.
+   - Sous-titres en direct (Loopback audio système) : Dès que l'utilisateur demande d'afficher les sous-titres, transcrire le son du PC, une vidéo ou un stream en direct ("sous-titres en direct", "transcris le son", "active les sous-titres"), utilise impérativement l'action "live_subtitles" ({{"action": "live_subtitles", "enabled": true, "target_window": null}}) ou "show_floating_card" ({{"id": "live_subtitles", "title": "Sous-titres en direct", "card_type": "subtitles", "data": {{"text": ""}}}}). Pour les arrêter, utilise "live_subtitles" ({{"action": "live_subtitles", "enabled": false}}) ou "close_floating_card" ({{"id": "live_subtitles"}}).
  8. Fin de passes : Dès que "actions" est vide (tâche finie ou choix requis), fournis OBLIGATOIREMENT 2 à 4 suggestions concrètes dans "quick_suggestions".
 
 Format JSON obligatoire :
@@ -5631,6 +5872,7 @@ Format JSON obligatoire :
     {{"action": "cancel_scheduled_tasks"}},
     {{"action": "mute_audio"}},
     {{"action": "set_volume", "command": "mute"|"unmute"|"down"|"up"|"min"}},
+    {{"action": "live_subtitles", "enabled": true, "target_window": null}},
     {{"action": "click_numbered_target", "index": 1}},
     {{"action": "open_file", "path": "chemin/vers/image_ou_doc.png"}},
     {{"action": "show_floating_card", "id": "stats_1", "title": "Tableau comparatif", "card_type": "markdown", "data": {{"text": "| Modèle | Lien / Action | Prix |\n| --- | --- | --- |\n| Produit A | [link=\"action:Commander Produit A\"]⚡ Commander[/link] | 49€ |\n| Produit B | [link=\"action:Commander Produit B\"]⚡ Commander[/link] | 59€ |"}}}},
@@ -5949,6 +6191,13 @@ async fn call_llm_prompt(
                     if !speech.trim().is_empty() {
                         card_speeches.push(speech);
                     }
+                    if matches!(card.content, FloatingContentType::Subtitles { .. }) {
+                        let target_win = match &card.content {
+                            FloatingContentType::Subtitles { target_window, .. } => target_window.clone(),
+                            _ => None,
+                        };
+                        crate::audio::start_live_subtitles(target_win);
+                    }
                     let _ = event_tx.send(AgentEvent::ShowFloatingCard(card));
                 }
                 AgentAction::CloseFloatingCard { id } => {
@@ -5956,6 +6205,25 @@ async fn call_llm_prompt(
                         println!("[Agent] Ignoré close_floating_card(\"{id}\") car la carte a été mise à jour dans la même passe.");
                     } else {
                         let _ = event_tx.send(AgentEvent::CloseFloatingCard(id.clone()));
+                    }
+                }
+                AgentAction::LiveSubtitles { target_window, enabled } => {
+                    if *enabled {
+                        crate::audio::start_live_subtitles(target_window.clone());
+                        let default_title = t!("commands.subtitles_title").to_string();
+                        let card = FloatingCard::new(
+                            "live_subtitles",
+                            target_window.as_deref().unwrap_or(&default_title),
+                            FloatingContentType::Subtitles {
+                                text: String::new(),
+                                target_window: target_window.clone(),
+                                history: Vec::new(),
+                            },
+                        );
+                        let _ = event_tx.send(AgentEvent::ShowFloatingCard(card));
+                    } else {
+                        crate::audio::stop_live_subtitles();
+                        let _ = event_tx.send(AgentEvent::LiveSubtitlesClosed);
                     }
                 }
                 AgentAction::ToggleNumberedTargets { enabled } => {
@@ -5987,7 +6255,7 @@ async fn call_llm_prompt(
 
         for act in &payload.actions {
             if let AgentAction::ShowFloatingCard { title, .. } = act {
-                let read_btn_text = format!("🔊 Lire : {title}");
+                let read_btn_text = t!("ui.read_card_prefix", title = title).to_string();
                 if !payload.quick_suggestions.iter().any(|s| s.as_str() == Some(&read_btn_text)) {
                     payload.quick_suggestions.insert(0, QuickSuggestionItem::Text(read_btn_text));
                 }
@@ -6181,6 +6449,7 @@ async fn call_llm_prompt(
                 - Bannière cookies -> clique automatiquement 'Tout accepter' / 'Accepter'.\n\
                 - Bannière de notification web / push ('Activez les notifications franceinfo...', etc.) -> traite-la immédiatement en cliquant sur la croix 'Fermer (croix ✕)' / 'Fermer' / 'Refuser' / 'Plus tard' ou 'Activer' pour libérer la vue.\n\
                 - Pour lancer ou contrôler une vidéo ou un audio -> clique directement sur l'élément vidéo/audio ou son bouton de lecture ('play' / 'lecture').\n\
+                - Sous-titres en direct & transcription du son -> émets 'live_subtitles' (enabled: true) ou 'show_floating_card' (card_type: 'subtitles').\n\
                 - Notification système (toast) -> lis son contenu dans ta narration et laisse-la tranquille (ne la ferme pas).\n\
                 - Alerte / modale d'erreur -> lis le message dans ta narration, puis clique impérativement sur 'OK' / 'Fermer' pour la refermer.\n\
                 - Fenêtre volante Markdown -> insère des liens cliquables [link=\"action:...\"]Texte[/link] pour permettre à l'utilisateur de déclencher des suites ou choix en un clic.\n\

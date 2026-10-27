@@ -24,7 +24,9 @@
     "waiting_instructions": "Esperando instrucciones de exploración...",
     "please_set_api_key": "Por favor, configure su clave API de LLM para activar el asistente.",
     "scheduled_tasks_cancelled": "Todos los comandos diferidos han sido cancelados.",
-    "scheduled_tasks_cancelled_count": "Todos los comandos diferidos han sido cancelados (%{count} cancelado(s))."
+    "scheduled_tasks_cancelled_count": "Todos los comandos diferidos han sido cancelados (%{count} cancelado(s)).",
+    "subtitles_enabled": "Subtítulos en directo activados (%{source}).",
+    "subtitles_disabled": "Subtítulos en directo desactivados."
     ,"window_name_announced": "Ventana %{name}."
   },
   "roles": {
@@ -67,6 +69,12 @@
     "empty_value": "(vacío)",
     "action_feedback": "Acción: %{name}",
     "menu_feedback": "Menú: %{name}",
+    "start_subtitles": "Activar subtítulos",
+    "stop_subtitles": "Detener subtítulos",
+    "subtitles_title": "Subtítulos en directo",
+    "subtitles_system_audio": "Audio del sistema",
+    "start_subtitles_keywords": "subtitulos en directo,subtítulos en directo,subtitulos,subtítulos,subtitulo,subtítulo,transcripcion en vivo,transcripcion en directo,activar subtitulos,activar subtítulos,iniciar subtitulos,poner subtitulos,mostrar subtitulos",
+    "stop_subtitles_keywords": "detener subtitulos,detener subtítulos,desactivar subtitulos,desactivar subtítulos,parar subtitulos,quitar subtitulos,cerrar subtitulos,stop subtitulos",
     "analyze_screen_prompt": "Analiza la pantalla y resume lo que hace la ventana actual."
   },
   "themes": {
