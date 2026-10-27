@@ -784,7 +784,7 @@ fn run_live_subtitles_loop(
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Ok(devices) = host.input_devices() {
             for device in devices {
-                if let Ok(name) = device.to_string() {
+                if let name = device.to_string() {
                     let lower_name = name.to_lowercase();
                     #[cfg(target_os = "linux")]
                     let is_match = lower_name.contains(".monitor");
