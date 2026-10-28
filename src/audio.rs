@@ -175,6 +175,48 @@ impl WhisperEngine {
 
         Ok(result.trim().to_string())
     }
+
+    pub fn transcribe_multilingual(&mut self, samples_16k: &[f32]) -> Result<String, String> {
+        if samples_16k.is_empty() {
+            return Ok(String::new());
+        }
+
+        let max_abs = samples_16k.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        if max_abs < 0.008 {
+            return Ok(String::new());
+        }
+
+        let mut state = self.ctx.create_state()
+            .map_err(|e| format!("Erreur création état Whisper: {e}"))?;
+
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| (n.get() as i32 / 3).clamp(1, 2))
+            .unwrap_or(2);
+        params.set_n_threads(num_threads);
+        // "auto" active la détection automatique de n'importe quelle langue parlée
+        params.set_language(Some("auto"));
+        params.set_translate(false);
+        params.set_no_context(true);
+        params.set_single_segment(true);
+        params.set_no_timestamps(true);
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+
+        state.full(params, samples_16k)
+            .map_err(|e| format!("Erreur inférence whisper.cpp: {e}"))?;
+
+        let num_segments = state.full_n_segments();
+        let mut result = String::new();
+        for i in 0..num_segments {
+            if let Some(segment) = state.get_segment(i) {
+                result.push_str(&segment.to_string());
+            }
+        }
+        Ok(result.trim().to_string())
+    }
 }
 
 // ============================================================================
@@ -713,7 +755,7 @@ fn run_live_subtitles_loop(
                     let transcribe_res = {
                         let mut guard = whisper_instance.lock().unwrap();
                         if let Some(ref mut whisper) = *guard {
-                            whisper.transcribe(&samples)
+                            whisper.transcribe_multilingual(&samples)
                         } else {
                             Err("Moteur Whisper non disponible.".to_string())
                         }
@@ -722,7 +764,6 @@ fn run_live_subtitles_loop(
                         let trimmed = text.trim();
                         if !trimmed.is_empty()
                             && trimmed.chars().any(|c| c.is_alphanumeric())
-                            && !is_hallucination_or_noise(trimmed)
                         {
                             if let Ok(mut lock) = current_sub_text.lock() {
                                 *lock = trimmed.to_string();
