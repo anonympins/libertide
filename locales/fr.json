@@ -24,7 +24,9 @@
     "waiting_instructions": "En attente d'instructions d'exploration...",
     "please_set_api_key": "Veuillez renseigner votre clé API LLM pour activer l'assistant.",
     "scheduled_tasks_cancelled": "Toutes les commandes différées ont été annulées.",
-    "scheduled_tasks_cancelled_count": "Toutes les commandes différées ont été annulées (%{count} annulée(s))."
+    "scheduled_tasks_cancelled_count": "Toutes les commandes différées ont été annulées (%{count} annulée(s)).",
+    "subtitles_enabled": "Sous-titres en direct activés (%{source}).",
+    "subtitles_disabled": "Sous-titres en direct désactivés."
     ,"window_name_announced": "Fenêtre %{name}."
   },
   "roles": {
@@ -67,6 +69,12 @@
     "empty_value": "(vide)",
     "action_feedback": "Action : %{name}",
     "menu_feedback": "Menu : %{name}",
+    "start_subtitles": "Activer les sous-titres",
+    "stop_subtitles": "Arrêter les sous-titres",
+    "subtitles_title": "Sous-titres en direct",
+    "subtitles_system_audio": "Audio système",
+    "start_subtitles_keywords": "sous-titres en direct,sous-titre,sous titre,soustitre,transcription en direct,transcription audio,transcription live,active les sous-titres,activer les sous-titres,lance les sous-titres,met les sous-titres,affiche les sous-titres",
+    "stop_subtitles_keywords": "arrete les sous-titres,arrête les sous-titres,arreter les sous-titres,arrêter les sous-titres,stop sous-titres,coupe les sous-titres,ferme les sous-titres,desactive les sous-titres,désactive les sous-titres,stop subtitles",
     "analyze_screen_prompt": "Analyse l'écran et résume ce que fait la fenêtre en cours."
   },
   "themes": {

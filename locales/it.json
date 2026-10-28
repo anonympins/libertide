@@ -24,7 +24,10 @@
     "waiting_instructions": "In attesa di istruzioni di esplorazione...",
     "please_set_api_key": "Inserisci la tua chiave API LLM per attivare l'assistente.",
     "scheduled_tasks_cancelled": "Tutti i comandi differiti sono stati annullati.",
-    "scheduled_tasks_cancelled_count": "Tutti i comandi differiti sono stati annullati (%{count} annullato/i)."
+    "scheduled_tasks_cancelled_count": "Tutti i comandi differiti sono stati annullati (%{count} annullato/i).",
+    "subtitles_enabled": "Sottotitoli in tempo reale attivati (%{source}).",
+    "subtitles_disabled": "Sottotitoli in tempo reale disattivati.",
+    "window_name_announced": "Finestra %{name}."
   },
   "roles": {
     "button": "pulsante",
@@ -66,6 +69,12 @@
     "empty_value": "(vuoto)",
     "action_feedback": "Azione: %{name}",
     "menu_feedback": "Menu: %{name}",
+    "start_subtitles": "Attiva sottotitoli",
+    "stop_subtitles": "Interrompi sottotitoli",
+    "subtitles_title": "Sottotitoli in tempo reale",
+    "subtitles_system_audio": "Audio di sistema",
+    "start_subtitles_keywords": "sottotitoli in tempo reale,sottotitoli dal vivo,sottotitoli,sottotitolo,trascrizione dal vivo,trascrizione audio,attiva sottotitoli,avvia sottotitoli,mostra sottotitoli,abilita sottotitoli",
+    "stop_subtitles_keywords": "interrompi sottotitoli,disattiva sottotitoli,ferma sottotitoli,nascondi sottotitoli,chiudi sottotitoli,stop sottotitoli",
     "analyze_screen_prompt": "Analizza lo schermo e riassumi ciò che fa la finestra corrente."
   },
   "themes": {
@@ -130,6 +139,12 @@
     "detecting_controls": "🎯 Rilevamento controlli...",
     "select_window_hint": "🎯 %{index} : %{title} (Invio: scegli)",
     "open_zone_hint": "🎯 %{index} : %{title} (Invio: apri)",
+    "target_status_item": "%{provider} · 🔢 %{buffer}N. %{index}: %{name} (%{count} badge - Esc per uscire)",
+    "target_status_active": "%{provider} · 🔢 %{buffer}Modalità numeri attiva (%{count} badge - Esc per uscire)",
+    "keyboard_input_buffer": "Input tastiera: %{buffer}... | ",
+    "card_displayed": "Finestra mobile visualizzata: %{title}",
+    "read_card_prefix": "🔊 Leggi: %{title}",
+    "open_app_cmd": "Apri %{app}",
     "status_idle": "%{provider} · in attesa",
     "status_thinking": "%{provider} · in elaborazione...",
     "status_speaking": "%{provider} · in diretta",

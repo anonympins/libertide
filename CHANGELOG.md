@@ -5,6 +5,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [0.6.4] - 2026-11-04
+
+### 🎙️ Live System Audio Subtitles & Spectral Equalizer (`audio.rs`, `floating_window.rs`, `main.rs`, `commands.rs`)
+- **Real-Time Loopback Audio Captioning**:
+  - Continuous real-time audio captioning of system output sound (media players, browser streams, YouTube, Twitch, Netflix, video conferences).
+  - Dynamic standalone floating viewport (`FloatingCard`, `FloatingContentType::Subtitles`) designed for high contrast and readibility with dark background and enlarged typography.
+  - **16-Band Spectral Equalizer (`compute_spectrum_16`)**:
+    - Animated real-time frequency visualizer across 16 frequency bands (80 Hz to 9.5 kHz) with adaptive smoothing.
+    - Chromatic frequency color grading: deep bass cyan, midrange mint emerald, and high treble warm gold.
+  - Subtitle rolling history keeping recent speech blocks with one-click full transcript clipboard export.
+  - Deterministic voice commands (*"sous-titres en direct"*, *"active les sous-titres"*, *"transcris le son"*, *"stop sous-titres"* and their internationalized counterparts) and agent action `AgentAction::LiveSubtitles`.
+
+### 🐧🍎 Cross-Platform Audio Capture for Linux & macOS (`audio.rs`)
+- **Multi-Platform Loopback Ingestion Pipeline**:
+  - **Linux**: Automatic discovery and attachment to PulseAudio and PipeWire monitor sources (`.monitor`), with seamless fallback to CPAL default input stream.
+  - **macOS**: Direct capture configuration supporting virtual audio sinks (BlackHole, Soundflower) and system loopback routes.
+  - **Windows**: WASAPI loopback capture on default endpoint audio render devices.
+- **Decoupled Inference Architecture**:
+  - Dedicated worker thread (`live_subtitles_inference`) isolating local Whisper neural inference from the audio capture stream and UI event loop, completely eliminating stuttering, audio overruns, and interface latency.
+  - Continuous lockless linear resampler (`ContinuousResampler`) converting disparate host sample rates down to mono 16 kHz without external runtime dependencies.
+
+### ⚡ Custom Accessibility Macros & Expansion Engine (`fs_util.rs`, `theme.rs`, `main.rs`)
+- **Custom Shortcut Expansion (`'raccourci' => texte complet`)**:
+  - Configurable abbreviation-to-prompt substitution engine designed to reduce physical strain and vocal fatigue for motor-impaired and switch-access users.
+  - Persistent JSON storage in `macros.json` (`load_macros`, `save_macros`).
+  - **Smart Expansion Matching (`expand_macro_text`)**:
+    - Case-insensitive exact matches and symbol prefix compatibility (`!macro`, `/macro`, `#macro`).
+    - Dynamic suffix forwarding: passing additional arguments or target names (e.g., *"colis Amazon"* expands to *"[Texte macro colis] Amazon"*).
+  - **Dedicated Settings Tab (`SettingsTab::Macros`)**:
+    - Integrated `⚡ Macros` tab in the main settings modal.
+    - Visual management interface: add new shortcut/expansion pairs with error feedback, active macro list with text truncation previews, one-click delete, and dwell-click support.
+    - Acoustic earcon confirmation (`Earcon::Success`) on addition or removal.
+- **Default Accessibility-Focused Macros**:
+  - Replaced generic code-oriented defaults with 6 high-value daily independence macros:
+    - `actu`: Daily news and major headlines concise summary.
+    - `colis`: Screen order tracking and delivery status verification.
+    - `aide`: Contextual explanation of on-screen elements with guided action assistance.
+    - `resume`: Clear and accessible Markdown summary of the active document or web page.
+    - `meteo`: Current weather conditions and day forecast.
+    - `panier`: Shopping cart inspection and item breakdown before checkout.
+- **Omni-Channel Voice & Text Interception**:
+  - Seamless substitution both at speech recognition time (`AgentEvent::VoicePromptReady`) and upon keyboard/virtual input field submission in `OverlayApp`.
+  - Compatible with local actions, system shortcuts, and multi-step LLM reasoning passes.
+
+---
 ## [0.6.3] - 2026-11-02
 
 ### 🌐 Full Multilingual Localization & Internationalization (`main.rs`, `locales/`)

@@ -2341,8 +2341,12 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     Err(err) => feedback.push(format!("Impossible d'ouvrir le fichier '{path}' : {err}")),
                 }
             }
-            AgentAction::ShowFloatingCard { id, title, .. } => {
+            AgentAction::ShowFloatingCard { id, title, card_type, data } => {
                 if let Some(ref cid) = id {
+                    if card_type == "subtitles" || card_type == "live_subtitles" {
+                        let target_win = data.get("target_window").and_then(|v| v.as_str()).map(String::from);
+                        crate::audio::start_live_subtitles(target_win);
+                    }
                     if let Ok(mut hist) = ACTION_HISTORY.lock() {
                         hist.push_undo(UndoOperation::CloseFloatingCard(cid.clone()));
                     }
@@ -2354,6 +2358,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 if was_just_shown {
                     println!("[Actions] Annulation de close_floating_card('{id}') car la carte a été mise à jour dans la même passe.");
                     continue;
+                }
+                if id == "live_subtitles" {
+                    crate::floating_window::stop_live_subtitles();
+                    crate::audio::stop_live_subtitles();
                 }
                 feedback.push(format!("Fenêtre volante '{id}' fermée."));
             }
@@ -2367,6 +2375,17 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
             }
             AgentAction::ClickNumberedTarget { index } => {
                 feedback.push(format!("Clic sur le badge numéro {index} déclenché."));
+            }
+            AgentAction::LiveSubtitles { target_window, enabled } => {
+                if *enabled {
+                    crate::audio::start_live_subtitles(target_window.clone());
+                    let win_name = target_window.as_deref().unwrap_or("Sortie audio système");
+                    feedback.push(format!("Sous-titres en direct activés pour '{win_name}'. Overlay spectral et transcription ouverts à l'écran."));
+                } else {
+                    crate::audio::stop_live_subtitles();
+                    crate::floating_window::stop_live_subtitles();
+                    feedback.push("Sous-titres en direct désactivés.".to_string());
+                }
             }
         }
     }
@@ -2630,10 +2649,18 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                     Err(err) => feedback.push(format!("Impossible d'ouvrir le fichier '{path}' : {err}")),
                 }
             }
-            AgentAction::ShowFloatingCard { title, .. } => {
+            AgentAction::ShowFloatingCard { title, card_type, data, .. } => {
+                if card_type == "subtitles" || card_type == "live_subtitles" {
+                    let target_win = data.get("target_window").and_then(|v| v.as_str()).map(String::from);
+                    crate::audio::start_live_subtitles(target_win);
+                }
                 feedback.push(format!("Fenêtre volante '{title}' affichée à l'écran."));
             }
             AgentAction::CloseFloatingCard { id } => {
+                if id == "live_subtitles" {
+                    crate::floating_window::stop_live_subtitles();
+                    crate::audio::stop_live_subtitles();
+                }
                 feedback.push(format!("Fenêtre volante '{id}' fermée."));
             }
             AgentAction::ToggleNumberedTargets { enabled } => {
@@ -2848,6 +2875,16 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                             .spawn();
                         feedback.push("Bascule muet audio système envoyée.".to_string());
                     }
+                }
+            }
+            AgentAction::LiveSubtitles { target_window, enabled } => {
+                if *enabled {
+                    crate::audio::start_live_subtitles(target_window.clone());
+                    feedback.push(format!("Sous-titres activés ({:?}).", target_window));
+                } else {
+                    crate::audio::stop_live_subtitles();
+                    crate::floating_window::stop_live_subtitles();
+                    feedback.push("Sous-titres désactivés.".to_string());
                 }
             }
             _ => {}

@@ -24,7 +24,9 @@
     "waiting_instructions": "Waiting for exploration instructions...",
     "please_set_api_key": "Please provide your LLM API key to enable the assistant.",
     "scheduled_tasks_cancelled": "All scheduled tasks have been cancelled.",
-    "scheduled_tasks_cancelled_count": "All scheduled tasks have been cancelled (%{count} cancelled)."
+    "scheduled_tasks_cancelled_count": "All scheduled tasks have been cancelled (%{count} cancelled).",
+    "subtitles_enabled": "Live subtitles activated (%{source}).",
+    "subtitles_disabled": "Live subtitles disabled."
     ,"window_name_announced": "Window %{name}."
   },
   "roles": {
@@ -67,6 +69,12 @@
     "empty_value": "(empty)",
     "action_feedback": "Action: %{name}",
     "menu_feedback": "Menu: %{name}",
+    "start_subtitles": "Enable subtitles",
+    "stop_subtitles": "Stop subtitles",
+    "subtitles_title": "Live subtitles",
+    "subtitles_system_audio": "System audio",
+    "start_subtitles_keywords": "live subtitles,subtitles,subtitle,closed captions,captions,caption,live transcription,audio transcription,enable subtitles,start subtitles,turn on subtitles,show subtitles",
+    "stop_subtitles_keywords": "stop subtitles,disable subtitles,turn off subtitles,hide subtitles,close subtitles,cancel subtitles,stop captions,disable captions,stop live subtitles",
     "analyze_screen_prompt": "Analyze the screen and summarize what the current window is doing."
   },
   "themes": {

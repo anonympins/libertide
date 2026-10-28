@@ -41,8 +41,7 @@ pub use crate::automation::{AsWindowTarget, NumberedElementTarget, VIRTUAL_KEY};
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetClassNameW, GetWindowRect, GetWindowTextW, SetCursorPos};
 
 pub use crate::automation::{
-    UndoOperation, ACTION_HISTORY,
-    execute_undo_operation, undo_last_system_action, redo_last_system_action,
+     undo_last_system_action, redo_last_system_action,
 };
 use crate::automation::{
     focus_browser_address_bar, force_foreground_window, format_url_for_navigation,

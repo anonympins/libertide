@@ -24,7 +24,10 @@
     "waiting_instructions": "指示をお待ちしています...",
     "please_set_api_key": "アシスタントを利用するには LLM API キーを設定してください。",
     "scheduled_tasks_cancelled": "すべての予約コマンドをキャンセルしました。",
-    "scheduled_tasks_cancelled_count": "すべての予約コマンドをキャンセルしました（%{count} 件）。"
+    "scheduled_tasks_cancelled_count": "すべての予約コマンドをキャンセルしました（%{count} 件）。",
+    "subtitles_enabled": "リアルタイム字幕を有効にしました（%{source}）。",
+    "subtitles_disabled": "リアルタイム字幕を無効にしました。",
+    "window_name_announced": "ウィンドウ %{name}。"
   },
   "roles": {
     "button": "ボタン",
@@ -66,6 +69,12 @@
     "empty_value": "（空）",
     "action_feedback": "操作 : %{name}",
     "menu_feedback": "メニュー : %{name}",
+    "start_subtitles": "字幕を有効化",
+    "stop_subtitles": "字幕を停止",
+    "subtitles_title": "リアルタイム字幕",
+    "subtitles_system_audio": "システム音声",
+    "start_subtitles_keywords": "リアルタイム字幕,ライブ字幕,字幕,字幕を有効,字幕を表示,字幕開始,音声文字起こし,文字起こし",
+    "stop_subtitles_keywords": "字幕を停止,字幕停止,字幕を無効,字幕を消す,字幕を閉じる,字幕オフ",
     "analyze_screen_prompt": "画面を解析し、現在のアクティブウィンドウの概要を要約してください。"
   },
   "themes": {
@@ -130,6 +139,12 @@
     "detecting_controls": "🎯 コントロールを検出中...",
     "select_window_hint": "🎯 %{index} : %{title} (Enter: 選択)",
     "open_zone_hint": "🎯 %{index} : %{title} (Enter: 開く)",
+    "target_status_item": "%{provider} · 🔢 %{buffer}#%{index}: %{name}（%{count} 個のバッジ - Escで終了）",
+    "target_status_active": "%{provider} · 🔢 %{buffer}番号モード有効（%{count} 個のバッジ - Escで終了）",
+    "keyboard_input_buffer": "キーパッド入力: %{buffer}... | ",
+    "card_displayed": "フローティングウィンドウ表示: %{title}",
+    "read_card_prefix": "🔊 読み上げ: %{title}",
+    "open_app_cmd": "%{app} を開く",
     "status_idle": "%{provider} · 待機中",
     "status_thinking": "%{provider} · 思考中...",
     "status_speaking": "%{provider} · 応答中",

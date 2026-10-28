@@ -361,6 +361,11 @@ pub enum AgentEvent {
     ClickNumberedTarget(usize),
     NextNumberedChunk,
     PreviousNumberedChunk,
+    LiveSubtitleUpdate {
+        text: String,
+        spectrum: [f32; 16],
+    },
+    LiveSubtitlesClosed,
     NavigationZonesReady {
         window_id: isize,
         window_title: String,
@@ -612,6 +617,13 @@ pub enum AgentAction {
     OpenFile {
         path: String,
     },
+    #[serde(alias = "live_subtitles", alias = "subtitles", alias = "transcription_live")]
+    LiveSubtitles {
+        #[serde(default)]
+        target_window: Option<String>,
+        #[serde(default)]
+        enabled: bool,
+    },
     #[serde(alias = "show_floating_window", alias = "floating_card", alias = "display_card")]
     ShowFloatingCard {
         id: Option<String>,
@@ -724,6 +736,13 @@ impl QuickSuggestionItem {
                 AgentAction::ClickNumberedTarget { index } => Some(format!("Cliquer sur le numéro {index}")),
                 AgentAction::NextNumberedChunk => Some("50 badges suivants".to_string()),
                 AgentAction::PreviousNumberedChunk => Some("50 badges précédents".to_string()),
+                AgentAction::LiveSubtitles { enabled, .. } => {
+                    if *enabled {
+                        Some("Activer les sous-titres".to_string())
+                    } else {
+                        Some("Désactiver les sous-titres".to_string())
+                    }
+                }
                 _ => None,
             },
         }

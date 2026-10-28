@@ -24,7 +24,9 @@
     "waiting_instructions": "Warte auf Erkundungsanweisungen...",
     "please_set_api_key": "Bitte geben Sie Ihren LLM-API-Schlüssel ein, um den Assistenten zu aktivieren.",
     "scheduled_tasks_cancelled": "Alle verzögerten Befehle wurden abgebrochen.",
-    "scheduled_tasks_cancelled_count": "Alle verzögerten Befehle wurden abgebrochen (%{count} abgebrochen)."
+    "scheduled_tasks_cancelled_count": "Alle verzögerten Befehle wurden abgebrochen (%{count} abgebrochen).",
+    "subtitles_enabled": "Live-Untertitel aktiviert (%{source}).",
+    "subtitles_disabled": "Live-Untertitel deaktiviert."
     ,"window_name_announced": "Fenster %{name}."
   },
   "roles": {
@@ -67,6 +69,12 @@
     "empty_value": "(leer)",
     "action_feedback": "Aktion: %{name}",
     "menu_feedback": "Menü: %{name}",
+    "start_subtitles": "Untertitel aktivieren",
+    "stop_subtitles": "Untertitel stoppen",
+    "subtitles_title": "Live-Untertitel",
+    "subtitles_system_audio": "System-Audio",
+    "start_subtitles_keywords": "live-untertitel,live untertitel,untertitel,untertitelung,transkription,audio-transkription,untertitel aktivieren,untertitel starten,untertitel einschalten,untertitel anzeigen",
+    "stop_subtitles_keywords": "untertitel stoppen,untertitel deaktivieren,untertitel ausschalten,untertitel beenden,untertitel schließen,stop untertitel",
     "analyze_screen_prompt": "Den Bildschirm analysieren und das aktive Fenster zusammenfassen."
   },
   "themes": {
