@@ -132,11 +132,11 @@ pub const ACCESSIBILITY_ICON_FONT: egui::FontId = egui::FontId::proportional(24.
 pub const ACCESSIBILITY_SUB_FONT: egui::FontId = egui::FontId::proportional(10.0);
 pub const ACCESSIBILITY_ITEM_SPACING: f32 = 8.0;
 
-#[derive(Default)]
 pub struct DwellState {
     pub hovered_id: Option<egui::Id>,
     pub hover_start: Option<Instant>,
     pub dwell_duration: Duration,
+    pub activation_delay: Duration,
     pub cooldown_until: Option<Instant>,
     pub last_triggered_id: Option<egui::Id>,
     pub last_triggered_time: Option<Instant>,
@@ -144,12 +144,33 @@ pub struct DwellState {
     pub locked_ids: std::collections::HashMap<egui::Id, Instant>,
 }
 
+impl Default for DwellState {
+    fn default() -> Self {
+        Self {
+            hovered_id: None,
+            hover_start: None,
+            dwell_duration: Duration::ZERO,
+            activation_delay: Duration::from_millis(200),
+            cooldown_until: None,
+            last_triggered_id: None,
+            last_triggered_time: None,
+            unhovered_since: None,
+            locked_ids: std::collections::HashMap::new(),
+        }
+    }
+}
+
 impl DwellState {
     pub fn new(millis: u64) -> Self {
+        Self::new_with_delay(millis, 200)
+    }
+
+    pub fn new_with_delay(millis: u64, delay_ms: u64) -> Self {
         Self {
             hovered_id: None,
             hover_start: None,
             dwell_duration: Duration::from_millis(millis),
+            activation_delay: Duration::from_millis(delay_ms),
             cooldown_until: None,
             last_triggered_id: None,
             last_triggered_time: None,
@@ -160,6 +181,14 @@ impl DwellState {
 
     pub fn is_enabled(&self) -> bool {
         !self.dwell_duration.is_zero()
+    }
+
+    pub fn effective_activation_delay(&self) -> Duration {
+        if self.dwell_duration.is_zero() {
+            Duration::ZERO
+        } else {
+            self.activation_delay.min(self.dwell_duration / 2)
+        }
     }
 
     pub fn lock_id(&mut self, id: egui::Id, duration: Duration) {
@@ -197,7 +226,16 @@ impl DwellState {
         if self.hovered_id == Some(id) {
             if let Some(start) = self.hover_start {
                 let elapsed = Instant::now().duration_since(start);
-                let ratio = (elapsed.as_secs_f32() / self.dwell_duration.as_secs_f32()).clamp(0.0, 1.0);
+                let delay = self.effective_activation_delay();
+                if elapsed < delay {
+                    return None;
+                }
+                let active_elapsed = elapsed - delay;
+                let active_total = self.dwell_duration.saturating_sub(delay);
+                if active_total.is_zero() {
+                    return Some(1.0);
+                }
+                let ratio = (active_elapsed.as_secs_f32() / active_total.as_secs_f32()).clamp(0.0, 1.0);
                 return Some(ratio);
             }
         }
@@ -282,7 +320,19 @@ impl DwellState {
 
         if let Some(start) = self.hover_start {
             let elapsed = now.duration_since(start);
-            let ratio = (elapsed.as_secs_f32() / self.dwell_duration.as_secs_f32()).clamp(0.0, 1.0);
+            let delay = self.effective_activation_delay();
+
+            if elapsed < delay {
+                return (false, 0.0);
+            }
+
+            let active_elapsed = elapsed - delay;
+            let active_total = self.dwell_duration.saturating_sub(delay);
+            let ratio = if active_total.is_zero() {
+                1.0
+            } else {
+                (active_elapsed.as_secs_f32() / active_total.as_secs_f32()).clamp(0.0, 1.0)
+            };
 
             if elapsed >= self.dwell_duration {
                 self.hover_start = None;

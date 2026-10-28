@@ -493,7 +493,13 @@ impl OverlayApp {
             .ok()
             .or_else(|| read_env_var_from_file(".env", "DWELL_TIME_MS"))
             .and_then(|s| s.trim().parse::<u64>().ok())
-            .unwrap_or(1);
+            .unwrap_or(1200);
+
+        let dwell_activation_ms = std::env::var("DWELL_ACTIVATION_DELAY_MS")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "DWELL_ACTIVATION_DELAY_MS"))
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(1200);
 
         let (targets_request_tx, targets_request_rx) = channel::<TargetsScanRequest>();
         let (targets_result_tx, targets_result_rx) = channel::<TargetsScanResult>();
@@ -524,7 +530,7 @@ impl OverlayApp {
             llm_config: llm_config.clone(),
             theme,
             settings_tab: SettingsTab::LlmProvider,
-            dwell_state: DwellState::new(dwell_millis),
+            dwell_state: DwellState::new_with_delay(dwell_millis, dwell_activation_ms),
             last_trackball_input: Instant::now() - Duration::from_secs(1),
 
             numbered_targets: Vec::new(),
@@ -5401,6 +5407,31 @@ impl eframe::App for OverlayApp {
                                 self.dwell_state.dwell_duration = Duration::from_millis(current_dwell_ms);
                                 let _ = write_env_var_to_file(".env", "DWELL_TIME_MS", &current_dwell_ms.to_string());
                                 std::env::set_var("DWELL_TIME_MS", current_dwell_ms.to_string());
+                            }
+
+                            if current_dwell_ms > 0 {
+                                ui.add_space(3.0);
+                                let mut current_act_delay_ms = self.dwell_state.activation_delay.as_millis() as u64;
+                                let prev_act_delay_ms = current_act_delay_ms;
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("Délai avant affichage de la jauge :").size(12.0).strong().color(egui::Color32::WHITE));
+                                    let act_slider = egui::Slider::new(&mut current_act_delay_ms, 0..=600)
+                                        .step_by(25.0)
+                                        .custom_formatter(|val, _| {
+                                            if val <= 0.0 {
+                                                "Immédiat (0 ms)".to_string()
+                                            } else {
+                                                format!("{:.0} ms", val)
+                                            }
+                                        });
+                                    ui.add(act_slider)
+                                        .on_hover_text("Délai d'attente avant que la jauge verte ne commence à s'afficher et se remplir, évitant de perturber l'utilisateur lors du simple survol.");
+                                });
+                                if current_act_delay_ms != prev_act_delay_ms {
+                                    self.dwell_state.activation_delay = Duration::from_millis(current_act_delay_ms);
+                                    let _ = write_env_var_to_file(".env", "DWELL_ACTIVATION_DELAY_MS", &current_act_delay_ms.to_string());
+                                    std::env::set_var("DWELL_ACTIVATION_DELAY_MS", current_act_delay_ms.to_string());
+                                }
                             }
 
                             ui.add_space(6.0);
