@@ -6,6 +6,7 @@ pub enum SettingsTab {
     LlmProvider,
     Theme,
     Language,
+    Macros,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

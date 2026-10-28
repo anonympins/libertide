@@ -128,6 +128,12 @@ pub struct OverlayApp {
     // Suggestions d'applications en direct (PATH & Levenshtein)
     input_suggestions: Vec<String>,
     last_suggestion_query: String,
+
+    // Macros personnalisées ('raccourci' => texte complet)
+    macros: Vec<(String, String)>,
+    macro_shortcut_input: String,
+    macro_text_input: String,
+    macro_error: Option<String>,
 }
 
 fn extract_badge_number(text: &str) -> Option<usize> {
@@ -492,6 +498,7 @@ impl OverlayApp {
         let (targets_request_tx, targets_request_rx) = channel::<TargetsScanRequest>();
         let (targets_result_tx, targets_result_rx) = channel::<TargetsScanResult>();
         spawn_targets_worker(targets_request_rx, targets_result_tx);
+        let macros = load_macros();
 
         let mut app = Self {
             status: AgentStatus::Idle,
@@ -578,6 +585,10 @@ impl OverlayApp {
             api_key_error: None,
             input_suggestions: Vec::new(),
             last_suggestion_query: String::new(),
+            macros,
+            macro_shortcut_input: String::new(),
+            macro_text_input: String::new(),
+            macro_error: None,
         };
         app.sync_modal_inputs_for_provider(llm_config.provider);
         update_open_floating_cards(&app.floating_cards);
@@ -684,6 +695,10 @@ impl OverlayApp {
         if self.status == AgentStatus::Speaking {
             self.status = AgentStatus::Idle;
         }
+    }
+
+    pub fn expand_macro(&self, text: &str) -> String {
+        expand_macro_text(text, &self.macros)
     }
 
     fn trigger_emergency_stop(&mut self, _ctx: &egui::Context) {
@@ -1429,6 +1444,11 @@ impl eframe::App for OverlayApp {
                         return;
                     }
                     self.stop_speaking();
+
+                    let prompt = self.expand_macro(&prompt);
+                    if prompt != prompt {
+                        println!("[Macro] Déploiement vocal : \"{}\"", prompt);
+                    }
 
                     let norm_prompt = normalize_for_command_match(&prompt);
                     if norm_prompt.trim().is_empty() {
@@ -4003,11 +4023,12 @@ impl eframe::App for OverlayApp {
                                             self.input_suggestions.clear();
                                             self.last_suggestion_query.clear();
                                             let typed_raw = std::mem::take(&mut self.input_text).trim().to_string();
-                                            let prompt = if analyze_btn_hit && typed_raw.is_empty() {
+                                            let prompt_raw = if analyze_btn_hit && typed_raw.is_empty() {
                                                 t!("commands.analyze_screen_prompt").to_string()
                                             } else {
                                                 typed_raw
                                             };
+                                            let prompt = self.expand_macro(&prompt_raw);
                                             self.live_transcript.clear();
 
                                             let norm_prompt = normalize_for_command_match(&prompt);
@@ -4980,6 +5001,27 @@ impl eframe::App for OverlayApp {
                                 if lang_activated {
                                     self.settings_tab = SettingsTab::Language;
                                 }
+                                let is_macro_active = self.settings_tab == SettingsTab::Macros;
+                                let tab_macro = ui.selectable_label(
+                                    is_macro_active,
+                                    egui::RichText::new("⚡ Macros")
+                                        .size(12.0)
+                                        .color(if is_macro_active {
+                                            theme.accent
+                                        } else {
+                                            theme.text_secondary
+                                        })
+                                        .strong(),
+                                );
+                                let tab_macro_id = ui.make_persistent_id("dwell_tab_macros");
+                                let macro_activated = if !is_macro_active {
+                                    apply_dwell_to_response(ui, &mut self.dwell_state, tab_macro_id, &tab_macro)
+                                } else {
+                                    tab_macro.clicked()
+                                };
+                                if macro_activated {
+                                    self.settings_tab = SettingsTab::Macros;
+                                }
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if ui.add(
                                         egui::Button::new(
@@ -5427,6 +5469,134 @@ impl eframe::App for OverlayApp {
                                                 .color(theme.text_secondary),
                                         );
                                     });
+                                }
+                                SettingsTab::Macros => {
+                                    // --- Onglet Raccourcis & Macros ---
+                                    ui.label(
+                                        egui::RichText::new("Configurez vos raccourcis vocaux et textuels ('raccourci' => texte complet).")
+                                            .size(11.5)
+                                            .color(theme.text_secondary),
+                                    );
+                                    ui.add_space(6.0);
+
+                                    egui::Frame::new()
+                                        .fill(theme.control_bg)
+                                        .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                        .corner_radius(egui::CornerRadius::same(8))
+                                        .inner_margin(egui::Margin::symmetric(10, 8))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new("Nouveau raccourci macro :")
+                                                    .size(11.0)
+                                                    .color(theme.accent)
+                                                    .strong(),
+                                            );
+                                            ui.add_space(3.0);
+
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new("Raccourci :").size(11.0).color(egui::Color32::WHITE));
+                                                ui.add(
+                                                    egui::TextEdit::singleline(&mut self.macro_shortcut_input)
+                                                        .hint_text("ex: actu, colis, aide")
+                                                        .desired_width(120.0),
+                                                );
+                                            });
+                                            ui.add_space(3.0);
+
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new("Texte complet :").size(11.0).color(egui::Color32::WHITE));
+                                                ui.add(
+                                                    egui::TextEdit::singleline(&mut self.macro_text_input)
+                                                        .hint_text("ex: Donne le résumé des actualités du jour")
+                                                        .desired_width(260.0),
+                                                );
+                                            });
+                                            ui.add_space(4.0);
+
+                                            if let Some(ref err) = self.macro_error {
+                                                ui.label(egui::RichText::new(err).color(egui::Color32::from_rgb(255, 110, 110)).size(10.5));
+                                                ui.add_space(2.0);
+                                            }
+
+                                            ui.horizontal(|ui| {
+                                                if ui.button(egui::RichText::new("➕ Ajouter la macro").strong().color(theme.accent)).clicked() {
+                                                    let sc = self.macro_shortcut_input.trim().to_string();
+                                                    let tx = self.macro_text_input.trim().to_string();
+                                                    if sc.is_empty() {
+                                                        self.macro_error = Some("Le raccourci ne peut pas être vide.".to_string());
+                                                    } else if tx.is_empty() {
+                                                        self.macro_error = Some("Le texte complet ne peut pas être vide.".to_string());
+                                                    } else {
+                                                        self.macros.retain(|(k, _)| !k.eq_ignore_ascii_case(&sc));
+                                                        self.macros.push((sc, tx));
+                                                        let _ = save_macros(&self.macros);
+                                                        self.macro_shortcut_input.clear();
+                                                        self.macro_text_input.clear();
+                                                        self.macro_error = None;
+                                                        play_earcon(Earcon::Success);
+                                                    }
+                                                }
+                                            });
+                                        });
+
+                                    ui.add_space(8.0);
+                                    ui.separator();
+                                    ui.add_space(6.0);
+
+                                    ui.label(
+                                        egui::RichText::new(format!("Macros actives ({}) :", self.macros.len()))
+                                            .size(11.5)
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    );
+                                    ui.add_space(4.0);
+
+                                    let mut to_remove = None;
+                                    egui::ScrollArea::vertical()
+                                        .max_height(140.0)
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            if self.macros.is_empty() {
+                                                ui.label(
+                                                    egui::RichText::new("Aucune macro configurée.")
+                                                        .size(11.0)
+                                                        .italics()
+                                                        .color(theme.text_secondary),
+                                                );
+                                            } else {
+                                                for (idx, (sc, tx)) in self.macros.iter().enumerate() {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(
+                                                            egui::RichText::new(format!("⚡ {}", sc))
+                                                                .size(11.0)
+                                                                .color(theme.accent)
+                                                                .strong(),
+                                                        );
+                                                        ui.label(egui::RichText::new("➔").size(10.0).color(theme.text_secondary));
+                                                        let preview = if tx.len() > 38 {
+                                                            format!("{}...", &tx[..35])
+                                                        } else {
+                                                            tx.clone()
+                                                        };
+                                                        ui.label(egui::RichText::new(preview).size(11.0).color(egui::Color32::WHITE))
+                                                            .on_hover_text(tx);
+
+                                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                            if ui.small_button("🗑").on_hover_text("Supprimer").clicked() {
+                                                                to_remove = Some(idx);
+                                                            }
+                                                        });
+                                                    });
+                                                    ui.add_space(2.0);
+                                                }
+                                            }
+                                        });
+
+                                    if let Some(idx) = to_remove {
+                                        self.macros.remove(idx);
+                                        let _ = save_macros(&self.macros);
+                                        play_earcon(Earcon::Success);
+                                    }
                                 }
                             }
                         });

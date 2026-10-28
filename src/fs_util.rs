@@ -44,6 +44,76 @@ pub fn find_env_file() -> PathBuf {
     PathBuf::from(".env")
 }
 
+/// Résout l'emplacement du fichier de configuration des macros (macros.json)
+pub fn find_macros_file() -> PathBuf {
+    let env_file = find_env_file();
+    env_file
+        .parent()
+        .map(|p| p.join("macros.json"))
+        .unwrap_or_else(|| PathBuf::from("macros.json"))
+}
+
+/// Charge la liste des macros enregistrées ('raccourci' => 'texte complet')
+pub fn load_macros() -> Vec<(String, String)> {
+    let path = find_macros_file();
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(list) = serde_json::from_str::<Vec<(String, String)>>(&content) {
+            return list;
+        }
+        if let Ok(map) = serde_json::from_str::<std::collections::BTreeMap<String, String>>(&content) {
+            return map.into_iter().collect();
+        }
+    }
+    vec![
+        ("actu".to_string(), "Donne les actualités et titres majeurs du jour sous forme de synthèse concise.".to_string()),
+        ("colis".to_string(), "Vérifie le statut de ma commande ou le suivi de livraison à l'écran.".to_string()),
+        ("aide".to_string(), "Explique clairement ce qui est affiché à l'écran et guide-moi sur les actions possibles.".to_string()),
+        ("resume".to_string(), "Fais un résumé clair et accessible de la page ou du document actif.".to_string()),
+        ("meteo".to_string(), "Donne la météo actuelle et les prévisions de la journée.".to_string()),
+        ("panier".to_string(), "Consulte mon panier d'achat et présente les articles avant toute validation.".to_string()),
+    ]
+}
+
+/// Enregistre les macros dans macros.json
+pub fn save_macros(macros: &[(String, String)]) -> std::io::Result<()> {
+    let path = find_macros_file();
+    let json = serde_json::to_string_pretty(macros).unwrap_or_default();
+    std::fs::write(path, json)
+}
+
+/// Déploie un raccourci de macro en son texte complet si une correspondance existe
+pub fn expand_macro_text(input: &str, macros: &[(String, String)]) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return input.to_string();
+    }
+    for (shortcut, expansion) in macros {
+        let sc = shortcut.trim();
+        if sc.is_empty() {
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case(sc)
+            || (trimmed.starts_with('!') && trimmed[1..].trim().eq_ignore_ascii_case(sc))
+            || (trimmed.starts_with('/') && trimmed[1..].trim().eq_ignore_ascii_case(sc))
+            || (trimmed.starts_with('#') && trimmed[1..].trim().eq_ignore_ascii_case(sc))
+        {
+            return expansion.clone();
+        }
+        let prefix = format!("{} ", sc.to_lowercase());
+        if trimmed.to_lowercase().starts_with(&prefix) {
+            let remainder = trimmed[prefix.len()..].trim();
+            return format!("{expansion} {remainder}");
+        }
+        if (trimmed.starts_with('!') || trimmed.starts_with('/') || trimmed.starts_with('#'))
+            && trimmed[1..].to_lowercase().starts_with(&prefix)
+        {
+            let remainder = trimmed[1..][prefix.len()..].trim();
+            return format!("{expansion} {remainder}");
+        }
+    }
+    input.to_string()
+}
+
 /// Lit une variable d'environnement définie dans un fichier texte (par exemple `.env`).
 pub fn read_env_var_from_file(file_path: &str, key: &str) -> Option<String> {
     let resolved_path = if file_path == ".env" { find_env_file() } else { PathBuf::from(file_path) };
