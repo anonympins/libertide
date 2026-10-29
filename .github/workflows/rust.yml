@@ -27,10 +27,10 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc, i686-pc-windows-msvc
 
-      - name: Install Vulkan SDK via Chocolatey
+      - name: Install Vulkan SDK and Ninja via Chocolatey
         shell: powershell
         run: |
-          choco install vulkan-sdk -y --no-progress
+          choco install vulkan-sdk ninja -y --no-progress
           $vulkanPath = (Get-ChildItem -Path "C:\VulkanSDK" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
           Write-Host "Vulkan SDK found at: $vulkanPath"
           Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$vulkanPath"
@@ -39,6 +39,8 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value "$vulkanPath\Lib"
           Add-Content -Path $env:GITHUB_ENV -Value "CMAKE_POLICY_DEFAULT_CMP0194=OLD"
           Add-Content -Path $env:GITHUB_ENV -Value "CMAKE_ARGS=-DCMAKE_POLICY_DEFAULT_CMP0194=OLD"
+          # Force Ninja comme générateur CMake pour éviter le bug MSBuild/Vulkan
+          Add-Content -Path $env:GITHUB_ENV -Value "CMAKE_GENERATOR=Ninja"
 
       - name: Rust Cache
         uses: actions/cache@v4
@@ -52,13 +54,20 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Run tests (release)
+      - name: Run tests (release, Vulkan)
         run: cargo test --release --verbose --features vulkan
+        env:
+          CMAKE_GENERATOR: Ninja
 
-      - name: Build optimized release executables (64-bit and 32-bit)
-        run: |
-          cargo build --release --target x86_64-pc-windows-msvc --verbose --features vulkan
-          cargo build --release --target i686-pc-windows-msvc --verbose
+      - name: Build optimized release executables (64-bit with Vulkan)
+        run: cargo build --release --target x86_64-pc-windows-msvc --verbose --features vulkan
+        env:
+          CMAKE_GENERATOR: Ninja
+
+      - name: Build optimized release executables (32-bit, no Vulkan)
+        run: cargo build --release --target i686-pc-windows-msvc --verbose
+        env:
+          CMAKE_GENERATOR: Ninja
 
       - name: Prepare distribution executables
         shell: powershell
