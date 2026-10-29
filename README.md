@@ -8,7 +8,7 @@
 [![WCAG Accessibility](https://img.shields.io/badge/Accessibility-WCAG%20AAA-brightgreen)](#-visual-comfort--high-visibility-wcag-aaa)
 [![Platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue)](#-getting-started-in-3-steps)
 
-[![Windows Build](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust.yml?label=Windows)](https://github.com/anonympins/libertide/actions/workflows/rust.yml)
+[![Windows Build](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-windows.yml?label=Windows)](https://github.com/anonympins/libertide/actions/workflows/rust-windows.yml)
 [![UNIX Build](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-unix.yml?label=Linux%20%2F%20UNIX)](https://github.com/anonympins/libertide/actions/workflows/rust-unix.yml)
 [![macOS Build](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-macos.yml?label=macOS)](https://github.com/anonympins/libertide/actions/workflows/rust-macos.yml)
 
@@ -58,11 +58,13 @@ Designed for users with single-movement abilities (micro-switch, puff-and-sip, s
 
 ### 3. 🎙️ Private Local Dictation & Autonomous Agent
 - **100% On-Device Dictation (Whisper)**: Speak letters, emails, or code naturally. Real-time speech transcription runs locally via `whisper.cpp`—voice data never leaves your computer.
-- **Autonomous Multi-Pass Reasoning**: Powered by leading LLMs (DeepSeek, Claude, GPT-4o, Mistral, Groq), Libertide plans and chains multi-step actions (scrolling, clicking, tab management, web exploration) across multiple reasoning passes.
+- **100% Offline Local LLM (Qwen 2.5 0.5B Instruct)**: Option to run reasoning entirely on-device without any API key or internet connection using an embedded, GPU-accelerated (or CPU) lightweight GGUF model (`qwen2.5-0.5b-instruct-q4_k_m.gguf`, ~398 MB) downloadable with a single click.
+- **Autonomous Multi-Pass Reasoning**: Powered by leading cloud LLMs (DeepSeek, Claude, GPT-4o, Mistral, Groq, GLM) or the local Qwen engine, Libertide plans and chains multi-step actions across iterative reasoning passes.
 - **Safety & Undo Stack**: Every simulated interaction (keystrokes, tab opens, navigation) is recorded in an undo stack. Say *"Undo"* or press `Escape` to rollback.
 
-### 4. 🪟 Interactive Floating Cards
+### 4. 🪟 Interactive Floating Cards & Live Subtitles
 Complex information is extracted and projected into accessible floating window cards:
+- **Live Subtitles & Real-Time Audio Loopback**: Transcribe system audio, streams (Twitch, YouTube, meetings) directly into an accessible floating window with an animated 16-band audio spectrum visualizer, history log, and instant clipboard export.
 - **Interactive Forms**: Flight searches, hotel finders, and filter tools rendered with high-contrast sliders, dropdowns, and checkboxes.
 - **Comparison Tables**: Sortable product, travel, or specification tables with one-click copy and actionable links (`[link="action:..."]`).
 - **Markdown Syntheses**: Clean article and document summaries with interactive action buttons.
@@ -105,6 +107,10 @@ The interface adapts dynamically to your eyesight:
 - **Target and click links**: Press `F7` or say *"Hover mode"*:
   ➔ Golden numbered badges overlay every clickable link and control.
   ➔ Speak *"Click 4"* or type `4` on the numeric keypad to open it.
+
+### 📺 3. Live video and audio subtitles
+- Say *"Active les sous-titres"* / *"Start subtitles"*:
+  ➔ Libertide captures system audio output in loopback and displays real-time subtitles in a high-contrast floating card accompanied by a live 16-band spectrum equalizer.
 
 ### 🖱️ 3. Clicking without shaking
 - **With gaze or mouse**: Point at the target area: Libertide outlines it and speaks the button label (*"Close window"*, *"Search"*), executing upon dwell timer expiration or single switch tap.
@@ -154,7 +160,9 @@ Libertide requires no specialized hardware:
 To process natural language commands, configure your preferred LLM provider:
 1. Launch the application.
 2. Click the **⚙ Settings** button in the lower bar (or say *"API Key"*).
-3. Choose your provider (**DeepSeek**, **OpenAI**, **Anthropic**, **Mistral**, **Groq**, or **GLM**) and paste your key.
+3. Choose your provider:
+   - **Cloud Providers**: **DeepSeek**, **OpenAI**, **Anthropic**, **Mistral**, **Groq**, or **GLM** (paste your API key).
+   - **100% Local & Free**: Choose **Local (Qwen 0.5B)** and click *Télécharger Qwen 2.5 0.5B (~398 Mo)* to run completely offline without an API key!
 
 *(On the first speech-recognition session, the lightweight local Whisper model downloads automatically in the background).*
 
@@ -199,6 +207,7 @@ Libertide understands English, French, and most modern languages:
 | Category | What you can say out loud |
 | :--- | :--- |
 | **Interface Control** | *"Hide"* • *"Show up"* • *"Emergency stop"* • *"Stop"* |
+| **Live Subtitles** | *"Active les sous-titres"* • *"Arrête les sous-titres"* • *"Start subtitles"* • *"Stop subtitles"* |
 | **Pointing & Clicking Help** | *"Hover mode"* • *"Numbers"* / *"Badges"* • *"Click 3"* • *"Switch mode"* |
 | **Display & Themes** | *"Zoom in"* • *"Zoom out"* • *"Reset zoom"* • *"High contrast"* • *"Next theme"* • *"Passer en anglais / français"* |
 | **Dictation & Writing** | *"Dictation mode"* • *"New line"* • *"Delete word"* • *"Stop dictation"* |

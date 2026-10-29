@@ -47,19 +47,35 @@ jobs:
             speech-dispatcher \
             espeak-ng
 
+      - name: Install Vulkan SDK via LunarG APT repository
+        run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-$(lsb_release -cs).list http://packages.lunarg.com/vulkan/lunarg-vulkan-$(lsb_release -cs).list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+          echo "VULKAN_SDK=/usr" >> $GITHUB_ENV
+          echo "VULKAN_SDK found at /usr"
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
+        uses: actions/cache@v4
         with:
-          cache-targets: "true"
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
       - name: Run tests (release profile)
-        run: cargo test --release
+        run: cargo test --release --features vulkan
 
       - name: Build optimized release executable
-        run: cargo build --release
+        run: cargo build --release --features vulkan
 
       - name: Prepare distribution package
         run: |

@@ -19,6 +19,7 @@ mod commands;
 mod overlay;
 mod ui;
 mod ocr;
+mod local_llm;
 
 use audio::spawn_audio_worker;
 use floating_window::{update_open_floating_cards, FloatingCard, FloatingCardOutput, FloatingContentType, OPEN_FLOATING_CARDS};
@@ -98,6 +99,7 @@ pub struct OverlayApp {
     hover_physical_mouse_moved: bool,
 
     // Canaux de communication asynchrones
+    event_sender: StdSender<AgentEvent>,
     event_receiver: Receiver<AgentEvent>,
     command_sender: UnboundedSender<AgentCommand>,
     tts_sender: StdSender<TtsCommand>,
@@ -124,6 +126,8 @@ pub struct OverlayApp {
     show_api_key_plain: bool,
     selected_provider_modal: LlmProvider,
     api_key_error: Option<String>,
+
+    local_download_progress: Option<(f32, f32, f32, f32)>,
 
     // Suggestions d'applications en direct (PATH & Levenshtein)
     input_suggestions: Vec<String>,
@@ -431,6 +435,7 @@ pub fn localized_theme_desc(theme: AppTheme) -> String {
 impl OverlayApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
+        event_sender: StdSender<AgentEvent>,
         event_receiver: Receiver<AgentEvent>,
         command_sender: UnboundedSender<AgentCommand>,
         tts_sender: StdSender<TtsCommand>,
@@ -452,7 +457,7 @@ impl OverlayApp {
 
         let llm_config = resolve_llm_config();
         let theme = AppTheme::resolve_theme();
-        let has_no_key = llm_config.api_key.is_empty();
+        let has_no_key = llm_config.provider != LlmProvider::Local && llm_config.api_key.is_empty();
         let hover_asked = is_hover_nav_asked();
         let app_language = std::env::var("APP_LANG")
             .ok()
@@ -493,7 +498,7 @@ impl OverlayApp {
             .ok()
             .or_else(|| read_env_var_from_file(".env", "DWELL_TIME_MS"))
             .and_then(|s| s.trim().parse::<u64>().ok())
-            .unwrap_or(1200);
+            .unwrap_or(0);
 
         let dwell_activation_ms = std::env::var("DWELL_ACTIVATION_DELAY_MS")
             .ok()
@@ -565,6 +570,7 @@ impl OverlayApp {
             hover_controls_speech_enabled: false,
             hover_physical_mouse_moved: false,
 
+            event_sender,
             event_receiver,
             command_sender,
             tts_sender,
@@ -589,6 +595,7 @@ impl OverlayApp {
             selected_provider_modal: llm_config.provider,
             show_api_key_plain: false,
             api_key_error: None,
+            local_download_progress: None,
             input_suggestions: Vec::new(),
             last_suggestion_query: String::new(),
             macros,
@@ -1342,6 +1349,14 @@ impl eframe::App for OverlayApp {
         // Dépouillement des événements asynchrones
         while let Ok(event) = self.event_receiver.try_recv() {
             match event {
+                AgentEvent::DownloadProgress { percent, downloaded_mb, total_mb, speed_mb_s } => {
+                    if percent >= 100.0 {
+                        self.local_download_progress = None;
+                    } else {
+                        self.local_download_progress = Some((percent, downloaded_mb, total_mb, speed_mb_s));
+                    }
+                    ctx.request_repaint();
+                }
                 AgentEvent::StatusChanged(new_status) => {
                     if self.status != AgentStatus::EmergencyStopped || new_status == AgentStatus::EmergencyStopped {
                         let prev_status = self.status;
@@ -5050,6 +5065,10 @@ impl eframe::App for OverlayApp {
                             match self.settings_tab {
                                 SettingsTab::LlmProvider => {
                             // --- Onglet Fournisseur LLM ---
+                            let env_var_target = self.selected_provider_modal.env_key_name();
+                            let env_model_target = self.selected_provider_modal.env_model_name();
+                            let default_model_name = self.selected_provider_modal.default_model();
+
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
                                 for &provider in LlmProvider::ALL {
@@ -5061,9 +5080,64 @@ impl eframe::App for OverlayApp {
                             });
 
                             ui.add_space(4.0);
-                            let env_var_target = self.selected_provider_modal.env_key_name();
-                            let env_model_target = self.selected_provider_modal.env_model_name();
-                            let default_model_name = self.selected_provider_modal.default_model();
+
+                            if self.selected_provider_modal == LlmProvider::Local {
+                                let model_exists = local_llm::find_local_llama_model_file().is_some();
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("Modèle local compact :")
+                                                    .size(11.0)
+                                                    .color(theme.accent)
+                                                    .strong(),
+                                            );
+                                            if model_exists {
+                                                ui.label(
+                                                    egui::RichText::new("✅ Qwen 2.5 0.5B installé")
+                                                        .size(11.0)
+                                                        .color(egui::Color32::from_rgb(100, 225, 130))
+                                                        .strong(),
+                                                );
+                                            } else {
+                                                ui.label(
+                                                    egui::RichText::new("⚠️ Non installé (~398 Mo)")
+                                                        .size(11.0)
+                                                        .color(egui::Color32::from_rgb(255, 180, 80)),
+                                                );
+                                            }
+                                        });
+
+                                        ui.add_space(4.0);
+
+                                        if let Some((percent, downloaded_mb, total_mb, speed_mb_s)) = self.local_download_progress {
+                                            ui.add(
+                                                egui::ProgressBar::new(percent / 100.0)
+                                                    .text(format!("{percent:.1} % ({downloaded_mb:.1} / {total_mb:.1} Mo - {speed_mb_s:.1} Mo/s)"))
+                                                    .animate(true)
+                                            );
+                                        } else if !model_exists {
+                                            let event_tx_clone = self.event_sender.clone();
+                                            if ui.button(egui::RichText::new("⬇ Télécharger Qwen 2.5 0.5B (~398 Mo)").strong().color(theme.accent)).clicked() {
+                                                std::thread::spawn(move || {
+                                                    let _ = local_llm::ensure_llama_model_downloaded(&event_tx_clone);
+                                                });
+                                            }
+                                        } else {
+                                            ui.label(
+                                                egui::RichText::new("Le modèle s'exécutera localement avec accélération GPU (Vulkan) ou CPU sans dépendance cloud.")
+                                                    .size(10.5)
+                                                    .color(theme.text_secondary),
+                                            );
+                                        }
+                                    });
+                            } else {
+
+                            ui.add_space(4.0);
 
                             // --- Section Clé API ---
                             ui.label(
@@ -5208,10 +5282,17 @@ impl eframe::App for OverlayApp {
                                 });
 
                             });
+                            }
 
                             if let Some(ref err) = self.api_key_error {
                                 ui.add_space(2.0);
                                 ui.label(egui::RichText::new(err).color(egui::Color32::from_rgb(255, 110, 110)).size(11.0));
+                            }
+
+                            if self.selected_provider_modal == LlmProvider::Local {
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Aucune clé API requise pour le moteur local.").size(10.5).color(egui::Color32::from_rgb(140, 200, 255)));
+                                ui.add_space(2.0);
                             }
 
                             ui.add_space(5.0);
@@ -5224,7 +5305,13 @@ impl eframe::App for OverlayApp {
                                         self.model_input.trim()
                                     };
 
-                                    if key.is_empty() {
+                                    if self.selected_provider_modal == LlmProvider::Local {
+                                        let _ = write_env_var_to_file(".env", "LLM_PROVIDER", self.selected_provider_modal.display_name());
+                                        #[cfg(windows)]
+                                        restart_application();
+                                        self.show_api_key_modal = false;
+                                        self.api_key_error = None;
+                                    } else if key.is_empty() {
                                         self.api_key_error = Some(t!("ui.api_key_empty").to_string());
                                     } else if let Err(e) = write_env_var_to_file(".env", env_var_target, key) {
                                         self.api_key_error = Some(t!("ui.api_key_write_err", err = e).to_string());
@@ -7039,6 +7126,7 @@ fn spawn_agent_backend(
 }
 
 fn run_overlay_gui(
+    event_tx: StdSender<AgentEvent>,
     event_rx: Receiver<AgentEvent>,
     cmd_tx: UnboundedSender<AgentCommand>,
     tts_tx: StdSender<TtsCommand>,
@@ -7072,6 +7160,7 @@ fn run_overlay_gui(
         Box::new(move |cc| {
             Ok(Box::new(OverlayApp::new(
                 cc,
+                event_tx,
                 event_rx,
                 cmd_tx,
                 tts_tx,
@@ -7105,6 +7194,7 @@ fn main() -> eframe::Result<()> {
     spawn_agent_backend(cmd_rx, cmd_tx.clone(), event_tx.clone(), tts_tx.clone(), llm_config.clone());
 
     run_overlay_gui(
+        event_tx,
         event_rx,
         cmd_tx,
         tts_tx,

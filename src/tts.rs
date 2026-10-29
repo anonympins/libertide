@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::mpsc::{channel, Sender as StdSender};
 use std::time::{Duration, Instant};
 
@@ -397,6 +398,7 @@ trait SystemTtsBackend {
         sentence: &str,
         rx: &std::sync::mpsc::Receiver<TtsCommand>,
         pending_cmd: &mut Option<TtsCommand>,
+        sentence_queue: &mut VecDeque<String>,
     ) -> bool; // renvoie true si interrompu
 }
 
@@ -457,6 +459,7 @@ impl SystemTtsBackend for SapiBackend {
         sentence: &str,
         rx: &std::sync::mpsc::Receiver<TtsCommand>,
         pending_cmd: &mut Option<TtsCommand>,
+        sentence_queue: &mut VecDeque<String>,
     ) -> bool {
         use windows::core::PCWSTR;
         use windows::Win32::Media::Speech::SPVOICESTATUS;
@@ -491,6 +494,12 @@ impl SystemTtsBackend for SapiBackend {
                             set_tts_audio_level(0.0);
                             *pending_cmd = Some(TtsCommand::Speak(next_text));
                             return true;
+                        }
+                        TtsCommand::Enqueue(next_text) => {
+                            let clean = sanitize_for_tts(&next_text);
+                            for s in split_into_sentences(&clean) {
+                                sentence_queue.push_back(s);
+                            }
                         }
                     }
                 }
@@ -555,6 +564,7 @@ impl SystemTtsBackend for UnixTtsBackend {
         sentence: &str,
         rx: &std::sync::mpsc::Receiver<TtsCommand>,
         pending_cmd: &mut Option<TtsCommand>,
+        sentence_queue: &mut VecDeque<String>,
     ) -> bool {
         #[cfg(target_os = "macos")]
         let mut child_proc = {
@@ -614,6 +624,12 @@ impl SystemTtsBackend for UnixTtsBackend {
                             *pending_cmd = Some(TtsCommand::Speak(next_text));
                             return true;
                         }
+                        TtsCommand::Enqueue(next_text) => {
+                            let clean = sanitize_for_tts(&next_text);
+                            for s in split_into_sentences(&clean) {
+                                sentence_queue.push_back(s);
+                            }
+                        }
                     }
                 }
             }
@@ -661,10 +677,10 @@ pub fn spawn_tts_worker(event_tx: StdSender<AgentEvent>, initial_voice: VoiceGen
                     }
                     set_tts_audio_level(0.0);
                 }
-                TtsCommand::Speak(raw_text) => {
+                TtsCommand::Speak(raw_text) | TtsCommand::Enqueue(raw_text) => {
                     let clean_text = sanitize_for_tts(&raw_text);
-                    let sentences = split_into_sentences(&clean_text);
-                    if sentences.is_empty() {
+                    let mut sentence_queue: VecDeque<String> = split_into_sentences(&clean_text).into();
+                    if sentence_queue.is_empty() {
                         let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                         let _ = event_tx.send(AgentEvent::TtsFinished);
                         continue;
@@ -673,16 +689,16 @@ pub fn spawn_tts_worker(event_tx: StdSender<AgentEvent>, initial_voice: VoiceGen
                     let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Speaking));
                     let mut was_interrupted = false;
 
-                    for sentence in &sentences {
+                    while let Some(sentence) = sentence_queue.pop_front() {
                         if let Some(ref mut backend) = system_backend {
-                            if backend.speak_sentence(sentence, &rx, &mut pending_cmd) {
+                            if backend.speak_sentence(&sentence, &rx, &mut pending_cmd, &mut sentence_queue) {
                                 was_interrupted = true;
                                 break;
                             }
                         }
 
                         // Pause prosodique entre les phrases
-                        let pause_dur = punctuation_pause_duration(sentence);
+                        let pause_dur = punctuation_pause_duration(&sentence);
                         let pause_start = Instant::now();
                         while pause_start.elapsed() < pause_dur {
                             std::thread::sleep(Duration::from_millis(10));
@@ -704,6 +720,12 @@ pub fn spawn_tts_worker(event_tx: StdSender<AgentEvent>, initial_voice: VoiceGen
                                         pending_cmd = Some(TtsCommand::Speak(next_text));
                                         was_interrupted = true;
                                         break;
+                                    }
+                                    TtsCommand::Enqueue(next_text) => {
+                                        let clean = sanitize_for_tts(&next_text);
+                                        for s in split_into_sentences(&clean) {
+                                            sentence_queue.push_back(s);
+                                        }
                                     }
                                 }
                             }
