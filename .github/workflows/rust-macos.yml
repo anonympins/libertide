@@ -30,6 +30,31 @@ jobs:
           echo "LLAMA_METAL=1" >> $GITHUB_ENV
           echo "CMAKE_ARGS=-DGGML_METAL=ON" >> $GITHUB_ENV
 
+      - name: Fix Apple Clang march flag for Apple Silicon
+        run: |
+          mkdir -p "$HOME/bin"
+          cat << 'EOF' > "$HOME/bin/clang-wrapper"
+          #!/bin/bash
+          args=()
+          for arg in "$@"; do
+            if [ "$arg" = "-march=apple-m1" ]; then
+              args+=("-mcpu=apple-m1")
+            else
+              args+=("$arg")
+            fi
+          done
+          exec /usr/bin/clang "${args[@]}"
+          EOF
+          chmod +x "$HOME/bin/clang-wrapper"
+
+          sed 's|/usr/bin/clang|/usr/bin/clang++|g' "$HOME/bin/clang-wrapper" > "$HOME/bin/clang++-wrapper"
+          chmod +x "$HOME/bin/clang++-wrapper"
+
+          echo "CC=$HOME/bin/clang-wrapper" >> $GITHUB_ENV
+          echo "CXX=$HOME/bin/clang++-wrapper" >> $GITHUB_ENV
+          echo "CMAKE_C_COMPILER=$HOME/bin/clang-wrapper" >> $GITHUB_ENV
+          echo "CMAKE_CXX_COMPILER=$HOME/bin/clang++-wrapper" >> $GITHUB_ENV
+
       - name: Rust Cache
         uses: actions/cache@v4
         with:
