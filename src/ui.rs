@@ -3,14 +3,20 @@ use std::time::Duration;
 #[cfg(windows)]
 use windows::core::{w, Interface};
 #[cfg(windows)]
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{BOOL, HWND, RECT};
+#[cfg(windows)]
+use windows::Win32::Media::Audio::{
+    eMultimedia, eRender, IAudioSessionControl2, IAudioSessionManager2,
+    IMMDevice, IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
+};
 #[cfg(windows)]
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    CoCreateInstance, CoInitializeEx, CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationElement2,
+    CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationCacheRequest,
+    IUIAutomationElement, IUIAutomationElement2,
     IUIAutomationExpandCollapsePattern, IUIAutomationInvokePattern,
     IUIAutomationLegacyIAccessiblePattern, IUIAutomationRangeValuePattern,
     IUIAutomationScrollItemPattern, IUIAutomationScrollPattern,
@@ -27,6 +33,10 @@ use windows::Win32::UI::Accessibility::{
     UIA_SliderControlTypeId, UIA_SpinnerControlTypeId, UIA_TabControlTypeId,
     UIA_TabItemControlTypeId, UIA_TextPatternId, UIA_TogglePatternId, IUIAutomationTreeWalker,
     UIA_ToolBarControlTypeId, UIA_TreeItemControlTypeId, UIA_ValuePatternId,
+    UIA_AutomationIdPropertyId, UIA_BoundingRectanglePropertyId, UIA_ClassNamePropertyId,
+    UIA_ControlTypePropertyId, UIA_HelpTextPropertyId, UIA_IsKeyboardFocusablePropertyId,
+    UIA_IsOffscreenPropertyId, UIA_ItemStatusPropertyId, UIA_ItemTypePropertyId,
+    UIA_LocalizedControlTypePropertyId, UIA_NamePropertyId,
     UIA_GroupControlTypeId, UIA_SeparatorControlTypeId, UIA_TextControlTypeId,
 };
 #[cfg(windows)]
@@ -354,7 +364,26 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
 
         let walker = uia.ControlViewWalker().ok();
 
-        let Ok(elements) = window_element.FindAll(TreeScope_Descendants, &cond) else {
+        let cache_req = uia.CreateCacheRequest().ok();
+        if let Some(ref req) = cache_req {
+            let _ = req.AddProperty(UIA_ControlTypePropertyId);
+            let _ = req.AddProperty(UIA_NamePropertyId);
+            let _ = req.AddProperty(UIA_BoundingRectanglePropertyId);
+            let _ = req.AddProperty(UIA_ClassNamePropertyId);
+            let _ = req.AddProperty(UIA_IsOffscreenPropertyId);
+            let _ = req.AddProperty(UIA_AutomationIdPropertyId);
+            let _ = req.AddProperty(UIA_HelpTextPropertyId);
+            let _ = req.AddProperty(UIA_ItemTypePropertyId);
+            let _ = req.AddProperty(UIA_ItemStatusPropertyId);
+            let _ = req.AddProperty(UIA_LocalizedControlTypePropertyId);
+            let _ = req.AddProperty(UIA_IsKeyboardFocusablePropertyId);
+        }
+
+        let elements = match cache_req {
+            Some(ref req) => window_element.FindAllBuildCache(TreeScope_Descendants, &cond, req),
+            None => window_element.FindAll(TreeScope_Descendants, &cond),
+        };
+        let Ok(elements) = elements else {
             return results;
         };
 
@@ -372,13 +401,13 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
         let mut doc_rect: Option<RECT> = None;
         for i in 0..count {
             if let Ok(item) = elements.GetElement(i) {
-                let ctype = item.CurrentControlType().unwrap_or_default();
-                let class_name = item.CurrentClassName().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+                let ctype = item.CachedControlType().or_else(|_| item.CurrentControlType()).unwrap_or_default();
+                let class_name = item.CachedClassName().or_else(|_| item.CurrentClassName()).map(|b| b.to_string()).unwrap_or_default().to_lowercase();
                 let is_doc = ctype == UIA_DocumentControlTypeId
                     || class_name.contains("renderwidget")
                     || class_name.contains("rootwebarea");
                 if is_doc {
-                    if let Ok(r) = item.CurrentBoundingRectangle() {
+                    if let Ok(r) = item.CachedBoundingRectangle().or_else(|_| item.CurrentBoundingRectangle()) {
                         let w = r.right - r.left;
                         let h = r.bottom - r.top;
                         if w > 200 && h > 150 {
@@ -397,13 +426,13 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
 
         for i in 0..count {
             if let Ok(item) = elements.GetElement(i) {
-                let rect = item.CurrentBoundingRectangle().unwrap_or_default();
+                let rect = item.CachedBoundingRectangle().or_else(|_| item.CurrentBoundingRectangle()).unwrap_or_default();
                 let width = rect.right - rect.left;
                 let height = rect.bottom - rect.top;
                 if width > 4 && height > 4 {
-                    let ctype = item.CurrentControlType().unwrap_or_default();
-                    let class_name = item.CurrentClassName().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
-                    let loc_type = item.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+                    let ctype = item.CachedControlType().or_else(|_| item.CurrentControlType()).unwrap_or_default();
+                    let class_name = item.CachedClassName().or_else(|_| item.CurrentClassName()).map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+                    let loc_type = item.CachedLocalizedControlType().or_else(|_| item.CurrentLocalizedControlType()).map(|b| b.to_string()).unwrap_or_default().to_lowercase();
 
                     // Exclusion stricte des barres de défilement, curseurs d'ascenseur et boutons associés
                     if ctype == UIA_ScrollBarControlTypeId
@@ -415,13 +444,13 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         continue;
                     }
 
-                    let raw_name = item.CurrentName().map(|b| b.to_string()).unwrap_or_default();
+                    let raw_name = item.CachedName().or_else(|_| item.CurrentName()).map(|b| b.to_string()).unwrap_or_default();
                     let mut name = raw_name.trim().to_string();
-                    let automation_id = item.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default();
+                    let automation_id = item.CachedAutomationId().or_else(|_| item.CurrentAutomationId()).map(|b| b.to_string()).unwrap_or_default();
                     let auto_id_lower = automation_id.to_lowercase();
-                    let help_text = item.CurrentHelpText().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
-                    let item_type = item.CurrentItemType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
-                    let item_status_raw = item.CurrentItemStatus().map(|b| b.to_string()).unwrap_or_default().trim().to_string();
+                    let help_text = item.CachedHelpText().or_else(|_| item.CurrentHelpText()).map(|b| b.to_string()).unwrap_or_default().trim().to_string();
+                    let item_type = item.CachedItemType().or_else(|_| item.CurrentItemType()).map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+                    let item_status_raw = item.CachedItemStatus().or_else(|_| item.CurrentItemStatus()).map(|b| b.to_string()).unwrap_or_default().trim().to_string();
                     let item_status = item_status_raw.to_lowercase();
 
                     let primary_class = class_name.split_whitespace().next().unwrap_or("").to_string();
@@ -577,7 +606,7 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                         || is_swing_tab_class
                         || (has_source_ext && is_top_editor_area && height < 50);
 
-                    let is_offscreen = item.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false);
+                    let is_offscreen = item.CachedIsOffscreen().or_else(|_| item.CurrentIsOffscreen()).map(|b| b.as_bool()).unwrap_or(false);
                     let is_in_web = doc_rect.is_some() || is_browser_hwnd(hwnd, "");
                     if is_offscreen && !is_tab_candidate && !is_toast_window && !is_in_web {
                         continue;
@@ -632,7 +661,7 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
 
                     let is_editor_win = is_editor_window(hwnd, &name, &primary_class);
 
-                    let is_focusable = item.CurrentIsKeyboardFocusable().map(|b| b.as_bool()).unwrap_or(false) || is_swing_editor_class;
+                    let is_focusable = item.CachedIsKeyboardFocusable().or_else(|_| item.CurrentIsKeyboardFocusable()).map(|b| b.as_bool()).unwrap_or(false) || is_swing_editor_class;
                     let is_explicit_textarea = class_name.contains("textarea")
                         || loc_type.contains("textarea")
                         || is_swing_editor_class
@@ -1422,143 +1451,55 @@ pub fn send_terminal_input(_hwnd: impl AsWindowTarget, text: &str, auto_enter: b
 
 #[cfg(windows)]
 pub unsafe fn mute_other_audio_sessions() -> usize {
-    use std::ffi::c_void;
-    use windows::core::GUID;
-
-    type HRESULT = i32;
-    const S_OK: HRESULT = 0;
-    const CLSCTX_ALL: u32 = 23;
-
-    extern "system" {
-        fn CoCreateInstance(
-            rclsid: *const GUID,
-            p_unk_outer: *mut c_void,
-            dw_cls_context: u32,
-            riid: *const GUID,
-            ppv: *mut *mut c_void,
-        ) -> HRESULT;
-    }
-
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
-    let clsid_mm_device_enumerator = GUID::from_u128(0xBCDE0395_E52F_467C_8E3D_C4579291692E);
-    let iid_imm_device_enumerator = GUID::from_u128(0xA95664D2_9614_4D35_A746_DE8DB63617E6);
-    let iid_audio_session_manager2 = GUID::from_u128(0x77AA99A0_1BD6_484F_8BC7_2C654C9A9B6F);
-    let iid_audio_session_control2 = GUID::from_u128(0xBFB7FF88_7239_4FC9_8FA8_880C73E2E7EC);
-    let iid_simple_audio_volume = GUID::from_u128(0x87CE5498_68D6_44E5_AC21_AB2709778022);
+    let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
 
-    let mut enumerator: *mut c_void = std::ptr::null_mut();
-    if CoCreateInstance(
-        &clsid_mm_device_enumerator,
-        std::ptr::null_mut(),
-        CLSCTX_ALL,
-        &iid_imm_device_enumerator,
-        &mut enumerator,
-    ) != S_OK || enumerator.is_null() {
-        return 0;
-    }
+    let device: IMMDevice = match enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia) {
+        Ok(d) => d,
+        Err(_) => return 0,
+    };
 
-    let vtable_enum = *(enumerator as *const *const usize);
-    let get_default_endpoint: unsafe extern "system" fn(*mut c_void, i32, i32, *mut *mut c_void) -> HRESULT =
-        std::mem::transmute(*vtable_enum.add(4));
-    let release_enum: unsafe extern "system" fn(*mut c_void) -> u32 =
-        std::mem::transmute(*vtable_enum.add(2));
+    let session_mgr: IAudioSessionManager2 = match device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
 
-    let mut device: *mut c_void = std::ptr::null_mut();
-    let hr = get_default_endpoint(enumerator, 0, 1, &mut device);
-    release_enum(enumerator);
+    let session_enumerator = match session_mgr.GetSessionEnumerator() {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
 
-    if hr != S_OK || device.is_null() {
-        return 0;
-    }
-
-    let vtable_dev = *(device as *const *const usize);
-    let activate: unsafe extern "system" fn(*mut c_void, *const GUID, u32, *mut c_void, *mut *mut c_void) -> HRESULT =
-        std::mem::transmute(*vtable_dev.add(3));
-    let release_dev: unsafe extern "system" fn(*mut c_void) -> u32 =
-        std::mem::transmute(*vtable_dev.add(2));
-
-    let mut session_mgr: *mut c_void = std::ptr::null_mut();
-    let hr = activate(device, &iid_audio_session_manager2, CLSCTX_ALL, std::ptr::null_mut(), &mut session_mgr);
-    release_dev(device);
-
-    if hr != S_OK || session_mgr.is_null() {
-        return 0;
-    }
-
-    let vtable_mgr = *(session_mgr as *const *const usize);
-    let get_session_enum: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT =
-        std::mem::transmute(*vtable_mgr.add(5));
-    let release_mgr: unsafe extern "system" fn(*mut c_void) -> u32 =
-        std::mem::transmute(*vtable_mgr.add(2));
-
-    let mut session_enumerator: *mut c_void = std::ptr::null_mut();
-    let hr = get_session_enum(session_mgr, &mut session_enumerator);
-    release_mgr(session_mgr);
-
-    if hr != S_OK || session_enumerator.is_null() {
-        return 0;
-    }
-
-    let vtable_s_enum = *(session_enumerator as *const *const usize);
-    let get_count: unsafe extern "system" fn(*mut c_void, *mut i32) -> HRESULT =
-        std::mem::transmute(*vtable_s_enum.add(3));
-    let get_session: unsafe extern "system" fn(*mut c_void, i32, *mut *mut c_void) -> HRESULT =
-        std::mem::transmute(*vtable_s_enum.add(4));
-    let release_s_enum: unsafe extern "system" fn(*mut c_void) -> u32 =
-        std::mem::transmute(*vtable_s_enum.add(2));
-
-    let mut count = 0i32;
-    let _ = get_count(session_enumerator, &mut count);
+    let count = session_enumerator.GetCount().unwrap_or(0);
 
     let my_pid = std::process::id();
     let mut muted_count = 0usize;
 
     for i in 0..count {
-        let mut session_control: *mut c_void = std::ptr::null_mut();
-        if get_session(session_enumerator, i, &mut session_control) != S_OK || session_control.is_null() {
+        let Ok(session_control) = session_enumerator.GetSession(i) else {
             continue;
-        }
+        };
 
-        let vtable_sc = *(session_control as *const *const usize);
-        let query_interface_sc: unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT =
-            std::mem::transmute(*vtable_sc.add(0));
-        let release_sc: unsafe extern "system" fn(*mut c_void) -> u32 =
-            std::mem::transmute(*vtable_sc.add(2));
+        let session_pid = session_control
+            .cast::<IAudioSessionControl2>()
+            .ok()
+            .and_then(|c2| c2.GetProcessId().ok())
+            .unwrap_or(0);
 
-        let mut session_pid = 0u32;
-        let mut session_control2: *mut c_void = std::ptr::null_mut();
-        if query_interface_sc(session_control, &iid_audio_session_control2, &mut session_control2) == S_OK && !session_control2.is_null() {
-            let vtable_sc2 = *(session_control2 as *const *const usize);
-            let get_pid: unsafe extern "system" fn(*mut c_void, *mut u32) -> HRESULT =
-                std::mem::transmute(*vtable_sc2.add(14));
-            let release_sc2: unsafe extern "system" fn(*mut c_void) -> u32 =
-                std::mem::transmute(*vtable_sc2.add(2));
-            let _ = get_pid(session_control2, &mut session_pid);
-            release_sc2(session_control2);
-        }
-
-        let mut simple_volume: *mut c_void = std::ptr::null_mut();
-        if query_interface_sc(session_control, &iid_simple_audio_volume, &mut simple_volume) == S_OK && !simple_volume.is_null() {
-            let vtable_vol = *(simple_volume as *const *const usize);
-            let set_mute: unsafe extern "system" fn(*mut c_void, i32, *mut c_void) -> HRESULT =
-                std::mem::transmute(*vtable_vol.add(5));
-            let release_vol: unsafe extern "system" fn(*mut c_void) -> u32 =
-                std::mem::transmute(*vtable_vol.add(2));
-
+        if let Ok(volume) = session_control.cast::<ISimpleAudioVolume>() {
             if session_pid != my_pid {
-                if set_mute(simple_volume, 1, std::ptr::null_mut()) == S_OK {
+                if volume.SetMute(BOOL(1), std::ptr::null()).is_ok() {
                     muted_count += 1;
                 }
             } else {
-                let _ = set_mute(simple_volume, 0, std::ptr::null_mut());
+                let _ = volume.SetMute(BOOL(0), std::ptr::null());
             }
-            release_vol(simple_volume);
         }
-        release_sc(session_control);
     }
 
-    release_s_enum(session_enumerator);
     muted_count
 }
 

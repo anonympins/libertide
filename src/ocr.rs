@@ -4,7 +4,8 @@ use windows::Win32::Foundation::{HWND, POINT};
 #[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
-    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY,
+    GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    SRCCOPY,
 };
 #[cfg(windows)]
 use windows::Win32::System::Com::{
@@ -74,20 +75,14 @@ pub fn capture_window_rgba(hwnd: HWND, rect: [i32; 4]) -> Option<(Vec<u8>, u32, 
         };
 
         let mut buffer = vec![0u8; (w * h * 4) as usize];
-        extern "system" {
-            fn GetDIBits(
-                hdc: *mut std::ffi::c_void,
-                hbm: *mut std::ffi::c_void,
-                start: u32,
-                c_lines: u32,
-                lpv_bits: *mut u8,
-                lpbmi: *mut BITMAPINFO,
-                usage: u32,
-            ) -> i32;
-        }
-
         let lines = GetDIBits(
-            hdc_mem.0, hbm.0, 0, h, buffer.as_mut_ptr(), &mut bmi, DIB_RGB_COLORS.0,
+            hdc_mem,
+            hbm,
+            0,
+            h,
+            Some(buffer.as_mut_ptr() as *mut _),
+            &mut bmi,
+            DIB_RGB_COLORS,
         );
 
         SelectObject(hdc_mem, old_bm);

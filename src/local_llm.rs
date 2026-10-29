@@ -48,7 +48,7 @@ impl StreamingJsonNarration {
                     } else {
                         if self.buffer.len() > 12 {
                             let mut keep_from = self.buffer.len() - 12;
-                            while keep_fnumbersrom > 0 && !self.buffer.is_char_boundary(keep_from) {
+                            while keep_from > 0 && !self.buffer.is_char_boundary(keep_from) {
                                 keep_from -= 1;
                             }
                             if keep_from > 0 {

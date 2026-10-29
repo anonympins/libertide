@@ -1966,26 +1966,20 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         // Pause de sécurité avant le premier caractère
                         std::thread::sleep(Duration::from_millis(40));
 
-                        let text_to_type = if !text.ends_with(' ') && !text.ends_with('\n') {
+                        let text_to_paste = if !text.ends_with(' ') && !text.ends_with('\n') {
                             format!("{text} ")
                         } else {
                             text.to_string()
                         };
 
-                        for c in text_to_type.chars() {
-                            if c == '\n' || c == '\r' {
-                                send_hotkey(&[], VIRTUAL_KEY(0x0D));
-                                std::thread::sleep(Duration::from_millis(25));
-                            } else {
-                                send_char_unicode(c);
-                                std::thread::sleep(Duration::from_millis(10));
-                            }
-                        }
+                        set_clipboard_text(&text_to_paste);
+                        std::thread::sleep(Duration::from_millis(25));
+                        send_paste();
                         if should_enter {
                             std::thread::sleep(Duration::from_millis(40));
                             send_hotkey(&[], VIRTUAL_KEY(0x0D));
                         }
-                        feedback.push(format!("Texte dicté inséré directement au clavier ({} caractères).", text.len()));
+                        feedback.push(format!("Texte dicté inséré via presse-papiers ({} caractères).", text.len()));
                     }
                 } else {
                     let _ = write_to_browser_or_txt(text);
