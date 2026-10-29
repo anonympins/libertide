@@ -1,58 +1,17 @@
 use std::path::PathBuf;
 
 #[cfg(windows)]
-#[repr(C)]
-struct SystemTimeWin {
-    year: u16,
-    month: u16,
-    day_of_week: u16,
-    day: u16,
-    hour: u16,
-    minute: u16,
-    second: u16,
-    milliseconds: u16,
-}
-
+use windows::Win32::Foundation::SYSTEMTIME;
 #[cfg(windows)]
-#[repr(C)]
-struct SystemPowerStatus {
-    ac_line_status: u8,
-    battery_flag: u8,
-    battery_life_percent: u8,
-    system_status_flag: u8,
-    battery_life_time: u32,
-    battery_full_life_time: u32,
-}
-
-#[cfg(windows)]
-#[repr(C)]
-struct MemoryStatusEx {
-    dw_length: u32,
-    dw_memory_load: u32,
-    ull_total_phys: u64,
-    ull_avail_phys: u64,
-    ull_total_page_file: u64,
-    ull_avail_page_file: u64,
-    ull_total_virtual: u64,
-    ull_avail_virtual: u64,
-    ull_avail_extended_virtual: u64,
-}
-
-#[cfg(windows)]
-extern "system" {
-    fn GetLocalTime(st: *mut SystemTimeWin);
-    fn GetSystemPowerStatus(lp: *mut SystemPowerStatus) -> i32;
-    fn GlobalMemoryStatusEx(lp: *mut MemoryStatusEx) -> i32;
-}
+use windows::Win32::System::SystemInformation::{
+    GetLocalTime, GetSystemPowerStatus, GlobalMemoryStatusEx, MEMORYSTATUSEX, SYSTEM_POWER_STATUS,
+};
 
 /// Retourne la date et l'heure courante détaillée en français
 pub fn current_datetime_full_str() -> String {
     #[cfg(windows)]
     unsafe {
-        let mut st = SystemTimeWin {
-            year: 0, month: 0, day_of_week: 0, day: 0,
-            hour: 0, minute: 0, second: 0, milliseconds: 0,
-        };
+        let mut st = SYSTEMTIME::default();
         GetLocalTime(&mut st);
 
         const DAYS: [&str; 7] = ["Dimanche", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi"];
@@ -62,11 +21,12 @@ pub fn current_datetime_full_str() -> String {
         ];
 
         let day_name = DAYS.get(st.day_of_week as usize).unwrap_or(&"");
-        let month_name = MONTHS.get(st.month as usize).unwrap_or(&"");
+        let day_name = DAYS.get(st.wDayOfWeek as usize).unwrap_or(&"");
+        let month_name = MONTHS.get(st.wMonth as usize).unwrap_or(&"");
 
         format!(
             "{} {} {} {}, {:02}:{:02}:{:02}",
-            day_name, st.day, month_name, st.year, st.hour, st.minute, st.second
+            day_name, st.wDay, month_name, st.wYear, st.wHour, st.wMinute, st.wSecond
         )
     }
     #[cfg(not(windows))]
@@ -91,15 +51,15 @@ pub fn current_datetime_full_str() -> String {
 pub fn get_power_status() -> String {
     #[cfg(windows)]
     unsafe {
-        let mut sps = std::mem::zeroed::<SystemPowerStatus>();
-        if GetSystemPowerStatus(&mut sps) != 0 {
-            let ac = match sps.ac_line_status {
+        let mut sps = SYSTEM_POWER_STATUS::default();
+        if GetSystemPowerStatus(&mut sps).is_ok() {
+            let ac = match sps.ACLineStatus {
                 0 => "Sur batterie",
                 1 => "Branché sur secteur",
                 _ => "Alimentation inconnue",
             };
-            let percent = if sps.battery_life_percent <= 100 {
-                format!("{}%", sps.battery_life_percent)
+            let percent = if sps.BatteryLifePercent <= 100 {
+                format!("{}%", sps.BatteryLifePercent)
             } else {
                 "Niveau inconnu / absent".to_string()
             };
@@ -148,15 +108,17 @@ pub fn get_power_status() -> String {
 pub fn get_memory_info() -> String {
     #[cfg(windows)]
     unsafe {
-        let mut mem = std::mem::zeroed::<MemoryStatusEx>();
-        mem.dw_length = std::mem::size_of::<MemoryStatusEx>() as u32;
-        if GlobalMemoryStatusEx(&mut mem) != 0 {
-            let total_gb = mem.ull_total_phys as f64 / (1024.0 * 1024.0 * 1024.0);
-            let avail_gb = mem.ull_avail_phys as f64 / (1024.0 * 1024.0 * 1024.0);
+        let mut mem = MEMORYSTATUSEX {
+            dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+            ..Default::default()
+        };
+        if GlobalMemoryStatusEx(&mut mem).is_ok() {
+            let total_gb = mem.ullTotalPhys as f64 / (1024.0 * 1024.0 * 1024.0);
+            let avail_gb = mem.ullAvailPhys as f64 / (1024.0 * 1024.0 * 1024.0);
             let used_gb = total_gb - avail_gb;
             return format!(
                 "{:.1} Go utilisés / {:.1} Go totaux ({:.1} Go libres, charge : {}%)",
-                used_gb, total_gb, avail_gb, mem.dw_memory_load
+                used_gb, total_gb, avail_gb, mem.dwMemoryLoad
             );
         }
     }

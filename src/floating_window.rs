@@ -607,16 +607,26 @@ impl FloatingCard {
                         // Bouton d'accessibilité pour la lecture vocale complète
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             ui.add_space(8.0);
+                            let read_label = {
+                                let s = t!("ui.card_read_button");
+                                 s.into_owned()
+                            };
+                            let read_tooltip = {
+                                let s = t!("ui.card_read_tooltip");
+                                    s.into_owned()
+                            };
                             let read_btn = ui.add(
                                 egui::Button::new(
-                                    egui::RichText::new(t!("ui.card_read_button"))
+                                    egui::RichText::new(read_label)
                                         .size(10.5)
                                         .color(theme.text_user)
                                         .strong(),
                                 )
+                                .fill(theme.tab_inactive_bg)
+                                .stroke(egui::Stroke::new(1.0, theme.border_subtle))
                                 .small()
                                 .corner_radius(egui::CornerRadius::same(4)),
-                            ).on_hover_text(t!("ui.card_read_tooltip"));
+                            ).on_hover_text(read_tooltip);
                             let read_btn_id = ui.make_persistent_id(format!("dwell_read_card_{}", self.id));
                             if apply_dwell_to_response(ui, dwell_state, read_btn_id, &read_btn) {
                                 dwell_state.lock_id(read_btn_id, std::time::Duration::from_secs(6));
@@ -638,12 +648,22 @@ impl FloatingCard {
                                 play_earcon(Earcon::Success);
                             }
 
+                                let copy_label = {
+                                    let s = t!("ui.card_copy_all_btn");
+                                    if s == "ui.card_copy_all_btn" || s.starts_with("ui.") {
+                                        "📋 Tout copier".to_string()
+                                    } else {
+                                        s.into_owned()
+                                    }
+                                };
                                 let copy_btn = ui.add(
                                     egui::Button::new(
-                                        egui::RichText::new(t!("ui.card_copy_all_btn"))
+                                        egui::RichText::new(copy_label)
                                             .size(10.5)
                                             .color(theme.accent_text),
                                     )
+                                    .fill(theme.tab_inactive_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.border_subtle))
                                     .small()
                                     .corner_radius(egui::CornerRadius::same(4)),
                                 );

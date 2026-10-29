@@ -11,8 +11,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, FindWindowW, GetClassNameW, GetForegroundWindow, GetSystemMetrics,
     GetWindowRect, GetWindowTextLengthW, GetWindowTextW, IsIconic, IsWindowVisible,
-    SetForegroundWindow, SetWindowPos, ShowWindow, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE, SW_RESTORE,
+    SetForegroundWindow, SetWindowPos, ShowWindow, SystemParametersInfoW, SM_CXSCREEN,
+    SM_CYSCREEN, SPI_GETWORKAREA, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE, SW_RESTORE,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
 use crate::pattern::{extract_target_propositions, matches_pattern};
@@ -525,13 +526,14 @@ pub fn find_windows_matching(
 
 #[cfg(windows)]
 pub fn get_desktop_work_area() -> RECT {
-    extern "system" {
-        fn SystemParametersInfoW(uiAction: u32, uiParam: u32, pvParam: *mut std::ffi::c_void, fWinIni: u32) -> BOOL;
-    }
-    const SPI_GETWORKAREA: u32 = 0x0030;
     let mut rect = RECT::default();
     unsafe {
-        if SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut rect as *mut _ as *mut std::ffi::c_void, 0).as_bool()
+        if SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some(&mut rect as *mut _ as *mut std::ffi::c_void),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        ).is_ok()
             && rect.right > rect.left
             && rect.bottom > rect.top
         {

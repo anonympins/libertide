@@ -1,4 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::collections::VecDeque;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -34,7 +35,7 @@ impl AudioPlayer {
             let sample_rate = default_config.sample_rate().0;
             let channels = default_config.channels() as usize;
 
-            let ring_buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+            let ring_buffer: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
             let buf_cb = Arc::clone(&ring_buffer);
 
             let err_fn = |err| eprintln!("[Audio CPAL] Erreur de flux : {err}");
@@ -45,11 +46,7 @@ impl AudioPlayer {
                     move |data: &mut [f32], _| {
                         let mut buf = buf_cb.lock().unwrap();
                         for sample in data.iter_mut() {
-                            *sample = if !buf.is_empty() {
-                                buf.remove(0)
-                            } else {
-                                0.0
-                            };
+                            *sample = buf.pop_front().unwrap_or(0.0);
                         }
                     },
                     err_fn,
