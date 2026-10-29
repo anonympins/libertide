@@ -5,6 +5,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [0.6.6] - 2026-11-06
+
+### 🧠 100% Offline Local LLM Engine: Qwen 2.5 0.5B Instruct
+- **Zero-API Key On-Device Reasoning**:
+  - Integrated the ultra-lightweight **Qwen 2.5 0.5B Instruct** GGUF model (`qwen2.5-0.5b-instruct-q4_k_m.gguf`, ~398 MB) for private, zero-latency local agent execution.
+  - Enables full autonomous multi-pass planning, UI navigation, and query processing completely offline without internet access or third-party cloud API fees.
+  - Integrated one-click background download and local cache management directly inside the Settings dialog (`SettingsTab::LlmProvider`).
+  - Native GPU acceleration support with automatic graceful fallback to multi-threaded CPU inference.
+
+### ⏱️ First-Launch Ergonomics & Opt-In Dwell
+- **Disabled Dwell Time by Default (`dwell_millis = 0`)**:
+  - Set default dwell duration fallback to `0 ms` on fresh installs when no environment variable or `.env` setting exists.
+  - Completely disables dwell auto-clicking out of the box, preventing accidental activations and visual gauge popups during initial exploration.
+  - Users can enable and customize dwell timing anytime via the Settings slider (from 0 to 2,500 ms).
+
+### 📖 Documentation & Setup Guides (`README.md`)
+- **Comprehensive Offline & Subtitle Coverage**:
+  - Documented setup instructions for the local Qwen 2.5 0.5B model in the configuration steps.
+  - Added complete voice command references and workflow guides for live system audio subtitles (`Live Subtitles`) with loopback equalization.
+
+---
 ## [0.6.5] - 2026-11-05
 
 ### ⚡ UI Automation Caching & High-Performance Scanning (`ui.rs`)

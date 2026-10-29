@@ -493,7 +493,7 @@ impl OverlayApp {
             .ok()
             .or_else(|| read_env_var_from_file(".env", "DWELL_TIME_MS"))
             .and_then(|s| s.trim().parse::<u64>().ok())
-            .unwrap_or(1200);
+            .unwrap_or(0);
 
         let dwell_activation_ms = std::env::var("DWELL_ACTIVATION_DELAY_MS")
             .ok()
