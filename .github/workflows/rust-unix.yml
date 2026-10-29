@@ -47,6 +47,7 @@ jobs:
             libvulkan-dev \
             vulkan-tools \
             glslang-tools \
+            shaderc \
             speech-dispatcher \
             espeak-ng
 
