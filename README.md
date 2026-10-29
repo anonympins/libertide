@@ -8,7 +8,7 @@
 [![WCAG Accessibility](https://img.shields.io/badge/Accessibility-WCAG%20AAA-brightgreen)](#-visual-comfort--high-visibility-wcag-aaa)
 [![Platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue)](#-getting-started-in-3-steps)
 
-[![Windows Build](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust.yml?label=Windows)](https://github.com/anonympins/libertide/actions/workflows/rust.yml)
+[![Windows Build](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-windows.yml?label=Windows)](https://github.com/anonympins/libertide/actions/workflows/rust-windows.yml)
 [![UNIX Build](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-unix.yml?label=Linux%20%2F%20UNIX)](https://github.com/anonympins/libertide/actions/workflows/rust-unix.yml)
 [![macOS Build](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-macos.yml?label=macOS)](https://github.com/anonympins/libertide/actions/workflows/rust-macos.yml)
 
