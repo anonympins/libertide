@@ -123,6 +123,7 @@ pub struct OverlayApp {
     show_api_key_modal: bool,
     api_key_input: String,
     model_input: String,
+    endpoint_input: String,
     show_api_key_plain: bool,
     selected_provider_modal: LlmProvider,
     api_key_error: Option<String>,
@@ -457,7 +458,8 @@ impl OverlayApp {
 
         let llm_config = resolve_llm_config();
         let theme = AppTheme::resolve_theme();
-        let has_no_key = llm_config.provider != LlmProvider::Local && llm_config.api_key.is_empty();
+        let is_local_ep = llm_config.provider.is_local_or_custom_endpoint(&llm_config.endpoint);
+        let has_no_key = llm_config.provider != LlmProvider::Local && llm_config.api_key.is_empty() && !is_local_ep;
         let hover_asked = is_hover_nav_asked();
         let app_language = std::env::var("APP_LANG")
             .ok()
@@ -592,6 +594,7 @@ impl OverlayApp {
             show_api_key_modal: has_no_key,
             api_key_input: llm_config.api_key.clone(),
             model_input: llm_config.model.clone(),
+            endpoint_input: llm_config.endpoint.clone(),
             selected_provider_modal: llm_config.provider,
             show_api_key_plain: false,
             api_key_error: None,
@@ -624,6 +627,15 @@ impl OverlayApp {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| provider.default_model().to_string());
+
+        let endpoint_var = provider.env_endpoint_name();
+        self.endpoint_input = std::env::var(endpoint_var)
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", endpoint_var))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| provider.default_endpoint().to_string());
+
         self.api_key_error = None;
     }
 
@@ -895,39 +907,10 @@ impl OverlayApp {
                 self.switch_focus_index = active_idx.unwrap_or(0);
                 let cur_win = self.switch_windows[self.switch_focus_index].clone();
                 self.switch_active_window_id = Some(cur_win.id);
-                self.switch_step = SwitchAccessStep::Windows;
+                self.switch_step = SwitchAccessStep::Zones;
+                self.switch_focus_index = 0;
 
-                #[cfg(windows)]
-                {
-                    let target_hwnd = windows::Win32::Foundation::HWND(cur_win.id as _);
-                    force_foreground_window(target_hwnd);
-                    restore_if_iconic(target_hwnd);
-                    draw_screen_orange_border(cur_win.rect);
-                }
-                #[cfg(not(windows))]
-                {
-                    force_foreground_window(&cur_win.title);
-                    restore_if_iconic(&cur_win.title);
-                }
-
-                self.refresh_numbered_targets_for_window(cur_win.id);
-
-                let speech = t!("speech.switch_access_enabled", name = cur_win.title).to_string();
-
-                self.hover_last_announced_target = Some(cur_win.id as usize);
-                self.hover_last_announced_zone = Some(cur_win.title.clone());
-                self.hover_last_cursor_pos = physical_cursor;
-                self.hover_cursor_still_since = Instant::now();
-
-                self.chat_history.push(ChatEntry {
-                    role: ChatRole::Agent,
-                    text: speech.clone(),
-                    timestamp: current_time_str(),
-                    quick_suggestions: Vec::new(),
-                    screen_size_kb: None,
-                });
-                let _ = self.tts_sender.send(TtsCommand::Stop);
-                let _ = self.tts_sender.send(TtsCommand::Speak(speech));
+                self.activate_window_and_display_first_zone(cur_win.id, &cur_win.title, cur_win.rect, true);
             } else {
                 let msg = t!("speech.switch_no_windows").to_string();
                 self.chat_history.push(ChatEntry {
@@ -1068,13 +1051,38 @@ impl OverlayApp {
 
     pub fn click_numbered_target_by_index(&mut self, idx: usize) {
         self.stop_speaking();
-        let found_target = self.numbered_targets.iter().find(|t| t.index == idx).cloned();
+
+        // 1. Chercher en priorité absolue la cible directement parmi les cibles affichées
+        let mut found_target = self.numbered_targets.iter().find(|t| t.index == idx).cloned();
+
+        // 2. Si non trouvée dans la zone active courante, chercher dans l'ensemble des zones de la fenêtre
+        if found_target.is_none() {
+            for (z_idx, zone) in self.switch_zones.iter().enumerate() {
+                if let Some(t) = zone.targets.iter().find(|t| t.index == idx) {
+                    found_target = Some(t.clone());
+                    self.switch_active_zone_index = Some(z_idx);
+                    break;
+                }
+            }
+        }
+
+        // 3. Repli : si AUCUNE cible ne porte ce numéro et qu'on est en sélection de zone,
+        // alors seulement le numéro sert à basculer vers la zone correspondante
+        if found_target.is_none() && self.switch_access_mode && self.switch_step == SwitchAccessStep::Zones {
+            if idx >= 1 && idx <= self.switch_zones.len() {
+                self.select_switch_zone(idx - 1);
+                return;
+            }
+        }
+
         if let Some(target) = found_target {
+            if self.switch_step == SwitchAccessStep::Zones {
+                self.switch_step = SwitchAccessStep::Elements;
+            }
             if target.role == "fenêtre" {
                 if let Some(wid) = target.window_id {
                     self.switch_active_window_id = Some(wid);
-                    self.switch_step = SwitchAccessStep::Elements;
-                    self.refresh_numbered_targets_for_window(wid);
+                    self.transition_to_zones_for_window(wid, &target.name);
                     return;
                 }
             }
@@ -1121,6 +1129,14 @@ impl OverlayApp {
             {
                 clear_screen_numbered_badges();
                 ui::click_element(target.click_x, target.click_y, None, None);
+            }
+            if target.role == "champ de saisie" || target.role == "zone de texte" {
+                self.dictation_mode = true;
+                IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
+                self.continuous_mode = true;
+                if let Ok(mut guard) = LAST_FOCUSED_RECT.lock() {
+                    *guard = Some(target.rect);
+                }
             }
             play_earcon(Earcon::Success);
             let target_desc = if !target.name.is_empty() {
@@ -1182,6 +1198,169 @@ impl OverlayApp {
         }
     }
 
+    /// Transitionne de l'étape fenêtre vers l'étape des Chunks de badges / Zones
+    pub fn transition_to_zones_for_window(&mut self, window_id: isize, win_title: &str) {
+        self.switch_active_window_id = Some(window_id);
+        self.switch_step = SwitchAccessStep::Zones;
+        self.switch_focus_index = 0;
+        self.switch_auto_scroll = false;
+        self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
+        clear_screen_numbered_badges();
+
+        #[cfg(windows)]
+        let target_hwnd = windows::Win32::Foundation::HWND(window_id as _);
+        #[cfg(windows)]
+        {
+            if !target_hwnd.0.is_null() && !is_window_hung(target_hwnd) {
+                force_foreground_window(target_hwnd);
+                restore_if_iconic(target_hwnd);
+            }
+        }
+
+        if let Some(cached) = self.window_analysis_cache.get(&window_id).cloned() {
+            self.switch_zones = cached.zones;
+            self.display_zones_overlay(&cached.summary);
+        } else {
+            #[cfg(windows)]
+            let raw_targets = collect_numbered_targets_for_window(target_hwnd);
+            #[cfg(not(windows))]
+            let raw_targets = collect_numbered_targets_for_window(win_title);
+
+            let (summary, fallback_zones) = build_fallback_navigation_zones(win_title, &raw_targets);
+            self.window_analysis_cache.insert(window_id, CachedWindowAnalysis {
+                summary: summary.clone(),
+                zones: fallback_zones.clone(),
+            });
+            self.switch_zones = fallback_zones;
+            self.display_zones_overlay(&summary);
+
+            let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
+                window_id,
+                window_title: win_title.to_string(),
+                targets: raw_targets,
+                context_meta: None,
+            });
+        }
+    }
+
+    pub fn display_zones_overlay(&mut self, speech_text: &str) {
+        let zone_infos: Vec<ZoneOverlayInfo> = self.switch_zones.iter().enumerate().map(|(i, z)| {
+            ZoneOverlayInfo {
+                index: i + 1,
+                title: z.title.clone(),
+                rect: z.rect,
+                is_focused: (self.switch_focus_index % self.switch_zones.len().max(1)) == i,
+            }
+        }).collect();
+
+        // N'injecter que les badges jaunes de la zone active/focalisée
+        if let Some(cur_zone) = self.switch_zones.get(self.switch_focus_index % self.switch_zones.len().max(1)) {
+            let mut active_targets = cur_zone.targets.clone();
+            for (i, t) in active_targets.iter_mut().enumerate() {
+                t.index = i + 1;
+            }
+            self.numbered_targets = active_targets;
+        } else {
+            self.numbered_targets.clear();
+        }
+
+        let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
+        draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
+
+        self.chat_history.push(ChatEntry {
+            role: ChatRole::Agent,
+            text: speech_text.to_string(),
+            timestamp: current_time_str(),
+            quick_suggestions: Vec::new(),
+            screen_size_kb: None,
+        });
+        let _ = self.tts_sender.send(TtsCommand::Stop);
+        let _ = self.tts_sender.send(TtsCommand::Speak(speech_text.to_string()));
+    }
+
+    /// Active une fenêtre et affiche immédiatement la première zone bleue identifiée ainsi que ses points jaunes
+    pub fn activate_window_and_display_first_zone(
+        &mut self,
+        window_id: isize,
+        win_title: &str,
+        win_rect: [i32; 4],
+        speak_summary: bool,
+    ) {
+        self.switch_active_window_id = Some(window_id);
+
+        #[cfg(windows)]
+        {
+            let target_hwnd = windows::Win32::Foundation::HWND(window_id as _);
+            force_foreground_window(target_hwnd);
+            restore_if_iconic(target_hwnd);
+            draw_screen_orange_border(win_rect);
+        }
+        #[cfg(not(windows))]
+        {
+            force_foreground_window(win_title);
+            restore_if_iconic(win_title);
+        }
+
+        let (summary, zones) = if let Some(cached) = self.window_analysis_cache.get(&window_id).cloned() {
+            (cached.summary, cached.zones)
+        } else {
+            #[cfg(windows)]
+            let raw_targets = collect_numbered_targets_for_window(windows::Win32::Foundation::HWND(window_id as _));
+            #[cfg(not(windows))]
+            let raw_targets = collect_numbered_targets_for_window(win_title);
+
+            let (sum, fb_zones) = build_fallback_navigation_zones(win_title, &raw_targets);
+            self.window_analysis_cache.insert(window_id, CachedWindowAnalysis {
+                summary: sum.clone(),
+                zones: fb_zones.clone(),
+            });
+
+            if !raw_targets.is_empty() {
+                #[cfg(windows)]
+                let context_meta = extract_window_context_meta(windows::Win32::Foundation::HWND(window_id as _), win_title);
+                #[cfg(not(windows))]
+                let context_meta = None;
+
+                let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
+                    window_id,
+                    window_title: win_title.to_string(),
+                    targets: raw_targets,
+                    context_meta,
+                });
+            }
+            (sum, fb_zones)
+        };
+
+        self.switch_zones = zones;
+        if let Some(first_zone) = self.switch_zones.first() {
+            let mut active_targets = first_zone.targets.clone();
+            for (i, t) in active_targets.iter_mut().enumerate() {
+                t.index = i + 1;
+            }
+            self.numbered_targets = active_targets;
+        } else {
+            self.numbered_targets.clear();
+        }
+
+        let zone_infos: Vec<ZoneOverlayInfo> = self.switch_zones.iter().enumerate().map(|(i, z)| {
+            ZoneOverlayInfo {
+                index: i + 1,
+                title: z.title.clone(),
+                rect: z.rect,
+                is_focused: i == 0,
+            }
+        }).collect();
+
+        let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
+        draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
+
+        if speak_summary {
+            let speech = if !summary.is_empty() { summary } else { win_title.to_string() };
+            let _ = self.tts_sender.send(TtsCommand::Stop);
+            let _ = self.tts_sender.send(TtsCommand::Speak(speech));
+        }
+    }
+
     pub fn refresh_numbered_targets_for_window(&mut self, hwnd_id: isize) {
         #[cfg(windows)]
         {
@@ -1225,6 +1404,52 @@ impl OverlayApp {
             self.is_scan_in_progress = true;
             let _ = self.targets_request_tx.send(req);
         }
+    }
+
+    /// Sélectionne un Chunk / Zone et bascule vers ses contrôles et éléments OCR individuels
+    pub fn select_switch_zone(&mut self, zone_idx: usize) {
+        if zone_idx >= self.switch_zones.len() {
+            return;
+        }
+        self.last_switch_input = Instant::now();
+        self.switch_auto_scroll = false;
+        self.hover_physical_mouse_moved = false;
+        play_earcon(Earcon::Success);
+
+        let cur_zone = self.switch_zones[zone_idx].clone();
+        self.numbered_targets = cur_zone.targets.clone();
+        self.switch_active_zone_index = Some(zone_idx);
+        self.switch_step = SwitchAccessStep::Elements;
+        self.switch_focus_index = 0;
+        self.hover_controls_speech_enabled = true;
+
+        // Réaffecter des indices séquentiels pour ce chunk
+        for (i, t) in self.numbered_targets.iter_mut().enumerate() {
+            t.index = i + 1;
+        }
+
+        if let Some(first_target) = self.numbered_targets.first() {
+            focus_element_target(first_target);
+            self.hover_last_cursor_pos = Some((first_target.click_x, first_target.click_y));
+            self.hover_cursor_still_since = Instant::now();
+            self.hover_last_announced_target = Some(first_target.index);
+        }
+
+        self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
+        let vocal_msg = format!("Zone {} sélectionnée. {}", cur_zone.title, format_plural_control_type(&self.numbered_targets));
+        let _ = self.tts_sender.send(TtsCommand::Stop);
+        let _ = self.tts_sender.send(TtsCommand::Speak(vocal_msg));
+
+        // Maintenir l'encadré bleu et son badge de titre autour de la zone active
+        let zone_info = vec![ZoneOverlayInfo {
+            index: zone_idx + 1,
+            title: cur_zone.title.clone(),
+            rect: cur_zone.rect,
+            is_focused: true,
+        }];
+        draw_screen_zones_and_targets(&zone_info, &self.numbered_targets, self.zoom_factor, Some(1));
+        #[cfg(windows)]
+        draw_screen_control_border(cur_zone.rect, true);
     }
 }
 
@@ -2065,6 +2290,13 @@ impl eframe::App for OverlayApp {
 
                     if self.switch_access_mode && self.switch_active_window_id == Some(window_id) {
                         self.switch_zones = zones;
+                        if let Some(first_zone) = self.switch_zones.first() {
+                            let mut active_targets = first_zone.targets.clone();
+                            for (i, t) in active_targets.iter_mut().enumerate() {
+                                t.index = i + 1;
+                            }
+                            self.numbered_targets = active_targets;
+                        }
                         if !summary.is_empty() && self.hover_controls_speech_enabled {
                             let _ = self.tts_sender.send(TtsCommand::Stop);
                             let _ = self.tts_sender.send(TtsCommand::Speak(summary));
@@ -2079,7 +2311,10 @@ impl eframe::App for OverlayApp {
             m.has_focus(egui::Id::new("prompt_input_text"))
                 || m.has_focus(egui::Id::new("api_key_input_field"))
                 || m.has_focus(egui::Id::new("model_input_field"))
+                || m.has_focus(egui::Id::new("macro_shortcut_input"))
+                || m.has_focus(egui::Id::new("macro_text_input"))
         });
+        crate::automation::IS_USER_TYPING.store(is_typing, Ordering::Relaxed);
 
         // Gestion de la touche Échap globale et locale
         let mut hook_events = Vec::new();
@@ -2170,14 +2405,13 @@ impl eframe::App for OverlayApp {
 
         let egui_escape_hit = ctx.input(|i| i.key_pressed(egui::Key::Escape))
             || (egui_backspace_hit && !is_typing && self.numbered_input_buffer.is_empty());
-        let escape_triggered = (egui_escape_hit || hook_escape_hit || (global_escape_hit && self.dictation_mode))
-            && self.last_switch_input.elapsed() >= Duration::from_millis(250);
+        let escape_triggered = (egui_escape_hit || hook_escape_hit || global_escape_hit)
+            && self.last_switch_input.elapsed() >= Duration::from_millis(200);
 
         if escape_triggered {
             self.last_switch_input = Instant::now();
-            if self.status == AgentStatus::Speaking {
-                self.stop_speaking();
-            } else if self.dictation_mode {
+            self.stop_speaking();
+            if self.dictation_mode {
                 self.exit_dictation_mode();
             } else if self.switch_access_mode {
                 if self.switch_step == SwitchAccessStep::Elements {
@@ -2194,6 +2428,23 @@ impl eframe::App for OverlayApp {
                         let msg = t!("commands.back_to_blocks", zone = cur_zone.title).to_string();
                         let _ = self.tts_sender.send(TtsCommand::Speak(msg));
                         play_earcon(Earcon::Success);
+                        let zone_infos: Vec<ZoneOverlayInfo> = self.switch_zones.iter().enumerate().map(|(i, z)| {
+                            ZoneOverlayInfo {
+                                index: i + 1,
+                                title: z.title.clone(),
+                                rect: z.rect,
+                                is_focused: i == 0,
+                            }
+                        }).collect();
+                        if let Some(first_z) = self.switch_zones.first() {
+                            let mut active_targets = first_z.targets.clone();
+                            for (i, t) in active_targets.iter_mut().enumerate() {
+                                t.index = i + 1;
+                            }
+                            self.numbered_targets = active_targets;
+                        }
+                        let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
+                        draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
                     } else {
                         self.switch_step = SwitchAccessStep::Windows;
                         self.numbered_targets.clear();
@@ -2247,7 +2498,6 @@ impl eframe::App for OverlayApp {
                             window_id: Some(w.id),
                         }
                     }).collect();
-                    let _ = self.tts_sender.send(TtsCommand::Stop);
                     let base_msg = t!("speech.back_to_windows").to_string();
                     let msg = if let Some(first_win) = self.switch_windows.first() {
                         format!("{base_msg} : {}", first_win.title)
@@ -2257,7 +2507,7 @@ impl eframe::App for OverlayApp {
                     let _ = self.tts_sender.send(TtsCommand::Speak(msg));
                     play_earcon(Earcon::Success);
                 } else {
-                    self.toggle_switch_access_mode(None);
+                    self.toggle_switch_access_mode(Some(false));
                 }
             } else {
                 self.trigger_emergency_stop(&ctx);
@@ -2270,8 +2520,49 @@ impl eframe::App for OverlayApp {
                 self.last_applied_scan_sequence = result.sequence;
                 self.is_scan_in_progress = false;
 
-                // Mise à jour fluide sans frame noire intermédiaire
-                self.numbered_targets = result.targets;
+                // Mise à jour fluide sans écraser le découpage de la zone sélectionnée
+                if self.switch_step == SwitchAccessStep::Elements {
+                    if let Some(z_idx) = self.switch_active_zone_index {
+                        if let Some(zone) = self.switch_zones.get_mut(z_idx) {
+                            let (z_min_x, z_min_y, z_max_x, z_max_y) = (
+                                zone.rect[0] - 15,
+                                zone.rect[1] - 15,
+                                zone.rect[2] + 15,
+                                zone.rect[3] + 15,
+                            );
+                            let fresh_zone_targets: Vec<NumberedElementTarget> = result.targets
+                                .iter()
+                                .filter(|t| {
+                                    t.click_x >= z_min_x
+                                        && t.click_x <= z_max_x
+                                        && t.click_y >= z_min_y
+                                        && t.click_y <= z_max_y
+                                })
+                                .cloned()
+                                .collect();
+
+                            if !fresh_zone_targets.is_empty() {
+                                zone.targets = fresh_zone_targets;
+                            }
+                            self.numbered_targets = zone.targets.clone();
+                            for (i, t) in self.numbered_targets.iter_mut().enumerate() {
+                                t.index = i + 1;
+                            }
+                        }
+                    }
+                } else if self.switch_step == SwitchAccessStep::Windows {
+                    let (_, fb_zones) = build_fallback_navigation_zones("", &result.targets);
+                    self.switch_zones = fb_zones;
+                    if let Some(first_zone) = self.switch_zones.first() {
+                        let mut active_targets = first_zone.targets.clone();
+                        for (i, t) in active_targets.iter_mut().enumerate() {
+                            t.index = i + 1;
+                        }
+                        self.numbered_targets = active_targets;
+                    }
+                } else if self.switch_step == SwitchAccessStep::Zones {
+                    // En mode Zones, les cibles affichées restent restreintes à la zone focalisée
+                }
 
                 let physical_cursor = get_global_cursor_pos();
                 if let Some((cx, cy)) = physical_cursor {
@@ -2477,72 +2768,12 @@ impl eframe::App for OverlayApp {
                             self.hover_physical_mouse_moved = false;
 
                             let cur_win = self.switch_windows[self.switch_focus_index % num_windows].clone();
-                            #[cfg(windows)]
-                            {
-                                let target_hwnd = windows::Win32::Foundation::HWND(cur_win.id as _);
-                                force_foreground_window(target_hwnd);
-                                restore_if_iconic(target_hwnd);
-                                set_global_cursor_pos(cur_win.click_x, cur_win.click_y);
-                                draw_screen_orange_border(cur_win.rect);
-                            }
-                            #[cfg(not(windows))]
-                            {
-                                force_foreground_window(&cur_win.title);
-                                restore_if_iconic(&cur_win.title);
-                                set_global_cursor_pos(cur_win.click_x, cur_win.click_y);
-                            }
-
-                            self.switch_active_window_id = Some(cur_win.id);
-                            self.refresh_numbered_targets_for_window(cur_win.id);
-
-                            self.hover_last_cursor_pos = Some((cur_win.click_x, cur_win.click_y));
-                            self.hover_cursor_still_since = Instant::now();
-                            self.hover_last_announced_target = Some(cur_win.id as usize);
-                            self.hover_last_announced_zone = Some(cur_win.title.clone());
-
-                            // Le narrateur lit immédiatement le résumé sémantique de la fenêtre
-                            let speech = if let Some(cached) = self.window_analysis_cache.get(&cur_win.id) {
-                                if !cached.summary.is_empty() {
-                                    cached.summary.clone()
-                                } else {
-                                    cur_win.title.clone()
-                                }
-                            } else {
-                                #[cfg(windows)]
-                                let targets = collect_numbered_targets_for_window(windows::Win32::Foundation::HWND(cur_win.id as _));
-                                #[cfg(not(windows))]
-                                let targets = collect_numbered_targets_for_window(&cur_win.title);
-
-                                let (summary, fallback_zones) = build_fallback_navigation_zones(&cur_win.title, &targets);
-                                self.window_analysis_cache.insert(cur_win.id, CachedWindowAnalysis {
-                                    summary: summary.clone(),
-                                    zones: fallback_zones,
-                                });
-
-                                if !targets.is_empty() {
-                                    #[cfg(windows)]
-                                    let context_meta = extract_window_context_meta(windows::Win32::Foundation::HWND(cur_win.id as _), &cur_win.title);
-                                    #[cfg(not(windows))]
-                                    let context_meta = None;
-
-                                    let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
-                                        window_id: cur_win.id,
-                                        window_title: cur_win.title.clone(),
-                                        targets,
-                                        context_meta,
-                                    });
-                                }
-
-                                if !summary.is_empty() { summary } else { cur_win.title.clone() }
-                            };
-
-                            let _ = self.tts_sender.send(TtsCommand::Stop);
-                            let _ = self.tts_sender.send(TtsCommand::Speak(speech));
+                            self.activate_window_and_display_first_zone(cur_win.id, &cur_win.title, cur_win.rect, true);
                             self.hover_last_announced_target = Some(cur_win.id as usize);
                             ctx.request_repaint();
                         }
 
-                        if switch_input_hit {
+                        if switch_input_hit || ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
                             self.last_switch_input = Instant::now();
                             self.switch_auto_scroll = false;
                             self.hover_controls_speech_enabled = false;
@@ -2552,90 +2783,9 @@ impl eframe::App for OverlayApp {
                             let win_idx = self.switch_focus_index % num_windows;
                             let cur_win = &self.switch_windows[win_idx];
                             self.switch_active_window_id = Some(cur_win.id);
-                            #[cfg(windows)]
-                            let target_hwnd = windows::Win32::Foundation::HWND(cur_win.id as _);
-                            #[cfg(windows)]
-                            {
-                                force_foreground_window(target_hwnd);
-                                restore_if_iconic(target_hwnd);
-                            }
-                            #[cfg(not(windows))]
-                            {
-                                force_foreground_window(&cur_win.title);
-                            }
-
-                            // Vérification du cache pour ne pas réexécuter l'appel LLM
-                            if let Some(cached) = self.window_analysis_cache.get(&cur_win.id).cloned() {
-                                self.numbered_targets.clear();
-                                self.switch_zones = cached.zones;
-                                self.switch_step = SwitchAccessStep::Zones;
-                                self.switch_focus_index = 0;
-                                self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
-                                let speech = if !cached.summary.is_empty() {
-                                    cached.summary
-                                } else {
-                                    t!("speech.window_name_announced", name = cur_win.title).to_string()
-                                };
-
-                                self.chat_history.push(ChatEntry {
-                                    role: ChatRole::Agent,
-                                    text: speech.clone(),
-                                    timestamp: current_time_str(),
-                                    quick_suggestions: Vec::new(),
-                                    screen_size_kb: None,
-                                });
-                                let _ = self.tts_sender.send(TtsCommand::Stop);
-                                let _ = self.tts_sender.send(TtsCommand::Speak(speech));
-                            } else {
-                                #[cfg(windows)]
-                                {
-                                    std::thread::sleep(Duration::from_millis(60));
-                                    self.numbered_targets = collect_numbered_targets_for_window(target_hwnd);
-                                }
-                                #[cfg(not(windows))]
-                                {
-                                    self.numbered_targets = collect_numbered_targets_for_window(&cur_win.title);
-                                }
-
-                                let count = self.numbered_targets.len();
-                                if count > 0 {
-                                    let (summary, fallback_zones) = build_fallback_navigation_zones(&cur_win.title, &self.numbered_targets);
-                                    self.window_analysis_cache.insert(cur_win.id, CachedWindowAnalysis {
-                                        summary: summary.clone(),
-                                        zones: fallback_zones.clone(),
-                                    });
-                                    self.switch_zones = fallback_zones;
-                                    self.switch_step = SwitchAccessStep::Zones;
-                                    self.switch_focus_index = 0;
-                                    self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
-                                    let speech = if !summary.is_empty() {
-                                        summary
-                                    } else {
-                                        t!("speech.window_name_announced", name = cur_win.title).to_string()
-                                    };
-
-                                    self.chat_history.push(ChatEntry {
-                                        role: ChatRole::Agent,
-                                        text: speech.clone(),
-                                        timestamp: current_time_str(),
-                                        quick_suggestions: Vec::new(),
-                                        screen_size_kb: None,
-                                    });
-                                    let _ = self.tts_sender.send(TtsCommand::Stop);
-                                    let _ = self.tts_sender.send(TtsCommand::Speak(speech));
-
-                                    // Lancement en arrière-plan pour enrichissement IA
-                                    let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
-                                        window_id: cur_win.id,
-                                        window_title: cur_win.title.clone(),
-                                        targets: self.numbered_targets.clone(),
-                                        context_meta: None,
-                                    });
-                                } else {
-                                    let msg = t!("commands.no_controls_detected", title = cur_win.title).to_string();
-                                    let _ = self.tts_sender.send(TtsCommand::Speak(msg));
-                                }
-                            };
+                            let win_title = cur_win.title.clone();
+                            let win_id = cur_win.id;
+                            self.transition_to_zones_for_window(win_id, &win_title);
                             ctx.request_repaint();
                         }
                     }
@@ -2681,8 +2831,25 @@ impl eframe::App for OverlayApp {
                             set_global_cursor_pos(cur_zone.click_x, cur_zone.click_y);
                             self.hover_last_cursor_pos = Some((cur_zone.click_x, cur_zone.click_y));
                             self.hover_cursor_still_since = Instant::now();
-                            #[cfg(windows)]
-                            draw_screen_control_border(cur_zone.rect, true);
+
+                            let zone_infos: Vec<ZoneOverlayInfo> = self.switch_zones.iter().enumerate().map(|(i, z)| {
+                                ZoneOverlayInfo {
+                                    index: i + 1,
+                                    title: z.title.clone(),
+                                    rect: z.rect,
+                                    is_focused: (self.switch_focus_index % num_zones) == i,
+                                }
+                            }).collect();
+
+                            // N'afficher que les badges jaunes appartenant à cette zone
+                            let mut active_targets = cur_zone.targets.clone();
+                            for (i, t) in active_targets.iter_mut().enumerate() {
+                                t.index = i + 1;
+                            }
+                            self.numbered_targets = active_targets;
+                            let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
+                            draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
+
                             let vocal_label = cur_zone.title.clone();
                             let _ = self.tts_sender.send(TtsCommand::Stop);
                             let _ = self.tts_sender.send(TtsCommand::Speak(vocal_label));
@@ -2693,30 +2860,8 @@ impl eframe::App for OverlayApp {
                         }
 
                         if switch_input_hit {
-                            self.last_switch_input = Instant::now();
-                            self.switch_auto_scroll = false;
-                            self.hover_physical_mouse_moved = false;
-                            play_earcon(Earcon::Success);
-
                             let zone_idx = self.switch_focus_index % num_zones;
-                            let cur_zone = &self.switch_zones[zone_idx];
-                            self.numbered_targets = cur_zone.targets.clone();
-                            self.switch_active_zone_index = Some(zone_idx);
-                            self.switch_step = SwitchAccessStep::Elements;
-                            self.switch_focus_index = 0;
-                            self.hover_controls_speech_enabled = true;
-
-                            if let Some(first_target) = self.numbered_targets.first() {
-                                focus_element_target(first_target);
-                                self.hover_last_cursor_pos = Some((first_target.click_x, first_target.click_y));
-                                self.hover_cursor_still_since = Instant::now();
-                                self.hover_last_announced_target = Some(first_target.index);
-                            }
-
-                            self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
-                            let msg = self.numbered_targets.first().map(|t| t.name.clone()).unwrap_or_else(|| cur_zone.title.clone());
-                            let _ = self.tts_sender.send(TtsCommand::Stop);
-                            let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+                            self.select_switch_zone(zone_idx);
                             ctx.request_repaint();
                         }
                     }
@@ -2789,6 +2934,18 @@ impl eframe::App for OverlayApp {
                             self.hover_speech_deadline = None;
                             self.hover_last_announced_target = Some(cur_target.index);
                             self.hover_last_announced_zone = zone_title.map(|s| s.to_string());
+
+                            // Maintenir le cadre bleu de la zone parente avec les badges jaunes actifs
+                            if let Some(zone) = parent_zone {
+                                let zone_info = vec![ZoneOverlayInfo {
+                                    index: self.switch_active_zone_index.unwrap_or(0) + 1,
+                                    title: zone.title.clone(),
+                                    rect: zone.rect,
+                                    is_focused: true,
+                                }];
+                                draw_screen_zones_and_targets(&zone_info, &self.numbered_targets, self.zoom_factor, Some(cur_target.index));
+                            }
+
                             ctx.request_repaint();
                         }
 
@@ -3289,7 +3446,7 @@ impl eframe::App for OverlayApp {
                     self.hover_physical_mouse_moved = false;
                     self.hover_pending_speech = None;
                     self.hover_speech_deadline = None;
-                } else if has_moved {
+                } else if has_moved && !is_recent_switch_nav {
                     self.hover_physical_mouse_moved = true;
                     self.hover_cursor_still_since = Instant::now();
                     self.hover_last_cursor_pos = Some((cur_x, cur_y));
@@ -3451,66 +3608,16 @@ impl eframe::App for OverlayApp {
                                 let hovered_win_idx = find_switch_window_at_point(&self.switch_windows, cur_x, cur_y);
 
                                 if let Some(w_idx) = hovered_win_idx {
-                                    let cur_win = &self.switch_windows[w_idx];
+                                    let cur_win = self.switch_windows[w_idx].clone();
                                     let win_id = cur_win.id;
+                                    let win_title = cur_win.title;
+                                    let win_rect = cur_win.rect;
 
                                     if self.hover_last_announced_target != Some(win_id as usize) {
                                         self.switch_focus_index = w_idx;
-
-                                        #[cfg(windows)]
-                                        {
-                                            let hwnd = windows::Win32::Foundation::HWND(win_id as _);
-                                            if !is_window_hung(hwnd) {
-                                                force_foreground_window(hwnd);
-                                                restore_if_iconic(hwnd);
-                                            }
-                                            draw_screen_orange_border(cur_win.rect);
-                                        }
-                                        #[cfg(not(windows))]
-                                        {
-                                            force_foreground_window(&cur_win.title);
-                                            restore_if_iconic(&cur_win.title);
-                                        }
-
-                                        let summary_speech = if let Some(cached) = self.window_analysis_cache.get(&win_id) {
-                                            if !cached.summary.is_empty() {
-                                                cached.summary.clone()
-                                            } else {
-                                                cur_win.title.clone()
-                                            }
-                                        } else {
-                                            #[cfg(windows)]
-                                            let targets = collect_numbered_targets_for_window(windows::Win32::Foundation::HWND(win_id as _));
-                                            #[cfg(not(windows))]
-                                            let targets = collect_numbered_targets_for_window(&cur_win.title);
-
-                                            let (summary, fallback_zones) = build_fallback_navigation_zones(&cur_win.title, &targets);
-                                            self.window_analysis_cache.insert(win_id, CachedWindowAnalysis {
-                                                summary: summary.clone(),
-                                                zones: fallback_zones,
-                                            });
-
-                                            if !targets.is_empty() {
-                                                #[cfg(windows)]
-                                                let context_meta = extract_window_context_meta(windows::Win32::Foundation::HWND(win_id as _), &cur_win.title);
-                                                #[cfg(not(windows))]
-                                                let context_meta = None;
-
-                                                let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
-                                                    window_id: win_id,
-                                                    window_title: cur_win.title.clone(),
-                                                    targets,
-                                                    context_meta,
-                                                });
-                                            }
-
-                                            if !summary.is_empty() { summary } else { cur_win.title.clone() }
-                                        };
-
-                                        let _ = self.tts_sender.send(TtsCommand::Stop);
-                                        let _ = self.tts_sender.send(TtsCommand::Speak(summary_speech));
+                                        self.activate_window_and_display_first_zone(win_id, &win_title, win_rect, true);
                                         self.hover_last_announced_target = Some(win_id as usize);
-                                        self.hover_last_announced_zone = Some(cur_win.title.clone());
+                                        self.hover_last_announced_zone = Some(win_title);
                                         ctx.request_repaint();
                                         self.hover_physical_mouse_moved = false;
                                     }
@@ -4847,20 +4954,63 @@ impl eframe::App for OverlayApp {
                 // Poignées visuelles de redimensionnement discrètes aux coins
                 let painter = ui.painter();
 
-                // Tracé des badges de ciblage numéroté (Click by Number)
-                if self.switch_access_mode && !self.numbered_targets.is_empty() {
-                    let focused_target = if self.switch_step == SwitchAccessStep::Elements {
-                        self.numbered_targets.get(self.switch_focus_index)
-                    } else {
-                        None
-                    };
-                    let focused_idx = focused_target.map(|t| t.index);
-                    draw_screen_numbered_badges(&self.numbered_targets, self.zoom_factor, focused_idx);
-                    #[cfg(windows)]
-                    if self.switch_step == SwitchAccessStep::Elements {
+                // Tracé fluide et persistant des zones et badges sans clignotement ni effacement intempestif
+                if self.switch_access_mode {
+                    match self.switch_step {
+                        SwitchAccessStep::Windows => {
+                            if !self.switch_zones.is_empty() {
+                                let zone_infos: Vec<ZoneOverlayInfo> = self.switch_zones.iter().enumerate().map(|(i, z)| {
+                                    ZoneOverlayInfo {
+                                        index: i + 1,
+                                        title: z.title.clone(),
+                                        rect: z.rect,
+                                        is_focused: i == 0,
+                                    }
+                                }).collect();
+                                let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
+                                draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
+                            } else if !self.numbered_targets.is_empty() {
+                                let focused_idx = self.numbered_targets.first().map(|t| t.index);
+                                draw_screen_numbered_badges(&self.numbered_targets, self.zoom_factor, focused_idx);
+                            }
+                        }
+                        SwitchAccessStep::Zones => {
+                            if !self.switch_zones.is_empty() {
+                                let num_zones = self.switch_zones.len();
+                                let zone_infos: Vec<ZoneOverlayInfo> = self.switch_zones.iter().enumerate().map(|(i, z)| {
+                                    ZoneOverlayInfo {
+                                        index: i + 1,
+                                        title: z.title.clone(),
+                                        rect: z.rect,
+                                        is_focused: (self.switch_focus_index % num_zones) == i,
+                                    }
+                                }).collect();
+                                let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
+                                draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
+                            }
+                        }
+                        SwitchAccessStep::Elements => {
+                            let focused_target = self.numbered_targets.get(self.switch_focus_index % self.numbered_targets.len().max(1));
+                            let focused_idx = focused_target.map(|t| t.index);
+                            let active_zone_opt = self.switch_active_zone_index.and_then(|idx| self.switch_zones.get(idx));
+
+                            if let Some(zone) = active_zone_opt {
+                                let zone_info = vec![ZoneOverlayInfo {
+                                    index: self.switch_active_zone_index.unwrap_or(0) + 1,
+                                    title: zone.title.clone(),
+                                    rect: zone.rect,
+                                    is_focused: true,
+                                }];
+                                draw_screen_zones_and_targets(&zone_info, &self.numbered_targets, self.zoom_factor, focused_idx);
+                            } else if !self.numbered_targets.is_empty() {
+                                draw_screen_numbered_badges(&self.numbered_targets, self.zoom_factor, focused_idx);
+                            }
+
+                            #[cfg(windows)]
                         if let Some(target) = focused_target {
                             draw_screen_control_border(target.rect, target.role == "lecture textuelle");
                         }
+                    }
                     }
                 }
 
@@ -5067,18 +5217,66 @@ impl eframe::App for OverlayApp {
                             // --- Onglet Fournisseur LLM ---
                             let env_var_target = self.selected_provider_modal.env_key_name();
                             let env_model_target = self.selected_provider_modal.env_model_name();
+                            let env_endpoint_target = self.selected_provider_modal.env_endpoint_name();
                             let default_model_name = self.selected_provider_modal.default_model();
+                            let default_endpoint_url = self.selected_provider_modal.default_endpoint();
 
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
                                 for &provider in LlmProvider::ALL {
-                                    let is_sel = self.selected_provider_modal == provider;
-                                    if ui.selectable_label(is_sel, provider.display_name()).clicked() {
+                                    let is_current = self.llm_config.provider == provider;
+                                    let is_enabled = provider.is_enabled();
+                                    let is_selected_in_modal = self.selected_provider_modal == provider;
+
+                                    let badge = if is_current {
+                                        "★ "
+                                    } else if is_enabled {
+                                        "● "
+                                    } else {
+                                        "○ "
+                                    };
+
+                                    let label = format!("{}{}", badge, provider.display_name());
+                                    let label_rich = if is_current {
+                                        egui::RichText::new(label).strong().color(theme.accent)
+                                    } else if !is_enabled {
+                                        egui::RichText::new(label).color(egui::Color32::from_gray(140))
+                                    } else {
+                                        egui::RichText::new(label)
+                                    };
+
+                                    if ui.selectable_label(is_selected_in_modal, label_rich).clicked() {
                                         self.sync_modal_inputs_for_provider(provider);
                                     }
                                 }
                             });
 
+                            ui.add_space(4.0);
+
+                            // Activation / Désactivation et sélection active
+                            ui.horizontal(|ui| {
+                                let mut is_enabled = self.selected_provider_modal.is_enabled();
+                                if ui.checkbox(&mut is_enabled, "Fournisseur activé").changed() {
+                                    let _ = self.selected_provider_modal.set_enabled(is_enabled);
+                                    self.llm_config = resolve_llm_config();
+                                }
+
+                                if self.selected_provider_modal != self.llm_config.provider {
+                                    if ui.button("★ Définir comme actif principal").clicked() {
+                                        let _ = self.selected_provider_modal.set_enabled(true);
+                                        let _ = write_env_var_to_file(".env", "LLM_PROVIDER", self.selected_provider_modal.display_name());
+                                        std::env::set_var("LLM_PROVIDER", self.selected_provider_modal.display_name());
+                                        self.llm_config = resolve_llm_config();
+                                        play_earcon(Earcon::Success);
+                                    }
+                                } else {
+                                    ui.label(
+                                        egui::RichText::new("(Actif principal)")
+                                            .size(11.0)
+                                            .color(theme.accent),
+                                    );
+                                }
+                            });
                             ui.add_space(4.0);
 
                             if self.selected_provider_modal == LlmProvider::Local {
@@ -5170,7 +5368,7 @@ impl eframe::App for OverlayApp {
                                 let edit = egui::TextEdit::singleline(&mut self.api_key_input)
                                     .id(key_input_id)
                                     .password(!self.show_api_key_plain)
-                                    .hint_text("sk-...")
+                                    .hint_text("sk-... (ou laisser vide pour serveurs locaux)")
                                     .desired_width(230.0);
                                 let edit_resp = ui.add(edit);
 
@@ -5282,6 +5480,35 @@ impl eframe::App for OverlayApp {
                                 });
 
                             });
+
+                            ui.add_space(5.0);
+
+                            // --- Section Point d'accès (Endpoint) ---
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Point d'accès API (Endpoint) :")
+                                        .size(11.0)
+                                        .color(egui::Color32::WHITE)
+                                        .strong(),
+                                );
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.small_button("Défaut")
+                                        .on_hover_text(format!("Réinitialiser vers : {}", default_endpoint_url))
+                                        .clicked()
+                                    {
+                                        self.endpoint_input = default_endpoint_url.to_string();
+                                    }
+                                });
+                            });
+                            ui.add_space(2.0);
+
+                            ui.horizontal(|ui| {
+                                let endpoint_edit = egui::TextEdit::singleline(&mut self.endpoint_input)
+                                    .hint_text(default_endpoint_url)
+                                    .desired_width(320.0);
+                                ui.add(endpoint_edit)
+                                    .on_hover_text("URL HTTP/HTTPS complète pour Ollama, LM Studio, vLLM, LocalAI ou proxies compatibles");
+                            });
                             }
 
                             if let Some(ref err) = self.api_key_error {
@@ -5302,25 +5529,33 @@ impl eframe::App for OverlayApp {
                                     let model = if self.model_input.trim().is_empty() {
                                         default_model_name
                                     } else {
-                                        self.model_input.trim()
+                                        &self.model_input
+                                    };
+                                    let endpoint = if self.endpoint_input.trim().is_empty() {
+                                        default_endpoint_url
+                                    } else {
+                                        &self.endpoint_input
                                     };
 
                                     if self.selected_provider_modal == LlmProvider::Local {
                                         let _ = write_env_var_to_file(".env", "LLM_PROVIDER", self.selected_provider_modal.display_name());
-                                        #[cfg(windows)]
-                                        restart_application();
+                                        std::env::set_var("LLM_PROVIDER", self.selected_provider_modal.display_name());
+                                        self.llm_config = resolve_llm_config();
                                         self.show_api_key_modal = false;
                                         self.api_key_error = None;
-                                    } else if key.is_empty() {
-                                        self.api_key_error = Some(t!("ui.api_key_empty").to_string());
                                     } else if let Err(e) = write_env_var_to_file(".env", env_var_target, key) {
                                         self.api_key_error = Some(t!("ui.api_key_write_err", err = e).to_string());
                                     } else if let Err(e) = write_env_var_to_file(".env", env_model_target, model) {
                                         self.api_key_error = Some(t!("ui.model_write_err", err = e).to_string());
+                                    } else if let Err(e) = write_env_var_to_file(".env", env_endpoint_target, endpoint) {
+                                        self.api_key_error = Some(format!("Erreur sauvegarde endpoint: {e}"));
                                     } else {
                                         let _ = write_env_var_to_file(".env", "LLM_PROVIDER", self.selected_provider_modal.display_name());
-                                        #[cfg(windows)]
-                                        restart_application();
+                                        std::env::set_var("LLM_PROVIDER", self.selected_provider_modal.display_name());
+                                        std::env::set_var(env_var_target, key);
+                                        std::env::set_var(env_model_target, model);
+                                        std::env::set_var(env_endpoint_target, endpoint);
+                                        self.llm_config = resolve_llm_config();
                                         self.show_api_key_modal = false;
                                     }
                                 }
@@ -5861,11 +6096,16 @@ pub(crate) async fn send_llm_chat_completion(
             temperature,
         };
 
-        client
+        let mut req = client
             .post(&config.endpoint)
-            .header("x-api-key", &config.api_key)
             .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+
+        if !config.api_key.trim().is_empty() {
+            req = req.header("x-api-key", &config.api_key);
+        }
+
+        req
             .json(&req_payload)
             .send()
             .await
@@ -5898,9 +6138,13 @@ pub(crate) async fn send_llm_chat_completion(
             response_format,
         };
 
-        client
-            .post(&config.endpoint)
-            .bearer_auth(&config.api_key)
+        let mut req = client.post(&config.endpoint);
+        let key_clean = config.api_key.trim();
+        if !key_clean.is_empty() {
+            req = req.bearer_auth(key_clean);
+        }
+
+        req
             .json(&req_payload)
             .send()
             .await
@@ -6231,7 +6475,8 @@ async fn call_llm_prompt(
     let _busy_guard = BusyGuard;
     let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
 
-    if llm_config.api_key.is_empty() {
+    let is_local_target = llm_config.provider.is_local_or_custom_endpoint(&llm_config.endpoint);
+    if llm_config.api_key.is_empty() && !is_local_target {
         let _ = event_tx.send(AgentEvent::ReplaceNarration {
             text: format!("Veuillez renseigner {} dans le fichier .env.", llm_config.provider.env_key_name()),
             quick_suggestions: Vec::new(),
@@ -6246,6 +6491,8 @@ async fn call_llm_prompt(
     let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::SeqCst);
     let system_instructions = if is_dictation {
         DICTATION_SYSTEM_INSTRUCTIONS.to_string()
+    } else if llm_config.provider == LlmProvider::Local {
+        local_llm::LOCAL_QWEN_SYSTEM_PROMPT.to_string()
     } else {
         build_standard_system_instructions(&system_lang)
     };
@@ -6260,7 +6507,11 @@ async fn call_llm_prompt(
         });
     }
 
-    let mut max_agent_passes = TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, 15);
+    let mut max_agent_passes = if llm_config.provider == LlmProvider::Local {
+        1
+    } else {
+        TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, 15)
+    };
     let mut has_spoken = false;
     let mut pass = 1;
 
@@ -6305,6 +6556,8 @@ async fn call_llm_prompt(
 
         let (temperature, max_tokens) = if is_dictation {
             (0.3, 300)
+        } else if llm_config.provider == LlmProvider::Local {
+            (0.2, 1000)
         } else {
             (0.7, 1800)
         };
@@ -6318,6 +6571,33 @@ async fn call_llm_prompt(
             if is_request_cancelled(request_id) {
                 return;
             }
+
+            if llm_config.provider == LlmProvider::Local {
+                match local_llm::run_local_llama_completion(
+                    &system_instructions,
+                    &hist_snapshot,
+                    max_tokens,
+                    &event_tx,
+                    None,
+                ) {
+                    Ok(raw_content) => {
+                        history.lock().await.push(ChatMessage {
+                            role: "assistant".to_string(),
+                            content: raw_content.clone(),
+                        });
+                        success_payload = Some(parse_agent_response(&raw_content));
+                        break;
+                    }
+                    Err(err) => {
+                        let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                            text: format!("Erreur modèle local Qwen: {err}"),
+                            quick_suggestions: Vec::new(),
+                        });
+                        break;
+                    }
+                }
+            }
+
             attempts += 1;
 
             let response = send_llm_chat_completion(
@@ -6634,6 +6914,7 @@ async fn call_llm_prompt(
             )
         });
 
+        let is_local_llm = llm_config.provider == LlmProvider::Local;
         let (report, screen_after) = tokio::task::spawn_blocking(move || {
             if is_request_cancelled(request_id) {
                 return ("Actions interrompues.".to_string(), String::new());
@@ -6643,7 +6924,7 @@ async fn call_llm_prompt(
                 if is_request_cancelled(request_id) {
                     return (rep, String::new());
                 }
-                if is_dictation {
+                if is_dictation || is_local_llm {
                     return (rep, String::new());
                 }
                 let wait_ms = if has_web_action { 2200 } else { 1200 };
@@ -6686,8 +6967,8 @@ async fn call_llm_prompt(
             println!("[Agent] Quota de raisonnement resynchronisé avec TARGET_REASONING_PASSES : {max_agent_passes} passe(s) max");
         }
 
-        if is_dictation {
-            println!("[Dictée] Action exécutée instantanément, fin de séquence.");
+        if is_dictation || llm_config.provider == LlmProvider::Local {
+            println!("[Local/Dictée] Action exécutée instantanément, fin de séquence.");
             break;
         }
 
@@ -6730,6 +7011,12 @@ async fn call_llm_prompt(
                 }
             }
 
+            if llm_config.provider == LlmProvider::Local {
+                step_feedback.push_str(&format!(
+                    "\n\n[Consigne étape] : Poursuis : \"{}\". Choisis l'action suivante en JSON.",
+                    safe_user_instruction
+                ));
+            } else {
             step_feedback.push_str(&format!(
                 "\n\n[Consigne étape] : Poursuis : \"{}\".\n\
                 - RÈGLE D'OR : Réponds STRICTEMENT et UNIQUEMENT avec un objet JSON valide (contenant \"narration\", \"next_passes\", \"actions\", \"quick_suggestions\"). Aucun texte libre ou markdown en dehors du JSON.\n\
@@ -6748,6 +7035,7 @@ async fn call_llm_prompt(
                 - Tâche finie ou choix requis -> 'actions': [] + 2 à 4 'quick_suggestions'.",
                 safe_user_instruction
             ));
+            }
 
             history.lock().await.push(ChatMessage {
                 role: "user".to_string(),
@@ -6892,6 +7180,20 @@ fn spawn_agent_backend(
                                     PromptTrigger::User,
                                     request_id,
                                 ).await;
+                            } else if current_llm_config.provider == LlmProvider::Local {
+                                if is_request_cancelled(request_id) { return; }
+                                let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
+                                let final_prompt = format!("[Demande utilisateur]\n{prompt}");
+                                call_llm_prompt(
+                                    current_llm_config,
+                                    prompt.clone(),
+                                    final_prompt,
+                                    history,
+                                    event_tx,
+                                    last_call_time,
+                                    PromptTrigger::User,
+                                    request_id,
+                                ).await;
                             } else {
                                 let (field_content, screen_state): (Option<String>, String) = tokio::task::spawn_blocking(|| {
                                     #[cfg(windows)]
@@ -6994,7 +7296,7 @@ fn spawn_agent_backend(
                         });
                     }
                     AgentCommand::PeriodicScreenCheck => {
-                        if IS_EMERGENCY_STOPPED.load(Ordering::SeqCst) {
+                        if IS_EMERGENCY_STOPPED.load(Ordering::SeqCst) || bg_llm_config.provider == LlmProvider::Local {
                             continue;
                         }
                         if AGENT_BUSY.load(Ordering::SeqCst)

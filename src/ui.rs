@@ -15,7 +15,7 @@ use windows::Win32::System::Com::{
 };
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationCacheRequest,
+    CUIAutomation, IUIAutomation, IUIAutomation2,
     IUIAutomationElement, IUIAutomationElement2,
     IUIAutomationExpandCollapsePattern, IUIAutomationInvokePattern,
     IUIAutomationLegacyIAccessiblePattern, IUIAutomationRangeValuePattern,
@@ -50,9 +50,6 @@ pub use crate::automation::{AsWindowTarget, NumberedElementTarget, VIRTUAL_KEY};
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetClassNameW, GetWindowRect, GetWindowTextW, SetCursorPos};
 
-pub use crate::automation::{
-     undo_last_system_action, redo_last_system_action,
-};
 use crate::automation::{
     focus_browser_address_bar, force_foreground_window, format_url_for_navigation,
     is_browser_chrome_target, restore_if_iconic, send_hotkey, send_paste, set_clipboard_text,
@@ -533,7 +530,7 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                                 name = aria_label.clone();
                             } else {
                                 let mut win_r = RECT::default();
-                                if unsafe { GetWindowRect(hwnd, &mut win_r).is_ok() } {
+                                if  { GetWindowRect(hwnd, &mut win_r).is_ok() } {
                                     let dist_from_right = (win_r.right - rect.right).max(0);
                                     let dist_from_left = (rect.left - win_r.left).max(0);
                                     if rect.top <= win_r.top + 70 {

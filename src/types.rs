@@ -110,6 +110,18 @@ impl LlmProvider {
         }
     }
 
+    pub fn env_prefix(&self) -> &'static str {
+        match self {
+            Self::DeepSeek => "DEEPSEEK",
+            Self::OpenAI => "OPENAI",
+            Self::Anthropic => "ANTHROPIC",
+            Self::Mistral => "MISTRAL",
+            Self::Glm => "GLM",
+            Self::Groq => "GROQ",
+            Self::Local => "LOCAL",
+        }
+    }
+
     pub fn env_key_name(&self) -> &'static str {
         match self {
             Self::DeepSeek => "DEEPSEEK_API_KEY",
@@ -132,6 +144,48 @@ impl LlmProvider {
             Self::Groq => "GROQ_MODEL",
             Self::Local => "LOCAL_MODEL",
         }
+    }
+
+    pub fn env_endpoint_name(&self) -> &'static str {
+        match self {
+            Self::DeepSeek => "DEEPSEEK_ENDPOINT",
+            Self::OpenAI => "OPENAI_ENDPOINT",
+            Self::Anthropic => "ANTHROPIC_ENDPOINT",
+            Self::Mistral => "MISTRAL_ENDPOINT",
+            Self::Glm => "GLM_ENDPOINT",
+            Self::Groq => "GROQ_ENDPOINT",
+            Self::Local => "LOCAL_ENDPOINT",
+        }
+    }
+
+    pub fn env_enabled_name(&self) -> &'static str {
+        match self {
+            Self::DeepSeek => "DEEPSEEK_ENABLED",
+            Self::OpenAI => "OPENAI_ENABLED",
+            Self::Anthropic => "ANTHROPIC_ENABLED",
+            Self::Mistral => "MISTRAL_ENABLED",
+            Self::Glm => "GLM_ENABLED",
+            Self::Groq => "GROQ_ENABLED",
+            Self::Local => "LOCAL_ENABLED",
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        let var_name = self.env_enabled_name();
+        if let Ok(val) = std::env::var(var_name).or_else(|_| crate::fs_util::read_env_var_from_file(".env", var_name).ok_or(())) {
+            let s = val.trim().to_lowercase();
+            if s == "false" || s == "0" || s == "no" || s == "off" || s == "disabled" {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn set_enabled(&self, enabled: bool) -> std::io::Result<()> {
+        let var_name = self.env_enabled_name();
+        let val_str = if enabled { "true" } else { "false" };
+        std::env::set_var(var_name, val_str);
+        crate::fs_util::write_env_var_to_file(".env", var_name, val_str)
     }
 
     pub fn default_model(&self) -> &'static str {
@@ -158,17 +212,26 @@ impl LlmProvider {
         }
     }
 
-    pub fn from_name(s: &str) -> Option<Self> {
-        match s.trim().to_lowercase().as_str() {
-            "deepseek" => Some(Self::DeepSeek),
-            "openai" => Some(Self::OpenAI),
-            "anthropic" | "claude" => Some(Self::Anthropic),
-            "mistral" | "mistralai" => Some(Self::Mistral),
-            "glm" | "zhipu" | "zhipuai" => Some(Self::Glm),
-            "groq" => Some(Self::Groq),
-            "local" | "qwen" | "llama" => Some(Self::Local),
-            _ => None,
+    pub fn is_local_or_custom_endpoint(&self, endpoint: &str) -> bool {
+        if *self == Self::Local {
+            return true;
         }
+        let ep = endpoint.trim().to_lowercase();
+        ep.contains("localhost")
+            || ep.contains("127.0.0.1")
+            || ep.contains("0.0.0.0")
+    }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        let clean = s.trim().to_lowercase();
+        if clean.contains("deepseek") { Some(Self::DeepSeek) }
+        else if clean.contains("openai") || clean.contains("gpt") { Some(Self::OpenAI) }
+        else if clean.contains("anthropic") || clean.contains("claude") { Some(Self::Anthropic) }
+        else if clean.contains("mistral") { Some(Self::Mistral) }
+        else if clean.contains("glm") || clean.contains("zhipu") { Some(Self::Glm) }
+        else if clean.contains("groq") { Some(Self::Groq) }
+        else if clean.contains("local") || clean.contains("qwen") || clean.contains("llama") { Some(Self::Local) }
+        else { None }
     }
 }
 
@@ -178,6 +241,12 @@ pub struct LlmConfig {
     pub api_key: String,
     pub model: String,
     pub endpoint: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for LlmConfig {
@@ -187,6 +256,7 @@ impl Default for LlmConfig {
             api_key: String::new(),
             model: LlmProvider::DeepSeek.default_model().to_string(),
             endpoint: LlmProvider::DeepSeek.default_endpoint().to_string(),
+            enabled: true,
         }
     }
 }
