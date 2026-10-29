@@ -44,12 +44,17 @@ jobs:
             wmctrl \
             xclip \
             wl-clipboard \
-            libvulkan-dev \
-            vulkan-tools \
-            glslang-tools \
-            shaderc \
             speech-dispatcher \
             espeak-ng
+
+      - name: Install Vulkan SDK via LunarG APT repository
+        run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-$(lsb_release -cs).list http://packages.lunarg.com/vulkan/lunarg-vulkan-$(lsb_release -cs).list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+          echo "VULKAN_SDK=/usr" >> $GITHUB_ENV
+          echo "VULKAN_SDK found at /usr"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
