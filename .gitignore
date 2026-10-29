@@ -4,3 +4,4 @@
 models/ggml-base.bin
 /.idea
 /voices
+/models
