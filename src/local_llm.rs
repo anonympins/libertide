@@ -137,8 +137,8 @@ impl StreamingJsonNarration {
 }
 
 
-const MODEL_FILENAME: &str = "Llama-3.2-3B-Instruct-Q4_K_M.gguf";
-const HF_URL: &str = "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf";
+const MODEL_FILENAME: &str = "qwen2.5-0.5b-instruct-q4_k_m.gguf";
+const HF_URL: &str = "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf";
 
 static LOCAL_ENGINE: Mutex<Option<LocalLlamaEngine>> = Mutex::new(None);
 static LAST_SPOKEN_NARRATION: Mutex<String> = Mutex::new(String::new());
@@ -213,10 +213,10 @@ pub fn ensure_llama_model_downloaded(event_tx: &Sender<AgentEvent>) -> Result<Pa
     }
 
     let _ = event_tx.send(AgentEvent::SilentNarration(
-        "⏳ Téléchargement de Llama 3.2 3B local (~2.0 Go) en cours...".into(),
+        "⏳ Téléchargement du modèle compact Qwen 2.5 0.5B local (~398 Mo) en cours...".into(),
     ));
 
-    println!("[Local Llama] Téléchargement de {} depuis Hugging Face...", MODEL_FILENAME);
+    println!("[Local LLM] Téléchargement de {} depuis Hugging Face...", MODEL_FILENAME);
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| format!("Runtime Tokio: {e}"))?;
     let client = reqwest::Client::new();
@@ -262,12 +262,12 @@ pub fn ensure_llama_model_downloaded(event_tx: &Sender<AgentEvent>) -> Result<Pa
                     let blank = " ".repeat(remaining_width);
 
                     print!(
-                        "\r[Local Llama] [{}{}{}] {:5.1}% ({:.1}/{:.1} Mo) à {:.1} Mo/s   ",
+                        "\r[Local LLM] [{}{}{}] {:5.1}% ({:.1}/{:.1} Mo) à {:.1} Mo/s   ",
                         fill, arrow, blank, percent, downloaded_mb, total_mb, speed_mb_s
                     );
                 } else {
                     print!(
-                        "\r[Local Llama] Téléchargé : {:.1} Mo à {:.1} Mo/s...   ",
+                        "\r[Local LLM] Téléchargé : {:.1} Mo à {:.1} Mo/s...   ",
                         downloaded_mb, speed_mb_s
                     );
                 }
@@ -302,7 +302,7 @@ pub fn ensure_llama_model_downloaded(event_tx: &Sender<AgentEvent>) -> Result<Pa
     std::fs::rename(&temp_path, &model_path)
         .map_err(|e| format!("Impossible de renommer le fichier temporaire: {e}"))?;
 
-    println!("[Local Llama] Modèle téléchargé avec succès dans {}", model_path.display());
+    println!("[Local LLM] Modèle téléchargé avec succès dans {}", model_path.display());
     Ok(model_path)
 }
 
@@ -448,7 +448,7 @@ impl LocalLlamaEngine {
 
             let piece = vocab.token_to_piece(next_token, false, None);
             let piece_str = String::from_utf8_lossy(&piece);
-            if piece_str.contains("<|eot_id|>") || piece_str.contains("<|end_of_text|>") {
+            if piece_str.contains("<|im_end|>") || piece_str.contains("<|endoftext|>") || piece_str.contains("<|eot_id|>") {
                 break;
             }
             output.push_str(&piece_str);
@@ -512,13 +512,13 @@ pub fn get_or_load_local_llama(event_tx: &Sender<AgentEvent>) -> Result<(), Stri
     if lock.is_none() {
         let path = ensure_llama_model_downloaded(event_tx)?;
         let _ = event_tx.send(AgentEvent::SilentNarration(
-            "⚡ Initialisation du moteur Llama local (accélération GPU)...".into(),
+            "⚡ Initialisation du moteur Qwen local (accélération GPU / Vulkan)...".into(),
         ));
         let engine = LocalLlamaEngine::load(&path)?;
         let status_msg = if engine.gpu_enabled {
-            format!("🚀 Moteur Llama prêt avec accélération GPU ({} couches)", engine.gpu_layers)
+            format!("🚀 Moteur Qwen local prêt avec GPU ({} couches)", engine.gpu_layers)
         } else {
-            "💻 Moteur Llama prêt en mode CPU".into()
+            "💻 Moteur Qwen local prêt en mode CPU".into()
         };
         let _ = event_tx.send(AgentEvent::SilentNarration(status_msg));
         *lock = Some(engine);
@@ -526,7 +526,7 @@ pub fn get_or_load_local_llama(event_tx: &Sender<AgentEvent>) -> Result<(), Stri
     Ok(())
 }
 
-/// Exécute la complétion avec le format de prompt de Llama 3.2 Instruct
+/// Exécute la complétion avec le format de prompt ChatML de Qwen 2.5 Instruct
 pub fn run_local_llama_completion(
     system_prompt: &str,
     messages: &[ChatMessage],
@@ -570,17 +570,17 @@ pub fn run_local_llama_completion(
         .map(|m| m.content.trim())
         .unwrap_or("");
 
-    let mut formatted_prompt = String::from("<|begin_of_text|>");
-    formatted_prompt.push_str("<|start_header_id|>system<|end_header_id|>\n\n");
+    let mut formatted_prompt = String::new();
+    formatted_prompt.push_str("<|im_start|>system\n");
     if !system_prompt.trim().is_empty() {
         formatted_prompt.push_str(system_prompt.trim());
     }
     if is_json_update {
         formatted_prompt.push_str("\n\nNOTE: Tu traites une analyse de page web (données JSON). Émets directement les actions requises. Ne répète pas les narrations vocales précédentes (laisse \"narration\": \"\").");
     }
-    formatted_prompt.push_str("<|eot_id|>");
+    formatted_prompt.push_str("<|im_end|>\n");
 
-    formatted_prompt.push_str("<|start_header_id|>user<|end_header_id|>\n\n");
+    formatted_prompt.push_str("<|im_start|>user\n");
     if !user_query.is_empty() && !page_data.is_empty() {
         formatted_prompt.push_str("OBJECTIF ACTIF DE L'UTILISATEUR :\n");
         formatted_prompt.push_str(user_query);
@@ -593,9 +593,9 @@ pub fn run_local_llama_completion(
     } else if !last_user_content.is_empty() {
         formatted_prompt.push_str(last_user_content);
     }
-    formatted_prompt.push_str("<|eot_id|>");
+    formatted_prompt.push_str("<|im_end|>\n");
 
-    formatted_prompt.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
+    formatted_prompt.push_str("<|im_start|>assistant\n");
 
     // Ne pas relancer la synthèse vocale (TTS) lors de l'envoi de nouvelles données JSON d'analyse de page
     let effective_tts_tx = if is_json_update { None } else { tts_tx };

@@ -3,6 +3,10 @@ name = "libertide"
 version = "0.6.5"
 edition = "2021"
 
+[features]
+default = []
+vulkan = ["llama-cpp-2/vulkan"]
+
 [dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "wgpu", "glow", "x11", "wayland"] }
 egui = "0.37.0"
@@ -13,6 +17,7 @@ serde_json = "1.0"
 reqwest = { version = "0.13.5", features = ["json", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 rust-i18n = "4.2.4"
+llama-cpp-2 = { version = "0.1" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ocrs = "0.13.1"

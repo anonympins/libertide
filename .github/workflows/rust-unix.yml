@@ -44,6 +44,9 @@ jobs:
             wmctrl \
             xclip \
             wl-clipboard \
+            libvulkan-dev \
+            vulkan-tools \
+            glslang-tools \
             speech-dispatcher \
             espeak-ng
 
@@ -56,10 +59,10 @@ jobs:
           cache-targets: "true"
 
       - name: Run tests (release profile)
-        run: cargo test --release
+        run: cargo test --release --features vulkan
 
       - name: Build optimized release executable
-        run: cargo build --release
+        run: cargo build --release --features vulkan
 
       - name: Prepare distribution package
         run: |

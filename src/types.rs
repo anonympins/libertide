@@ -84,6 +84,7 @@ pub enum LlmProvider {
     Mistral,
     Glm,
     Groq,
+    Local,
 }
 
 impl LlmProvider {
@@ -94,6 +95,7 @@ impl LlmProvider {
         Self::Mistral,
         Self::Glm,
         Self::Groq,
+        Self::Local,
     ];
 
     pub fn display_name(&self) -> &'static str {
@@ -104,6 +106,7 @@ impl LlmProvider {
             Self::Mistral => "Mistral AI",
             Self::Glm => "Zhipu GLM",
             Self::Groq => "Groq",
+            Self::Local => "Local (Qwen 0.5B)",
         }
     }
 
@@ -115,6 +118,7 @@ impl LlmProvider {
             Self::Mistral => "MISTRAL_API_KEY",
             Self::Glm => "GLM_API_KEY",
             Self::Groq => "GROQ_API_KEY",
+            Self::Local => "LOCAL_LLAMA_MODEL",
         }
     }
 
@@ -126,6 +130,7 @@ impl LlmProvider {
             Self::Mistral => "MISTRAL_MODEL",
             Self::Glm => "GLM_MODEL",
             Self::Groq => "GROQ_MODEL",
+            Self::Local => "LOCAL_MODEL",
         }
     }
 
@@ -137,6 +142,7 @@ impl LlmProvider {
             Self::Mistral => "mistral-small-latest",
             Self::Glm => "glm-4-flash",
             Self::Groq => "llama-3.3-70b-versatile",
+            Self::Local => "qwen2.5-0.5b-instruct-q4_k_m.gguf",
         }
     }
 
@@ -148,6 +154,7 @@ impl LlmProvider {
             Self::Mistral => "https://api.mistral.ai/v1/chat/completions",
             Self::Glm => "https://open.bigmodel.cn/api/paas/v4/chat/completions",
             Self::Groq => "https://api.groq.com/openai/v1/chat/completions",
+            Self::Local => "local",
         }
     }
 
@@ -159,6 +166,7 @@ impl LlmProvider {
             "mistral" | "mistralai" => Some(Self::Mistral),
             "glm" | "zhipu" | "zhipuai" => Some(Self::Glm),
             "groq" => Some(Self::Groq),
+            "local" | "qwen" | "llama" => Some(Self::Local),
             _ => None,
         }
     }
@@ -359,6 +367,12 @@ pub enum AgentEvent {
     CloseFloatingCard(String),
     ToggleNumberedTargets(Option<bool>),
     ClickNumberedTarget(usize),
+    DownloadProgress {
+        percent: f32,
+        downloaded_mb: f32,
+        total_mb: f32,
+        speed_mb_s: f32,
+    },
     NextNumberedChunk,
     PreviousNumberedChunk,
     LiveSubtitleUpdate {
@@ -383,6 +397,7 @@ pub enum AudioCommand {
 #[derive(Debug, Clone)]
 pub enum TtsCommand {
     Speak(String),
+    Enqueue(String),
     Stop,
     SetGender(VoiceGender),
 }
