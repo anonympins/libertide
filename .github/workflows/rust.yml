@@ -34,7 +34,11 @@ jobs:
           $vulkanPath = (Get-ChildItem -Path "C:\VulkanSDK" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
           Write-Host "Vulkan SDK found at: $vulkanPath"
           Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$vulkanPath"
+          Add-Content -Path $env:GITHUB_ENV -Value "VK_SDK_PATH=$vulkanPath"
           Add-Content -Path $env:GITHUB_PATH -Value "$vulkanPath\Bin"
+          Add-Content -Path $env:GITHUB_PATH -Value "$vulkanPath\Lib"
+          Add-Content -Path $env:GITHUB_ENV -Value "CMAKE_POLICY_DEFAULT_CMP0194=OLD"
+          Add-Content -Path $env:GITHUB_ENV -Value "CMAKE_ARGS=-DCMAKE_POLICY_DEFAULT_CMP0194=OLD"
 
       - name: Rust Cache
         uses: actions/cache@v4
@@ -48,8 +52,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Run tests
-        run: cargo test --verbose --features vulkan
+      - name: Run tests (release)
+        run: cargo test --release --verbose --features vulkan
 
       - name: Build optimized release executables (64-bit and 32-bit)
         run: |
