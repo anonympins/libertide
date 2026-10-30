@@ -785,6 +785,7 @@ pub fn resolve_llm_config() -> LlmConfig {
         (LlmProvider::Mistral, &["MISTRAL_API_KEY"][..]),
         (LlmProvider::Glm, &["GLM_API_KEY", "ZHIPU_API_KEY"][..]),
         (LlmProvider::Groq, &["GROQ_API_KEY"][..]),
+        (LlmProvider::Local, &["LOCAL_LLAMA_MODEL"][..]),
     ];
 
     let forced_provider = std::env::var("LLM_PROVIDER")
@@ -796,33 +797,33 @@ pub fn resolve_llm_config() -> LlmConfig {
     let mut found_key = String::new();
 
     if let Some(forced) = forced_provider {
+        chosen_provider = forced;
+        let key_name = forced.env_key_name();
+        found_key = std::env::var(key_name)
+            .or_else(|_| read_env_var_from_file(".env", key_name).ok_or(()))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+    } else {
         for (prov, keys) in &providers_cascade {
-            if *prov == forced {
-                for &k in *keys {
-                    if let Ok(val) = std::env::var(k) {
-                        let t = val.trim();
-                        if !t.is_empty() {
-                            found_key = t.to_string();
-                            chosen_provider = *prov;
-                            break;
-                        }
-                    }
-                    if let Some(val) = read_env_var_from_file(".env", k) {
-                        let t = val.trim();
-                        if !t.is_empty() {
-                            found_key = t.to_string();
-                            chosen_provider = *prov;
-                            break;
-                        }
-                    }
-                }
+            if !prov.is_enabled() {
+                continue;
+            }
+            if *prov == LlmProvider::Local {
+                chosen_provider = *prov;
                 break;
             }
-        }
-    }
+            let specific_endpoint_key = prov.env_endpoint_name();
+            let has_custom_endpoint = std::env::var(specific_endpoint_key)
+                .ok()
+                .or_else(|| read_env_var_from_file(".env", specific_endpoint_key))
+                .map(|s| !s.trim().is_empty() && s.trim() != prov.default_endpoint())
+                .unwrap_or(false);
+            if has_custom_endpoint {
+                chosen_provider = *prov;
+                break;
+            }
 
-    if found_key.is_empty() {
-        for (prov, keys) in &providers_cascade {
             for &k in *keys {
                 if let Ok(val) = std::env::var(k) {
                     let t = val.trim();
@@ -856,9 +857,12 @@ pub fn resolve_llm_config() -> LlmConfig {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let endpoint_override = std::env::var("LLM_BASE_URL")
-        .or_else(|_| std::env::var("LLM_ENDPOINT"))
+    let specific_endpoint_key = chosen_provider.env_endpoint_name();
+    let endpoint_override = std::env::var(specific_endpoint_key)
         .ok()
+        .or_else(|| read_env_var_from_file(".env", specific_endpoint_key))
+        .or_else(|| std::env::var("LLM_BASE_URL").ok())
+        .or_else(|| std::env::var("LLM_ENDPOINT").ok())
         .or_else(|| read_env_var_from_file(".env", "LLM_BASE_URL"))
         .or_else(|| read_env_var_from_file(".env", "LLM_ENDPOINT"))
         .map(|s| s.trim().to_string())
@@ -866,12 +870,14 @@ pub fn resolve_llm_config() -> LlmConfig {
 
     let model = model_override.unwrap_or_else(|| chosen_provider.default_model().to_string());
     let endpoint = endpoint_override.unwrap_or_else(|| chosen_provider.default_endpoint().to_string());
+    let enabled = chosen_provider.is_enabled();
 
     LlmConfig {
         provider: chosen_provider,
         api_key: found_key,
         model,
         endpoint,
+        enabled,
     }
 }
 
@@ -1281,61 +1287,121 @@ pub fn build_fallback_navigation_zones(window_title: &str, targets: &[NumberedEl
     if targets.is_empty() {
         return (format!("Fenêtre {window_title}. Aucun contrôle interactif direct détecté."), Vec::new());
     }
-    let mut top_targets = Vec::new();
-    let mut main_targets = Vec::new();
+
+    // Regroupement par "features" / intentions fonctionnelles (façon mini-site accessible)
+    // plutôt qu'un découpage spatial aveugle (haut/bas/gauche/droite).
+    let mut search_input_targets = Vec::new();
+    let mut nav_tab_targets = Vec::new();
+    let mut action_button_targets = Vec::new();
+    let mut content_reader_targets = Vec::new();
+    let mut other_targets = Vec::new();
+
     for t in targets {
-        if t.rect[1] < 65 {
-            top_targets.push(t.clone());
+        let role_low = t.role.to_lowercase();
+        let name_low = t.name.to_lowercase();
+
+        if t.is_editable()
+            || role_low.contains("champ")
+            || role_low.contains("saisie")
+            || role_low.contains("texte")
+            || name_low.contains("recherche")
+            || name_low.contains("search")
+        {
+            search_input_targets.push(t.clone());
+        } else if role_low.contains("onglet")
+            || role_low.contains("tab")
+            || (role_low.contains("lien") && (name_low.contains("accueil") || name_low.contains("menu") || name_low.contains("page")))
+        {
+            nav_tab_targets.push(t.clone());
+        } else if t.is_text_reading() || t.is_label() || t.is_ocr() {
+            content_reader_targets.push(t.clone());
+        } else if role_low.contains("bouton") || role_low.contains("case") || role_low.contains("curseur") {
+            action_button_targets.push(t.clone());
         } else {
-            main_targets.push(t.clone());
+            other_targets.push(t.clone());
         }
     }
 
     let mut fallback_zones = Vec::new();
-    if !top_targets.is_empty() {
-        let min_x = top_targets.iter().map(|t| t.rect[0]).min().unwrap_or(0);
-        let min_y = top_targets.iter().map(|t| t.rect[1]).min().unwrap_or(0);
-        let max_x = top_targets.iter().map(|t| t.rect[2]).max().unwrap_or(0);
-        let max_y = top_targets.iter().map(|t| t.rect[3]).max().unwrap_or(0);
-        fallback_zones.push(NavigationZone {
-            title: "Barre supérieure et commandes".to_string(),
-            description: format!("Boutons d'en-tête de {}", window_title),
-            click_x: min_x + (max_x - min_x) / 2,
-            click_y: min_y + (max_y - min_y) / 2,
-            rect: [min_x, min_y, max_x, max_y],
-            targets: top_targets,
+
+    let mut add_feature_zone = |zones: &mut Vec<NavigationZone>, title: &str, desc: &str, mut group: Vec<NumberedElementTarget>| {
+        if group.is_empty() {
+            return;
+        }
+        // Tri des contrôles par ordre visuel de lecture naturelle
+        group.sort_by_key(|t| (t.rect[1] / 24) * 10000 + t.rect[0]);
+
+        let z_min_x = group.iter().map(|t| t.rect[0]).min().unwrap_or(0);
+        let z_min_y = group.iter().map(|t| t.rect[1]).min().unwrap_or(0);
+        let z_max_x = group.iter().map(|t| t.rect[2]).max().unwrap_or(0);
+        let z_max_y = group.iter().map(|t| t.rect[3]).max().unwrap_or(0);
+        let pad = 8;
+        for (i, elem) in group.iter_mut().enumerate() {
+            elem.index = i + 1;
+        }
+        zones.push(NavigationZone {
+            title: title.to_string(),
+            description: desc.to_string(),
+            click_x: z_min_x + (z_max_x - z_min_x) / 2,
+            click_y: z_min_y + (z_max_y - z_min_y) / 2,
+            rect: [z_min_x - pad, z_min_y - pad, z_max_x + pad, z_max_y + pad],
+            targets: group,
         });
+    };
+
+    add_feature_zone(&mut fallback_zones, "Recherche & Formulaire de saisie", &format!("Champs de texte et saisie pour {window_title}"), search_input_targets);
+    add_feature_zone(&mut fallback_zones, "Navigation & Rubriques", "Onglets et liens de navigation", nav_tab_targets);
+    add_feature_zone(&mut fallback_zones, "Contenu & Informations clés", "Données textuelles et visualisations", content_reader_targets);
+    add_feature_zone(&mut fallback_zones, "Actions & Commandes", "Boutons d'exécution et de validation", action_button_targets);
+
+    if !other_targets.is_empty() {
+        if fallback_zones.is_empty() {
+            add_feature_zone(&mut fallback_zones, "Panneau d'interaction", &format!("Contrôles principaux de {window_title}"), other_targets);
+        } else {
+            // Rattaché à la zone d'action ou de contenu
+            fallback_zones.last_mut().unwrap().targets.extend(other_targets);
+        }
     }
-    if !main_targets.is_empty() {
-        let min_x = main_targets.iter().map(|t| t.rect[0]).min().unwrap_or(0);
-        let min_y = main_targets.iter().map(|t| t.rect[1]).min().unwrap_or(0);
-        let max_x = main_targets.iter().map(|t| t.rect[2]).max().unwrap_or(0);
-        let max_y = main_targets.iter().map(|t| t.rect[3]).max().unwrap_or(0);
-        fallback_zones.push(NavigationZone {
-            title: "Corps et zone principale".to_string(),
-            description: format!("Contrôles et champs de {}", window_title),
-            click_x: min_x + (max_x - min_x) / 2,
-            click_y: min_y + (max_y - min_y) / 2,
-            rect: [min_x, min_y, max_x, max_y],
-            targets: main_targets,
-        });
+
+    // Si aucune feature séparée n'a pu émerger (ex. uniquement des boutons d'une même liste)
+    if fallback_zones.len() <= 1 {
+        fallback_zones.clear();
+        let mut all_sorted = targets.to_vec();
+        all_sorted.sort_by_key(|t| (t.rect[1] / 30) * 10000 + t.rect[0]);
+        if all_sorted.len() > 12 {
+            let half = all_sorted.len() / 2;
+            let first_half = all_sorted[..half].to_vec();
+            let second_half = all_sorted[half..].to_vec();
+            add_feature_zone(&mut fallback_zones, "Options principales", &format!("Première série d'options de {window_title}"), first_half);
+            add_feature_zone(&mut fallback_zones, "Options complémentaires", &format!("Seconde série d'options de {window_title}"), second_half);
+        } else {
+            add_feature_zone(&mut fallback_zones, "Panneau principal", &format!("Fonctionnalités de {window_title}"), all_sorted);
+        }
     }
+
     for z in fallback_zones.iter_mut() {
         inject_text_reader_target(z);
     }
+
     let notable_items: Vec<&str> = targets
         .iter()
         .filter(|t| !t.name.trim().is_empty() && t.role != "lecture textuelle")
-        .take(3)
+        .take(4)
         .map(|t| t.name.trim())
         .collect();
 
     let summary = if !notable_items.is_empty() {
-        format!("Fenêtre {}. Contenu disponible : {}.", window_title, notable_items.join(", "))
+        format!("Fenêtre {}. {} zones d'interaction disponibles : {}.", window_title, fallback_zones.len(), notable_items.join(", "))
     } else {
-        format!("Fenêtre {}.", window_title)
+        format!("Fenêtre {}. {} zones d'interaction identifiées.", window_title, fallback_zones.len())
     };
     (summary, fallback_zones)
+}
+
+
+/// Dessine les zones de navigation sous forme de cibles numérotées sur l'écran
+pub fn draw_screen_zones(zones: &[ZoneOverlayInfo], zoom_factor: f32) {
+    crate::window_util::draw_screen_zones_and_targets(zones, &[], zoom_factor, None);
 }
 
 #[cfg(windows)]
@@ -1396,7 +1462,6 @@ pub async fn analyze_navigation_zones_with_llm(
     if targets.is_empty() {
         return (format!("Fenêtre {window_title}. Aucun contrôle interactif direct détecté."), Vec::new());
     }
-
     let mut prompt_content = format!("Fenêtre analysée : \"{}\"\nContrôles et éléments de contenu détectés :\n", window_title);
     if let Some(meta) = context_meta {
         prompt_content.push_str(&format!("[Méta-informations et extrait du document] :\n{}\n\n", meta));
@@ -1412,18 +1477,30 @@ pub async fn analyze_navigation_zones_with_llm(
     }
     let (_, lang_name) = get_system_locale_language();
     let sys_prompt = format!(r#"Tu es un expert d'ergonomie et d'accessibilité numérique pour personnes malvoyantes et non-voyantes (Screen Reader & Switch Access).
-Tu reçois la liste des éléments interactifs et textuels d'une fenêtre.
+Tu reçois la liste des éléments interactifs et textuels d'une fenêtre applicative ou page web.
 
-RÈGLES IMPÉRATIVES DE SYNTHÈSE SÉMANTIQUE :
-1. "summary" : Présentation vocale (3 à 5 phrases) impérativement en {lang_name} axée EXCLUSIVEMENT sur la SÉMANTIQUE et le CONTENU RÉEL des contrôles.
-2. "zones" : Découper ces éléments en 2 à 4 blocs d'interaction thématiques logiques avec un titre parlant ("title").
+RÈGLES D'OR DE DÉCOUPAGE EN MINI-SITE ACCESSIBLE (FEATURE PAR FEATURE) :
+1. PHILOSOPHIE : Tu dois réinventer l'écran sous la forme d'un MINI-SITE ACCESSIBLE structuré autour des VRAIES FONCTIONNALITÉS MÉTIER (features / intentions de l'utilisateur).
+2. INTERDICTION FORMELLE DU DÉCOUPAGE GÉOMÉTRIQUE SPATIAL NAÏF :
+   - Ne crée JAMAIS de zones nommées d'après leur position : INTERDIT d'écrire "Haut", "Bas", "Gauche", "Droite", "Milieu", "En-tête", "Panneau latéral", "Zone centrale", "Pied de page".
+3. DÉCOUPAGE EN 2 À 4 FEATURES PARLANTES :
+   Chaque zone bleue ("title") doit représenter une fonctionnalité concrète que l'utilisateur veut accomplir, par exemple :
+   - "Recherche & Filtres catalogue" (au lieu de "Haut")
+   - "Lecteur vidéo & Commandes de lecture"
+   - "Formulaire de saisie & Coordonnées"
+   - "Sélection des articles & Panier"
+   - "Résultats & Fiches produits"
+   - "Actions & Validation de commande"
+   - "Navigation & Onglets de travail"
+4. "summary" : Présentation vocale (2 à 4 phrases) en {lang_name} résumant l'objectif de la fenêtre et les fonctionnalités disponibles.
+5. "revisited_name" : Rend chaque libellé de contrôle limpide, explicite et facile à comprendre pour un utilisateur naviguant au contacteur ou à la voix.
 
 Réponds STRICTEMENT en JSON :
 {{
-  "summary": "Synthèse purement sémantique des informations, titres et options concrètement affichés.",
+  "summary": "Synthèse vocale des fonctionnalités et du contenu réel de l'écran.",
   "zones": [
     {{
-      "title": "Nom thématique du bloc de navigation",
+      "title": "Nom fonctionnel de la feature (ex: Recherche & Filtres, Panier & Validation, Lecteur & Contrôles)",
       "description": "Contenu sémantique concret présent dans ce bloc",
       "controls": [
         {{ "index": 1, "revisited_name": "Libellé sémantique révisé" }}
@@ -1442,9 +1519,57 @@ Réponds STRICTEMENT en JSON :
     if let Ok(res) = response {
         if res.status().is_success() {
             if let Ok(raw) = parse_llm_response_text(res, config.provider).await {
-                let payload = parse_agent_response(&raw);
-                if !payload.narration.is_empty() {
-                    return (payload.narration, Vec::new());
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let summary = val.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let mut parsed_zones = Vec::new();
+
+                    if let Some(arr) = val.get("zones").and_then(|v| v.as_array()) {
+                        for (z_idx, z_val) in arr.iter().enumerate() {
+                            let title = z_val.get("title").and_then(|v| v.as_str()).unwrap_or(&format!("Zone {}", z_idx + 1)).to_string();
+                            let desc = z_val.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let mut group_targets = Vec::new();
+
+                            if let Some(controls) = z_val.get("controls").and_then(|v| v.as_array()) {
+                                for c in controls {
+                                    let c_idx = c.get("index").and_then(|v| v.as_u64()).map(|n| n as usize);
+                                    if let Some(ci) = c_idx {
+                                        if let Some(orig) = targets.iter().find(|t| t.index == ci) {
+                                            let mut cloned = orig.clone();
+                                            if let Some(rev) = c.get("revisited_name").and_then(|v| v.as_str()) {
+                                                if !rev.trim().is_empty() {
+                                                    cloned.name = rev.trim().to_string();
+                                                }
+                                            }
+                                            group_targets.push(cloned);
+                                        }
+                                    }
+                                }
+                            }
+
+                            if !group_targets.is_empty() {
+                                let z_min_x = group_targets.iter().map(|t| t.rect[0]).min().unwrap_or(0);
+                                let z_min_y = group_targets.iter().map(|t| t.rect[1]).min().unwrap_or(0);
+                                let z_max_x = group_targets.iter().map(|t| t.rect[2]).max().unwrap_or(0);
+                                let z_max_y = group_targets.iter().map(|t| t.rect[3]).max().unwrap_or(0);
+                                let pad = 8;
+                                parsed_zones.push(NavigationZone {
+                                    title,
+                                    description: desc,
+                                    click_x: z_min_x + (z_max_x - z_min_x) / 2,
+                                    click_y: z_min_y + (z_max_y - z_min_y) / 2,
+                                    rect: [z_min_x - pad, z_min_y - pad, z_max_x + pad, z_max_y + pad],
+                                    targets: group_targets,
+                                });
+                            }
+                        }
+                    }
+
+                    if !parsed_zones.is_empty() {
+                        for z in parsed_zones.iter_mut() {
+                            inject_text_reader_target(z);
+                        }
+                        return (summary, parsed_zones);
+                    }
                 }
             }
         }

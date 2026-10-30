@@ -20,6 +20,14 @@ use crate::pattern::{extract_target_propositions, matches_pattern};
 #[cfg(windows)]
 use crate::send_hotkey;
 
+#[derive(Default, Clone, Debug)]
+pub struct ZoneOverlayInfo {
+    pub index: usize,
+    pub title: String,
+    pub rect: [i32; 4],
+    pub is_focused: bool,
+}
+
 #[cfg(windows)]
 pub fn is_window_hung(hwnd: HWND) -> bool {
     extern "system" {
@@ -645,6 +653,7 @@ static BADGE_OVERLAY_HWND: std::sync::Mutex<Option<isize>> = std::sync::Mutex::n
 #[derive(Default, Clone)]
 pub struct OverlayDrawState {
     pub targets: Vec<crate::types::NumberedElementTarget>,
+    pub zones: Vec<ZoneOverlayInfo>,
     pub zoom_factor: f32,
     pub focused_index: Option<usize>,
     pub focused_border: Option<([i32; 4], bool)>,
@@ -655,6 +664,7 @@ pub struct OverlayDrawState {
 #[cfg(windows)]
 pub static OVERLAY_STATE: std::sync::Mutex<OverlayDrawState> = std::sync::Mutex::new(OverlayDrawState {
     targets: Vec::new(),
+    zones: Vec::new(),
     zoom_factor: 1.0,
     focused_index: None,
     focused_border: None,
@@ -813,7 +823,7 @@ pub fn render_overlay_state(state: &OverlayDrawState) {
 
     let Some(hwnd) = ensure_overlay_window() else { return; };
 
-    if !state.is_visible || (state.targets.is_empty() && state.orange_border.is_none() && state.focused_border.is_none()) {
+    if !state.is_visible || (state.targets.is_empty() && state.zones.is_empty() && state.orange_border.is_none() && state.focused_border.is_none()) {
         unsafe { let _ = ShowWindow(hwnd, 0); } // SW_HIDE
         return;
     }
@@ -852,6 +862,76 @@ pub fn render_overlay_state(state: &OverlayDrawState) {
             RoundRect(mem_dc, l - vx - 2, t - vy - 2, r - vx + 2, b - vy + 2, 8, 8);
             SelectObject(mem_dc, old_pen);
             DeleteObject(orange_pen);
+        }
+
+        // 1.5 Encadrés de zone bleus avec badge de titre bleu au-dessus
+        if !state.zones.is_empty() {
+            let z = state.zoom_factor.clamp(0.7, 2.5);
+            let font_h = -(((13.0 * z).round() as i32).max(12));
+            let font_name: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
+            let hfont_zone = CreateFontW(
+                font_h, 0, 0, 0, 700 /* FW_BOLD */, 0, 0, 0, 1,
+                0, 0, 5 /* CLEARTYPE_QUALITY */, 0, font_name.as_ptr(),
+            );
+
+            const DT_CALCRECT: u32 = 0x00000400;
+            const DT_CENTER: u32 = 0x00000001;
+            const DT_VCENTER: u32 = 0x00000004;
+            const DT_SINGLELINE: u32 = 0x00000020;
+
+            for zone in &state.zones {
+                let zx0 = zone.rect[0] - vx;
+                let zy0 = zone.rect[1] - vy;
+                let zx1 = zone.rect[2] - vx;
+                let zy1 = zone.rect[3] - vy;
+                let zw = zx1 - zx0;
+                let zh = zy1 - zy0;
+                if zw <= 10 || zh <= 10 {
+                    continue;
+                }
+
+                // Encadré bleu de la zone (BGR: 0x00FFBE00 pour bleu électrique focalisé, 0x00DC8200 pour repos)
+                let border_color = if zone.is_focused { 0x00FFBE00 } else { 0x00DC8200 };
+                let pen_w = if zone.is_focused { 3 } else { 2 };
+                let zone_pen = CreatePen(0, pen_w, border_color);
+                let old_pen = SelectObject(mem_dc, zone_pen);
+                RoundRect(mem_dc, zx0, zy0, zx1, zy1, 8, 8);
+                SelectObject(mem_dc, old_pen);
+                DeleteObject(zone_pen);
+
+                // Badge bleu plein au-dessus de l'encadré portant le nom prononcé par le narrateur
+                let title_text = if zone.title.starts_with(|c: char| c.is_ascii_digit()) {
+                    zone.title.clone()
+                } else {
+                    format!("{}. {}", zone.index, zone.title)
+                };
+                let title_utf16: Vec<u16> = title_text.encode_utf16().collect();
+
+                let old_font = SelectObject(mem_dc, hfont_zone);
+                SetBkMode(mem_dc, 1); // TRANSPARENT
+                let mut calc_rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                DrawTextW(mem_dc, title_utf16.as_ptr(), title_utf16.len() as i32, &mut calc_rc, DT_CALCRECT | DT_SINGLELINE);
+                let txt_w = calc_rc.right - calc_rc.left;
+                let txt_h = (calc_rc.bottom - calc_rc.top).max(14);
+
+                let badge_w = txt_w + 20;
+                let badge_h = txt_h + 8;
+                let bx0 = zx0.max(2);
+                let by0 = if zy0 - badge_h - 2 >= 2 { zy0 - badge_h - 2 } else { zy0 + 4 };
+                let bx1 = bx0 + badge_w;
+                let by1 = by0 + badge_h;
+
+                let badge_bg = if zone.is_focused { 0x00FF8C00 } else { 0x00B96900 }; // BGR bleu
+                let brush_badge = CreateSolidBrush(badge_bg);
+                FillRect(mem_dc, &RECT { left: bx0, top: by0, right: bx1, bottom: by1 }, brush_badge);
+                DeleteObject(brush_badge);
+
+                SetTextColor(mem_dc, 0x00FFFFFF);
+                let mut text_rc = RECT { left: bx0, top: by0, right: bx1, bottom: by1 };
+                DrawTextW(mem_dc, title_utf16.as_ptr(), title_utf16.len() as i32, &mut text_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(mem_dc, old_font);
+            }
+            DeleteObject(hfont_zone);
         }
 
         // 2. Bordure de focus du contrôle sélectionné
@@ -997,6 +1077,7 @@ pub fn draw_screen_numbered_badges(
 ) {
     if let Ok(mut state) = OVERLAY_STATE.lock() {
         let is_same = state.is_visible
+            && state.zones.is_empty()
             && (state.zoom_factor - zoom_factor).abs() < 0.01
             && state.focused_index == focused_index
             && state.targets.len() == targets.len()
@@ -1006,6 +1087,7 @@ pub fn draw_screen_numbered_badges(
             return;
         }
 
+        state.zones.clear();
         state.targets = targets.to_vec();
         state.zoom_factor = zoom_factor;
         state.focused_index = focused_index;
@@ -1015,9 +1097,47 @@ pub fn draw_screen_numbered_badges(
 }
 
 #[cfg(windows)]
+pub fn draw_screen_zones_and_targets(
+    zones: &[ZoneOverlayInfo],
+    targets: &[crate::types::NumberedElementTarget],
+    zoom_factor: f32,
+    focused_index: Option<usize>,
+) {
+    if let Ok(mut state) = OVERLAY_STATE.lock() {
+        let is_same = state.is_visible
+            && (state.zoom_factor - zoom_factor).abs() < 0.01
+            && state.focused_index == focused_index
+            && state.targets.len() == targets.len()
+            && state.zones.len() == zones.len()
+            && state.targets.iter().zip(targets.iter()).all(|(a, b)| a.index == b.index && a.rect == b.rect)
+            && state.zones.iter().zip(zones.iter()).all(|(a, b)| a.index == b.index && a.rect == b.rect && a.is_focused == b.is_focused && a.title == b.title);
+
+        if is_same {
+            return;
+        }
+
+        state.zones = zones.to_vec();
+        state.targets = targets.to_vec();
+        state.zoom_factor = zoom_factor;
+        state.focused_index = focused_index;
+        state.is_visible = !zones.is_empty() || !targets.is_empty() || state.orange_border.is_some();
+        render_overlay_state(&state);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn draw_screen_zones_and_targets(
+    _zones: &[ZoneOverlayInfo],
+    _targets: &[crate::types::NumberedElementTarget],
+    _zoom_factor: f32,
+    _focused_index: Option<usize>,
+) {}
+
+#[cfg(windows)]
 pub fn clear_screen_numbered_badges() {
     if let Ok(mut state) = OVERLAY_STATE.lock() {
         state.targets.clear();
+        state.zones.clear();
         state.focused_border = None;
         state.orange_border = None;
         state.is_visible = false;

@@ -282,11 +282,11 @@ pub fn recognize_texts_vision(rect: [i32; 4]) -> Vec<(String, [i32; 4])> {
         if !cls_req.is_null() && !cls_handler.is_null() && !cls_array.is_null() {
             let req = msg_send_0(msg_send_0(cls_req, sel_alloc), sel_init);
 
-            // Niveau de reconnaissance rapide pour réactivité d'interface (1 = fast, 0 = accurate)
+            // Niveau de reconnaissance précis (0 = accurate) pour capturer l'ensemble des textes d'une même police
             let sel_set_level = sel_registerName(b"setRecognitionLevel:\0".as_ptr() as *const _);
             let set_level_fn: unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, isize) =
                 std::mem::transmute(objc_msgSend as *const ());
-            set_level_fn(req, sel_set_level, 1);
+            set_level_fn(req, sel_set_level, 0);
 
             let sel_init_with_cg = sel_registerName(b"initWithCGImage:options:\0".as_ptr() as *const _);
             let init_cg_fn: unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void) -> *mut std::ffi::c_void =
@@ -320,7 +320,7 @@ pub fn recognize_texts_vision(rect: [i32; 4]) -> Vec<(String, [i32; 4])> {
                     let utf8_fn: unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> *const std::ffi::c_char =
                         std::mem::transmute(objc_msgSend as *const ());
 
-                    let count = count_fn(obs_array, sel_count).min(40);
+                    let count = count_fn(obs_array, sel_count).min(150);
                     for i in 0..count {
                         let obs = obj_at_fn(obs_array, sel_obj_at, i);
                         let cands = obj_at_fn(obs, sel_top, 1);
@@ -664,11 +664,15 @@ fn resolve_visual_zone_content(
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         if let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+            let mid_x = click_x;
+            let mid_y = click_y;
+            let dx = ((rect[2] - rect[0]) / 4).max(2);
+            let dy = ((rect[3] - rect[1]) / 4).max(2);
             let sample_points = [
-                POINT { x: click_x, y: click_y },
-                POINT { x: (rect[0] + 10).min(rect[2]), y: click_y },
-                POINT { x: (rect[2] - 10).max(rect[0]), y: click_y },
-                POINT { x: click_x, y: (rect[1] + 6).min(rect[3]) },
+                POINT { x: mid_x, y: mid_y },
+                POINT { x: (rect[0] + dx).min(rect[2]), y: mid_y },
+                POINT { x: (rect[2] - dx).max(rect[0]), y: mid_y },
+                POINT { x: mid_x, y: (rect[1] + dy).min(rect[3]) },
             ];
 
             for pt in sample_points {
@@ -763,18 +767,18 @@ pub fn detect_visual_boxes_from_pixels(
     window_rect: [i32; 4],
     existing_targets: &[NumberedElementTarget],
 ) -> Vec<[i32; 4]> {
-    if w < 30 || h < 30 {
+    if w < 20 || h < 20 {
         return Vec::new();
     }
 
     let required_len = (w as usize) * (h as usize) * 4;
-    if pixels.len() < required_len {
+    if pixels.len() < required_len || w < 12 || h < 8 {
         return Vec::new();
     }
 
-    // Découpage en cellules pour détection rapide des contrastes de contours (texte / boutons)
-    const CELL_W: u32 = 16;
-    const CELL_H: u32 = 12;
+    // Découpage en cellules affinées pour une capture complète de tous les mots et caractères
+    const CELL_W: u32 = 12;
+    const CELL_H: u32 = 8;
 
     let grid_cols = (w / CELL_W) as usize;
     let grid_rows = (h / CELL_H) as usize;
@@ -784,7 +788,7 @@ pub fn detect_visual_boxes_from_pixels(
 
     let mut grid = vec![false; grid_cols * grid_rows];
 
-    // Échantillonnage des transitions horizontales de luminance dans chaque cellule
+    // Échantillonnage bi-directionnel (horizontal + vertical) pour capturer tous les contours de texte
     for gy in 0..grid_rows {
         for gx in 0..grid_cols {
             let x_start = (gx as u32) * CELL_W;
@@ -794,34 +798,42 @@ pub fn detect_visual_boxes_from_pixels(
 
             for dy in (0..CELL_H).step_by(2) {
                 let py = y_start + dy;
-                if py >= h { break; }
+                if py + 1 >= h { break; }
                 let row_offset = (py * w * 4) as usize;
+                let next_row_offset = ((py + 1) * w * 4) as usize;
 
-                for dx in (0..CELL_W.saturating_sub(1)).step_by(2) {
+                for dx in (0..CELL_W).step_by(2) {
                     let px = x_start + dx;
                     if px + 1 >= w { break; }
                     let idx1 = row_offset + (px as usize) * 4;
-                    let idx2 = row_offset + ((px + 1) as usize) * 4;
+                    let idx_r = row_offset + ((px + 1) as usize) * 4;
+                    let idx_b = next_row_offset + (px as usize) * 4;
 
                     let b1 = pixels[idx1] as i32;
                     let g1 = pixels[idx1 + 1] as i32;
                     let r1 = pixels[idx1 + 2] as i32;
                     let lum1 = (r1 * 299 + g1 * 587 + b1 * 114) >> 10;
 
-                    let b2 = pixels[idx2] as i32;
-                    let g2 = pixels[idx2 + 1] as i32;
-                    let r2 = pixels[idx2 + 2] as i32;
-                    let lum2 = (r2 * 299 + g2 * 587 + b2 * 114) >> 10;
+                    let b_r = pixels[idx_r] as i32;
+                    let g_r = pixels[idx_r + 1] as i32;
+                    let r_r = pixels[idx_r + 2] as i32;
+                    let lum_r = (r_r * 299 + g_r * 587 + b_r * 114) >> 10;
 
-                    if (lum1 - lum2).abs() > 26 {
+                    let b_b = pixels[idx_b] as i32;
+                    let g_b = pixels[idx_b + 1] as i32;
+                    let r_b = pixels[idx_b + 2] as i32;
+                    let lum_b = (r_b * 299 + g_b * 587 + b_b * 114) >> 10;
+
+                    // Seuil à 18 pour capter aussi le texte lissé et les polices fines
+                    if (lum1 - lum_r).abs() > 18 || (lum1 - lum_b).abs() > 18 {
                         edge_count += 1;
                     }
                     samples += 1;
                 }
             }
 
-            // Une zone de texte/bouton présente une densité de contours entre 8% et 65%
-            if samples > 0 && edge_count >= 2 && edge_count <= (samples * 65 / 100) {
+            // Tout bloc présentant au moins une transition de contraste est conservé (suppression du plafond de rejet des polices denses/grasses)
+            if samples > 0 && edge_count >= 1 {
                 grid[gy * grid_cols + gx] = true;
             }
         }
@@ -852,11 +864,11 @@ pub fn detect_visual_boxes_from_pixels(
                 min_gy = min_gy.min(cy);
                 max_gy = max_gy.max(cy);
 
-                // Exploration des voisins immédiats et pontage horizontal (+/- 2 cellules)
+                // Exploration des voisins immédiats et pontage horizontal (+/- 3 cellules pour lier les mots)
                 for dy in [-1isize, 0, 1] {
                     let ny = cy as isize + dy;
                     if ny < 0 || ny >= grid_rows as isize { continue; }
-                    for dx in [-2isize, -1, 0, 1, 2] {
+                    for dx in [-3isize, -2, -1, 0, 1, 2, 3] {
                         let nx = cx as isize + dx;
                         if nx < 0 || nx >= grid_cols as isize { continue; }
                         let n_idx = (ny as usize) * grid_cols + (nx as usize);
@@ -871,19 +883,42 @@ pub fn detect_visual_boxes_from_pixels(
             let box_w = (max_gx - min_gx + 1) as u32 * CELL_W;
             let box_h = (max_gy - min_gy + 1) as u32 * CELL_H;
 
-            // Filtrage : taille compatible avec du texte ou des boutons d'interface
-            if box_w >= 28 && box_h >= 10 && box_h <= 90 && box_w <= (w * 4 / 5) {
+            // Conserver tous les textes (mots courts box_w >= 14, lignes complètes et paragraphes)
+            if box_w >= 14 && box_h >= 7 && box_h <= 300 {
                 let screen_x0 = window_rect[0] + (min_gx as u32 * CELL_W) as i32;
                 let screen_y0 = window_rect[1] + (min_gy as u32 * CELL_H) as i32;
                 let screen_x1 = screen_x0 + box_w as i32;
                 let screen_y1 = screen_y0 + box_h as i32;
 
-                // Vérifier qu'elle n'intersecte aucun contrôle UIA déjà recensé
+                // Rejeter uniquement si un contrôle UIA terminal couvre plus de 35% de la surface
                 let overlaps_uia = existing_targets.iter().any(|t| {
-                    screen_x0 < t.rect[2]
-                        && screen_x1 > t.rect[0]
-                        && screen_y0 < t.rect[3]
-                        && screen_y1 > t.rect[1]
+                    let is_container = t.role == "fenêtre"
+                        || t.role == "window"
+                        || t.role == "pane"
+                        || t.role == "group"
+                        || t.role == "groupe"
+                        || t.role == "client"
+                        || t.role == "panneau";
+                    if is_container {
+                        return false;
+                    }
+                    // Si l'élément UIA n'a pas de nom textuel lisible, on ne supprime pas l'OCR
+                    if t.name.trim().is_empty() {
+                        return false;
+                    }
+
+                    let inter_x0 = screen_x0.max(t.rect[0]);
+                    let inter_y0 = screen_y0.max(t.rect[1]);
+                    let inter_x1 = screen_x1.min(t.rect[2]);
+                    let inter_y1 = screen_y1.min(t.rect[3]);
+
+                    if inter_x1 > inter_x0 && inter_y1 > inter_y0 {
+                        let inter_area = ((inter_x1 - inter_x0) * (inter_y1 - inter_y0)) as f64;
+                        let cand_area = (box_w * box_h) as f64;
+                        inter_area / cand_area > 0.50
+                    } else {
+                        false
+                    }
                 });
 
                 if !overlaps_uia {
@@ -894,8 +929,8 @@ pub fn detect_visual_boxes_from_pixels(
     }
 
     // Trier les cibles par ordre visuel de lecture (haut-vers-bas, gauche-vers-droite)
-    candidate_boxes.sort_by_key(|b| (b[1] / 20) * 10000 + b[0]);
-    candidate_boxes.truncate(8);
+    candidate_boxes.sort_by_key(|b| (b[1] / 16) * 10000 + b[0]);
+    candidate_boxes.truncate(250);
 
     candidate_boxes
 }
@@ -912,10 +947,30 @@ pub fn enrich_targets_with_ocr(
         if !vision_items.is_empty() {
             for (text, cand_rect) in vision_items {
                 let overlaps = existing_targets.iter().any(|t| {
-                    cand_rect[0] < t.rect[2]
-                        && cand_rect[2] > t.rect[0]
-                        && cand_rect[1] < t.rect[3]
-                        && cand_rect[3] > t.rect[1]
+                    let is_container = t.role == "fenêtre"
+                        || t.role == "window"
+                        || t.role == "pane"
+                        || t.role == "group"
+                        || t.role == "groupe"
+                        || t.role == "client"
+                        || t.role == "panneau";
+                    if is_container {
+                        return false;
+                    }
+                    if t.name.trim().is_empty() {
+                        return false;
+                    }
+                    let inter_x0 = cand_rect[0].max(t.rect[0]);
+                    let inter_y0 = cand_rect[1].max(t.rect[1]);
+                    let inter_x1 = cand_rect[2].min(t.rect[2]);
+                    let inter_y1 = cand_rect[3].min(t.rect[3]);
+                    if inter_x1 > inter_x0 && inter_y1 > inter_y0 {
+                        let inter_area = ((inter_x1 - inter_x0) * (inter_y1 - inter_y0)) as f64;
+                        let cand_area = ((cand_rect[2] - cand_rect[0]).max(1) * (cand_rect[3] - cand_rect[1]).max(1)) as f64;
+                        inter_area / cand_area > 0.50
+                    } else {
+                        false
+                    }
                 });
                 if !overlaps {
                     let click_x = (cand_rect[0] + cand_rect[2]) / 2;
@@ -945,10 +1000,30 @@ pub fn enrich_targets_with_ocr(
             if !ocr_items.is_empty() {
                 for (text, cand_rect) in ocr_items {
                     let overlaps = existing_targets.iter().any(|t| {
-                        cand_rect[0] < t.rect[2]
-                            && cand_rect[2] > t.rect[0]
-                            && cand_rect[1] < t.rect[3]
-                            && cand_rect[3] > t.rect[1]
+                        let is_container = t.role == "fenêtre"
+                            || t.role == "window"
+                            || t.role == "pane"
+                            || t.role == "group"
+                            || t.role == "groupe"
+                            || t.role == "client"
+                            || t.role == "panneau";
+                        if is_container {
+                            return false;
+                        }
+                        if t.name.trim().is_empty() {
+                            return false;
+                        }
+                        let inter_x0 = cand_rect[0].max(t.rect[0]);
+                        let inter_y0 = cand_rect[1].max(t.rect[1]);
+                        let inter_x1 = cand_rect[2].min(t.rect[2]);
+                        let inter_y1 = cand_rect[3].min(t.rect[3]);
+                        if inter_x1 > inter_x0 && inter_y1 > inter_y0 {
+                            let inter_area = ((inter_x1 - inter_x0) * (inter_y1 - inter_y0)) as f64;
+                            let cand_area = ((cand_rect[2] - cand_rect[0]).max(1) * (cand_rect[3] - cand_rect[1]).max(1)) as f64;
+                            inter_area / cand_area > 0.50
+                        } else {
+                            false
+                        }
                     });
                     if !overlaps {
                         let click_x = (cand_rect[0] + cand_rect[2]) / 2;

@@ -1261,6 +1261,7 @@ pub static LAST_SCREEN_SUMMARY: Mutex<Option<String>> = Mutex::new(None);
 pub static IS_IMMERSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static IS_DICTATION_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static IMMERSION_SCREEN_HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+pub static IS_USER_TYPING: AtomicBool = AtomicBool::new(false);
 
 pub static SWITCH_HOOK_ENABLED: AtomicBool = AtomicBool::new(false);
 pub static SWITCH_KEY_QUEUE: Mutex<Vec<crate::types::SwitchKeyEvent>> = Mutex::new(Vec::new());
@@ -1332,7 +1333,12 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
             return CallNextHookEx(None, code, wparam, lparam);
         }
 
-        if !is_libertide_fg {
+        let is_user_typing = IS_USER_TYPING.load(Ordering::Relaxed);
+        // Si l'utilisateur est activement en train de taper dans un champ de saisie de l'overlay,
+        // laisser passer les frappes clavier normalement.
+        if is_libertide_fg && is_user_typing {
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
         let vk = kbd.vkCode;
         let is_down = wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize;
         let is_up = wparam.0 == WM_KEYUP as usize || wparam.0 == WM_SYSKEYUP as usize;
@@ -1439,7 +1445,6 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
             if is_down || is_up {
                 return windows::Win32::Foundation::LRESULT(1);
             }
-        }
         }
     }
 
