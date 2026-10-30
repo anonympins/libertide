@@ -58,8 +58,15 @@ Designed for users with single-movement abilities (micro-switch, puff-and-sip, s
 
 ### 3. 🎙️ Private Local Dictation & Autonomous Agent
 - **100% On-Device Dictation (Whisper)**: Speak letters, emails, or code naturally. Real-time speech transcription runs locally via `whisper.cpp`—voice data never leaves your computer.
-- **100% Offline Local LLM (Qwen 2.5 0.5B Instruct)**: Option to run reasoning entirely on-device without any API key or internet connection using an embedded, GPU-accelerated (or CPU) lightweight GGUF model (`qwen2.5-0.5b-instruct-q4_k_m.gguf`, ~398 MB) downloadable with a single click.
-- **Autonomous Multi-Pass Reasoning**: Powered by leading cloud LLMs (DeepSeek, Claude, GPT-4o, Mistral, Groq, GLM) or the local Qwen engine, Libertide plans and chains multi-step actions across iterative reasoning passes.
+- **100% Offline Local LLM Engine (`llama-cpp-2` & GGUF)**: Run reasoning entirely on-device with zero network latency, zero API costs, and absolute data confidentiality. Includes native Windows **GPU hardware acceleration (Vulkan)** with automatic graceful fallback to multi-threaded CPU inference.
+  - **Integrated Quantized Presets (`Q4_K_M`)**:
+    - **Qwen 2.5 0.5B Instruct** (~398 MB) : Sub-1B ultra-lightweight and reactive for low-spec setups.
+    - **Llama 3.2 1B Instruct** (~770 MB) : Excellent balance between speed and reasoning.
+    - **Qwen 2.5 1.5B Instruct** (~986 MB) : High precision in French and multilingual tasks.
+    - **Llama 3.2 3B Instruct** (~2.0 GB) : Extended contextual reasoning and instruction-following.
+    - **Qwen 2.5 3B Instruct** (~1.9 GB) : Deep reasoning with complex tool/action planning.
+  - **Real-Time Streaming TTS**: Stream-parses JSON output token-by-token to narrate responses immediately without waiting for inference completion.
+- **Autonomous Multi-Pass Reasoning**: Powered by leading cloud LLMs (DeepSeek, Claude, GPT-4o, Mistral, Groq, GLM) or the local offline models, Libertide plans and chains multi-step actions across iterative reasoning passes.
 - **Safety & Undo Stack**: Every simulated interaction (keystrokes, tab opens, navigation) is recorded in an undo stack. Say *"Undo"* or press `Escape` to rollback.
 
 ### 4. 🪟 Interactive Floating Cards & Live Subtitles
@@ -162,7 +169,13 @@ To process natural language commands, configure your preferred LLM provider:
 2. Click the **⚙ Settings** button in the lower bar (or say *"API Key"*).
 3. Choose your provider:
    - **Cloud Providers**: **DeepSeek**, **OpenAI**, **Anthropic**, **Mistral**, **Groq**, or **GLM** (paste your API key).
-   - **100% Local & Free**: Choose **Local (Qwen 0.5B)** and click *Télécharger Qwen 2.5 0.5B (~398 Mo)* to run completely offline without an API key!
+   - **100% Local & Free (Zero API Key)**: Choose **Local** and select your preferred on-device model from the presets:
+     - *Qwen 2.5 0.5B Instruct* (~398 MB)
+     - *Llama 3.2 1B Instruct* (~770 MB)
+     - *Qwen 2.5 1.5B Instruct* (~986 MB)
+     - *Llama 3.2 3B Instruct* (~2.0 GB)
+     - *Qwen 2.5 3B Instruct* (~1.9 GB)  
+     Click **⬇ Télécharger** to download the model with real-time speed/progress monitoring and resume support.
 
 *(On the first speech-recognition session, the lightweight local Whisper model downloads automatically in the background).*
 
@@ -185,6 +198,9 @@ cd libertide
 
 # Run in development mode
 cargo run --release
+
+# Run with Vulkan GPU acceleration (Windows / Linux)
+cargo run --release --features vulkan
 ```
 
 ---
