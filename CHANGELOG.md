@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.7] - 2026-10-30
+
+### 🧠 Embedded Local LLM Engine & Offline Inference (`local_llm.rs`, `main.rs`, `types.rs`)
+- **Native integration of llama.cpp (`llama-cpp-2`)**:
+  - Local and 100% offline execution of language models in GGUF format, guaranteeing absolute data confidentiality, zero third-party API costs, and no network dependency.
+  - Manager of quantized model presets in `Q4_K_M` with automatic system prompt selection (ChatML vs Llama 3):
+    - **Qwen 2.5 0.5B Instruct** (~398 MB, sub-1B ultra-responsive for modest configurations).
+    - **Llama 3.2 1B Instruct** (~770 MB).
+    - **Qwen 2.5 1.5B Instruct** (~986 MB).
+    - **Llama 3.2 3B Instruct** (~2.0 GB).
+    - **Qwen 2.5 3B Instruct** (~1.9 GB).
+  - Automated background downloading from Hugging Face with resume support (`.tmp`), interactive progress bar (`AgentEvent::DownloadProgress`), and real-time throughput metrics.
+- **JSON Streaming & Zero-Latency TTS Pipelining (`StreamingJsonNarration`)**:
+  - Incremental JSON stream parser extracting the `"narration"` key token by token during inference.
+  - Real-time transmission of completed sentences to the speech synthesis engine (`TtsCommand::Enqueue`), eliminating the waiting delay before speech begins.
+  - Repetition penalty handling (`repeat_penalty = 1.15`) over a sliding window of 64 tokens and early stopping as soon as the root JSON structure closes.
+
+### ⚡ Windows GPU Hardware Acceleration & CI/CD Pipeline (`local_llm.rs`, `rust-windows.yml`, `Cargo.toml`)
+- **Native Vulkan acceleration support**:
+  - Full offloading of model layers to the graphics processor under Windows (`LLAMA_GPU_LAYERS`, 99 layers offloaded to VRAM by default).
+  - Graceful fallback mechanism to multi-threaded CPU inference in the absence of a dedicated GPU or incompatible driver.
+  - Optimized prompt ingestion in chunks (*chunked prefill*: batch of 2048 tokens on GPU / 1024 on CPU).
+- **GitHub Actions CI/CD automation (`rust-windows.yml`)**:
+  - Integration of the Vulkan SDK and Ninja via Chocolatey on the `windows-latest` build environment.
+  - Compilation of tests and distribution binaries with the `--features vulkan` flag.
+
+### ⚙️ Local Model Management in Settings (`main.rs`, `theme.rs`)
+- **Dedicated user interface (`SettingsTab::LlmProvider`)**:
+  - Interactive radio selector listing each local model, its disk footprint, and its installation status (`✅ Ready` / `⚠️ Not downloaded`).
+  - One-click download with display of percentage, megabytes transferred, and download speed.
+  - Persistence in `.env` (`LOCAL_LLAMA_MODEL`, `LOCAL_LLAMA_PRESET`, `LLM_PROVIDER=Local`).
+
+
 ---
 ## [0.6.6] - 2026-11-06
 
@@ -288,6 +321,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Robust action history management (`ActionHistoryManager`) with bidirectional Undo and Redo functionality.
 
 ---
+
 
 ## [0.5.6] - 2026-10-26
 
