@@ -636,6 +636,10 @@ impl OverlayApp {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| provider.default_endpoint().to_string());
 
+        if provider == LlmProvider::Local {
+            self.model_input = local_llm::get_active_preset().name.to_string();
+        }
+
         self.api_key_error = None;
     }
 
@@ -643,6 +647,16 @@ impl OverlayApp {
         self.theme = theme;
         let _ = write_env_var_to_file(".env", "THEME", theme.key());
         std::env::set_var("THEME", theme.key());
+    }
+
+    pub fn current_agent_model_display_name(&self) -> String {
+        if self.llm_config.provider == LlmProvider::Local {
+            local_llm::get_active_preset().name.to_string()
+        } else if !self.llm_config.model.is_empty() {
+            format!("{} ({})", self.llm_config.provider.display_name(), self.llm_config.model)
+        } else {
+            self.llm_config.provider.display_name().to_string()
+        }
     }
 
     pub fn set_zoom_factor(&mut self, factor: f32) {
@@ -3801,7 +3815,7 @@ impl eframe::App for OverlayApp {
 
                             ui.scope_builder(egui::UiBuilder::new().max_rect(content_area), |ui| {
                                 ui.vertical(|ui| {
-                                    let prov_name = self.llm_config.provider.display_name();
+                                    let prov_name = self.current_agent_model_display_name();
                                     let status_badge = if self.dictation_mode {
                                         t!("ui.dictation_badge").to_string()
                                     } else if self.switch_access_mode {
@@ -4499,6 +4513,9 @@ impl eframe::App for OverlayApp {
                                     let mut clicked_quick_suggestion: Option<String> = None;
                                     let mut request_stop_speaking = false;
                                     let mut speak_message: Option<String> = None;
+                                    let agent_display_name = self.current_agent_model_display_name();
+                                    let is_speaking = self.status == AgentStatus::Speaking;
+                                    let dwell_state = &mut self.dwell_state;
 
                                     for (idx, entry) in self.chat_history.iter().enumerate() {
                                         let is_highlighted = Some(idx) == last_user_idx || Some(idx) == last_agent_idx;
@@ -4518,7 +4535,7 @@ impl eframe::App for OverlayApp {
                                                         };
                                                         (name, egui::Color32::from_rgb(255, 215, 120))
                                                     }
-                                            ChatRole::Agent => (self.llm_config.provider.display_name().to_string(), theme.accent),
+                                            ChatRole::Agent => (agent_display_name.clone(), theme.accent),
                                                 };
                                                 ui.label(
                                                     egui::RichText::new(&label_name)
@@ -4532,7 +4549,7 @@ impl eframe::App for OverlayApp {
                                                         .color(egui::Color32::from_rgba_unmultiplied(170, 185, 205, 140)),
                                                 );
 
-                                                if entry.role == ChatRole::Agent && Some(idx) == last_agent_idx && self.status == AgentStatus::Speaking {
+                                                if entry.role == ChatRole::Agent && Some(idx) == last_agent_idx && is_speaking {
                                                     ui.add_space(4.0);
                                                     let stop_btn = ui.add(
                                                         egui::Button::new(
@@ -4578,7 +4595,7 @@ impl eframe::App for OverlayApp {
                                                 || (entry.text.contains('|') && entry.text.contains('\n'));
 
                                             if entry.role == ChatRole::Agent && has_interactive_md {
-                                                if let Some(prompt) = floating_window::render_markdown(ui, &entry.text, &format!("chat_entry_{idx}"), &mut self.dwell_state, &theme) {
+                                                if let Some(prompt) = floating_window::render_markdown(ui, &entry.text, &format!("chat_entry_{idx}"), dwell_state, &theme) {
                                                     clicked_quick_suggestion = Some(prompt);
                                                 }
                                             } else {
@@ -4593,9 +4610,9 @@ impl eframe::App for OverlayApp {
                                             let interact_resp = ui.interact(label_resp.rect, msg_id, egui::Sense::click());
 
                                             let msg_dwell_id = ui.make_persistent_id(format!("dwell_chat_msg_{idx}"));
-                                            let dwell_triggered = apply_dwell_to_response(ui, &mut self.dwell_state, msg_dwell_id, &interact_resp);
+                                            let dwell_triggered = apply_dwell_to_response(ui, dwell_state, msg_dwell_id, &interact_resp);
                                             if dwell_triggered {
-                                                self.dwell_state.lock_id(msg_dwell_id, Duration::from_secs(6));
+                                                dwell_state.lock_id(msg_dwell_id, Duration::from_secs(6));
                                                 speak_message = Some(entry.text.clone());
                                             }
 
@@ -4658,7 +4675,7 @@ impl eframe::App for OverlayApp {
 
                                                             let resp = ui.add(btn).on_hover_text(t!("ui.quick_suggestion_tooltip"));
                                                             let sug_dwell_id = ui.make_persistent_id(format!("dwell_quick_sug_{idx}_{sug_idx}"));
-                                                            if apply_dwell_to_response(ui, &mut self.dwell_state, sug_dwell_id, &resp) {
+                                                            if apply_dwell_to_response(ui, dwell_state, sug_dwell_id, &resp) {
                                                                 clicked_quick_suggestion = Some(clean_label.to_string());
                                                             }
                                                         }
@@ -5280,7 +5297,7 @@ impl eframe::App for OverlayApp {
                             ui.add_space(4.0);
 
                             if self.selected_provider_modal == LlmProvider::Local {
-                                let model_exists = local_llm::find_local_llama_model_file().is_some();
+                                let active_preset = local_llm::get_active_preset();
                                 egui::Frame::new()
                                     .fill(theme.control_bg)
                                     .stroke(egui::Stroke::new(1.0, theme.border_subtle))
@@ -5289,45 +5306,84 @@ impl eframe::App for OverlayApp {
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
                                             ui.label(
-                                                egui::RichText::new("Modèle local compact :")
+                                                egui::RichText::new("Modèles locaux intégrés (GGUF / Vulkan & CPU) :")
                                                     .size(11.0)
                                                     .color(theme.accent)
                                                     .strong(),
                                             );
-                                            if model_exists {
-                                                ui.label(
-                                                    egui::RichText::new("✅ Qwen 2.5 0.5B installé")
-                                                        .size(11.0)
-                                                        .color(egui::Color32::from_rgb(100, 225, 130))
-                                                        .strong(),
-                                                );
-                                            } else {
-                                                ui.label(
-                                                    egui::RichText::new("⚠️ Non installé (~398 Mo)")
-                                                        .size(11.0)
-                                                        .color(egui::Color32::from_rgb(255, 180, 80)),
-                                                );
-                                            }
                                         });
 
                                         ui.add_space(4.0);
 
+                                        for preset in local_llm::MODEL_PRESETS {
+                                            let is_active = active_preset.id == preset.id;
+                                            let is_installed = local_llm::is_preset_downloaded(preset);
+
+                                            ui.horizontal(|ui| {
+                                                let radio_label = format!("{} ({})", preset.name, preset.size_desc);
+                                                let radio_resp = ui.radio(is_active, radio_label);
+                                                if radio_resp.clicked() && !is_active {
+                                                    local_llm::set_active_preset(preset.id);
+                                                    self.llm_config.model = preset.name.to_string();
+                                                    self.model_input = preset.name.to_string();
+                                                    let _ = write_env_var_to_file(".env", "LLM_MODEL", preset.filename);
+                                                    std::env::set_var("LLM_MODEL", preset.filename);
+                                                    let _ = write_env_var_to_file(".env", "LOCAL_LLAMA_MODEL", preset.filename);
+                                                    std::env::set_var("LOCAL_LLAMA_MODEL", preset.filename);
+                                                    play_earcon(Earcon::Success);
+                                                }
+
+                                                let family_badge = match preset.family {
+                                                    local_llm::ModelFamily::ChatML => "ChatML",
+                                                    local_llm::ModelFamily::Llama3 => "Llama 3",
+                                                };
+                                                ui.label(
+                                                    egui::RichText::new(family_badge)
+                                                        .size(9.5)
+                                                        .color(theme.text_secondary),
+                                                );
+
+                                                if is_installed {
+                                                    ui.label(
+                                                        egui::RichText::new("✅ Prêt")
+                                                            .size(10.5)
+                                                        .color(egui::Color32::from_rgb(100, 225, 130))
+                                                        .strong(),
+                                                    );
+                                                } else {
+                                                ui.label(
+                                                        egui::RichText::new("⚠️ Non téléchargé")
+                                                            .size(10.5)
+                                                        .color(egui::Color32::from_rgb(255, 180, 80)),
+                                                    );
+                                                }
+                                            });
+                                        }
+
+                                        ui.add_space(6.0);
+
+                                        let active_installed = local_llm::is_preset_downloaded(active_preset);
                                         if let Some((percent, downloaded_mb, total_mb, speed_mb_s)) = self.local_download_progress {
                                             ui.add(
                                                 egui::ProgressBar::new(percent / 100.0)
                                                     .text(format!("{percent:.1} % ({downloaded_mb:.1} / {total_mb:.1} Mo - {speed_mb_s:.1} Mo/s)"))
                                                     .animate(true)
                                             );
-                                        } else if !model_exists {
+                                        } else if !active_installed {
                                             let event_tx_clone = self.event_sender.clone();
-                                            if ui.button(egui::RichText::new("⬇ Télécharger Qwen 2.5 0.5B (~398 Mo)").strong().color(theme.accent)).clicked() {
+                                            let p = *active_preset;
+                                            let btn_text = format!("⬇ Télécharger {} ({})", p.name, p.size_desc);
+                                            if ui.button(egui::RichText::new(btn_text).strong().color(theme.accent)).clicked() {
                                                 std::thread::spawn(move || {
-                                                    let _ = local_llm::ensure_llama_model_downloaded(&event_tx_clone);
+                                                    let _ = local_llm::ensure_llama_model_downloaded_for_preset(&p, &event_tx_clone);
                                                 });
                                             }
                                         } else {
                                             ui.label(
-                                                egui::RichText::new("Le modèle s'exécutera localement avec accélération GPU (Vulkan) ou CPU sans dépendance cloud.")
+                                                egui::RichText::new(format!(
+                                                    "Le modèle {} s'exécutera localement avec accélération GPU (Vulkan) ou CPU sans dépendance cloud.",
+                                                    active_preset.name
+                                                ))
                                                     .size(10.5)
                                                     .color(theme.text_secondary),
                                             );
@@ -5540,7 +5596,14 @@ impl eframe::App for OverlayApp {
                                     if self.selected_provider_modal == LlmProvider::Local {
                                         let _ = write_env_var_to_file(".env", "LLM_PROVIDER", self.selected_provider_modal.display_name());
                                         std::env::set_var("LLM_PROVIDER", self.selected_provider_modal.display_name());
+                                        let active_p = local_llm::get_active_preset();
+                                        local_llm::set_active_preset(active_p.id);
+                                        let _ = write_env_var_to_file(".env", "LLM_MODEL", active_p.filename);
+                                        std::env::set_var("LLM_MODEL", active_p.filename);
+                                        let _ = write_env_var_to_file(".env", "LOCAL_LLAMA_MODEL", active_p.filename);
+                                        std::env::set_var("LOCAL_LLAMA_MODEL", active_p.filename);
                                         self.llm_config = resolve_llm_config();
+                                        self.llm_config.model = active_p.name.to_string();
                                         self.show_api_key_modal = false;
                                         self.api_key_error = None;
                                     } else if let Err(e) = write_env_var_to_file(".env", env_var_target, key) {
@@ -6262,7 +6325,7 @@ async fn compact_history_if_needed(
     *history = recent;
 }
 
-fn build_standard_system_instructions(lang_name: &str) -> String {
+pub fn build_standard_system_instructions(lang_name: &str) -> String {
     format!(r###"Tu es l'agent d'exploration Libertide multiplateforme (Windows, macOS, Linux).
 Réponds STRICTEMENT en JSON sans texte hors JSON. "narration" concise rédigée impérativement dans la langue du système de l'utilisateur : {lang_name} (max 2 phrases).
 
@@ -6492,7 +6555,12 @@ async fn call_llm_prompt(
     let system_instructions = if is_dictation {
         DICTATION_SYSTEM_INSTRUCTIONS.to_string()
     } else if llm_config.provider == LlmProvider::Local {
-        local_llm::LOCAL_QWEN_SYSTEM_PROMPT.to_string()
+        let preset = local_llm::get_active_preset();
+        if preset.is_sub_1b {
+            local_llm::COMPACT_SYSTEM_PROMPT.to_string()
+        } else {
+            build_standard_system_instructions(&system_lang)
+        }
     } else {
         build_standard_system_instructions(&system_lang)
     };
@@ -6507,7 +6575,7 @@ async fn call_llm_prompt(
         });
     }
 
-    let mut max_agent_passes = if llm_config.provider == LlmProvider::Local {
+    let mut max_agent_passes = if llm_config.provider == LlmProvider::Local && local_llm::get_active_preset().is_sub_1b {
         1
     } else {
         TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, 15)
@@ -6914,7 +6982,7 @@ async fn call_llm_prompt(
             )
         });
 
-        let is_local_llm = llm_config.provider == LlmProvider::Local;
+        let is_local_sub_1b = llm_config.provider == LlmProvider::Local && local_llm::get_active_preset().is_sub_1b;
         let (report, screen_after) = tokio::task::spawn_blocking(move || {
             if is_request_cancelled(request_id) {
                 return ("Actions interrompues.".to_string(), String::new());
@@ -6924,7 +6992,7 @@ async fn call_llm_prompt(
                 if is_request_cancelled(request_id) {
                     return (rep, String::new());
                 }
-                if is_dictation || is_local_llm {
+                if is_dictation || is_local_sub_1b {
                     return (rep, String::new());
                 }
                 let wait_ms = if has_web_action { 2200 } else { 1200 };
@@ -6967,7 +7035,7 @@ async fn call_llm_prompt(
             println!("[Agent] Quota de raisonnement resynchronisé avec TARGET_REASONING_PASSES : {max_agent_passes} passe(s) max");
         }
 
-        if is_dictation || llm_config.provider == LlmProvider::Local {
+        if is_dictation || (llm_config.provider == LlmProvider::Local && local_llm::get_active_preset().is_sub_1b) {
             println!("[Local/Dictée] Action exécutée instantanément, fin de séquence.");
             break;
         }
@@ -7011,7 +7079,7 @@ async fn call_llm_prompt(
                 }
             }
 
-            if llm_config.provider == LlmProvider::Local {
+            if llm_config.provider == LlmProvider::Local && local_llm::get_active_preset().is_sub_1b {
                 step_feedback.push_str(&format!(
                     "\n\n[Consigne étape] : Poursuis : \"{}\". Choisis l'action suivante en JSON.",
                     safe_user_instruction
@@ -7107,7 +7175,10 @@ fn spawn_agent_backend(
                 match cmd {
                     AgentCommand::AnalyzeNavigationZones { window_id, window_title, targets, context_meta } => {
                         let client = reqwest::Client::new();
-                        let current_llm_config = bg_llm_config.clone();
+                        let mut current_llm_config = resolve_llm_config();
+                        if current_llm_config.provider == LlmProvider::Local {
+                            current_llm_config.model = local_llm::get_active_preset().name.to_string();
+                        }
                         let event_tx = event_tx.clone();
                         tokio::spawn(async move {
                             let (summary, zones) = analyze_navigation_zones_with_llm(&client, &current_llm_config, &window_title, &targets, context_meta.as_deref()).await;
@@ -7137,7 +7208,10 @@ fn spawn_agent_backend(
                         let history = history.clone();
                         let last_call_time = last_call_time.clone();
                         let event_tx = event_tx.clone();
-                        let current_llm_config = bg_llm_config.clone();
+                        let mut current_llm_config = resolve_llm_config();
+                        if current_llm_config.provider == LlmProvider::Local {
+                            current_llm_config.model = local_llm::get_active_preset().name.to_string();
+                        }
 
                         current_task = Some(tokio::spawn(async move {
                             if is_request_cancelled(request_id) {
@@ -7180,7 +7254,7 @@ fn spawn_agent_backend(
                                     PromptTrigger::User,
                                     request_id,
                                 ).await;
-                            } else if current_llm_config.provider == LlmProvider::Local {
+                            } else if current_llm_config.provider == LlmProvider::Local && local_llm::get_active_preset().is_sub_1b {
                                 if is_request_cancelled(request_id) { return; }
                                 let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
                                 let final_prompt = format!("[Demande utilisateur]\n{prompt}");
@@ -7296,7 +7370,9 @@ fn spawn_agent_backend(
                         });
                     }
                     AgentCommand::PeriodicScreenCheck => {
-                        if IS_EMERGENCY_STOPPED.load(Ordering::SeqCst) || bg_llm_config.provider == LlmProvider::Local {
+                        if IS_EMERGENCY_STOPPED.load(Ordering::SeqCst)
+                            || (bg_llm_config.provider == LlmProvider::Local && local_llm::get_active_preset().is_sub_1b)
+                        {
                             continue;
                         }
                         if AGENT_BUSY.load(Ordering::SeqCst)
@@ -7310,7 +7386,10 @@ fn spawn_agent_backend(
                         let history = history.clone();
                         let last_call_time = last_call_time.clone();
                         let event_tx = event_tx.clone();
-                        let current_llm_config = bg_llm_config.clone();
+                        let mut current_llm_config = resolve_llm_config();
+                        if current_llm_config.provider == LlmProvider::Local {
+                            current_llm_config.model = local_llm::get_active_preset().name.to_string();
+                        }
 
                         current_task = Some(tokio::spawn(async move {
                             if is_request_cancelled(request_id) { return; }

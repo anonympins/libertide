@@ -10,6 +10,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: "C:\\t"
+  CMAKE_GENERATOR: "Ninja"
 
 jobs:
   build-windows:
@@ -23,12 +25,27 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             arch: x64
-          - target: i686-pc-windows-msvc
-            arch: x86
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup MSVC developer tools & Ninja
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Vulkan SDK via Chocolatey
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk ninja -y --no-progress
+          $sdkPath = (Get-ChildItem -Directory "C:\VulkanSDK" | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          Write-Host "Vulkan SDK installé sous: $sdkPath"
+          "VULKAN_SDK=$sdkPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VK_SDK_PATH=$sdkPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$sdkPath\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          "$sdkPath\Lib" | Out-File -FilePath $env:GITHUB_PATH -Append
+          "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -42,23 +59,23 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/
+            C:/t/
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-cargo-
             ${{ runner.os }}-cargo-
 
       - name: Run tests (release profile)
-        run: cargo test --release --target ${{ matrix.target }}
+        run: cargo test --release --target ${{ matrix.target }} --features vulkan
 
       - name: Build optimized release executable
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --features vulkan
 
       - name: Prepare distribution package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist
-          Copy-Item "target/${{ matrix.target }}/release/libertide.exe" dist/
+          Copy-Item "C:/t/${{ matrix.target }}/release/libertide.exe" dist/
           if (Test-Path README.md) { Copy-Item README.md dist/ }
           if (Test-Path LICENSE) { Copy-Item LICENSE dist/ }
           Compress-Archive -Path dist/* -DestinationPath "libertide-windows-${{ matrix.arch }}.zip"
