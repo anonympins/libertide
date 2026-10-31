@@ -6556,6 +6556,9 @@ dans leur demande d'information, ou propension à discuter. Ne mentionne pas tes
 Si l'utilisateur demande quelque chose, le réflexe est de chercher sur google
 L'analyse de l'écran ne doit servir qu'à la navigation et à l'information
 
+INTERDICTION FORMELLE DE CONSEIL PASSIF ("Il faudrait ouvrir...", "Vous devez ouvrir...", "Je ne trouve pas...") :
+Tu es un agent exécutant autonome, pas un conseiller. Si l'application ou le média demandé (ex: radio, musique, actualité, météo, service) n'est pas présent à l'écran, TU DOIS OUVRIR TOI-MÊME LE NAVIGATEUR immédiatement avec "navigate_to_url" (vers le site officiel de radio, streaming ou Google) ou "open_search_browser". Ne dis JAMAIS "il faudrait", FAIS-LE !
+
 Utilise le "Je" et l'écriture inclusive, et projette toi une forte personnalité sans géner l'accessibilité.
 N'anticipes pas des actions que l'utilisateur n'a pas demandé, sauf sur l'information retournée.
 
@@ -6636,7 +6639,7 @@ Règles principales :
    - DISTINCTION ABSOLUE ENTRE "open_search" ET "open_search_browser" (2 COMMANDES DISTINCTES) :
      * "open_search" (ou accessibility_shortcut: "open_search") : Recherche SYSTÈME / OS locale (Win+S). Sert STRICTEMENT ET UNIQUEMENT à rechercher un fichier local, une application installée ou un paramètre Windows sur l'ordinateur. INTERDICTION FORMELLE d'utiliser "open_search" pour chercher sur internet ou sur le web !
      * "open_search_browser" (ou "focus_address_bar" / accessibility_shortcut: "open_search_browser") : Recherche WEB / NAVIGATEUR. Sert SYSTÉMATIQUEMENT pour chercher sur le web, aller sur internet, ou saisir une requête dans l'omnibox/barre d'adresse du navigateur. Si l'utilisateur demande de chercher sur le web, Google, YouTube, la météo, un produit, etc., utilise TOUJOURS "open_search_browser" (ou "focus_address_bar" / "navigate_to_url").
-4bis. RÈGLES DE LIENS INTERACTIFS & MACRO [link="cible"]label[/link] (CHAT & FENÊTRES VOLANTES) :
+ 4bis. RÈGLES DE LIENS INTERACTIFS & MACRO [link="cible"]label[/link] (CHAT & FENÊTRES VOLANTES) :
    - RÈGLE D'OR : Tout élément multimédia, ressource, fichier, page web, action ou suggestion mentionné dans "narration" ou dans une fenêtre volante ("show_floating_card") DOIT IMPÉRATIVEMENT être formaté sous forme de lien cliquable, prioritairement avec la macro robuste `[link="cible"]Icône Libellé[/link]` (ou en Markdown `Icône Libellé`).
    - LIENS DANS LES TABLEAUX MARKDOWN : Tu PEUX et DOIS insérer des liens `[link="..."]...[/link]` à l'intérieur des cellules de tableaux Markdown ou de fenêtres volantes (ex: `| Produit | Action | Prix |\n| --- | --- | --- |\n| Drone Pro | [link="action:Commander Drone Pro"]⚡ Commander[/link] | 299€ |`).
    - AVANTAGE MAJEUR DE LA MACRO `[link="..."]...[/link]` : Elle évite tout conflit de parenthèses imbriquées dans les requêtes et les URLs complexes.
@@ -6683,6 +6686,7 @@ Format JSON obligatoire :
     {{"action": "open_app", "name": "nom_executable"}},
     {{"action": "open_search"}},
     {{"action": "open_search_browser"}},
+    {{"action": "open_browser", "url": "https://..."}},
     {{"action": "navigate_back"}},
     {{"action": "navigate_forward"}},
     {{"action": "undo"}},
@@ -6758,6 +6762,22 @@ enum PromptTrigger {
     User,
     Surveillance,
     Immersion { screen_changed: bool },
+}
+
+fn url_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for b in input.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            _ => {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
 }
 
 async fn call_llm_prompt(
@@ -7226,6 +7246,43 @@ async fn call_llm_prompt(
         println!("[Agent] {} action(s) planifiée(s) :", payload.actions.len());
         for (i, act) in payload.actions.iter().enumerate() {
             println!("  [{}] {:?}", i + 1, act);
+        }
+
+        if payload.actions.is_empty() {
+            let lower_user = safe_user_instruction.to_lowercase();
+            let is_action_request = lower_user.starts_with("mets")
+                || lower_user.starts_with("lance")
+                || lower_user.starts_with("ouvre")
+                || lower_user.starts_with("cherche")
+                || lower_user.starts_with("trouve")
+                || lower_user.starts_with("joue")
+                || lower_user.starts_with("écoute")
+                || lower_user.contains("radio")
+                || lower_user.contains("musique");
+
+            let lower_narration = payload.narration.to_lowercase();
+            let is_passive_excuse = lower_narration.contains("il faudrait")
+                || lower_narration.contains("faudrait ouvrir")
+                || lower_narration.contains("aucune radio")
+                || lower_narration.contains("aucun média")
+                || lower_narration.contains("aucun resultat");
+
+            // Si l'utilisateur voulait une action concrète et que l'IA a abandonné ou s'est défaussée :
+            if (is_action_request || is_passive_excuse) && pass == 1 {
+                println!("[Agent Résilience] L'IA s'est défaussée sans action pour \"{}\". Forçage d'une action de recherche / média...", safe_user_instruction);
+                let target_query = if lower_user.contains("radio") {
+                    "https://www.radiofrance.fr".to_string()
+                } else {
+                    format!("https://www.google.com/search?q={}", url_encode(&safe_user_instruction))
+                };
+                payload.actions.push(AgentAction::NavigateToUrl {
+                    url: target_query,
+                    target: Some("new_tab".to_string()),
+                    new_window: Default::default(),
+                    window: Default::default(),
+                });
+                payload.narration = format!("J'ouvre le navigateur pour lancer {} immédiatement.", safe_user_instruction);
+            }
         }
 
         if payload.actions.is_empty() {

@@ -343,6 +343,13 @@ pub enum CommandTag {
     LiveSubtitles,
     EmergencyOrHealth,
     GeneralChitChat,
+    MotorAndSwitchAccess,
+    VisualAccessibility,
+    CareAndComfort,
+    CognitiveAndClarity,
+    RadioAndMusicStream,
+    TravelAndFlightBooking,
+    BrowserTabNavigation,
 }
 
 impl CommandTag {
@@ -361,6 +368,13 @@ impl CommandTag {
         Self::LiveSubtitles,
         Self::EmergencyOrHealth,
         Self::GeneralChitChat,
+        Self::MotorAndSwitchAccess,
+        Self::VisualAccessibility,
+        Self::CareAndComfort,
+        Self::CognitiveAndClarity,
+        Self::RadioAndMusicStream,
+        Self::TravelAndFlightBooking,
+        Self::BrowserTabNavigation,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -379,12 +393,46 @@ impl CommandTag {
             Self::LiveSubtitles => "LIVE_SUBTITLES",
             Self::EmergencyOrHealth => "EMERGENCY_OR_HEALTH",
             Self::GeneralChitChat => "GENERAL_CHIT_CHAT",
+            Self::MotorAndSwitchAccess => "MOTOR_AND_SWITCH_ACCESS",
+            Self::VisualAccessibility => "VISUAL_ACCESSIBILITY",
+            Self::CareAndComfort => "CARE_AND_COMFORT",
+            Self::CognitiveAndClarity => "COGNITIVE_AND_CLARITY",
+            Self::RadioAndMusicStream => "RADIO_AND_MUSIC_STREAM",
+            Self::TravelAndFlightBooking => "TRAVEL_AND_FLIGHT_BOOKING",
+            Self::BrowserTabNavigation => "BROWSER_TAB_NAVIGATION",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::ScheduleTask => "Planification temporelle, minuteurs, rappels, timers, commandes différées (schedule_prompt, schedule_prompts, cancel_scheduled_tasks)",
+            Self::WebNavigateOrSearch => "Navigation web, moteurs de recherche, URLs, omnibox, exploration internet (navigate_to_url, open_search_browser, navigate_back)",
+            Self::AudioSettings => "Paramètres audio Windows/OS, panneau de son, choix casque/enceinte (action_center, open_settings)",
+            Self::VolumeControl => "Réglage du volume sonore (set_volume up/down/min/max)",
+            Self::MuteAudio => "Mise en sourdine des flux audio parasites, silence (mute_audio, set_volume mute)",
+            Self::ClickElementOrButton => "Interactivité UI : clics sur boutons, liens, icônes, menus, cases, badges numérotés, défilement (click_element, click_button, click_numbered_target, scroll)",
+            Self::TextInputOrDictation => "Saisie de texte, remplissage de formulaires, champs de recherche, remplacement (write_text, replace_field_text, clear_text, focus_element)",
+            Self::AppManagement => "Lancement et fermeture d'applications locales (open_app, close_app, open_search)",
+            Self::WindowManagementOrImmersion => "Gestion des fenêtres, agencement, mosaïque, mode immersion (arrange_window, tile_windows, activate_immersion, focus_window)",
+            Self::ScreenReadingOrSummary => "Lecture et résumé de l'écran, extraction de code/texte, défilement (read_editor_content, scroll)",
+            Self::FloatingCardOrForm => "Affichage et fermeture de fenêtres volantes, formulaires interactifs, synthèses (show_floating_card, close_floating_card)",
+            Self::LiveSubtitles => "Sous-titres en direct et retranscription de l'audio système (live_subtitles)",
+            Self::EmergencyOrHealth => "Urgence vitale, appel aux secours, sécurité et santé",
+            Self::GeneralChitChat => "Conversation générale, salutations, politesse, questions sans action requise",
+            Self::MotorAndSwitchAccess => "Accessibilité motrice, contacteurs, commande oculaire, navigation par numéros (click_numbered_target, toggle_numbered_targets)",
+            Self::VisualAccessibility => "Accessibilité visuelle, contrastes, loupe, grossissement de police",
+            Self::CareAndComfort => "Confort, signalement de douleur, soif, fatigue, appel de l'aidant",
+            Self::CognitiveAndClarity => "Accessibilité cognitive, simplification, langage clair et concis (FALC)",
+            Self::RadioAndMusicStream => "Lecture de radio en direct, webradio, streaming musical, contrôle de lecture et médias web (navigate_to_url, click_button direct/play, set_volume)",
+            Self::TravelAndFlightBooking => "Recherche et réservation de billets d'avion, comparatifs de vols, formulaires de voyage et filtres interactifs (show_floating_card form/table, navigate_to_url Google Flights)",
+            Self::BrowserTabNavigation => "Gestion et recherche d'onglets de navigateur, bascule entre onglets, ouverture/fermeture d'onglets (click_element sur onglet, close_tab, navigate_to_url target new_tab)",
         }
     }
 
     pub fn from_str_loose(s: &str) -> Option<Self> {
         let upper = s.trim().to_uppercase();
-        if upper.contains("SCHEDULE") || upper.contains("TIMER") || upper.contains("DIFFERE") || upper.contains("DIFFÉRÉ") {
+        if upper.contains("SCHEDULE") || upper.contains("TIMER") || upper.contains("DIFFERE") || upper.contains("DIFFÉRÉ")
+            || upper.contains("RAPPEL") || upper.contains("REMIND") || upper.contains("DELAY") || upper.contains("PLANIF") || upper.contains("MINUTEUR") {
             Some(Self::ScheduleTask)
         } else if upper.contains("MUTE") || upper.contains("SOURDINE") {
             Some(Self::MuteAudio)
@@ -394,9 +442,9 @@ impl CommandTag {
             Some(Self::AudioSettings)
         } else if upper.contains("NAVIGATE") || upper.contains("SEARCH") || upper.contains("WEB") || upper.contains("BROWSER") || upper.contains("GOOGLE") {
             Some(Self::WebNavigateOrSearch)
-        } else if upper.contains("CLICK") || upper.contains("CLIQUE") || upper.contains("BUTTON") || upper.contains("BOUTON") {
+        } else if upper.contains("CLICK") || upper.contains("CLIQUE") || upper.contains("BUTTON") || upper.contains("BOUTON") || upper.contains("INTERACT") {
             Some(Self::ClickElementOrButton)
-        } else if upper.contains("WRITE") || upper.contains("TEXT") || upper.contains("INPUT") || upper.contains("DICTAT") || upper.contains("SAISIE") {
+        } else if upper.contains("WRITE") || upper.contains("TEXT") || upper.contains("INPUT") || upper.contains("DICTAT") || upper.contains("SAISIE") || upper.contains("FORM") {
             Some(Self::TextInputOrDictation)
         } else if upper.contains("APP") || upper.contains("APPLICATION") || upper.contains("LAUNCH") || upper.contains("CLOSE_APP") {
             Some(Self::AppManagement)
@@ -412,6 +460,20 @@ impl CommandTag {
             Some(Self::EmergencyOrHealth)
         } else if upper.contains("CHAT") || upper.contains("CONVERSATION") || upper.contains("BONJOUR") {
             Some(Self::GeneralChitChat)
+        } else if upper.contains("MOTOR") || upper.contains("SWITCH") || upper.contains("CONTACTEUR") || upper.contains("SURVOL") || upper.contains("BADGE") {
+            Some(Self::MotorAndSwitchAccess)
+        } else if upper.contains("VISUAL") || upper.contains("ZOOM") || upper.contains("LOUPE") || upper.contains("CONTRAST") || upper.contains("THEME") || upper.contains("MALVOY") {
+            Some(Self::VisualAccessibility)
+        } else if upper.contains("CARE") || upper.contains("COMFORT") || upper.contains("AIDANT") || upper.contains("DOULEUR") || upper.contains("SOIF") || upper.contains("FATIGUE") {
+            Some(Self::CareAndComfort)
+        } else if upper.contains("COGNITIVE") || upper.contains("FALC") || upper.contains("SIMPLE") || upper.contains("CLARITY") || upper.contains("FACILE") {
+            Some(Self::CognitiveAndClarity)
+        } else if upper.contains("RADIO") || upper.contains("STREAM") || upper.contains("MUSIQ") || upper.contains("WEBRADIO") {
+            Some(Self::RadioAndMusicStream)
+        } else if upper.contains("FLIGHT") || upper.contains("VOL") || upper.contains("AVION") || upper.contains("TRAVEL") || upper.contains("BILLET") {
+            Some(Self::TravelAndFlightBooking)
+        } else if upper.contains("TAB") || upper.contains("ONGLET") {
+            Some(Self::BrowserTabNavigation)
         } else {
             None
         }
@@ -421,7 +483,7 @@ impl CommandTag {
 pub fn all_command_tags_prompt_list() -> String {
     CommandTag::ALL
         .iter()
-        .map(|t| t.as_str())
+        .map(|t| format!("{}: {}", t.as_str(), t.description()))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -430,6 +492,50 @@ pub fn all_command_tags_prompt_list() -> String {
 pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
     let lower = query.to_lowercase();
     let mut tags = Vec::new();
+
+    // 0. Détection prioritaire : Radio, musique et streaming audio en direct
+    if lower.contains("radio") || lower.contains("france inter") || lower.contains("france info") || lower.contains("franceinfo")
+        || lower.contains("rtl") || lower.contains("nrj") || lower.contains("nostalgie") || lower.contains("skyrock")
+        || lower.contains("fip") || lower.contains("europe 1") || lower.contains("chérie fm") || lower.contains("cherie fm")
+        || lower.contains("webradio") || lower.contains("musique") || lower.contains("playlist") || lower.contains("deezer")
+        || lower.contains("spotify") || lower.contains("soundcloud") || lower.contains("podcast")
+        || ((lower.contains("écoute") || lower.contains("ecoute") || lower.contains("écouter") || lower.contains("ecouter") || lower.contains("mets ") || lower.contains("lance "))
+            && (lower.contains("radio") || lower.contains("direct") || lower.contains("live") || lower.contains("musique") || lower.contains("chanson"))) {
+        tags.push(CommandTag::RadioAndMusicStream);
+        if !tags.contains(&CommandTag::WebNavigateOrSearch) {
+            tags.push(CommandTag::WebNavigateOrSearch);
+        }
+        if !tags.contains(&CommandTag::ClickElementOrButton) {
+            tags.push(CommandTag::ClickElementOrButton);
+        }
+    }
+
+    // 0 bis. Détection prioritaire : Billets d'avion, comparateurs de vol et voyages
+    if lower.contains("vol") || lower.contains("vols") || lower.contains("billet d'avion") || lower.contains("billets d'avion")
+        || lower.contains("avion") || lower.contains("billet") || lower.contains("billets") || lower.contains("skyscanner")
+        || lower.contains("kayak") || lower.contains("google flights") || lower.contains("booking") || lower.contains("voyage")
+        || lower.contains("vol pour") || lower.contains("aller retour") || lower.contains("aller-retour") || lower.contains("compagnie aérienne")
+        || (lower.contains("billet") && (lower.contains("paris") || lower.contains("tokyo") || lower.contains("londres") || lower.contains("marseille") || lower.contains("nice") || lower.contains("avion"))) {
+        tags.push(CommandTag::TravelAndFlightBooking);
+        if !tags.contains(&CommandTag::FloatingCardOrForm) {
+            tags.push(CommandTag::FloatingCardOrForm);
+        }
+        if !tags.contains(&CommandTag::WebNavigateOrSearch) {
+            tags.push(CommandTag::WebNavigateOrSearch);
+        }
+    }
+
+    // 0 ter. Détection prioritaire : Recherche et gestion des onglets de navigateur
+    if lower.contains("onglet") || lower.contains("onglets") || lower.contains("tab") || lower.contains("tabs")
+        || lower.contains("nouvel onglet") || lower.contains("ferme l'onglet") || lower.contains("fermer l'onglet")
+        || lower.contains("ferme cet onglet") || lower.contains("cherche dans l'onglet") || lower.contains("autre onglet")
+        || lower.contains("bascule sur l'onglet") || lower.contains("va sur l'onglet") || lower.contains("passe à l'onglet")
+        || lower.contains("recherche onglet") || lower.contains("trouve l'onglet") || lower.contains("ferme onglet") {
+        tags.push(CommandTag::BrowserTabNavigation);
+        if !tags.contains(&CommandTag::ClickElementOrButton) {
+            tags.push(CommandTag::ClickElementOrButton);
+        }
+    }
 
     if lower.contains("volume") || lower.contains("plus fort") || lower.contains("moins fort") || lower.contains("baisse") || lower.contains("monte le son") {
         tags.push(CommandTag::VolumeControl);
@@ -441,24 +547,82 @@ pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
         tags.push(CommandTag::AudioSettings);
     }
 
+    // 1. Détection enrichie du scheduling (timers, délais, rappels, planification et annulation)
+    let has_delay_pattern = lower.split_whitespace().any(|w| {
+        w.ends_with("min") || w.ends_with("sec") || w.ends_with('h')
+    }) || lower.contains("dans ") || lower.contains("d'ici ") || lower.contains("après ") || lower.contains("apres ") || lower.contains("in ");
+
+    let has_schedule_kw = lower.contains("minute") || lower.contains("seconde") || lower.contains("heure")
+        || lower.contains("rappel") || lower.contains("rappelle") || lower.contains("remind")
+        || lower.contains("différ") || lower.contains("differe") || lower.contains("retarde")
+        || lower.contains("timer") || lower.contains("minuteur") || lower.contains("chronomètre") || lower.contains("chronometre")
+        || lower.contains("alarme") || lower.contains("programme") || lower.contains("programmer")
+        || lower.contains("planifie") || lower.contains("planifier") || lower.contains("schedule")
+        || lower.contains("attends") || lower.contains("attendre") || lower.contains("patienter")
+        || lower.contains("annule le timer") || lower.contains("annule les timers") || lower.contains("stop timer")
+        || lower.contains("annule les rappels") || lower.contains("annuler les rappels");
+
+    if (has_delay_pattern && (lower.contains("dans ") || lower.contains("après ") || lower.contains("in "))) || has_schedule_kw {
+        tags.push(CommandTag::ScheduleTask);
+    }
+
     if lower.contains("cherche") || lower.contains("recherche") || lower.contains("google") || lower.contains("trouve")
         || lower.contains("météo") || lower.contains("meteo") || lower.contains("radio") || lower.contains("youtube")
         || lower.contains("site") || lower.contains("page web") || lower.contains("http") || lower.contains(".com") || lower.contains(".fr") {
         tags.push(CommandTag::WebNavigateOrSearch);
     }
 
-    if lower.contains("minute") || lower.contains("seconde") || lower.contains("heure")
-        || lower.contains("rappel") || lower.contains("différ") || lower.contains("differe")
-        || lower.contains("timer") || lower.contains("dans 5") || lower.contains("dans 10") {
-        tags.push(CommandTag::ScheduleTask);
-    }
+    // 2. Détection enrichie de l'interactivité UI (clics, sélection, formulaires, défilement)
+    let has_click_kw = lower.contains("clique") || lower.contains("clic") || lower.contains("cliquer") || lower.contains("click")
+        || lower.contains("bouton") || lower.contains("button") || lower.contains("appuie") || lower.contains("presse")
+        || lower.contains("sélectionne") || lower.contains("selectionne") || lower.contains("choisis") || lower.contains("valide")
+        || lower.contains("coche") || lower.contains("décoche") || lower.contains("decoche") || lower.contains("badge")
+        || lower.contains("numéro") || lower.contains("numero") || lower.contains("cible") || lower.contains("onglet")
+        || lower.contains("lien") || lower.contains("link");
 
-    if lower.contains("clique") || lower.contains("clic") || lower.contains("bouton") || lower.contains("appuie sur") || lower.contains("badge") || lower.contains("numéro") || lower.contains("numero") {
+    if has_click_kw {
         tags.push(CommandTag::ClickElementOrButton);
     }
 
-    if lower.contains("écris") || lower.contains("ecris") || lower.contains("tape") || lower.contains("saisis") || lower.contains("remplace le texte") || lower.contains("efface le texte") {
+    // Accessibilité motrice forte, contacteurs et navigation par numéros
+    if lower.contains("contacteur") || lower.contains("switch") || lower.contains("mode survol")
+        || lower.contains("badge") || lower.contains("numéro") || lower.contains("numero")
+        || lower.contains("suivant") || lower.contains("précédent") || lower.contains("precedent")
+        || lower.contains("défile") || lower.contains("defile") || lower.contains("cible suivante") {
+        tags.push(CommandTag::MotorAndSwitchAccess);
+        if !tags.contains(&CommandTag::ClickElementOrButton) {
+            tags.push(CommandTag::ClickElementOrButton);
+        }
+    }
+
+    // Accessibilité visuelle, grossissement, contrastes et lecture d'écran
+    if lower.contains("zoom") || lower.contains("grossis") || lower.contains("loupe")
+        || lower.contains("plus grand") || lower.contains("police") || lower.contains("contraste")
+        || lower.contains("thème") || lower.contains("theme") || lower.contains("lis l'écran")
+        || lower.contains("décris l'écran") || lower.contains("decris l'ecran") || lower.contains("qu'est-ce qu'il y a") {
+        tags.push(CommandTag::VisualAccessibility);
+        if !tags.contains(&CommandTag::ScreenReadingOrSummary) {
+            tags.push(CommandTag::ScreenReadingOrSummary);
+        }
+    }
+
+    // Formulaires, saisie textuelle et champs interactifs
+    if lower.contains("écris") || lower.contains("ecris") || lower.contains("écrire") || lower.contains("ecrire")
+        || lower.contains("tape") || lower.contains("taper") || lower.contains("saisis") || lower.contains("saisir")
+        || lower.contains("remplis") || lower.contains("remplir") || lower.contains("formulaire") || lower.contains("champ")
+        || lower.contains("remplace le texte") || lower.contains("efface le texte") || lower.contains("input") || lower.contains("textarea") {
         tags.push(CommandTag::TextInputOrDictation);
+    }
+
+    // Défilement (interactivité spatiale)
+    if lower.contains("défile") || lower.contains("defile") || lower.contains("scroll")
+        || lower.contains("descends") || lower.contains("descendre") || lower.contains("monte") || lower.contains("monter") {
+        if !tags.contains(&CommandTag::ClickElementOrButton) {
+            tags.push(CommandTag::ClickElementOrButton);
+        }
+        if !tags.contains(&CommandTag::ScreenReadingOrSummary) {
+            tags.push(CommandTag::ScreenReadingOrSummary);
+        }
     }
 
     if lower.contains("ouvre") || lower.contains("lance") || lower.contains("ferme") || lower.contains("quitte") || lower.contains("notepad") || lower.contains("calc") {
@@ -478,8 +642,25 @@ pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
         tags.push(CommandTag::LiveSubtitles);
     }
 
+    // Besoins essentiels, inconfort et soutien aidant
+    if lower.contains("aidant") || lower.contains("douleur") || lower.contains("j'ai mal")
+        || lower.contains("soif") || lower.contains("boire") || lower.contains("fatigue")
+        || lower.contains("froid") || lower.contains("chaud") || lower.contains("fauteuil")
+        || lower.contains("repositionne") || lower.contains("appelle") {
+        tags.push(CommandTag::CareAndComfort);
+    }
+
+    // Urgence vitale et secours
     if lower.contains("urgence") || lower.contains("secours") || lower.contains("samu") || lower.contains("pompier") || lower.contains("malaise") || lower.contains("15") || lower.contains("18") || lower.contains("112") {
         tags.push(CommandTag::EmergencyOrHealth);
+        tags.push(CommandTag::CareAndComfort);
+    }
+
+    // Simplification cognitive et FALC (Facile à Lire et à Comprendre)
+    if lower.contains("explique simplement") || lower.contains("plus simple") || lower.contains("en facile")
+        || lower.contains("pas compris") || lower.contains("doucement") || lower.contains("résume court")
+        || lower.contains("étape par étape") || lower.contains("etape par etape") {
+        tags.push(CommandTag::CognitiveAndClarity);
     }
 
     if lower == "bonjour" || lower == "salut" || lower == "coucou" || lower == "merci" || lower == "qui es tu" || lower.starts_with("bonjour ") || lower.starts_with("salut ") {
@@ -510,16 +691,64 @@ pub fn parse_tags_from_response(raw: &str) -> Vec<CommandTag> {
 
 /// Moteur de règles : injecte dynamiquement les instructions spécifiques à chaque tag identifié
 pub fn build_routed_system_prompt(tags: &[CommandTag], lang_name: &str) -> String {
-    let effective_tags = if tags.is_empty() {
+    let mut effective_tags = if tags.is_empty() {
         vec![
             CommandTag::WebNavigateOrSearch,
             CommandTag::ClickElementOrButton,
             CommandTag::TextInputOrDictation,
+            CommandTag::MotorAndSwitchAccess,
+            CommandTag::VisualAccessibility,
             CommandTag::GeneralChitChat,
         ]
     } else {
         tags.to_vec()
     };
+
+    // Synergies d'interactivité : La navigation web ou l'accès par contacteur
+    // nécessitent naturellement les outils de clics, de saisie et de défilement.
+    if effective_tags.contains(&CommandTag::WebNavigateOrSearch) {
+        if !effective_tags.contains(&CommandTag::ClickElementOrButton) {
+            effective_tags.push(CommandTag::ClickElementOrButton);
+        }
+        if !effective_tags.contains(&CommandTag::TextInputOrDictation) {
+            effective_tags.push(CommandTag::TextInputOrDictation);
+        }
+        if !effective_tags.contains(&CommandTag::ScreenReadingOrSummary) {
+            effective_tags.push(CommandTag::ScreenReadingOrSummary);
+        }
+    }
+    if effective_tags.contains(&CommandTag::RadioAndMusicStream) {
+        if !effective_tags.contains(&CommandTag::WebNavigateOrSearch) {
+            effective_tags.push(CommandTag::WebNavigateOrSearch);
+        }
+        if !effective_tags.contains(&CommandTag::ClickElementOrButton) {
+            effective_tags.push(CommandTag::ClickElementOrButton);
+        }
+        if !effective_tags.contains(&CommandTag::VolumeControl) {
+            effective_tags.push(CommandTag::VolumeControl);
+        }
+    }
+    if effective_tags.contains(&CommandTag::TravelAndFlightBooking) {
+        if !effective_tags.contains(&CommandTag::FloatingCardOrForm) {
+            effective_tags.push(CommandTag::FloatingCardOrForm);
+        }
+        if !effective_tags.contains(&CommandTag::WebNavigateOrSearch) {
+            effective_tags.push(CommandTag::WebNavigateOrSearch);
+        }
+        if !effective_tags.contains(&CommandTag::TextInputOrDictation) {
+            effective_tags.push(CommandTag::TextInputOrDictation);
+        }
+    }
+    if effective_tags.contains(&CommandTag::BrowserTabNavigation) {
+        if !effective_tags.contains(&CommandTag::ClickElementOrButton) {
+            effective_tags.push(CommandTag::ClickElementOrButton);
+        }
+    }
+    if effective_tags.contains(&CommandTag::MotorAndSwitchAccess) {
+        if !effective_tags.contains(&CommandTag::ClickElementOrButton) {
+            effective_tags.push(CommandTag::ClickElementOrButton);
+        }
+    }
 
     let mut prompt = String::new();
 
@@ -565,6 +794,11 @@ Règles NAVIGATION WEB & RECHERCHE :
                 prompt.push_str(r#"
 Règles CLICS ET CIBLAGE :
 - UN SEUL CLIC PAR PASSE : 1 seule action "click_element", "click_button" ou "click_numbered_target". Interdiction d'enchaîner deux clics dans la même passe.
+- "click_element" : cible un lien ou un élément d'interface textuel par son libellé visible ("target_name").
+- "click_button" : cible un bouton interactif par son nom visible ("button_name").
+- "click_numbered_target" : clique directement sur un numéro de badge affiché à l'écran ("index": N).
+- "focus_element" : place le focus sur un contrôle sans forcément le valider.
+- "scroll" : fait défiler la vue pour révéler des contrôles cachés ("direction": "down"|"up"|"bottom"|"top", "amount": 1..2).
 - Renseigne toujours la cible exacte visible à l'écran.
 "#);
             }
@@ -572,7 +806,9 @@ Règles CLICS ET CIBLAGE :
                 prompt.push_str(r#"
 Règles SAISIE TEXTE & FORMULAIRES :
 - Pour saisir : "write_text" avec "target": "nom_champ", "press_enter": true/false.
-- Pour remplacer : "replace_field_text". Pour effacer : "clear_text".
+- Pour remplacer : "replace_field_text" avec "target": "nom_champ", "text": "...".
+- Pour effacer : "clear_text".
+- Pour focaliser : "focus_element" ou "focus_address_bar".
 - Terminal : le texte est injecté directement dans la console active.
 "#);
             }
@@ -614,9 +850,11 @@ Règles LECTURE & RÉSUMÉ D'ÉCRAN :
             CommandTag::ScheduleTask => {
                 prompt.push_str(r#"
 Règles TÂCHES DIFFÉRÉES & TIMERS :
-- Planifier : "schedule_prompt" ("delay_seconds": N, "prompt": "consigne future").
-- Planifier plusieurs : "schedule_prompts" (tasks: [{"delay_seconds": N, "prompt": "..."}]).
-- Annuler : "cancel_scheduled_tasks".
+- Planifier une tâche : action "schedule_prompt" avec "delay_seconds" (secondes : 1 min = 60, 5 min = 300, 10 min = 600, 1h = 3600) et "prompt" (la consigne textuelle à exécuter au terme du délai).
+  Exemple : {"action": "schedule_prompt", "delay_seconds": 300, "prompt": "Rappelle-moi d'éteindre le four"}
+- Planifier plusieurs tâches échelonnées : action "schedule_prompts" avec "tasks": [{"delay_seconds": 60, "prompt": "..."}, {"delay_seconds": 300, "prompt": "..."}].
+- Annuler les timers / tâches différées : action "cancel_scheduled_tasks". Utilise-la immédiatement si l'utilisateur demande d'annuler ou d'arrêter des rappels/timers.
+- La "narration" doit confirmer explicitement le délai programmé et l'action différée dans la langue de l'utilisateur ({lang_name}).
 "#);
             }
             CommandTag::FloatingCardOrForm => {
@@ -639,6 +877,69 @@ Règles SOUS-TITRES EN DIRECT :
 Règles URGENCE & SANTÉ :
 - Alerte explicite : "next_passes": 15, appelle "mute_audio", envoie les messages/appels d'urgence, rappelle 15/18/112.
 - Didascalies/doute (*gémissements*) : garde "actions": [], demande confirmation dans quick_suggestions.
+"#);
+            }
+            CommandTag::MotorAndSwitchAccess => {
+                prompt.push_str(r#"
+Règles ACCESSIBILITÉ MOTRICE & CONTACTEURS (HANDICAP MOTEUR FORT / COMMANDE OCULAIRE) :
+- Priorité absolue au ciblage direct par numéro de badge via l'action "click_numbered_target" (index: N), sans requérir de pointage souris précis.
+- Propose systématiquement des suggestions claires et espacées dans "quick_suggestions" activables d'un seul clic ou au survol prolongé (Dwell).
+- En cas de tremblements ou gestes involontaires supposés, n'exécute pas d'actions destructrices sans confirmation dans "quick_suggestions".
+- Action "toggle_numbered_targets" (enabled: true/false) pour gérer la vue des badges numérotés.
+"#);
+            }
+            CommandTag::VisualAccessibility => {
+                prompt.push_str(r#"
+Règles ACCESSIBILITÉ VISUELLE & LECTURE D'ÉCRAN (MALVOYANCE / CÉCITÉ) :
+- Narration audio immersive : décris la position spatiale des éléments (haut, centre, barre d'onglets), les états (sélectionné, coché, replié, disponible).
+- Grossissement et loupe système : utilise "accessibility_shortcut": "magnifier_zoom_in" / "magnifier_zoom_out" / "color_filter_toggle".
+- Pour les documents et synthèses : projette une carte volante grand format via "show_floating_card" (card_type: "markdown").
+"#);
+            }
+            CommandTag::CareAndComfort => {
+                prompt.push_str(r#"
+Règles SOIN, CONFORT & SOUTIEN AIDANT (PERTE D'AUTONOMIE / PARALYSIE) :
+- Priorité absolue au confort et à la sécurité de l'utilisateur : besoins de communication (soif, douleur, repositionnement, appel de l'aidant).
+- Isole immédiatement tout environnement sonore bruyant en émettant "mute_audio" pour faciliter l'écoute et l'échange.
+- Réponds avec une bienveillance maximale, un ton apaisant et concis.
+- Fournis toujours dans "quick_suggestions" des choix d'action immédiats pour alerter un proche ou confirmer le besoin d'aide.
+"#);
+            }
+            CommandTag::CognitiveAndClarity => {
+                prompt.push_str(r#"
+Règles ACCESSIBILITÉ COGNITIVE & FALC (FACILE À LIRE ET À COMPRENDRE) :
+- Règle des phrases courtes : 15 mots maximum par phrase, vocabulaire limpide et familier, aucune abréviation ni jargon technique.
+- Une seule information à la fois : décompose toute démarche complexe en étapes uniques successives ("next_passes": 1 à la fois).
+- Dans "quick_suggestions", propose 2 à 3 réponses directes et évidentes (ex: ["Oui", "Non", "Étape suivante"]).
+"#);
+            }
+            CommandTag::RadioAndMusicStream => {
+                prompt.push_str(r#"
+Règles STRATÉGIE RADIO & STREAMING AUDIO :
+- Étape 1 : Ouvre immédiatement le flux radio ou la page officielle via "navigate_to_url" (ex: "https://www.radiofrance.fr/franceinter" ou recherche Google directe "https://www.google.com/search?q=écouter+france+inter+en+direct").
+- Étape 2 (Bannière cookies) : Dès l'arrivée, clique systématiquement sur le bouton d'acceptation ("Tout accepter", "Accepter").
+- Étape 3 (Lancement audio) : Cherche et clique sur le bouton de lecture en direct ("Écouter le direct", "Direct", "Play", "Lecture") ou sur l'élément [@audio:...] / [@video:...].
+- Étape 4 (Anti-terminal) : N'ouvre JAMAIS de console pour le son. Règle le volume avec "set_volume" ou "accessibility_shortcut": "space".
+- Étape 5 (Clôture) : Dès que le flux audio démarre, ARRÊTE les passes ("actions": [], "next_passes": 0) et confirme oralement la station en cours dans "narration".
+"#);
+            }
+            CommandTag::TravelAndFlightBooking => {
+                prompt.push_str(r#"
+Règles STRATÉGIE BILLETS D'AVION & RECHERCHE DE VOLS :
+- Étape 1 (Formulaire interactif volant) : Projette OBLIGATOIREMENT une fenêtre volante formulaire via "show_floating_card" (id: "vol_search", title: "Filtres Billet d'Avion", card_type: "form", data: {"submit_label": "Rechercher les vols", "prompt_prefix": "Recherche de vol avec ces critères :", "fields": [{"id": "depart", "label": "Ville de départ", "type": "text", "value": "Paris"}, {"id": "destination", "label": "Destination", "type": "text", "value": "Tokyo"}, {"id": "prix_max", "label": "Budget maximum", "type": "number_slider", "min": 200, "max": 3000, "step": 50, "value": 900, "unit": "€"}, {"id": "direct", "label": "Vols directs seulement", "type": "checkbox", "checked": true}]}).
+- Étape 2 (Exploration web) : Ouvre parallèlement Google Flights ou un comparateur via "navigate_to_url" (ex: "https://www.google.com/travel/flights?q=vol+de+Paris+a+Tokyo").
+- Étape 3 (Tableau comparatif structuré) : Dès que les tarifs et horaires apparaissent, projette un tableau de synthèse via "show_floating_card" (id: "comparatif_vols", title: "Comparatif des vols", card_type: "table", data: {"headers": ["Compagnie", "Horaires / Durée", "Prix", "Action"], "rows": [["Air France", "Direct (13h20)", "980 €", "[link=\"action:Choisir Air France\"]⚡ Choisir[/link]"]]}).
+- Étape 4 : Détaille les 2 meilleures options dans "narration" en précisant prix et durée, puis conclus ("next_passes": 0).
+"#);
+            }
+            CommandTag::BrowserTabNavigation => {
+                prompt.push_str(r#"
+Règles GESTION ET RECHERCHE D'ONGLETS DU NAVIGATEUR :
+- Consulte la liste des onglets détectés sous "[Onglets / pages ouvertes]".
+- Pour basculer vers un onglet ouvert : clique directement sur son libellé via "click_element" (ex: {"action": "click_element", "target_name": "Titre de l'onglet"}).
+- Pour ouvrir un nouvel onglet : utilise "navigate_to_url" avec "target": "new_tab" (ou "accessibility_shortcut": "ctrl+t").
+- Pour fermer l'onglet actif : utilise "accessibility_shortcut": "close_tab" (Ctrl+W) et SURTOUT PAS "close_app".
+- Pour rouvrir le dernier onglet fermé : "accessibility_shortcut": "reopen_tab" (Ctrl+Shift+T).
 "#);
             }
             CommandTag::GeneralChitChat => {
@@ -666,6 +967,8 @@ Règles CONVERSATION :
                 prompt.push_str("- {\"action\": \"click_element\", \"target_name\": \"Libellé du lien ou élément\"}\n");
                 prompt.push_str("- {\"action\": \"click_button\", \"button_name\": \"Libellé du bouton\"}\n");
                 prompt.push_str("- {\"action\": \"click_numbered_target\", \"index\": 1}\n");
+                prompt.push_str("- {\"action\": \"focus_element\", \"target_name\": \"nom\"}\n");
+                prompt.push_str("- {\"action\": \"scroll\", \"direction\": \"down\"|\"up\", \"amount\": 1}\n");
             }
             CommandTag::TextInputOrDictation => {
                 prompt.push_str("- {\"action\": \"write_text\", \"text\": \"...\", \"target\": \"nom_champ\", \"press_enter\": true}\n");
@@ -695,7 +998,8 @@ Règles CONVERSATION :
                 prompt.push_str("- {\"action\": \"scroll\", \"direction\": \"down\"|\"up\", \"amount\": 1}\n");
             }
             CommandTag::ScheduleTask => {
-                prompt.push_str("- {\"action\": \"schedule_prompt\", \"delay_seconds\": 10, \"prompt\": \"...\"}\n");
+                prompt.push_str("- {\"action\": \"schedule_prompt\", \"delay_seconds\": 300, \"prompt\": \"consigne à exécuter\"}\n");
+                prompt.push_str("- {\"action\": \"schedule_prompts\", \"tasks\": [{\"delay_seconds\": 60, \"prompt\": \"...\"}]}\n");
                 prompt.push_str("- {\"action\": \"cancel_scheduled_tasks\"}\n");
             }
             CommandTag::FloatingCardOrForm => {
@@ -708,6 +1012,35 @@ Règles CONVERSATION :
             CommandTag::EmergencyOrHealth => {
                 prompt.push_str("- {\"action\": \"set_reasoning_passes\", \"passes\": 15}\n");
                 prompt.push_str("- {\"action\": \"mute_audio\"}\n");
+            }
+            CommandTag::MotorAndSwitchAccess => {
+                prompt.push_str("- {\"action\": \"click_numbered_target\", \"index\": 1}\n");
+                prompt.push_str("- {\"action\": \"toggle_numbered_targets\", \"enabled\": true}\n");
+                prompt.push_str("- {\"action\": \"undo\"}\n");
+            }
+            CommandTag::VisualAccessibility => {
+                prompt.push_str("- {\"action\": \"accessibility_shortcut\", \"shortcut\": \"magnifier_zoom_in\"|\"magnifier_zoom_out\"|\"color_filter_toggle\"|\"narrator_toggle\"}\n");
+            }
+            CommandTag::CareAndComfort => {
+                prompt.push_str("- {\"action\": \"mute_audio\"}\n");
+                prompt.push_str("- {\"action\": \"set_reasoning_passes\", \"passes\": 15}\n");
+                prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"alerte_aidant\", \"title\": \"Demande d'assistance\", \"card_type\": \"markdown\", \"data\": {\"text\": \"...\"}}\n");
+            }
+            CommandTag::CognitiveAndClarity => {
+                prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"guide_simple\", \"title\": \"Guide pas-à-pas\", \"card_type\": \"markdown\", \"data\": {\"text\": \"...\"}}\n");
+            }
+            CommandTag::RadioAndMusicStream => {
+                prompt.push_str("- {\"action\": \"navigate_to_url\", \"url\": \"https://www.radiofrance.fr/...\", \"target\": \"new_tab\"}\n");
+                prompt.push_str("- {\"action\": \"click_button\", \"button_name\": \"Écouter le direct\"}\n");
+                prompt.push_str("- {\"action\": \"set_volume\", \"command\": \"up\"|\"down\"|\"mute\"|\"unmute\"}\n");
+            }
+            CommandTag::TravelAndFlightBooking => {
+                prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"vol_search\", \"title\": \"Filtres Vol\", \"card_type\": \"form\", \"data\": {...}}\n");
+                prompt.push_str("- {\"action\": \"navigate_to_url\", \"url\": \"https://www.google.com/travel/flights?q=...\", \"target\": \"new_tab\"}\n");
+            }
+            CommandTag::BrowserTabNavigation => {
+                prompt.push_str("- {\"action\": \"click_element\", \"target_name\": \"Nom de l'onglet ouvert\"}\n");
+                prompt.push_str("- {\"action\": \"accessibility_shortcut\", \"shortcut\": \"close_tab\"|\"reopen_tab\"}\n");
             }
             CommandTag::GeneralChitChat => {}
         }
@@ -769,12 +1102,30 @@ Règles de passes, navigation web et recherche :
   * Raccourcis multimédia et panneaux : "accessibility_shortcut" ("volume_up"|"volume_down"|"mute_volume"|"action_center"|"open_settings").
 6. LIENS INTERACTIFS & MACRO [link="cible"]label[/link] :
   * Tout média, document ou action mentionné dans "narration" ou cartes volantes DOIT être formaté en lien cliquable : [link="action:Consigne"]Icône Libellé[/link] ou [link="https://..."]🌐 Libellé[/link] (ex: [link="action:Lancer la radio"]▶ Écouter Radio France[/link]).
+7. STRATÉGIE RADIO & STREAMING AUDIO :
+  * Dès que l'utilisateur demande une station de radio (ex: France Inter, RTL, Nostalgie, NRJ, FIP) ou de la musique :
+    - Ouvre directement via "navigate_to_url" vers la page officielle ou la recherche web (ex: "https://www.google.com/search?q=écouter+france+inter+en+direct").
+    - Clique immédiatement pour valider les cookies ("Tout accepter").
+    - Clique sur le bouton "Écouter le direct", "Direct" ou le média audio.
+    - Arrête aussitôt les passes ("actions": [], "next_passes": 0) dès que l'audio est lancé, et confirme dans "narration".
+8. STRATÉGIE BILLETS D'AVION & RECHERCHE DE VOLS :
+  * Pour chercher un vol ou un comparatif :
+    - Projette d'abord une carte volante interactive "show_floating_card" ("card_type": "form", "id": "vol_search") avec critères personnalisables (villes, budget, vol direct).
+    - Ouvre les comparateurs de référence ou Google Flights via "navigate_to_url" ("https://www.google.com/travel/flights?q=vols+...").
+    - Projette les meilleurs tarifs identifiés dans un tableau comparatif volant ("card_type": "table") avec des liens d'actions cliquables.
+9. STRATÉGIE GESTION ET RECHERCHE D'ONGLETS DU NAVIGATEUR :
+  * Vérifie "[Onglets / pages ouvertes]".
+  * Pour basculer sur un onglet existant : clique sur son nom avec "click_element" (ex: {"action": "click_element", "target_name": "Titre Onglet"}).
+  * Pour fermer l'onglet actif : utilise "accessibility_shortcut": "close_tab" (Ctrl+W) au lieu de fermer la fenêtre entière.
   * Synthèse & Résumé de page : Projette une fenêtre volante Markdown via "show_floating_card" (card_type: "markdown", id: "resume_page", title: "Résumé", data: {"text": "..."}) avec des liens cliquables.
 7. NAVIGATION DE SECOURS ET FALLBACK :
   * Si la demande implique une action, média (radio, musique), météo, info ou service, et qu'aucun élément pertinent n'est à l'écran : lance une recherche Google via "navigate_to_url" vers "https://www.google.com/search?q=termes+de+recherche" (termes séparés par '+') avec "next_passes": 4. Ne ferme JAMAIS la fenêtre active pour faire cela.
   * Pour revenir à la page précédente si page erronée ou impasse : "navigate_back".
   * Pour faire défiler les résultats : {"action": "scroll", "direction": "down", "amount": 1}.
   * Interdiction d'abandonner : Ne JAMAIS renvoyer "actions": [] dès qu'un verbe d'action ou une demande concrète est exprimée ("mets", "ouvre", "cherche", "lance", "trouve", "clique").
+8. TÂCHES DIFFÉRÉES & TIMERS :
+  * Pour planifier une action ou un rappel futur : {"action": "schedule_prompt", "delay_seconds": N, "prompt": "consigne"} (convertir le délai en secondes : 1 min = 60, 5 min = 300).
+  * Pour annuler tous les timers ou rappels programmés : {"action": "cancel_scheduled_tasks"}.
 
 Actions et commandes disponibles avec syntaxe :
 - {"action": "click_element", "target_name": "Libellé visible du lien ou élément"}
@@ -799,6 +1150,9 @@ Actions et commandes disponibles avec syntaxe :
 - {"action": "show_floating_card", "id": "info", "title": "...", "card_type": "markdown"|"form"|"table"|"stats", "data": {"text": "..."}}
 - {"action": "close_floating_card", "id": "info"}
 - {"action": "live_subtitles", "enabled": true}
+- {"action": "schedule_prompt", "delay_seconds": 300, "prompt": "consigne"}
+- {"action": "schedule_prompts", "tasks": [{"delay_seconds": 60, "prompt": "..."}]}
+- {"action": "cancel_scheduled_tasks"}
 - {"action": "open_file", "path": "chemin/fichier"}
 "##;
 
@@ -1429,7 +1783,7 @@ impl LocalLlamaEngine {
         let preset = get_active_preset();
         let tags_list = all_command_tags_prompt_list();
         let prompt_text = format!(
-            "Tu es un classificateur d'intention. Choisis 1 ou 2 tags pertinents dans cette liste exacte selon la demande :\n{}\n\nRéponds UNIQUEMENT avec le ou les tags séparés par une virgule.",
+            "Tu es un classificateur d'intention spécialisé en assistance informatique et accessibilité aux personnes en situation de handicap (moteur, visuel, auditif, cognitif). Choisis 1 à 3 tags pertinents dans cette liste exacte selon la demande :\n{}\n\nRéponds UNIQUEMENT avec le ou les tags séparés par une virgule.",
             tags_list
         );
 
