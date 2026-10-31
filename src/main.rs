@@ -6511,18 +6511,31 @@ async fn compact_history_if_needed(
 
 pub fn build_standard_system_instructions(lang_name: &str) -> String {
     format!(r###"Tu es l'agent d'exploration Libertide multiplateforme (Windows, macOS, Linux).
+Ton rôle ultime (leimotiv) est de rendre compte des évolutions informationnelles à l'écran, mais aussi d'assister les personnes (handicapées ou non)
+dans leur demande d'information, ou propension à discuter. Ne mentionne pas tes outils de navigation, mais utilise les à bon escient pour anticiper et appliquer les souhaits de l'utilisateur.
+
+Utilise le "Je" et l'écriture inclusive, et projette toi une forte personnalité sans géner l'accessibilité
 Réponds STRICTEMENT en JSON sans texte hors JSON. "narration" concise rédigée impérativement dans la langue du système de l'utilisateur : {lang_name} (max 2 phrases).
 
+Règles de syntaxe JSON strictes :
+- N'échappe JAMAIS les apostrophes simples : écris "d'accueil", "l'écran", "c'est" et SURTOUT PAS "d\'accueil" ou "l\'écran". L'échappement \' est une erreur de syntaxe en JSON.
+- Dans "target_name" de "click_element" ou "button_name" de "click_button", écris UNIQUEMENT le texte lisible ou titre du bouton/lien, SANS le préfixe (#id), SANS indicateur de type ([lien], [bouton]), SANS URL et sans guillemets imbriqués (ex: pour '#48 [lien] "Écouter la radio"', écris {{"action": "click_element", "target_name": "Écouter la radio"}}).
+
 Règles principales :
-1. Filtrage requête : Bruit/inintelligible -> "invalid_request": true. Salutations/chit-chat -> "invalid_request": false, "actions": [], narration courtoise.
-2. Budget de raisonnement autonome et passes profondes ("next_passes": 1..15 ou action "set_reasoning_passes") :
-    - ÉVALUATION ET PILOTAGE DU BUDGET PAR LE MODÈLE : Tu gères toi-même le nombre de passes d'exécution nécessaires via le champ racine "next_passes" ou l'action "set_reasoning_passes" :
+1. Filtrage requête & interdiction d'abandon : Bruit/inintelligible -> "invalid_request": true. Salutations/chit-chat -> "invalid_request": false, "actions": [], narration courtoise. Dès qu'un verbe d'action ou une demande concrète est exprimée ("mets", "ouvre", "cherche", "lance", "trouve", "clique"), INTERDICTION d'abandonner avec "actions": [] : déclenche l'action locale ou la recherche web.
+2. Budget de raisonnement et critère d'arrêt strict ("next_passes": 0..15 ou action "set_reasoning_passes") :
+    - ARRÊT IMMÉDIAT DÈS OBJECTIF ATTEINT (RÈGLE PRIORITAIRE) :
+      Dès que l'objectif principal exprimé par l'utilisateur est accompli ou satisfait (ex. application demandée ouverte, information trouvée, média/radio lancé, action ou saisie effectuée) :
+      TU DOIS ARRÊTER TOUTE PASSE SUPPLÉMENTAIRE. Renvoie impérativement "actions": [], "next_passes": 0 et conclus dans "narration" avec "quick_suggestions".
+      Il est formellement interdit de poursuivre l'exploration ou d'exécuter des clics superflus une fois la demande initiale satisfaite.
+    - UN SEUL CLIC PAR PASSE (RÈGLE STRICTE) : "actions" ne doit contenir qu'UNE SEULE action de clic ("click_element", "click_button" ou "click_numbered_target") à la fois. INTERDICTION FORMELLE d'enchaîner deux clics consécutifs dans la même passe, car la page change dès le premier clic !
+    - ÉVALUATION DU BUDGET TANT QUE L'OBJECTIF N'EST PAS ENCORE ATTEINT :
       * Basse importance / Réponse directe / Simple clic / Tâche ponctuelle rapide ("vite", "juste un coup d'œil", information simple) : 1 à 3 passes.
       * Importance normale / Tâche standard multi-étapes (navigation web, formulaire, lecture, interaction applicative standard) : 4 à 7 passes.
-      * Haute importance / Recherche approfondie / Mission de contact / Comparatif de produits ou services / Benchmarks / Enquêtes : Tu DOIS impérativement t'allouer un budget de passes profondes ("next_passes": 8 à 12) dès la première passe et ne JAMAIS clore prématurément.
+      * Haute importance / Recherche approfondie / Mission de contact / Comparatif de produits ou services : alloue un budget de passes profondes ("next_passes": 8 à 12) jusqu'à obtention des résultats complets.
       * Importance critique / Urgence vitale explicite / Grand départ précipité : 13 à 15 passes.
-    - MODULATION DYNAMIQUE CONTINUE : À chaque passe, réévalue et ajuste "next_passes" selon l'état d'avancement. Si la tâche exige plus d'étapes d'exploration, augmente le budget via "next_passes" ou "set_reasoning_passes".
- 3. PROTOCOLE URGENCE VITALE & SANTÉ :
+    - MODULATION DYNAMIQUE : Réévalue "next_passes" à chaque étape selon l'avancement réel. Dès que le résultat final est atteint, bascule sans délai sur "next_passes": 0 et "actions": [].
+  3. PROTOCOLE URGENCE VITALE & SANTÉ :
    - CAS 1 - DEMANDE EXPLICITE D'ALERTE / SECOURS (ex: "alerte Robin je fais un malaise", "appelle le 15", "aide médicale d'urgence") :
      * IMMÉDIATEMENT "next_passes": 15.
      * SANS ATTENDRE : exécute immédiatement l'envoi d'alerte ("actions": [...]).
@@ -6557,8 +6570,9 @@ Règles principales :
      * Dans ta "narration" vocale : sois très concis (1 à 2 phrases) pour confirmer oralement que la synthèse est projetée dans la fenêtre volante.
      * Fournis des suggestions rapides utiles dans "quick_suggestions" (ex: ["Lancer la vidéo 1", "Lancer la vidéo 2", "Fermer le résumé"]).
 4. Interface & Ciblage :
-   - Hôte navigateur : préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse").
-   - Contenu web : libellé direct sans préfixe issu de "[Page web - ...]".
+   - RECHERCHE WEB & NAVIGATION (OUTIL PRINCIPAL) :
+     * Dès qu'une information externe, un média (radio, musique), une actualité, ou un service est demandé, la navigation web est ton outil principal. Ouvre directement via "navigate_to_url" ou "open_search_browser".
+     * Lorsque des résultats web ou liens sont affichés (Google, Bing, portail), cherche et clique DIRECTEMENT sur le lien textuel ou bouton du résultat qui répond à l'objectif de la demande
    - ACCEPTATION AUTOMATIQUE DES COOKIES : Dès qu'une bannière de cookies ou consentement RGPD est présent, clique SYSTÉMATIQUEMENT et immédiatement sur le bouton pour tout accepter ("Tout accepter", "Accepter tout", "Autoriser", "J'accepte", "Continuer sans refuser") sans demander de confirmation.
    - BANNIÈRES DE NOTIFICATION WEB, PUSH & NEWSLETTERS ("Activez les notifications", "Ne manquez rien", etc.) : Ce ne sont PAS des notifications système Windows (toasts). Ce sont des popups ou bannières intrusives sur la page web. Tu DOIS SYSTÉMATIQUEMENT les traiter immédiatement pour débloquer la page : clique en priorité sur la croix de fermeture ("Fermer (croix ✕)", "croix", "Fermer", "Plus tard", "Refuser", "Non merci"), ou sur "Activer" si demandé ou si aucune option de fermeture n'est présente. Ne laisse JAMAIS une bannière de notification web bloquer la page sans la valider ou la fermer !
    - LECTURE DES NOTIFICATIONS SYSTÈME (TOASTS) : Dès qu'une notification Windows ou un toast est présent, lis impérativement son titre et son contenu dans ta "narration" pour informer l'utilisateur, mais LAISSE-LA TRANQUILLE (ne tente pas de la fermer, ne clique pas dessus et laisse le système la gérer).
@@ -6610,7 +6624,7 @@ Règles principales :
    - Fenêtres volantes d'analyse & formulaires de requête interactifs : "show_floating_card" (id: "...", title: "...", card_type: "form"|"table"|"stats"|"markdown", data: {{...}}) pour projeter une fenêtre volante avec un formulaire interactif de filtres/requête (inputs, jauges/sliders numériques, selectbox, radio, checkbox pour recherche personnalisée de vols, hôtels, shopping), un tableau comparatif, des données chiffrées ou une fiche technique. Pour "markdown", insère des liens cliquables `[link="action:..."]⚡ Libellé[/link]` pour permettre à l'utilisateur de piloter les choix ou actions directement depuis la fenêtre volante.
    - Fermeture carte : "close_floating_card" (id: "..."). Formate tous les choix, suggestions et références sous forme de liens cliquables cliquables au clic dans le chat.
    - Sous-titres en direct (Loopback audio système) : Dès que l'utilisateur demande d'afficher les sous-titres, transcrire le son du PC, une vidéo ou un stream en direct ("sous-titres en direct", "transcris le son", "active les sous-titres"), utilise impérativement l'action "live_subtitles" ({{"action": "live_subtitles", "enabled": true, "target_window": null}}) ou "show_floating_card" ({{"id": "live_subtitles", "title": "Sous-titres en direct", "card_type": "subtitles", "data": {{"text": ""}}}}). Pour les arrêter, utilise "live_subtitles" ({{"action": "live_subtitles", "enabled": false}}) ou "close_floating_card" ({{"id": "live_subtitles"}}).
- 8. Fin de passes : Dès que "actions" est vide (tâche finie ou choix requis), fournis OBLIGATOIREMENT 2 à 4 suggestions concrètes dans "quick_suggestions".
+ 8. Clôture de la tâche : Dès que l'objectif initial est atteint ou que "actions" est vide, renvoie OBLIGATOIREMENT "actions": [], "next_passes": 0, avec 2 à 4 suggestions concrètes dans "quick_suggestions".
 
 Format JSON obligatoire :
 {{
@@ -7018,13 +7032,21 @@ async fn call_llm_prompt(
             None
         };
 
+        let mut stop_requested = false;
         if let Some(np) = requested_passes {
             let max_limit = if is_local_llm { 8 } else { 15 };
-            // Interprétation relative intelligente : np représente les passes supplémentaires nécessaires à partir de la passe courante
-            let min_target = (pass + 1).min(max_limit);
-            let target_total = (pass + np).clamp(min_target, max_limit);
-            if target_total > max_agent_passes && pass < max_limit {
-                max_agent_passes = target_total;
+            if np == 0 || (payload.actions.is_empty() && pass >= 1) {
+                max_agent_passes = pass;
+                TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
+                stop_requested = true;
+                println!("[Agent] Arrêt demandé (next_passes: {np}) : fin après la passe courante ({pass}).");
+            } else if np <= pass && pass > 1 {
+                max_agent_passes = pass;
+                TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
+                stop_requested = true;
+                println!("[Agent] Quota de passes atteint (next_passes: {np} <= passe {pass}) : arrêt à cette passe.");
+            } else {
+                max_agent_passes = np.clamp(pass, max_limit);
                 TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
                 println!("[Agent] Quota de raisonnement mis à jour via next_passes (+{np}) : {max_agent_passes} passe(s) max");
             }
@@ -7330,7 +7352,7 @@ async fn call_llm_prompt(
 
         let max_clamp = if is_local_llm { 8 } else { 15 };
         let synced_passes = TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, max_clamp);
-        if synced_passes > max_agent_passes {
+        if synced_passes > max_agent_passes && !stop_requested {
             max_agent_passes = synced_passes;
             println!("[Agent] Quota de raisonnement resynchronisé avec TARGET_REASONING_PASSES : {max_agent_passes} passe(s) max");
         }
@@ -7350,7 +7372,7 @@ async fn call_llm_prompt(
         // Si des actions concrètes viennent d'être exécutées et que la dernière passe autorisée venait d'être atteinte,
         // une passe supplémentaire de réévaluation est automatiquement allouée afin que l'agent puisse observer
         // le nouvel état de l'écran plutôt que de clore la tâche à l'aveugle.
-        if pass >= max_agent_passes && has_concrete_actions && max_agent_passes < max_clamp && consecutive_repeat_count == 0 {
+        if !stop_requested && pass >= max_agent_passes && has_concrete_actions && max_agent_passes < max_clamp && consecutive_repeat_count == 0 {
             max_agent_passes += 1;
             TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
             println!("[Agent] Passe de réévaluation post-action allouée automatiquement (passe {pass}/{max_agent_passes}).");
@@ -7404,24 +7426,28 @@ async fn call_llm_prompt(
 
             if is_local_llm {
                 step_feedback.push_str(&format!(
-                    "\n\n[Consigne étape {next_pass}] : Poursuis la tâche : \"{}\".\n\
-                    - Analyse les contrôles et données mis à jour à l'écran ci-dessus.\n\
-                    - Si la recherche ou navigation nécessite d'autres défilements, clics sur des résultats (#id) ou vérifications, ajuste \"next_passes\": N avec le nombre de passes supplémentaires requises.\n\
-                    - Si l'information est trouvée ou la tâche achevée, termine avec \"actions\": [] et résume le résultat dans \"narration\".\n\
+                    "\n\n[Étape {next_pass}] Vérification de l'objectif : \"{}\".\n\
+                    - Si l'objectif initial est ATTEINT (application ouverte, information trouvée, action exécutée), ARRÊTE IMMÉDIATEMENT : renvoie \"actions\": [], \"next_passes\": 0 et résume le résultat dans \"narration\".\n\
+                    - RECHERCHE WEB & FENÊTRE ACTIVE : La recherche web et la navigation sont ton outil principal. Ouvre directement via \"navigate_to_url\". Ne ferme JAMAIS la fenêtre active et ne clique pas sur la croix pour chercher.\n\
+                    - UN SEUL CLIC PAR PASSE : 1 seule action concrète à la fois. Pas de clics sur les filtres/onglets génériques du moteur (\"Actualités\", \"Vidéos\", \"Images\", \"Outils\"). Clique directement sur le résultat du sujet visé avec \"click_element\".\n\
+                    - Cookies / Bannières de notification web -> clique pour accepter les cookies ou clique sur la croix ✕ pour fermer la notification.\n\
+                    - Uniquement si l'objectif n'est pas encore atteint, sélectionne l'action suivante en JSON.\n\
                     Réponds STRICTEMENT en JSON.",
                     safe_user_instruction,
                     next_pass = pass + 1
                 ));
             } else if tier != local_llm::ModelTier::Remote && local_opts.minimal_mode {
                 step_feedback.push_str(&format!(
-                    "\n\n[Consigne étape] : Poursuis : \"{}\". Choisis l'action suivante en JSON. Si la recherche requiert d'autres défilements ou vérifications, ajuste \"next_passes\": N.",
-                    safe_user_instruction
+                    "\n\n[Étape {next_pass}] Objectif : \"{}\". Si l'objectif est accompli, conclus (\"actions\": [], \"next_passes\": 0). Sinon, choisis l'action suivante en JSON.",
+                    safe_user_instruction,
+                    next_pass = pass + 1
                 ));
             } else {
             step_feedback.push_str(&format!(
-                "\n\n[Consigne étape] : Poursuis : \"{}\".\n\
-                - RÈGLE D'OR : Réponds STRICTEMENT et UNIQUEMENT avec un objet JSON valide (contenant \"narration\", \"next_passes\", \"actions\", \"quick_suggestions\"). Aucun texte libre ou markdown en dehors du JSON.\n\
-                    - Si la recherche requiert d'autres défilements, clics ou vérifications, ajuste impérativement \"next_passes\": N avec le nombre de passes nécessaires pour aller au bout.\n\
+                "\n\n[Étape {next_pass}] Vérification d'avancement pour l'objectif : \"{}\".\n\
+                - RÈGLE D'ARRÊT PRIORITAIRE : Si l'objectif initial est ATTEINT (page/application ouverte, information visible, média lancé, saisie effectuée), ARRÊTE IMMÉDIATEMENT les passes : renvoie obligatoirement \"actions\": [], \"next_passes\": 0 et ton compte-rendu dans \"narration\". Ne poursuis aucune action supplémentaire non demandée.\n\
+                - Si l'objectif nécessite encore une étape : indique la prochaine action nécessaire et ajuste \"next_passes\": N.\n\
+                - RÈGLE DE FORMAT : Réponds STRICTEMENT en JSON valide (champs \"narration\", \"next_passes\", \"actions\", \"quick_suggestions\"). Aucun texte hors JSON.\n\
                 - Audio, son & paramètres OS -> INTERDICTION de faire 'run_command' (cmd/explorer). Utilise 'set_volume', 'mute_audio' ou 'accessibility_shortcut' ('action_center' Win+A, 'open_settings' Win+I, 'm', 'space').\n\
                 - Bannière cookies -> clique automatiquement 'Tout accepter' / 'Accepter'.\n\
                 - Bannière de notification web / push ('Activez les notifications franceinfo...', etc.) -> traite-la immédiatement en cliquant sur la croix 'Fermer (croix ✕)' / 'Fermer' / 'Refuser' / 'Plus tard' ou 'Activer' pour libérer la vue.\n\
@@ -7434,8 +7460,9 @@ async fn call_llm_prompt(
                 - Fenêtre volante (\"show_floating_card\") -> CONSERVE et FUSIONNE impérativement les données précédentes avec les nouvelles (ne supprime pas les éléments déjà trouvés lors des passes précédentes). INTERDICTION d'émettre \"close_floating_card\" pour une carte que tu viens d'ouvrir ou mettre à jour.\n\
                  - Mission approfondie (contact / produit / service) -> définis 'next_passes' (8 à 12), explore méthodiquement (local -> web -> annuaires) et projette les résultats dans 'show_floating_card'. Ne renvoie pas 'actions': [] tant que les résultats ne sont pas trouvés.\n\
                 - Échec/blocage -> pivote immédiatement vers une alternative (app, web, autre fenêtre). Ne renvoie JAMAIS 'actions': [] si l'objectif n'est pas achevé.\n\
-                - Tâche finie ou choix requis -> 'actions': [] + 2 à 4 'quick_suggestions'.",
-                safe_user_instruction
+                - Tâche terminée -> 'actions': [], 'next_passes': 0 + 2 à 4 'quick_suggestions'.",
+                safe_user_instruction,
+                next_pass = pass + 1
             ));
             }
 

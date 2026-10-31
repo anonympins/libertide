@@ -2810,6 +2810,23 @@ pub fn is_browser_chrome_target(target: &str) -> bool {
         || is_address_bar_target(target)
 }
 
+pub fn is_window_control_target(target: &str) -> bool {
+    let t = target.trim().to_lowercase();
+    t.contains("fermer la fenêtre")
+        || t.contains("fermer la fenetre")
+        || t.contains("fermer (croix")
+        || t.contains("close window")
+        || t.contains("agrandir la fenêtre")
+        || t.contains("agrandir la fenetre")
+        || t.contains("agrandir / restaurer")
+        || t.contains("réduire la fenêtre")
+        || t.contains("reduire la fenetre")
+        || t.contains("restaurer la fenêtre")
+        || t.contains("restaurer la fenetre")
+        || t.contains("menu système")
+        || t.contains("contrôle fenêtre")
+}
+
 pub fn is_generic_textarea_target(target: &str) -> bool {
     let t = target.trim().to_lowercase().replace('’', "'");
     t.is_empty()
