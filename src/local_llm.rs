@@ -336,26 +336,34 @@ Format JSON obligatoire :
   "quick_suggestions": ["Option 1", "Option 2"]
 }
 
+Règles de syntaxe JSON strictes :
+- N'échappe JAMAIS les apostrophes simples : écris "d'accueil", "l'écran", "c'est" et SURTOUT PAS "d\'accueil" ou "l\'écran". L'échappement \' est une erreur de syntaxe en JSON.
+- Dans "target_name" de "click_element", écris UNIQUEMENT le texte lisible ou titre du bouton/lien, sans le préfixe (#id), sans indicateur de type ([lien], [bouton]), sans URL et sans guillemets imbriqués (ex: pour '#48 [lien] "Écouter la radio"', écris {"action": "click_element", "target_name": "Écouter la radio"}).
+
 Règles de passes, navigation web et recherche :
+- Navigation active de lien en lien (recherche de source fiable) : Par défaut, dès qu'une recherche est effectuée ou que des résultats web/liens apparaissent à l'écran, explore activement en cliquant de lien en lien via "click_element" (avec le titre, texte ou intitulé visible du lien) vers des sources réputées et fiables (ex: sites officiels, players directs) jusqu'à parvenir à la source finale ou au lancement effectif du contenu.
+- Clic sur boutons interactifs et médias : Sur la page de destination, utilise "click_element" pour cliquer sur les boutons de lecture ("Play", "Écouter", "Écouter en direct", nom de la station) et fermer ou accepter les bandeaux de cookies/consentement.
+- Règle de fallback / Recherche web obligatoire : Si la demande implique une action, la lecture d'un média (ex: "mets une radio", "mets de la musique"), la météo, une actualité ou un service, et qu'aucune application ou élément pertinent n'est disponible à l'écran, tu NE DOIS PAS renvoyer "actions": []. Tu DOIS lancer une recherche Google en utilisant "navigate_to_url" vers "https://www.google.com/search?q=termes+de+recherche" (termes séparés par des '+', ex: "https://www.google.com/search?q=radio+en+direct+france") avec "next_passes" entre 3 et 5 pour poursuivre la navigation à l'étape suivante.
 - Navigation web et recherche par étapes : Tu disposes d'un système de passes séquentielles pour explorer l'écran.
   * Pour une recherche web, comparaison ou formulaire multi-étapes : définis "next_passes" entre 3 et 6.
-  * À chaque passe, exécute 1 ou 2 actions concrètes (ex: naviguer vers l'adresse web ou cliquer sur un résultat), puis analyse la nouvelle page à la passe suivante.
-  * Pour cliquer sur un résultat ou lien affiché à l'écran, privilégie "click_numbered_target" avec son numéro #id.
+  * À chaque passe, exécute 1 ou 2 actions concrètes (ex: cliquer sur un résultat de recherche ou bouton via "click_element"), puis analyse la nouvelle page à la passe suivante.
+  * Pour cliquer sur un résultat, lien ou bouton affiché à l'écran, privilégie TOUJOURS "click_element" avec son texte ou intitulé visible dans "target_name".
   * Pour faire défiler les résultats d'une page longue, utilise {"action": "scroll", "direction": "down"}.
+  * Interdiction de répétition : Ne JAMAIS répéter "open_search_browser" si la page affiche déjà des résultats ou liens. Clique directement sur un résultat avec "click_element".
   * Pour revenir à la page ou aux résultats précédents, utilise {"action": "navigate_back"}.
   * Dès que l'information est obtenue ou que la tâche est terminée, renvoie "actions": [], "next_passes": 1, et résume le résultat dans "narration".
 
 Actions et commandes disponibles avec syntaxe :
-1. click_numbered_target : Clic sur un badge/numéro affiché à l'écran (#id)
+1. click_element : Clic sur un élément textuel, bouton ou lien par son nom ou texte visible (Action prioritaire pour naviguer et interagir)
+   Syntaxe : {"action": "click_element", "target_name": "Radio France"}
+2. click_numbered_target : Clic de secours sur un badge/numéro affiché à l'écran (#id) uniquement si le texte est absent ou inaccessible
    Syntaxe : {"action": "click_numbered_target", "index": 1}
-2. click_element : Clic sur un élément textuel, bouton ou lien par son nom
-   Syntaxe : {"action": "click_element", "target_name": "Rechercher"}
 3. write_text : Saisie de texte dans un champ de formulaire ou de recherche
    Syntaxe : {"action": "write_text", "text": "texte à taper", "target": "nom_champ", "press_enter": true}
 4. open_app : Lancer une application par son nom
    Syntaxe : {"action": "open_app", "name": "notepad"}
-5. navigate_to_url : Ouvrir ou naviguer vers une adresse web
-   Syntaxe : {"action": "navigate_to_url", "url": "https://www.google.com"}
+5. navigate_to_url : Ouvrir ou naviguer vers une adresse web ou recherche Google
+   Syntaxe : {"action": "navigate_to_url", "url": "https://www.google.com/search?q=radio+en+direct+france"}
 6. open_search_browser : Sélectionner la barre d'adresse/recherche web du navigateur
    Syntaxe : {"action": "open_search_browser"}
 7. navigate_back : Revenir à la page précédente dans l'historique web
@@ -369,11 +377,55 @@ Actions et commandes disponibles avec syntaxe :
 11. close_floating_card : Fermer une carte volante ouverte
     Syntaxe : {"action": "close_floating_card", "id": "info"}
 
-Si aucune action n'est requise (simple question ou salutation), renvoie "actions": [].
+Interdiction d'abandon : Reste sur "actions": [] UNIQUEMENT pour les salutations ou questions purement informatives sans action. Dès qu'un verbe d'action ou une demande concrète est exprimée ("mets", "ouvre", "cherche", "lance", "trouve"), déclenche l'action locale ou la recherche Google.
 "##;
 
 static LOCAL_ENGINE: Mutex<Option<LocalLlamaEngine>> = Mutex::new(None);
 static LAST_SPOKEN_NARRATION: Mutex<String> = Mutex::new(String::new());
+
+/// Nettoie et fiabilise le JSON généré par le LLM local avant désérialisation
+fn sanitize_json_output(raw: &str) -> String {
+    let trimmed = raw.trim();
+
+    // Retrait d'éventuels blocs de formatage Markdown ```json ... ```
+    let content = if let Some(start) = trimmed.find("```json") {
+        let after = &trimmed[start + 7..];
+        if let Some(end) = after.rfind("```") {
+            after[..end].trim()
+        } else {
+            after.trim()
+        }
+    } else if let Some(start) = trimmed.find("```") {
+        let after = &trimmed[start + 3..];
+        if let Some(end) = after.rfind("```") {
+            after[..end].trim()
+        } else {
+            after.trim()
+        }
+    } else {
+        trimmed
+    };
+
+    // Délimiter strictement l'objet JSON racine { ... }
+    let json_slice = if let (Some(first), Some(last)) = (content.find('{'), content.rfind('}')) {
+        if last >= first { &content[first..=last] } else { content }
+    } else {
+        content
+    };
+
+    // Correction des séquences d'échappement invalides courantes produites par les SLM (notamment \' -> ')
+    let mut cleaned = String::with_capacity(json_slice.len());
+    let mut chars = json_slice.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && chars.peek() == Some(&'\'') {
+            chars.next();
+            cleaned.push('\'');
+            continue;
+        }
+        cleaned.push(c);
+    }
+    cleaned
+}
 
 /// Tronque une chaîne UTF-8 sans couper au milieu d'un point de code multi-octets
 fn safe_truncate_str(s: &str, max_bytes: usize) -> &str {
@@ -813,7 +865,7 @@ impl LocalLlamaEngine {
         }
         println!();
 
-        Ok(output)
+        Ok(sanitize_json_output(&output))
     }
 }
 
