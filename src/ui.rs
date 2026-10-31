@@ -339,6 +339,12 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
         eprintln!("[UIA] Fenêtre {:?} figée (sablier). Inspection UI ignorée.", hwnd.0);
         return results;
     }
+    let (pid, _) = get_window_process_info(hwnd);
+    let current_pid = std::process::id();
+    if pid == current_pid {
+        // Exclure formellement l'overlay et toutes les fenêtres de Libertide
+        return results;
+    }
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let uia: Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
@@ -2142,6 +2148,11 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
     if let Some(id_part) = prop_clean.strip_prefix('#') {
         let id_clean = id_part.trim();
         if !id_clean.is_empty() {
+            if let Ok(target_idx) = id_clean.parse::<usize>() {
+                if elem.index == target_idx {
+                    return Some(520.0);
+                }
+            }
             if elem.automation_id.eq_ignore_ascii_case(id_clean) {
                 return Some(500.0);
             }
@@ -2153,6 +2164,12 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
             if elem.name.eq_ignore_ascii_case(id_clean) {
                 return Some(420.0);
             }
+        }
+    }
+
+    if let Ok(target_idx) = prop_clean.parse::<usize>() {
+        if elem.index == target_idx {
+            return Some(520.0);
         }
     }
 
@@ -2266,6 +2283,14 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
         || prop_lower.contains("fermer le bandeau");
     if is_elem_cross && is_prop_cross {
         return Some(550.0);
+    }
+
+    let is_search_query = prop_lower.contains("search") || prop_lower.contains("recherch") || prop_lower.contains("query");
+    if is_search_query && (elem.is_input || elem.is_edit_or_textarea) {
+        let elem_str = format!("{} {} {} {}", elem.name, elem.automation_id, elem.aria_role, elem.class_name).to_lowercase();
+        if elem_str.contains("search") || elem_str.contains("recherch") || elem_str.contains("query") || elem_str.contains("find") {
+            return Some(480.0);
+        }
     }
 
     let ecom_bonus = ecommerce_match_bonus(prop_clean, &elem.name)

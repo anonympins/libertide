@@ -106,7 +106,7 @@ impl LlmProvider {
             Self::Mistral => "Mistral AI",
             Self::Glm => "Zhipu GLM",
             Self::Groq => "Groq",
-            Self::Local => "Local (Qwen 0.5B)",
+            Self::Local => "Local (GGUF / Llama)",
         }
     }
 
@@ -196,7 +196,7 @@ impl LlmProvider {
             Self::Mistral => "mistral-small-latest",
             Self::Glm => "glm-4-flash",
             Self::Groq => "llama-3.3-70b-versatile",
-            Self::Local => "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+            Self::Local => "qwen2.5-1.5b-instruct-q4_k_m.gguf",
         }
     }
 
@@ -418,6 +418,7 @@ pub struct CachedWindowAnalysis {
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     StatusChanged(AgentStatus),
+    NarrationStart,
     NarrationChunk(String),
     ReplaceNarration {
         text: String,

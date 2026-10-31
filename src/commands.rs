@@ -868,9 +868,54 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                                 feedback.push(format!("Texte inséré dans le champ validé '{}'.", elem.name));
                                 handled = true;
                             } else {
-                                println!("[Actions] Rejet : aucun champ interactable correspondant à '{}'", target_desc);
-                                feedback.push(format!("Ciblage rejeté : le champ interactable '{}' est introuvable parmi les éléments réels de l'écran. Aucune cible arbitraire n'a été sélectionnée.", target_desc));
-                                handled = true;
+                                println!("[Actions] Champ '{}' non trouvé directement, recherche d'un champ de recherche ou saisie de repli", target_desc);
+                                let td_low = target_desc.to_lowercase().replace('_', " ");
+                                let is_search = td_low.contains("search") || td_low.contains("recherch") || td_low.contains("barre");
+                                let has_web = elements.iter().any(|e| e.is_web_content && (e.is_explicit_textarea || e.is_edit_or_textarea || e.is_input));
+
+                                let fallback_elem = if is_search {
+                                    elements.iter().find(|e| {
+                                        (e.is_input || e.is_edit_or_textarea) && {
+                                            let combined = format!("{} {} {}", e.name, e.automation_id, e.class_name).to_lowercase();
+                                            combined.contains("search") || combined.contains("recherch") || combined.contains("query")
+                                        }
+                                    })
+                                } else {
+                                    None
+                                }
+                                .or_else(|| {
+                                    elements
+                                        .iter()
+                                        .filter(|e| {
+                                            if has_web && e.is_browser_chrome {
+                                                return false;
+                                            }
+                                            e.is_input || e.is_edit_or_textarea || e.is_explicit_textarea
+                                        })
+                                        .max_by_key(|e| (e.is_web_content, e.is_explicit_textarea, e.area))
+                                });
+
+                                if let Some(fe) = fallback_elem {
+                                    println!("[Actions] Champ de repli trouvé : '{}' [id='{}']", fe.name, fe.automation_id);
+                                    unsafe { let _ = fe.element.SetFocus(); }
+                                    click_element(fe.click_x, fe.click_y, Some(&fe.element), fe.pattern.as_ref());
+                                    std::thread::sleep(Duration::from_millis(50));
+                                    send_hotkey(&[VK_CONTROL], VK_A);
+                                    std::thread::sleep(Duration::from_millis(30));
+                                    set_clipboard_text(text);
+                                    std::thread::sleep(Duration::from_millis(30));
+                                    send_paste();
+                                    if should_enter {
+                                        std::thread::sleep(Duration::from_millis(60));
+                                        send_hotkey(&[], VK_RETURN);
+                                    }
+                                    feedback.push(format!("Texte inséré dans le champ '{}'.", fe.name));
+                                    handled = true;
+                                } else {
+                                    println!("[Actions] Rejet : aucun champ interactable correspondant à '{}'", target_desc);
+                                    feedback.push(format!("Ciblage rejeté : le champ interactable '{}' est introuvable parmi les éléments réels de l'écran.", target_desc));
+                                    handled = true;
+                                }
                             }
                         }
                     } else if let Some(hwnd) = target_hwnd.or(active_user_hwnd).or(preferred_target_hwnd) {
@@ -2230,7 +2275,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
             }
             AgentAction::SetReasoningPasses { passes, reason } => {
                 let clamped = (*passes).clamp(1, 15);
-                TARGET_REASONING_PASSES.store(clamped, Ordering::SeqCst);
+                TARGET_REASONING_PASSES.fetch_max(clamped, Ordering::SeqCst);
                 let reason_desc = reason.as_deref().unwrap_or("ajustement au contexte d'urgence");
                 println!("[Actions] Quota de passes ajusté à {} (motif: {})", clamped, reason_desc);
                 feedback.push(format!("Budget de raisonnement configuré à {} passes ({reason_desc}).", clamped));
@@ -2775,7 +2820,7 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
             }
             AgentAction::SetReasoningPasses { passes, reason } => {
                 let clamped = (*passes).clamp(1, 15);
-                TARGET_REASONING_PASSES.store(clamped, Ordering::SeqCst);
+                TARGET_REASONING_PASSES.fetch_max(clamped, Ordering::SeqCst);
                 let reason_desc = reason.as_deref().unwrap_or("ajustement au contexte d'urgence");
                 feedback.push(format!("Budget de raisonnement configuré à {} passes ({reason_desc}).", clamped));
             }

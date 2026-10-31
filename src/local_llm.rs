@@ -150,18 +150,16 @@ pub struct ModelPreset {
     pub hf_url: &'static str,
     pub size_desc: &'static str,
     pub family: ModelFamily,
-    pub is_sub_1b: bool,
 }
 
 pub const MODEL_PRESETS: &[ModelPreset] = &[
     ModelPreset {
-        id: "qwen-0.5b",
-        name: "Qwen 2.5 0.5B Instruct",
-        filename: "qwen2.5-0.5b-instruct-q4_k_m.gguf",
-        hf_url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
-        size_desc: "~398 Mo",
+        id: "qwen-1.5b",
+        name: "Qwen 2.5 1.5B Instruct",
+        filename: "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        hf_url: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        size_desc: "~986 Mo",
         family: ModelFamily::ChatML,
-        is_sub_1b: true,
     },
     ModelPreset {
         id: "llama-1b",
@@ -170,25 +168,6 @@ pub const MODEL_PRESETS: &[ModelPreset] = &[
         hf_url: "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
         size_desc: "~770 Mo",
         family: ModelFamily::Llama3,
-        is_sub_1b: false,
-    },
-    ModelPreset {
-        id: "qwen-1.5b",
-        name: "Qwen 2.5 1.5B Instruct",
-        filename: "qwen2.5-1.5b-instruct-q4_k_m.gguf",
-        hf_url: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
-        size_desc: "~986 Mo",
-        family: ModelFamily::ChatML,
-        is_sub_1b: false,
-    },
-    ModelPreset {
-        id: "llama-3b",
-        name: "Llama 3.2 3B Instruct",
-        filename: "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
-        hf_url: "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
-        size_desc: "~2.0 Go",
-        family: ModelFamily::Llama3,
-        is_sub_1b: false,
     },
     ModelPreset {
         id: "qwen-3b",
@@ -197,7 +176,30 @@ pub const MODEL_PRESETS: &[ModelPreset] = &[
         hf_url: "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
         size_desc: "~1.9 Go",
         family: ModelFamily::ChatML,
-        is_sub_1b: false,
+    },
+    ModelPreset {
+        id: "llama-3b",
+        name: "Llama 3.2 3B Instruct",
+        filename: "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        hf_url: "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        size_desc: "~2.0 Go",
+        family: ModelFamily::Llama3,
+    },
+    ModelPreset {
+        id: "qwen-7b",
+        name: "Qwen 2.5 7B Instruct",
+        filename: "qwen2.5-7b-instruct-q4_k_m.gguf",
+        hf_url: "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf",
+        size_desc: "~4.7 Go",
+        family: ModelFamily::ChatML,
+    },
+    ModelPreset {
+        id: "llama-8b",
+        name: "Llama 3.1 8B Instruct",
+        filename: "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+        hf_url: "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+        size_desc: "~4.9 Go",
+        family: ModelFamily::Llama3,
     },
 ];
 
@@ -211,7 +213,7 @@ pub fn get_active_preset() -> &'static ModelPreset {
             return p;
         }
     }
-    // Par défaut : Qwen 2.5 0.5B
+    // Par défaut : Qwen 2.5 1.5B
     &MODEL_PRESETS[0]
 }
 
@@ -224,28 +226,151 @@ pub fn set_active_preset(preset_id: &str) {
     }
 }
 
-/// Prompt compact optimisé pour modèles Sub-1B (ex: Qwen 2.5 0.5B) :
-pub const COMPACT_SYSTEM_PROMPT: &str = r##"Tu es l'agent système Windows Libertide. Réponds UNIQUEMENT en JSON strict à toute intervention de l'utilisateur.
-Ne décris jamais l'apparence visuelle, les widgets ou leur disposition à l'écran. Concentre-toi uniquement sur le résumé du contenu informationnel et ce que la page ou l'application adresse.
-Format :
-{
-  "narration": "réponse ou résumé du contenu en markdown."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelTier {
+    Local,  // Modèle local unifié (GGUF / Vulkan & CPU)
+    Remote, // Cloud : DeepSeek, OpenAI, Anthropic, Mistral, Groq, GLM
 }
+
+impl ModelTier {
+    pub fn name(&self) -> &'static str {
+        match self {
+            ModelTier::Local => "Modèle local",
+            ModelTier::Remote => "Modèle distant (Cloud)",
+        }
+    }
+
+    pub fn default_options(&self) -> LocalLlmOptions {
+        match self {
+            ModelTier::Local => LocalLlmOptions {
+                minimal_mode: false,
+                active_window_only: true,
+                include_feedback: true,
+                include_history: true,
+            },
+            ModelTier::Remote => LocalLlmOptions {
+                minimal_mode: false,
+                active_window_only: false,
+                include_feedback: true,
+                include_history: true,
+            },
+        }
+    }
+}
+
+impl ModelPreset {
+    pub fn tier(&self) -> ModelTier {
+        ModelTier::Local
+    }
+}
+
+pub fn resolve_model_tier(provider: crate::types::LlmProvider, _preset: Option<&ModelPreset>) -> ModelTier {
+    if provider != crate::types::LlmProvider::Local {
+        ModelTier::Remote
+    } else {
+        ModelTier::Local
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalLlmOptions {
+    pub minimal_mode: bool,
+    pub active_window_only: bool,
+    pub include_feedback: bool,
+    pub include_history: bool,
+}
+
+impl Default for LocalLlmOptions {
+    fn default() -> Self {
+        get_active_preset().tier().default_options()
+    }
+}
+
+fn read_bool_env(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .ok()
+        .or_else(|| crate::fs_util::read_env_var_from_file(".env", key))
+        .and_then(|v| match v.trim().to_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(default)
+}
+
+pub fn get_local_llm_options() -> LocalLlmOptions {
+    let tier_defaults = get_active_preset().tier().default_options();
+    LocalLlmOptions {
+        minimal_mode: read_bool_env("LOCAL_LLM_MINIMAL_MODE", tier_defaults.minimal_mode),
+        active_window_only: read_bool_env("LOCAL_LLM_ACTIVE_WIN_ONLY", tier_defaults.active_window_only),
+        include_feedback: read_bool_env("LOCAL_LLM_FEEDBACK", tier_defaults.include_feedback),
+        include_history: read_bool_env("LOCAL_LLM_HISTORY", tier_defaults.include_history),
+    }
+}
+
+pub fn set_local_llm_options(opts: LocalLlmOptions) {
+    let min_str = if opts.minimal_mode { "true" } else { "false" };
+    let _ = crate::fs_util::write_env_var_to_file(".env", "LOCAL_LLM_MINIMAL_MODE", min_str);
+    std::env::set_var("LOCAL_LLM_MINIMAL_MODE", min_str);
+
+    let win_str = if opts.active_window_only { "true" } else { "false" };
+    let _ = crate::fs_util::write_env_var_to_file(".env", "LOCAL_LLM_ACTIVE_WIN_ONLY", win_str);
+    std::env::set_var("LOCAL_LLM_ACTIVE_WIN_ONLY", win_str);
+
+    let fb_str = if opts.include_feedback { "true" } else { "false" };
+    let _ = crate::fs_util::write_env_var_to_file(".env", "LOCAL_LLM_FEEDBACK", fb_str);
+    std::env::set_var("LOCAL_LLM_FEEDBACK", fb_str);
+
+    let hist_str = if opts.include_history { "true" } else { "false" };
+    let _ = crate::fs_util::write_env_var_to_file(".env", "LOCAL_LLM_HISTORY", hist_str);
+    std::env::set_var("LOCAL_LLM_HISTORY", hist_str);
+}
+
+/// Prompt système unifié avec documentation détaillée des actions et syntaxe JSON
+pub const UNIFIED_LOCAL_SYSTEM_PROMPT: &str = r##"Tu es l'agent système Libertide. Réponds STRICTEMENT avec un unique objet JSON valide, sans aucun texte ou bloc markdown autour.
+Format JSON obligatoire :
+{
+  "narration": "Explication courte en français (1 à 3 paragraphes max de 2/3p ).",
+  "next_passes": 5,
+  "actions": [],
+  "quick_suggestions": ["Option 1", "Option 2"]
+}
+
+Règles de passes, navigation web et recherche :
+- Navigation web et recherche par étapes : Tu disposes d'un système de passes séquentielles pour explorer l'écran.
+  * Pour une recherche web, comparaison ou formulaire multi-étapes : définis "next_passes" entre 3 et 6.
+  * À chaque passe, exécute 1 ou 2 actions concrètes (ex: naviguer vers l'adresse web ou cliquer sur un résultat), puis analyse la nouvelle page à la passe suivante.
+  * Pour cliquer sur un résultat ou lien affiché à l'écran, privilégie "click_numbered_target" avec son numéro #id.
+  * Pour faire défiler les résultats d'une page longue, utilise {"action": "scroll", "direction": "down"}.
+  * Pour revenir à la page ou aux résultats précédents, utilise {"action": "navigate_back"}.
+  * Dès que l'information est obtenue ou que la tâche est terminée, renvoie "actions": [], "next_passes": 1, et résume le résultat dans "narration".
+
+Actions et commandes disponibles avec syntaxe :
+1. click_numbered_target : Clic sur un badge/numéro affiché à l'écran (#id)
+   Syntaxe : {"action": "click_numbered_target", "index": 1}
+2. click_element : Clic sur un élément textuel, bouton ou lien par son nom
+   Syntaxe : {"action": "click_element", "target_name": "Rechercher"}
+3. write_text : Saisie de texte dans un champ de formulaire ou de recherche
+   Syntaxe : {"action": "write_text", "text": "texte à taper", "target": "nom_champ", "press_enter": true}
+4. open_app : Lancer une application par son nom
+   Syntaxe : {"action": "open_app", "name": "notepad"}
+5. navigate_to_url : Ouvrir ou naviguer vers une adresse web
+   Syntaxe : {"action": "navigate_to_url", "url": "https://www.google.com"}
+6. open_search_browser : Sélectionner la barre d'adresse/recherche web du navigateur
+   Syntaxe : {"action": "open_search_browser"}
+7. navigate_back : Revenir à la page précédente dans l'historique web
+   Syntaxe : {"action": "navigate_back"}
+8. scroll : Faire défiler le contenu de la page ou fenêtre
+   Syntaxe : {"action": "scroll", "direction": "down"}
+9. accessibility_shortcut : Envoyer une touche système ou raccourci (enter, escape, close_tab)
+   Syntaxe : {"action": "accessibility_shortcut", "shortcut": "enter"}
+10. show_floating_card : Afficher une fiche ou synthèse d'informations volante
+    Syntaxe : {"action": "show_floating_card", "id": "info", "title": "Synthèse", "card_type": "markdown", "data": {"text": "# Titre\nContenu..."}}
+11. close_floating_card : Fermer une carte volante ouverte
+    Syntaxe : {"action": "close_floating_card", "id": "info"}
+
+Si aucune action n'est requise (simple question ou salutation), renvoie "actions": [].
 "##;
-
-/// Prompt standard pour modèles > 1B offrant de meilleures capacités de raisonnement et de fidélité :
-pub const STANDARD_SYSTEM_PROMPT: &str = r##"Tu es l'assistant vocal et système Libertide sur Windows.
-Tu aides l'utilisateur en fournissant des réponses complètes, claires et bien structurées.
-Lorsque l'écran ou une fenêtre est analysé, ne décris JAMAIS l'apparence visuelle, les widgets, les boutons ou leur disposition spatiale. Concentre-toi EXCLUSIVEMENT sur le fond : le résumé du contenu informationnel, les idées clés, le sujet traité et ce que la page ou l'application adresse.
-Tu dois répondre UNIQUEMENT avec un objet JSON valide contenant le champ "narration".
-
-Règles importantes :
-1. Aucun texte en dehors du bloc JSON.
-2. Synthèse du contenu uniquement : ignore l'agencement visuel, les zones graphiques et les détails d'interface.
-3. Utilise le format Markdown pour mettre en valeur les éléments clés.
-"##;
-
-pub const LOCAL_QWEN_SYSTEM_PROMPT: &str = COMPACT_SYSTEM_PROMPT;
 
 static LOCAL_ENGINE: Mutex<Option<LocalLlamaEngine>> = Mutex::new(None);
 static LAST_SPOKEN_NARRATION: Mutex<String> = Mutex::new(String::new());
@@ -732,68 +857,53 @@ pub fn run_local_llama_completion(
         last.clear();
     }
 
+    if !is_json_update {
+        let _ = event_tx.send(AgentEvent::NarrationStart);
+    }
+    
     let preset = get_active_preset();
-    let is_sub_1b = preset.is_sub_1b;
-
-    let generated_standard_prompt;
-    let effective_system_prompt: &str = if is_sub_1b {
-        if system_prompt.trim().is_empty()
-            || system_prompt.contains("Tu es l'agent d'exploration Libertide multiplateforme")
-        {
-            COMPACT_SYSTEM_PROMPT
-        } else {
-            system_prompt.trim()
-        }
+    let opts = get_local_llm_options();
+    let effective_system_prompt = if system_prompt.trim().is_empty() {
+        UNIFIED_LOCAL_SYSTEM_PROMPT.to_string()
+    } else if system_prompt.contains("Tu es l'agent système Libertide") {
+        system_prompt.trim().to_string()
     } else {
-        if !system_prompt.trim().is_empty() && system_prompt.contains("Tu es l'agent d'exploration Libertide multiplateforme") {
-            system_prompt.trim()
-        } else if !system_prompt.trim().is_empty() && system_prompt != COMPACT_SYSTEM_PROMPT && system_prompt != STANDARD_SYSTEM_PROMPT {
-            system_prompt.trim()
-        } else {
-            let (_, lang_name) = crate::get_system_locale_language();
-            generated_standard_prompt = crate::build_standard_system_instructions(&lang_name);
-            &generated_standard_prompt
-        }
+        format!("{}\n\n{}", UNIFIED_LOCAL_SYSTEM_PROMPT, system_prompt.trim())
     };
 
-    // Identifier le message utilisateur le plus récent (priorité absolue à la dernière consigne)
+    // Identifier le message utilisateur le plus récent (incluant éléments interactifs et consignes)
     let last_user_msg = messages
         .iter()
         .rev()
-        .find(|m| m.role == "user" && !is_json_payload(&m.content))
+        .find(|m| m.role == "user")
         .map(|m| m.content.trim())
-        .or_else(|| {
-            messages
-                .iter()
-                .rev()
-                .find(|m| m.role == "user")
-                .map(|m| m.content.trim())
-        })
         .unwrap_or("");
 
-    let clean_query = if is_sub_1b {
-        extract_clean_user_message(last_user_msg)
+    // Conserver le message utilisateur complet avec [État actuel de l'écran] pour la consigne courante
+    let clean_query = last_user_msg;
+
+    // Prise en compte de l'historique sans filtrer les éléments interactifs
+    let candidate_messages: Vec<&ChatMessage> = if opts.include_history {
+        messages.iter().collect()
     } else {
-        last_user_msg
+        messages.iter().rev().find(|m| m.role == "user").into_iter().collect()
     };
 
-    // Sélection des 5 derniers messages au maximum (en excluant les payloads techniques)
-    let non_payload_messages: Vec<&ChatMessage> = messages
+    // Conserver jusqu'à 8 messages (4 tours utilisateur + réponses assistant)
+    let start_idx = candidate_messages.len().saturating_sub(8);
+    let recent_messages = &candidate_messages[start_idx..];
+    let last_user_in_recent = recent_messages
         .iter()
-        .filter(|m| !is_json_payload(&m.content))
-        .collect();
-
-    let start_idx = non_payload_messages.len().saturating_sub(5);
-    let recent_messages = &non_payload_messages[start_idx..];
+        .rposition(|m| m.role == "user");
 
     let mut formatted_prompt = String::new();
-    let user_token_budget = if is_sub_1b { 1500 } else { 10000 };
-    let query_token_budget = if is_sub_1b { 2000 } else { 10000 };
+    let user_token_budget = 10000;
+    let query_token_budget = 10000;
 
     match preset.family {
         ModelFamily::Llama3 => {
             formatted_prompt.push_str("<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n");
-            formatted_prompt.push_str(effective_system_prompt);
+            formatted_prompt.push_str(&effective_system_prompt);
             formatted_prompt.push_str("<|eot_id|>");
 
             if recent_messages.is_empty() {
@@ -802,18 +912,18 @@ pub fn run_local_llama_completion(
                 formatted_prompt.push_str(safe_query);
                 formatted_prompt.push_str("<|eot_id|>");
             } else {
-                for msg in recent_messages {
+                for (idx, msg) in recent_messages.iter().enumerate() {
                     if msg.role == "assistant" {
                         formatted_prompt.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
-                        let safe_assistant = safe_truncate_str(msg.content.trim(), if is_sub_1b { 1200 } else { 2500 });
+                        let safe_assistant = safe_truncate_str(msg.content.trim(), 2000);
                         formatted_prompt.push_str(safe_assistant);
                         formatted_prompt.push_str("<|eot_id|>");
                     } else {
                         formatted_prompt.push_str("<|start_header_id|>user<|end_header_id|>\n\n");
-                        let user_text = if is_sub_1b {
-                            extract_clean_user_message(&msg.content)
-                        } else {
+                        let user_text = if Some(idx) == last_user_in_recent {
                             msg.content.trim()
+                        } else {
+                            extract_clean_user_message(&msg.content)
                         };
                         let safe_user = safe_truncate_str(user_text, user_token_budget);
                         formatted_prompt.push_str(safe_user);
@@ -834,7 +944,7 @@ pub fn run_local_llama_completion(
         }
         ModelFamily::ChatML => {
             formatted_prompt.push_str("<|im_start|>system\n");
-            formatted_prompt.push_str(effective_system_prompt);
+            formatted_prompt.push_str(&effective_system_prompt);
             formatted_prompt.push_str("<|im_end|>\n");
 
             if recent_messages.is_empty() {
@@ -843,18 +953,18 @@ pub fn run_local_llama_completion(
                 formatted_prompt.push_str(safe_query);
                 formatted_prompt.push_str("<|im_end|>\n");
             } else {
-                for msg in recent_messages {
+                for (idx, msg) in recent_messages.iter().enumerate() {
                     if msg.role == "assistant" {
                         formatted_prompt.push_str("<|im_start|>assistant\n");
-                        let safe_assistant = safe_truncate_str(msg.content.trim(), if is_sub_1b { 1200 } else { 2500 });
+                        let safe_assistant = safe_truncate_str(msg.content.trim(), 2000);
                         formatted_prompt.push_str(safe_assistant);
                         formatted_prompt.push_str("<|im_end|>\n");
                     } else {
                         formatted_prompt.push_str("<|im_start|>user\n");
-                        let user_text = if is_sub_1b {
-                            extract_clean_user_message(&msg.content)
-                        } else {
+                        let user_text = if Some(idx) == last_user_in_recent {
                             msg.content.trim()
+                        } else {
+                            extract_clean_user_message(&msg.content)
                         };
                         let safe_user = safe_truncate_str(user_text, user_token_budget);
                         formatted_prompt.push_str(safe_user);

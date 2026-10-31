@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 pub use crate::scheduler::*;
 pub use crate::autostart::*;
+use crate::get_window_title;
 
 use crate::fs_util::{
     create_temp_note_file, find_executable_in_path, find_file_in_workspace,
@@ -2775,14 +2776,14 @@ pub fn truncate_with_notice(text: &str, max_chars: usize) -> String {
 }
 
 pub fn is_address_bar_target(target: &str) -> bool {
-    let t = target.trim().to_lowercase();
+    let t = target.trim().to_lowercase().replace('_', " ").replace('-', " ");
     let clean = t
         .strip_prefix("[navigateur]").unwrap_or(&t)
         .strip_prefix("navigateur:").unwrap_or(&t)
         .strip_prefix("[browser]").unwrap_or(&t)
         .strip_prefix("browser:").unwrap_or(&t)
         .trim();
-    clean == "url"
+    clean == "url" 
         || clean.contains("url")
         || clean.contains("adresse")
         || clean.contains("address")
@@ -3509,13 +3510,17 @@ pub fn get_active_field_content() -> Option<String> {
         };
 
         let overlay_hwnd = FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()));
+        let current_pid = std::process::id();
 
         if let Ok(focused) = uia.GetFocusedElement() {
-            let is_overlay = if let Ok(native_handle) = focused.CurrentNativeWindowHandle() {
-                HWND(native_handle.0 as _) == overlay_hwnd
-            } else {
-                false
-            };
+            let native_hwnd = focused.CurrentNativeWindowHandle().ok().map(|h| HWND(h.0 as _));
+            let is_overlay = native_hwnd.map_or(false, |h| {
+                if h == overlay_hwnd {
+                    return true;
+                }
+                let (focused_pid, _) = get_window_process_info(h);
+                focused_pid == current_pid
+            });
 
             let class_name = focused.CurrentClassName().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
             let loc_type = focused.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
@@ -3872,6 +3877,136 @@ pub fn generate_fallback_suggestions_from_screen(screen_summary: &str) -> Vec<Qu
     suggestions
 }
 
+/// Extrait exclusivement le contenu textuel et informatif de la fenêtre cible
+/// en éliminant tous les contrôles interactifs (boutons, combobox, onglets, coordonnées...).
+#[cfg(windows)]
+pub fn extract_window_text_only(hwnd: HWND) -> String {
+    if hwnd.0.is_null() || is_window_hung(hwnd) {
+        return String::new();
+    }
+
+    let (pid, _) = get_window_process_info(hwnd);
+    if pid == std::process::id() {
+        return String::new();
+    }
+
+    let title = get_window_title(hwnd);
+    if title.to_lowercase().contains("libertide") {
+        return String::new();
+    }
+    let mut lines = Vec::new();
+
+    if !title.is_empty() {
+        lines.push(format!("[Fenêtre active : \"{}\"]", title));
+    }
+
+    // 1. Si c'est un terminal, extraire directement la sortie console
+    if is_terminal_window(hwnd, &title) {
+        if let Some(term_text) = read_terminal_window_content(hwnd, &title) {
+            let clean = term_text.trim();
+            if !clean.is_empty() {
+                lines.push(clean.to_string());
+                return truncate_with_notice(&lines.join("\n\n"), 10000);
+            }
+        }
+    }
+
+    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let mut seen = std::collections::HashSet::new();
+
+    if let Ok(uia) = unsafe { CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) } {
+        if let Ok(win_elem) = unsafe { uia.ElementFromHandle(hwnd) } {
+            // 2. Si c'est un navigateur, extraire en priorité le texte du document web
+            if is_browser_hwnd(hwnd, &title) {
+                if let Ok(cond_doc) = unsafe {
+                    uia.CreatePropertyCondition(
+                        windows::Win32::UI::Accessibility::UIA_ControlTypePropertyId,
+                        &windows::core::VARIANT::from(UIA_DocumentControlTypeId.0),
+                    )
+                } {
+                    if let Ok(doc_elements) = unsafe { win_elem.FindAll(TreeScope_Descendants, &cond_doc) } {
+                        let doc_count = unsafe { doc_elements.Length().unwrap_or(0).min(6) };
+                        let mut best_text = String::new();
+                        for di in 0..doc_count {
+                            if let Ok(doc_elem) = unsafe { doc_elements.GetElement(di) } {
+                                if let Some(doc_text) = extract_web_document_text(&doc_elem, 15000) {
+                                    if doc_text.len() > best_text.len() {
+                                        best_text = doc_text;
+                                    }
+                                }
+                            }
+                        }
+                        if !best_text.is_empty() {
+                            let clean_text = if best_text.contains('<') && best_text.contains('>') {
+                                crate::html_util::sanitize_html_to_markdown(&best_text)
+                            } else {
+                                best_text
+                            };
+                            for l in clean_text.lines() {
+                                let trimmed = l.trim();
+                                if trimmed.len() >= 2 && !seen.contains(trimmed) {
+                                    seen.insert(trimmed.to_string());
+                                    lines.push(trimmed.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. Parcourir les nœuds textuels descendants (text, document, edit, labels)
+            if lines.len() <= 2 {
+                if let Ok(cond) = unsafe { uia.ControlViewCondition() } {
+                    if let Ok(elements) = unsafe { win_elem.FindAll(TreeScope_Descendants, &cond) } {
+                        let count = unsafe { elements.Length().unwrap_or(0).min(120) };
+                        for i in 0..count {
+                            if let Ok(elem) = unsafe { elements.GetElement(i) } {
+                                let ctype = unsafe { elem.CurrentControlType().unwrap_or_default() };
+                                let is_text_type = ctype == UIA_DocumentControlTypeId
+                                    || ctype == UIA_EditControlTypeId
+                                    || ctype.0 == 50020; // UIA_TextControlTypeId
+
+                                let class_name = unsafe { elem.CurrentClassName().map(|b| b.to_string().to_lowercase()).unwrap_or_default() };
+                                let is_static_or_label = class_name.contains("static") || class_name.contains("text") || class_name.contains("label");
+
+                                if is_text_type || is_static_or_label {
+                                    if let Some(txt) = extract_inner_text(&uia, &elem, 800) {
+                                        let clean = txt.trim();
+                                        if clean.len() >= 3 && !seen.contains(clean) && !clean.starts_with("http") {
+                                            seen.insert(clean.to_string());
+                                            lines.push(clean.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Repli OCR si très peu de texte natif extrait (Canvas, Java Swing, app legacy)
+    if lines.len() <= 2 {
+        let mut r = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut r).is_ok() } {
+            let zone_rect = [r.left, r.top, r.right, r.bottom];
+            let ocr_text = extract_text_from_zone(hwnd, zone_rect, &[]);
+            let clean_ocr = ocr_text.trim();
+            if !clean_ocr.is_empty() {
+                lines.push(clean_ocr.to_string());
+            }
+        }
+    }
+
+    truncate_with_notice(&lines.join("\n"), 10000)
+}
+
+#[cfg(not(windows))]
+pub fn extract_window_text_only(_target: impl AsWindowTarget) -> String {
+    summarize_screen_state(None, false)
+}
+
 #[cfg(windows)]
 pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) -> String {
     let work_area = get_desktop_work_area();
@@ -3895,7 +4030,7 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
             .or_else(|| get_active_or_best_window(&user_windows))
             .or_else(|| find_best_browser_window(&user_windows, None))
             .or_else(|| user_windows.first().map(|(h, _)| *h))
-            .unwrap_or(raw_fg)
+            .unwrap_or(HWND(std::ptr::null_mut()))
     };
 
     let prev_screen_snapshot = LAST_SCREEN_SUMMARY.lock().ok().and_then(|g| g.clone());
@@ -3915,12 +4050,16 @@ pub fn summarize_screen_state(target_window: Option<&str>, _autoscroll: bool) ->
         }
     }
 
-    if inspect_hwnds.is_empty() {
-        inspect_hwnds.push(active_hwnd);
-        for (h, _) in &user_windows {
-            if !inspect_hwnds.contains(h) && inspect_hwnds.len() < 3 {
-                inspect_hwnds.push(*h);
-            }
+    if inspect_hwnds.is_empty() && !active_hwnd.0.is_null() {
+        let (pid, _) = get_window_process_info(active_hwnd);
+        if pid != current_pid {
+            inspect_hwnds.push(active_hwnd);
+        }
+    }
+    for (h, _) in &user_windows {
+        let (h_pid, _) = get_window_process_info(*h);
+        if h_pid != current_pid && !inspect_hwnds.contains(h) && inspect_hwnds.len() < 3 {
+            inspect_hwnds.push(*h);
         }
     }
 
