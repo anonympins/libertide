@@ -2024,6 +2024,65 @@ pub fn localized_speech(
     }
 }
 
+/// Met en forme la liste des suggestions rapides pour une annonce vocale fluide par le narrateur
+pub fn format_suggestions_for_speech(suggestions: &[QuickSuggestionItem]) -> Option<String> {
+    let valid_suggestions: Vec<String> = suggestions
+        .iter()
+        .filter_map(|sug| sug.to_display_string())
+        .map(|s| {
+            s.trim()
+                .trim_start_matches(|c: char| !c.is_alphanumeric() && c != '(' && c != '[' && c != '#')
+                .trim()
+                .to_string()
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if valid_suggestions.is_empty() {
+        return None;
+    }
+
+    let locale = rust_i18n::locale();
+    let intro = if valid_suggestions.len() == 1 {
+        localized_speech(
+            &locale,
+            "Suggestion :",
+            "Suggestion:",
+            "Sugerencia:",
+            "Vorschlag:",
+            "Suggerimento:",
+            "Sugestão:",
+            "Предложение:",
+            "建议：",
+            "提案：",
+        )
+    } else {
+        localized_speech(
+            &locale,
+            "Suggestions :",
+            "Suggestions:",
+            "Sugerencias:",
+            "Vorschläge:",
+            "Suggerimenti:",
+            "Sugestões:",
+            "Предложения:",
+            "建议：",
+            "提案：",
+        )
+    };
+
+    let mut out = String::new();
+    out.push_str(&intro);
+    for item in valid_suggestions {
+        out.push(' ');
+        out.push_str(&item);
+        if !item.ends_with('.') && !item.ends_with('!') && !item.ends_with('?') {
+            out.push('.');
+        }
+    }
+    Some(out)
+}
+
 pub fn setup_custom_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 

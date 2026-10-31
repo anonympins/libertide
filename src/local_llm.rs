@@ -350,6 +350,7 @@ pub enum CommandTag {
     RadioAndMusicStream,
     TravelAndFlightBooking,
     BrowserTabNavigation,
+    NavigateInWebpage,
 }
 
 impl CommandTag {
@@ -375,6 +376,7 @@ impl CommandTag {
         Self::RadioAndMusicStream,
         Self::TravelAndFlightBooking,
         Self::BrowserTabNavigation,
+        Self::NavigateInWebpage,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -400,6 +402,7 @@ impl CommandTag {
             Self::RadioAndMusicStream => "RADIO_AND_MUSIC_STREAM",
             Self::TravelAndFlightBooking => "TRAVEL_AND_FLIGHT_BOOKING",
             Self::BrowserTabNavigation => "BROWSER_TAB_NAVIGATION",
+            Self::NavigateInWebpage => "NAVIGATE_IN_WEBPAGE",
         }
     }
 
@@ -426,6 +429,7 @@ impl CommandTag {
             Self::RadioAndMusicStream => "Lecture de radio en direct, webradio, streaming musical, contrôle de lecture et médias web (navigate_to_url, click_button direct/play, set_volume)",
             Self::TravelAndFlightBooking => "Recherche et réservation de billets d'avion, comparatifs de vols, formulaires de voyage et filtres interactifs (show_floating_card form/table, navigate_to_url Google Flights)",
             Self::BrowserTabNavigation => "Gestion et recherche d'onglets de navigateur, bascule entre onglets, ouverture/fermeture d'onglets (click_element sur onglet, close_tab, navigate_to_url target new_tab)",
+            Self::NavigateInWebpage => "Navigation approfondie dans le contenu de la page web ouverte, acceptation des cookies, fermeture des popups, clic sur les liens/boutons de résultats et lancement de direct/audio (navigate_to_url, click_element, click_button, scroll)",
         }
     }
 
@@ -474,6 +478,8 @@ impl CommandTag {
             Some(Self::TravelAndFlightBooking)
         } else if upper.contains("TAB") || upper.contains("ONGLET") {
             Some(Self::BrowserTabNavigation)
+        } else if upper.contains("NAVIGATE_IN_WEBPAGE") || upper.contains("WEBPAGE") || upper.contains("PAGE_WEB") {
+            Some(Self::NavigateInWebpage)
         } else {
             None
         }
@@ -494,7 +500,7 @@ pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
     let mut tags = Vec::new();
 
     // 0. Détection prioritaire : Radio, musique et streaming audio en direct
-    if lower.contains("radio") || lower.contains("france inter") || lower.contains("france info") || lower.contains("franceinfo")
+    if lower.contains("radio") || lower.contains("radio france") || lower.contains("france inter") || lower.contains("france info") || lower.contains("franceinfo")
         || lower.contains("rtl") || lower.contains("nrj") || lower.contains("nostalgie") || lower.contains("skyrock")
         || lower.contains("fip") || lower.contains("europe 1") || lower.contains("chérie fm") || lower.contains("cherie fm")
         || lower.contains("webradio") || lower.contains("musique") || lower.contains("playlist") || lower.contains("deezer")
@@ -502,6 +508,9 @@ pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
         || ((lower.contains("écoute") || lower.contains("ecoute") || lower.contains("écouter") || lower.contains("ecouter") || lower.contains("mets ") || lower.contains("lance "))
             && (lower.contains("radio") || lower.contains("direct") || lower.contains("live") || lower.contains("musique") || lower.contains("chanson"))) {
         tags.push(CommandTag::RadioAndMusicStream);
+        if !tags.contains(&CommandTag::NavigateInWebpage) {
+            tags.push(CommandTag::NavigateInWebpage);
+        }
         if !tags.contains(&CommandTag::WebNavigateOrSearch) {
             tags.push(CommandTag::WebNavigateOrSearch);
         }
@@ -532,6 +541,20 @@ pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
         || lower.contains("bascule sur l'onglet") || lower.contains("va sur l'onglet") || lower.contains("passe à l'onglet")
         || lower.contains("recherche onglet") || lower.contains("trouve l'onglet") || lower.contains("ferme onglet") {
         tags.push(CommandTag::BrowserTabNavigation);
+        if !tags.contains(&CommandTag::ClickElementOrButton) {
+            tags.push(CommandTag::ClickElementOrButton);
+        }
+    }
+
+    // 0 quater. Détection prioritaire : Vidéos, films, streaming, séries et divertissement
+    if lower.contains("film") || lower.contains("films") || lower.contains("série") || lower.contains("series")
+        || lower.contains("streaming") || lower.contains("cinéma") || lower.contains("cinema")
+        || lower.contains("vidéo") || lower.contains("video") || lower.contains("documentaire")
+        || lower.contains("replay") || lower.contains("arte") || lower.contains("netflix") || lower.contains("pluto") {
+        tags.push(CommandTag::WebNavigateOrSearch);
+        if !tags.contains(&CommandTag::NavigateInWebpage) {
+            tags.push(CommandTag::NavigateInWebpage);
+        }
         if !tags.contains(&CommandTag::ClickElementOrButton) {
             tags.push(CommandTag::ClickElementOrButton);
         }
@@ -570,6 +593,9 @@ pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
         || lower.contains("météo") || lower.contains("meteo") || lower.contains("radio") || lower.contains("youtube")
         || lower.contains("site") || lower.contains("page web") || lower.contains("http") || lower.contains(".com") || lower.contains(".fr") {
         tags.push(CommandTag::WebNavigateOrSearch);
+        if !tags.contains(&CommandTag::NavigateInWebpage) {
+            tags.push(CommandTag::NavigateInWebpage);
+        }
     }
 
     // 2. Détection enrichie de l'interactivité UI (clics, sélection, formulaires, défilement)
@@ -707,6 +733,9 @@ pub fn build_routed_system_prompt(tags: &[CommandTag], lang_name: &str) -> Strin
     // Synergies d'interactivité : La navigation web ou l'accès par contacteur
     // nécessitent naturellement les outils de clics, de saisie et de défilement.
     if effective_tags.contains(&CommandTag::WebNavigateOrSearch) {
+        if !effective_tags.contains(&CommandTag::NavigateInWebpage) {
+            effective_tags.push(CommandTag::NavigateInWebpage);
+        }
         if !effective_tags.contains(&CommandTag::ClickElementOrButton) {
             effective_tags.push(CommandTag::ClickElementOrButton);
         }
@@ -718,6 +747,9 @@ pub fn build_routed_system_prompt(tags: &[CommandTag], lang_name: &str) -> Strin
         }
     }
     if effective_tags.contains(&CommandTag::RadioAndMusicStream) {
+        if !effective_tags.contains(&CommandTag::NavigateInWebpage) {
+            effective_tags.push(CommandTag::NavigateInWebpage);
+        }
         if !effective_tags.contains(&CommandTag::WebNavigateOrSearch) {
             effective_tags.push(CommandTag::WebNavigateOrSearch);
         }
@@ -764,14 +796,39 @@ Format JSON obligatoire :
 {{
   "narration": "Description détaillée, explicative et bienveillante rédigée impérativement en {lang_name} (2 à 4 phrases complètes). Précise le contexte à l'écran, l'action menée et ce qui a changé afin de guider précisément les personnes en situation de handicap.",
   "next_passes": 5,
-  "actions": [],
+  "actions": [
+    {{"action": "click_button", "button_name": "Texte visible exact"}}
+  ],
   "quick_suggestions": ["Option 1", "Option 2"]
 }}
+
+STRUCTURE STRICTE DU TABLEAU "actions" :
+- "actions" est TOUJOURS une liste d'OBJETS JSON. Chaque action DOIT être un objet ayant impérativement la clé "action".
+- EXEMPLE VALIDE : "actions": [{{"action": "click_button", "button_name": "Se connecter avec Google"}}]
+- ERREURS DE SYNTAXE STRICTEMENT INTERDITES :
+  * INTERDIT : ["click_button" : "..."] (le deux-points dans un tableau est un JSON invalide !)
+  * INTERDIT : {{"click_button": "..."}} (l'action doit être un élément objet dans une liste)
+  * INTERDIT d'écrire "Bouton" ou "Lien" dans "button_name" ou "target_name" : écris UNIQUEMENT le texte exact "Se connecter avec Google" et SURTOUT PAS 'Bouton "Se connecter avec Google"'.
+
+RÈGLE D'ACTION OBLIGATOIRE ET INTERDICTION DU CONSEIL PASSIF :
+- Tu es un agent d'action et d'exécution directe pour l'accessibilité, et NON un conseiller théorique ni un chatbot passif.
+- INTERDICTION STRICTE DE DONNER DES CONSEILS PASSIFS OU DE DÉCRIRE LA MÉTHODE ("Il faudrait...", "Vous pouvez vous rendre sur...", "Voici la méthode...").
+- Dès que l'utilisateur demande une action, une recherche (films, vidéos, streaming, météo, service), ou un média : TU DOIS EFFECTUER TOI-MÊME L'ACTION IMMÉDIATEMENT en fournissant l'action concrète dans "actions" (ex: "navigate_to_url" vers Google ou la plateforme) avec "next_passes" > 0 !
+- "actions": [] est STRICTEMENT RÉSERVÉ aux salutations pures (bonjour/merci) OU lorsque l'objectif final est déjà pleinement atteint et visible à l'écran.
+
+RÉTRO-ANALYSE COGNITIVE & ARRÊT STRICT SUR OBJECTIF (SELF-CHECK DE COMPLÉTION) :
+- Compare systématiquement : [État actuel de l'écran] vs [Demande initiale de l'utilisateur].
+- SI LA CIBLE EST ATTEINTE (page de films/vidéos affichée, vidéo en lecture, formulaire validé, texte saisi, information demandée lisible à l'écran) :
+  -> ARRÊT STRICT ET IMMÉDIAT : renvoie impérativement "actions": [] et "next_passes": 0.
+  -> INTERDICTION FORMELLE DE SUR-AGIR : Ne clique JAMAIS au hasard, ne défile pas indéfiniment et ne clique pas sur des recommandations secondaires, publicités ou menus inutiles une fois sur la destination demandée.
+- SI LA CIBLE N'EST PAS ENCORE ATTEINTE (page intermédiaire, moteur de recherche en attente de clic, cookies ou popups bloquantes) :
+  -> Fournis l'unique action concrète suivante dans "actions" avec "next_passes" > 0.
 
 Règles de syntaxe JSON strictes :
 - N'échappe JAMAIS les apostrophes simples : écris "d'accueil", "l'écran", "c'est" et SURTOUT PAS "d\'accueil" ou "l\'écran".
 - Dans "target_name" de "click_element" ou "button_name" de "click_button", écris UNIQUEMENT le texte lisible ou titre du bouton/lien, SANS préfixe (#id), SANS type ([lien]), SANS URL.
-- ARRÊT STRICT DÈS OBJECTIF ATTEINT (RÈGLE PRIORITAIRE) : Dès que l'objectif principal demandé par l'utilisateur est terminé ou accompli (application ouverte, information trouvée, média/radio en lecture, action ou texte saisi), ARRÊTE IMMÉDIATEMENT : renvoie STRICTEMENT "actions": [], "next_passes": 0, et résume le résultat dans "narration" en {lang_name}.
+- VÉRIFICATION D'ACCOMPLISSEMENT DE L'OBJECTIF AVANT ARRÊT : Avant de renvoyer "actions": [], vérifie rigoureusement que la demande initiale de l'utilisateur est concrètement et intégralement accomplie à l'écran. Si l'écran affiche encore une page intermédiaire (résultats de recherche, formulaire non validé, cookies en attente, flux audio non démarré), INTERDICTION de t'arrêter : continue vers l'action concrète suivante avec "next_passes" > 0.
+- ARRÊT STRICT UNIQUEMENT DÈS OBJECTIF RÉELLEMENT ATTEINT : Dès que l'objectif principal demandé par l'utilisateur est pleinement terminé (application ouverte, information trouvée, média/radio en lecture, action ou texte saisi), ARRÊTE : renvoie STRICTEMENT "actions": [], "next_passes": 0, et résume le résultat dans "narration" en {lang_name}.
 "#
     );
     prompt.push_str(&header);
@@ -783,6 +840,7 @@ Règles de syntaxe JSON strictes :
                 prompt.push_str(r#"
 Règles NAVIGATION WEB & RECHERCHE :
 - Outil majeur : ouvre directement le web via "navigate_to_url" (ex: "https://www.google.com/search?q=...") ou "open_search_browser".
+- RECHERCHE IMMÉDIATE SANS CONSEIL : Si l'utilisateur demande une recherche (ex: film, streaming, vidéo, cours, information), INTERDICTION de répondre par du texte passif. Émets IMMÉDIATEMENT {"action": "navigate_to_url", "url": "https://www.google.com/search?q=...", "target": "new_tab"} avec "next_passes": 5.
 - INTERDICTION de fermer la fenêtre active (pas de "close_app" ni clic croix) pour chercher sur le web.
 - Clique directement sur le résultat textuel du sujet demandé, JAMAIS sur les filtres/onglets génériques du moteur ("Actualités", "Vidéos", "Images", "Outils").
 - Accepte systématiquement les bannières cookies ("Tout accepter").
@@ -790,16 +848,27 @@ Règles NAVIGATION WEB & RECHERCHE :
 - Pour revenir en arrière : "navigate_back".
 "#);
             }
+            CommandTag::NavigateInWebpage => {
+                prompt.push_str(r#"
+Règles NAVIGATION DANS LA PAGE WEB (TAG NAVIGATE_IN_WEBPAGE) :
+- Quand le navigateur est ouvert ou qu'une page web est atteinte : INTERDICTION FORMELLE de t'arrêter à la simple ouverture ! Tu DOIS naviguer DANS la page web.
+- Étape 1 : Valide immédiatement les bandeaux de consentement ou cookies ("Tout accepter", "Accepter tout", "Autoriser").
+- Étape 2 : Ferme les popups/bannières intrusives de notifications web ("Fermer", croix ✕, "Plus tard").
+- Étape 3 : Repère les contrôles interactifs pertinents (bouton "Écouter le direct", "Direct", "Play", station radio, lecteur [@audio:...] / [@video:...]) et clique dessus via "click_element" ou "click_button".
+- Étape 4 : Fais défiler la page avec "scroll" ("down") si les boutons ou contrôles de lecture ne sont pas visibles d'emblée.
+- Étape 5 : Tant que le flux audio n'est pas lancé ou que la page n'est pas traitée, continue avec "next_passes" > 0.
+"#);
+            }
             CommandTag::ClickElementOrButton => {
                 prompt.push_str(r#"
 Règles CLICS ET CIBLAGE :
 - UN SEUL CLIC PAR PASSE : 1 seule action "click_element", "click_button" ou "click_numbered_target". Interdiction d'enchaîner deux clics dans la même passe.
-- "click_element" : cible un lien ou un élément d'interface textuel par son libellé visible ("target_name").
-- "click_button" : cible un bouton interactif par son nom visible ("button_name").
-- "click_numbered_target" : clique directement sur un numéro de badge affiché à l'écran ("index": N).
+- Pour cliquer sur un lien ou texte interactif : {"action": "click_element", "target_name": "Libellé visible exact"}.
+- Pour cliquer sur un bouton : {"action": "click_button", "button_name": "Libellé visible exact"} (ex: {"action": "click_button", "button_name": "Se connecter avec Google"}, SANS le mot "Bouton").
+- Pour cliquer sur un numéro de badge : {"action": "click_numbered_target", "index": N}.
 - "focus_element" : place le focus sur un contrôle sans forcément le valider.
 - "scroll" : fait défiler la vue pour révéler des contrôles cachés ("direction": "down"|"up"|"bottom"|"top", "amount": 1..2).
-- Renseigne toujours la cible exacte visible à l'écran.
+- Renseigne toujours la cible exacte visible à l'écran, SANS préfixe (#id), SANS type ([bouton]), SANS guillemets imbriqués.
 "#);
             }
             CommandTag::TextInputOrDictation => {
@@ -963,6 +1032,11 @@ Règles CONVERSATION :
                 prompt.push_str("- {\"action\": \"navigate_back\"}\n");
                 prompt.push_str("- {\"action\": \"navigate_forward\"}\n");
             }
+            CommandTag::NavigateInWebpage => {
+                prompt.push_str("- {\"action\": \"click_element\", \"target_name\": \"Écouter le direct\"}\n");
+                prompt.push_str("- {\"action\": \"click_button\", \"button_name\": \"Direct\"}\n");
+                prompt.push_str("- {\"action\": \"scroll\", \"direction\": \"down\", \"amount\": 1}\n");
+            }
             CommandTag::ClickElementOrButton => {
                 prompt.push_str("- {\"action\": \"click_element\", \"target_name\": \"Libellé du lien ou élément\"}\n");
                 prompt.push_str("- {\"action\": \"click_button\", \"button_name\": \"Libellé du bouton\"}\n");
@@ -1065,9 +1139,17 @@ Format JSON obligatoire :
 {
   "narration": "Description détaillée, explicative et bienveillante rédigée impérativement en {lang_name} (2 à 4 phrases complètes). Décris la disposition générale de l'écran, les éléments trouvés, l'action entreprise et son résultat pour compenser l'absence de vision ou faciliter l'accessibilité cognitive.",
   "next_passes": 5,
-  "actions": [],
+  "actions": [
+    {"action": "click_button", "button_name": "Texte visible exact"}
+  ],
   "quick_suggestions": ["Option 1", "Option 2"]
 }
+
+STRUCTURE STRICTE DU TABLEAU "actions" :
+- Chaque action DOIT être un objet JSON complet contenant la clé "action".
+- EXEMPLE VALIDE : "actions": [{"action": "click_button", "button_name": "Se connecter avec Google"}]
+- SYNTAXES STRICTEMENT INTERDITES : ["click_button" : "..."] ou {"click_button": "..."}.
+- Dans "button_name" ou "target_name", retire impérativement le mot "Bouton" ou "Lien" et les guillemets imbriqués.
 
 Règles de syntaxe JSON strictes :
 - N'échappe JAMAIS les apostrophes simples : écris "d'accueil", "l'écran", "c'est" et SURTOUT PAS "d\'accueil" ou "l\'écran". L'échappement \' est une erreur de syntaxe en JSON.
@@ -1080,8 +1162,14 @@ Règles de passes, navigation web et recherche :
   * INTERDICTION FORMELLE DE FERMER LA FENÊTRE ACTIVE : Ne ferme JAMAIS la fenêtre actuelle (pas de "close_app", ni de clic sur "Fermer (croix ✕)") pour lancer une recherche ou ouvrir un site. Conserve les applications de l'utilisateur et ouvre directement le navigateur par-dessus.
   * Ne te laisse pas happer par la fenêtre active : si elle ne correspond pas à la demande (ex: éditeur de code, terminal, document), n'interagis pas au hasard avec et ne tente pas de la fermer ; lance immédiatement la navigation web !
 - UN SEUL CLIC PAR PASSE (RÈGLE STRICTE) : "actions" ne doit contenir qu'UNE SEULE action de clic ("click_element", "click_button" ou "click_numbered_target") à la fois. INTERDICTION FORMELLE d'enchaîner deux clics consécutifs dans la même passe, car la page change dès le premier clic !
+RÉTRO-ANALYSE COGNITIVE & SELF-CHECK DE COMPLÉTION :
+- Avant chaque action, confronte [État actuel de l'écran] à la [Demande initiale de l'utilisateur].
+- Si la page cible, vidéo, résultat ou état désiré est affiché : STOP IMMEDIAT ("actions": [], "next_passes": 0).
+- INTERDICTION STRICTE DE SUR-AGIR : Pas de clic parasite sur les vidéos suggérées, publicités ou liens secondaires une fois la destination atteinte.
+
 2. ARRÊT STRICT DÈS OBJECTIF ATTEINT (RÈGLE PRIORITAIRE) : Dès que l'objectif principal demandé par l'utilisateur est terminé ou accompli (application ouverte, information trouvée, média/radio en lecture, action ou texte saisi), ARRÊTE IMMÉDIATEMENT : renvoie STRICTEMENT "actions": [], "next_passes": 0, et résume le résultat dans "narration" en {lang_name}. INTERDICTION FORMELLE de faire des passes supplémentaires ou des clics superflus une fois l'objectif initial terminé.
-3. PRIORITÉ ABSOLUE AUX RÉSULTATS DU SUJET DEMANDÉ (PAS DE NAVIGATION DANS LES MENUS DU MOTEUR) :
+- VÉRIFICATION D'OBJECTIF : Si tu es sur un moteur de recherche ou une page intermédiaire, l'objectif n'est PAS encore atteint ! Clique sur le résultat textuel du sujet ou accepte les bannières pour atteindre la finalité.
+4. PRIORITÉ ABSOLUE AUX RÉSULTATS DU SUJET DEMANDÉ (PAS DE NAVIGATION DANS LES MENUS DU MOTEUR) :
   * Lorsque des résultats web ou liens sont affichés (Google, Bing, portail), cherche et clique DIRECTEMENT sur le lien textuel ou bouton du résultat qui répond à l'objectif de la demande (ex: nom de la radio mentionnée dans la narration, site officiel, article ou bouton "Écouter en direct").
   * INTERDICTION FORMELLE de cliquer sur les onglets ou filtres génériques du moteur de recherche ("Actualités", "Vidéos", "Images", "Shopping", "Tous", "Outils", "Filtres", "Paramètres"). Ces liens ne sont PAS des résultats et font échouer la recherche !
 4. INSTRUCTIONS PRÉCISES D'INTERFACE & DE NAVIGATION :
@@ -1159,6 +1247,299 @@ Actions et commandes disponibles avec syntaxe :
 static LOCAL_ENGINE: Mutex<Option<LocalLlamaEngine>> = Mutex::new(None);
 static LAST_SPOKEN_NARRATION: Mutex<String> = Mutex::new(String::new());
 
+fn action_param_field_for(action: &str) -> &'static str {
+    match action {
+        "click_button" => "button_name",
+        "click_element" | "focus_element" => "target_name",
+        "click_numbered_target" => "index",
+        "navigate_to_url" | "open_browser" => "url",
+        "open_app" | "close_app" => "name",
+        "write_text" | "dictate" | "replace_field_text" => "text",
+        "focus_window" => "title",
+        "scroll" => "direction",
+        "accessibility_shortcut" => "shortcut",
+        "set_volume" => "command",
+        "show_floating_card" => "title",
+        "close_floating_card" => "id",
+        _ => "target_name",
+    }
+}
+
+fn clean_action_target_str(s: &str) -> String {
+    let mut trimmed = s.trim();
+
+    if (trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2)
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2)
+    {
+        trimmed = trimmed[1..trimmed.len() - 1].trim();
+    }
+
+    if trimmed.starts_with('#') {
+        if let Some(pos) = trimmed.find(']') {
+            trimmed = trimmed[pos + 1..].trim();
+        }
+    }
+
+    let lower = trimmed.to_lowercase();
+    for prefix in &[
+        "[bouton]", "[button]", "[lien]", "[link]", "[onglet]", "[tab]", "[saisie]", "[input]",
+        "bouton", "button", "lien", "link",
+    ] {
+        if lower.starts_with(prefix) {
+            trimmed = trimmed[prefix.len()..].trim();
+            break;
+        }
+    }
+
+    trimmed = trimmed.trim_start_matches(|c| c == ':' || c == '-' || c == ' ');
+
+    let mut result = trimmed.to_string();
+    if result.starts_with("\\\"") && result.ends_with("\\\"") && result.len() >= 4 {
+        result = result[2..result.len() - 2].to_string();
+    } else if result.starts_with('"') && result.ends_with('"') && result.len() >= 2 {
+        result = result[1..result.len() - 1].to_string();
+    } else if result.starts_with('\'') && result.ends_with('\'') && result.len() >= 2 {
+        result = result[1..result.len() - 1].to_string();
+    }
+    result.trim().to_string()
+}
+
+fn split_top_level_items(s: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut start = 0;
+    let mut depth_brace = 0;
+    let mut depth_bracket = 0;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for (i, c) in s.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if c == '\\' {
+            escape = true;
+            continue;
+        }
+        if c == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if !in_string {
+            match c {
+                '{' => depth_brace += 1,
+                '}' => depth_brace -= 1,
+                '[' => depth_bracket += 1,
+                ']' => depth_bracket -= 1,
+                ',' if depth_brace == 0 && depth_bracket == 0 => {
+                    let item = s[start..i].trim();
+                    if !item.is_empty() {
+                        items.push(item);
+                    }
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    let last = s[start..].trim();
+    if !last.is_empty() {
+        items.push(last);
+    }
+    items
+}
+
+fn repair_single_action_item(item: &str) -> String {
+    let trimmed = item.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(obj) = val.as_object_mut() {
+            if let Some(action_val) = obj.get("action").and_then(|a| a.as_str()).map(str::to_string) {
+                let target_field = action_param_field_for(&action_val);
+                if let Some(val_str) = obj.get(target_field).and_then(|v| v.as_str()).map(str::to_string) {
+                    let cleaned = clean_action_target_str(&val_str);
+                    obj.insert(target_field.to_string(), serde_json::Value::String(cleaned));
+                }
+                return serde_json::to_string(obj).unwrap_or_else(|_| trimmed.to_string());
+            } else if obj.len() == 1 {
+                let (act_key, act_arg) = obj.iter().next().unwrap();
+                let act_name = act_key.clone();
+                let param_name = action_param_field_for(&act_name);
+                let cleaned_arg = match act_arg {
+                    serde_json::Value::String(s) => serde_json::Value::String(clean_action_target_str(s)),
+                    other => other.clone(),
+                };
+                let mut new_obj = serde_json::Map::new();
+                new_obj.insert("action".to_string(), serde_json::Value::String(act_name));
+                new_obj.insert(param_name.to_string(), cleaned_arg);
+                return serde_json::to_string(&new_obj).unwrap_or_else(|_| trimmed.to_string());
+            }
+        }
+    }
+
+    let mut in_str = false;
+    let mut esc = false;
+    let mut colon_pos = None;
+
+    for (i, c) in trimmed.char_indices() {
+        if esc {
+            esc = false;
+            continue;
+        }
+        if c == '\\' {
+            esc = true;
+            continue;
+        }
+        if c == '"' {
+            in_str = !in_str;
+            continue;
+        }
+        if !in_str && c == ':' {
+            colon_pos = Some(i);
+            break;
+        }
+    }
+
+    if let Some(pos) = colon_pos {
+        let left = trimmed[..pos].trim();
+        let right = trimmed[pos + 1..].trim();
+
+        let action_name = left.trim_matches(['"', '\'', ' ']);
+        let param_field = action_param_field_for(action_name);
+        let cleaned_val = clean_action_target_str(right);
+        let val_json = serde_json::to_string(&cleaned_val).unwrap_or_else(|_| format!("\"{}\"", cleaned_val));
+        format!("{{\"action\": \"{}\", \"{}\": {}}}", action_name, param_field, val_json)
+    } else {
+        let act_name = trimmed.trim_matches(['"', '\'', ' ']);
+        format!("{{\"action\": \"{}\"}}", act_name)
+    }
+}
+
+fn repair_actions_field(json_str: &str) -> String {
+    let Some(actions_pos) = json_str.find("\"actions\"") else {
+        return json_str.to_string();
+    };
+
+    let after_key = &json_str[actions_pos + 9..];
+    let Some(colon_offset) = after_key.find(':') else {
+        return json_str.to_string();
+    };
+
+    let after_colon_idx = actions_pos + 9 + colon_offset + 1;
+    let after_colon = &json_str[after_colon_idx..];
+    let trimmed_after_colon = after_colon.trim_start();
+    let leading_spaces = after_colon.len() - trimmed_after_colon.len();
+    let val_start = after_colon_idx + leading_spaces;
+
+    if trimmed_after_colon.starts_with('[') {
+        let mut depth = 0;
+        let mut in_string = false;
+        let mut escape = false;
+        let mut end_bracket_pos = None;
+
+        for (i, c) in json_str[val_start..].char_indices() {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if c == '\\' {
+                escape = true;
+                continue;
+            }
+            if c == '"' {
+                in_string = !in_string;
+                continue;
+            }
+            if !in_string {
+                if c == '[' {
+                    depth += 1;
+                } else if c == ']' {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_bracket_pos = Some(val_start + i);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let Some(val_end) = end_bracket_pos else {
+            return json_str.to_string();
+        };
+
+        let array_content = json_str[val_start + 1..val_end].trim();
+        if array_content.is_empty() {
+            return json_str.to_string();
+        }
+
+        let items = split_top_level_items(array_content);
+        let mut repaired_items = Vec::new();
+        for it in items {
+            let repaired = repair_single_action_item(it);
+            if !repaired.is_empty() {
+                repaired_items.push(repaired);
+            }
+        }
+        let repaired_array = format!("[{}]", repaired_items.join(", "));
+
+        let mut result = String::with_capacity(json_str.len() + 64);
+        result.push_str(&json_str[..val_start]);
+        result.push_str(&repaired_array);
+        result.push_str(&json_str[val_end + 1..]);
+        result
+    } else if trimmed_after_colon.starts_with('{') {
+        let mut depth = 0;
+        let mut in_string = false;
+        let mut escape = false;
+        let mut end_brace_pos = None;
+
+        for (i, c) in json_str[val_start..].char_indices() {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if c == '\\' {
+                escape = true;
+                continue;
+            }
+            if c == '"' {
+                in_string = !in_string;
+                continue;
+            }
+            if !in_string {
+                if c == '{' {
+                    depth += 1;
+                } else if c == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_brace_pos = Some(val_start + i);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let Some(val_end) = end_brace_pos else {
+            return json_str.to_string();
+        };
+
+        let obj_content = &json_str[val_start..=val_end];
+        let repaired = repair_single_action_item(obj_content);
+        let repaired_array = if !repaired.is_empty() { format!("[{repaired}]") } else { "[]".to_string() };
+
+        let mut result = String::with_capacity(json_str.len() + 64);
+        result.push_str(&json_str[..val_start]);
+        result.push_str(&repaired_array);
+        result.push_str(&json_str[val_end + 1..]);
+        result
+    } else {
+        json_str.to_string()
+    }
+}
+
 /// Nettoie et fiabilise le JSON généré par le LLM local avant désérialisation
 fn sanitize_json_output(raw: &str) -> String {
     let trimmed = raw.trim();
@@ -1200,7 +1581,45 @@ fn sanitize_json_output(raw: &str) -> String {
         }
         cleaned.push(c);
     }
-    cleaned
+
+    let mut repaired = repair_actions_field(&cleaned);
+
+    // Garde-fou programmatique : si "actions" est vide ([] ou absent), forcer "next_passes": 0
+    if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&repaired) {
+        if let Some(obj) = val.as_object_mut() {
+            let actions_empty = obj.get("actions")
+                .and_then(|a| a.as_array())
+                .map_or(true, |arr| arr.is_empty());
+
+            if actions_empty {
+                obj.insert("next_passes".to_string(), serde_json::json!(0));
+                if !obj.contains_key("actions") {
+                    obj.insert("actions".to_string(), serde_json::json!([]));
+                }
+            }
+            if let Ok(serialized) = serde_json::to_string(obj) {
+                return serialized;
+            }
+        }
+    } else {
+        // Fallback textuel de sécurité si serde_json n'arrive pas à parser l'objet complet
+        let actions_empty = repaired.contains("\"actions\": []")
+            || repaired.contains("\"actions\":[]")
+            || repaired.contains("\"actions\": [ ]");
+        if actions_empty {
+            if let Some(pos) = repaired.find("\"next_passes\"") {
+                if let Some(colon) = repaired[pos..].find(':') {
+                    let start = pos + colon + 1;
+                    let num_end = repaired[start..].find(|c: char| !c.is_ascii_digit() && !c.is_whitespace()).unwrap_or(0);
+                    if num_end > 0 {
+                        repaired.replace_range(start..start + num_end, " 0");
+                    }
+                }
+            }
+        }
+    }
+
+    repaired
 }
 
 /// Tronque une chaîne UTF-8 sans couper au milieu d'un point de code multi-octets
@@ -1236,7 +1655,14 @@ fn is_json_payload(content: &str) -> bool {
 fn extract_clean_user_message(content: &str) -> &str {
     let trimmed = content.trim();
     if let Some(pos) = trimmed.rfind("[Demande utilisateur]\n") {
-        trimmed[pos + "[Demande utilisateur]\n".len()..].trim()
+        let after = trimmed[pos + "[Demande utilisateur]\n".len()..].trim();
+        if let Some(end) = after.find("\n\n[") {
+            after[..end].trim()
+        } else if let Some(end) = after.find("\n[") {
+            after[..end].trim()
+        } else {
+            after
+        }
     } else if let Some(pos) = trimmed.rfind("[Consigne étape] : Poursuis : \"") {
         let after = &trimmed[pos + "[Consigne étape] : Poursuis : \"".len()..];
         if let Some(end) = after.find('"') {
@@ -1845,6 +2271,43 @@ pub fn get_or_load_local_llama(event_tx: &Sender<AgentEvent>) -> Result<(), Stri
         *lock = Some(engine);
     }
     Ok(())
+}
+
+/// Précharge le modèle local actif en mémoire (RAM/VRAM) en tâche de fond dès le démarrage
+pub fn init_local_llm() {
+    let preset = get_active_preset();
+    if !is_preset_downloaded(preset) {
+        println!("[Local LLM] Le modèle '{}' n'est pas encore téléchargé, préchargement ignoré.", preset.name);
+        return;
+    }
+
+    {
+        if let Ok(lock) = LOCAL_ENGINE.lock() {
+            if lock.is_some() {
+                return;
+            }
+        }
+    }
+
+    if let Some(path) = find_local_llama_model_file() {
+        println!("[Local LLM] Préchargement anticipé du modèle '{}' ({}) en mémoire...", preset.name, path.display());
+        match LocalLlamaEngine::load(&path) {
+            Ok(engine) => {
+                let status_msg = if engine.gpu_enabled {
+                    format!("🚀 Modèle local {} prêt avec accélération GPU ({} couches déchargées)", preset.name, engine.gpu_layers)
+                } else {
+                    format!("💻 Modèle local {} prêt en mode CPU", preset.name)
+                };
+                println!("[Local LLM] {status_msg}");
+                if let Ok(mut lock) = LOCAL_ENGINE.lock() {
+                    *lock = Some(engine);
+                }
+            }
+            Err(e) => {
+                eprintln!("[Local LLM] Erreur lors du préchargement anticipé : {e}");
+            }
+        }
+    }
 }
 
 /// Exécute la complétion avec le format de prompt ChatML de Qwen 2.5 Instruct

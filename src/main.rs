@@ -577,7 +577,12 @@ impl OverlayApp {
         } else {
             (t!("speech.waiting_instructions").to_string(), Vec::new())
         };
-        let _ = tts_sender.send(TtsCommand::Speak(initial_subtitle.clone()));
+        let initial_speech = if let Some(sug_speech) = format_suggestions_for_speech(&initial_suggestions) {
+            format!("{initial_subtitle}\n\n{sug_speech}")
+        } else {
+            initial_subtitle.clone()
+        };
+        let _ = tts_sender.send(TtsCommand::Speak(initial_speech));
 
         let dwell_millis = std::env::var("DWELL_TIME_MS")
             .ok()
@@ -1759,29 +1764,50 @@ impl eframe::App for OverlayApp {
                     }
                     if text.trim().is_empty() {
                         if let Some(last) = self.chat_history.last_mut().filter(|e| e.role == ChatRole::Agent) {
-                            for sug in quick_suggestions {
+                            for sug in &quick_suggestions {
                                 if !last.quick_suggestions.iter().any(|s| s.as_str() == sug.as_str()) {
-                                    last.quick_suggestions.push(sug);
+                                    last.quick_suggestions.push(sug.clone());
                                 }
+                            }
+                        }
+                        if let Some(sug_speech) = format_suggestions_for_speech(&quick_suggestions) {
+                            if !sanitize_for_tts(&sug_speech).trim().is_empty() {
+                                self.status = AgentStatus::Speaking;
+                                let _ = self.tts_sender.send(TtsCommand::Enqueue(sug_speech));
                             }
                         }
                     } else if was_streaming || self.llm_config.provider == LlmProvider::Local {
                         if let Some(last) = self.chat_history.last_mut().filter(|e| e.role == ChatRole::Agent) {
-                            last.text = text;
-                            last.quick_suggestions = quick_suggestions;
+                            last.text = text.clone();
+                            last.quick_suggestions = quick_suggestions.clone();
                         } else {
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::Agent,
-                                text,
+                                text: text.clone(),
                                 timestamp: current_time_str(),
-                                quick_suggestions,
+                                quick_suggestions: quick_suggestions.clone(),
                                 screen_size_kb: None,
                             });
                         }
+                        if let Some(sug_speech) = format_suggestions_for_speech(&quick_suggestions) {
+                            if !sanitize_for_tts(&sug_speech).trim().is_empty() {
+                                self.status = AgentStatus::Speaking;
+                                let _ = self.tts_sender.send(TtsCommand::Enqueue(sug_speech));
+                            }
+                        }
                     } else {
-                        if !sanitize_for_tts(&text).trim().is_empty() {
+                        let full_speech = if let Some(sug_speech) = format_suggestions_for_speech(&quick_suggestions) {
+                            if !sanitize_for_tts(&text).trim().is_empty() {
+                                format!("{text}\n\n{sug_speech}")
+                            } else {
+                                sug_speech
+                            }
+                        } else {
+                            text.clone()
+                        };
+                        if !sanitize_for_tts(&full_speech).trim().is_empty() {
                             self.status = AgentStatus::Speaking;
-                            let _ = self.tts_sender.send(TtsCommand::Speak(text.clone()));
+                            let _ = self.tts_sender.send(TtsCommand::Speak(full_speech));
                         }
                         self.chat_history.push(ChatEntry {
                             role: ChatRole::Agent,
@@ -4091,6 +4117,23 @@ impl eframe::App for OverlayApp {
                                             }
                                         }
 
+                                        // Interception de la touche Entrée (sans Shift) AVANT que TextEdit n'insère un saut de ligne
+                                        let enter_pressed_before = is_input_focused
+                                            && !is_modal_open
+                                            && !is_other_typing
+                                            && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+
+                                        if enter_pressed_before {
+                                            enter_hit = true;
+                                            ctx.input_mut(|i| {
+                                                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                                                i.events.retain(|e| !matches!(e, egui::Event::Text(ref t) if t == "\n" || t == "\r"));
+                                            });
+                                            while self.input_text.ends_with('\n') || self.input_text.ends_with('\r') {
+                                                self.input_text.pop();
+                                            }
+                                        }
+
                                         let paste_hit = ctx.input(|i| {
                                             i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
                                                 || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
@@ -4245,10 +4288,15 @@ impl eframe::App for OverlayApp {
                                             let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
                                         }
 
-                                        enter_hit = (response.lost_focus() || response.has_focus())
-                                            && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-                                        if enter_hit {
-                                            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                                        if !enter_hit && !is_modal_open && !is_other_typing {
+                                            enter_hit = response.has_focus()
+                                                && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                                            if enter_hit {
+                                                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                                                while self.input_text.ends_with('\n') || self.input_text.ends_with('\r') {
+                                                    self.input_text.pop();
+                                                }
+                                            }
                                         }
                                     });
 
@@ -4742,7 +4790,12 @@ impl eframe::App for OverlayApp {
                                             let dwell_triggered = apply_dwell_to_response(ui, dwell_state, msg_dwell_id, &interact_resp);
                                             if dwell_triggered {
                                                 dwell_state.lock_id(msg_dwell_id, Duration::from_secs(6));
-                                                speak_message = Some(entry.text.clone());
+                                                let speech = if let Some(sug_speech) = format_suggestions_for_speech(&entry.quick_suggestions) {
+                                                    format!("{}\n\n{}", entry.text, sug_speech)
+                                                } else {
+                                                    entry.text.clone()
+                                                };
+                                                speak_message = Some(speech);
                                             }
 
                                             if interact_resp.clicked() {
@@ -5425,6 +5478,12 @@ impl eframe::App for OverlayApp {
                                         self.local_llm_options = rec;
                                         local_llm::set_local_llm_options(rec);
 
+                                        if self.selected_provider_modal == LlmProvider::Local {
+                                            std::thread::spawn(|| {
+                                                local_llm::init_local_llm();
+                                            });
+                                        }
+
                                         play_earcon(Earcon::Success);
                                     }
                                 } else {
@@ -5539,7 +5598,9 @@ impl eframe::App for OverlayApp {
                                             let btn_text = format!("⬇ Télécharger {} ({})", p.name, p.size_desc);
                                             if ui.button(egui::RichText::new(btn_text).strong().color(theme.accent)).clicked() {
                                                 std::thread::spawn(move || {
-                                                    let _ = local_llm::ensure_llama_model_downloaded_for_preset(&p, &event_tx_clone);
+                                                    if local_llm::ensure_llama_model_downloaded_for_preset(&p, &event_tx_clone).is_ok() {
+                                                        local_llm::init_local_llm();
+                                                    }
                                                 });
                                             }
                                         } else {
@@ -5824,6 +5885,9 @@ impl eframe::App for OverlayApp {
                                         self.llm_config.model = active_p.name.to_string();
                                         self.show_api_key_modal = false;
                                         self.api_key_error = None;
+                                        std::thread::spawn(|| {
+                                            local_llm::init_local_llm();
+                                        });
                                     } else if let Err(e) = write_env_var_to_file(".env", env_var_target, key) {
                                         self.api_key_error = Some(t!("ui.api_key_write_err", err = e).to_string());
                                     } else if let Err(e) = write_env_var_to_file(".env", env_model_target, model) {
@@ -6627,6 +6691,15 @@ Règles principales :
      * Lorsque des résultats web ou liens sont affichés (Google, Bing, portail), cherche et clique DIRECTEMENT sur le lien textuel ou bouton du résultat qui répond à l'objectif de la demande
    - ACCEPTATION AUTOMATIQUE DES COOKIES : Dès qu'une bannière de cookies ou consentement RGPD est présent, clique SYSTÉMATIQUEMENT et immédiatement sur le bouton pour tout accepter ("Tout accepter", "Accepter tout", "Autoriser", "J'accepte", "Continuer sans refuser") sans demander de confirmation.
    - BANNIÈRES DE NOTIFICATION WEB, PUSH & NEWSLETTERS ("Activez les notifications", "Ne manquez rien", etc.) : Ce ne sont PAS des notifications système Windows (toasts). Ce sont des popups ou bannières intrusives sur la page web. Tu DOIS SYSTÉMATIQUEMENT les traiter immédiatement pour débloquer la page : clique en priorité sur la croix de fermeture ("Fermer (croix ✕)", "croix", "Fermer", "Plus tard", "Refuser", "Non merci"), ou sur "Activer" si demandé ou si aucune option de fermeture n'est présente. Ne laisse JAMAIS une bannière de notification web bloquer la page sans la valider ou la fermer !
+   - PROTOCOLE DE ROUTAGE DANS LA PAGE WEB (TAG NAVIGATE_IN_WEBPAGE) :
+     * Dès que l'utilisateur demande une station de radio (ex: "mets radio france", "lance france inter", "écoute rtl"), de la musique, ou une recherche :
+       L'ouverture du navigateur n'est QUE la première étape ! Il est FORMELLEMENT INTERDIT de renvoyer "actions": [] ou d'abandonner dès que le navigateur s'ouvre.
+       Tu DOIS appliquer le routage NAVIGATE_IN_WEBPAGE pour poursuivre l'exploration DANS la page web :
+       1. Passe 1 : Ouvre le site ou la recherche web ("navigate_to_url").
+       2. Passe 2 : Accepte immédiatement la bannière de cookies si présente ("Tout accepter" / "Accepter").
+       3. Passe 3 : Repère et clique directement sur le bouton de lecture / station ("Écouter le direct", "Direct", "Play", "Écouter", ou lien de la radio).
+       4. Passe 4 : Dès que le son / flux est lancé, conclus ("actions": [], "next_passes": 0) et confirme la station dans "narration".
+       Tant que l'écoute n'est pas lancée, MAINTIENS IMPÉRATIVEMENT "next_passes" > 0.
    - LECTURE DES NOTIFICATIONS SYSTÈME (TOASTS) : Dès qu'une notification Windows ou un toast est présent, lis impérativement son titre et son contenu dans ta "narration" pour informer l'utilisateur, mais LAISSE-LA TRANQUILLE (ne tente pas de la fermer, ne clique pas dessus et laisse le système la gérer).
    - ALERTES & MESSAGES D'ERREUR (FERMETURE SYSTÉMATIQUE APRÈS LECTURE) : Dès qu'une boîte de dialogue d'alerte, un popup d'avertissement ou un message d'erreur est à l'écran, lis-le clairement ou résume-le dans ta "narration", puis FERME-LA SYSTÉMATIQUEMENT en cliquant sur son bouton de fermeture/validation ("OK", "Fermer", "Annuler", "Continuer", croix) pour débloquer l'écran et poursuivre ton travail. Ne JAMAIS envoyer "escape".
    - PRIORITÉ ABSOLUE AUX CHANGEMENTS WEB : Si des informations, boutons ou données sont présent sur la page web (signalés sous 'INFORMATIONS WEB MODIFIÉES / NOUVELLES'), ils priment impérativement sur tous les éléments statiques et les autres fenêtres. Base en priorité absolue tes actions ou réponses sur ces changements.
@@ -6847,9 +6920,9 @@ async fn call_llm_prompt(
     let mut max_agent_passes = match tier {
         local_llm::ModelTier::Local => {
             if local_opts.minimal_mode {
-                TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, 6)
-            } else {
                 TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, 8)
+            } else {
+                TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, 12)
             }
         }
         local_llm::ModelTier::Remote => TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, 15),
@@ -7103,7 +7176,7 @@ async fn call_llm_prompt(
 
         let mut stop_requested = false;
         if let Some(np) = requested_passes {
-            let max_limit = if is_local_llm { 8 } else { 15 };
+            let max_limit = if is_local_llm { 12 } else { 15 };
             if np == 0 || (payload.actions.is_empty() && pass >= 1) {
                 max_agent_passes = pass;
                 TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
@@ -7257,15 +7330,27 @@ async fn call_llm_prompt(
                 || lower_user.starts_with("trouve")
                 || lower_user.starts_with("joue")
                 || lower_user.starts_with("écoute")
+                || lower_user.starts_with("fais")
+                || lower_user.contains("cherche")
+                || lower_user.contains("recherche")
                 || lower_user.contains("radio")
-                || lower_user.contains("musique");
+                || lower_user.contains("musique")
+                || lower_user.contains("film")
+                || lower_user.contains("streaming")
+                || lower_user.contains("vidéo")
+                || lower_user.contains("video");
 
             let lower_narration = payload.narration.to_lowercase();
             let is_passive_excuse = lower_narration.contains("il faudrait")
                 || lower_narration.contains("faudrait ouvrir")
                 || lower_narration.contains("aucune radio")
                 || lower_narration.contains("aucun média")
-                || lower_narration.contains("aucun resultat");
+                || lower_narration.contains("aucun resultat")
+                || lower_narration.contains("vous pouvez")
+                || lower_narration.contains("il existe plusieurs")
+                || lower_narration.contains("pour trouver")
+                || lower_narration.contains("voici comment")
+                || lower_narration.contains("méthode");
 
             // Si l'utilisateur voulait une action concrète et que l'IA a abandonné ou s'est défaussée :
             if (is_action_request || is_passive_excuse) && pass == 1 {
@@ -7282,6 +7367,40 @@ async fn call_llm_prompt(
                     window: Default::default(),
                 });
                 payload.narration = format!("J'ouvre le navigateur pour lancer {} immédiatement.", safe_user_instruction);
+                stop_requested = false;
+                max_agent_passes = 6.max(max_agent_passes);
+                TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
+            } else if is_action_request && pass < max_agent_passes && consecutive_repeat_count == 0 {
+                // Vérifier si l'écran est resté sur une étape intermédiaire (moteur de recherche, cookies, etc.)
+                let screen_now = {
+                    LAST_SCREEN_SUMMARY.lock().ok().and_then(|s| s.clone()).unwrap_or_default().to_lowercase()
+                };
+                let on_search_engine = screen_now.contains("google") || screen_now.contains("bing") || screen_now.contains("recherche");
+                let cookie_banner_present = screen_now.contains("cookie") || screen_now.contains("consentement") || screen_now.contains("tout accepter");
+                let on_media_player = screen_now.contains("direct") || screen_now.contains("écouter") || screen_now.contains("lecture") || screen_now.contains("play");
+
+                let objective_clearly_done = if lower_user.contains("radio") || lower_user.contains("musique") {
+                    !on_search_engine && (screen_now.contains("[@audio:") || screen_now.contains("en direct") || screen_now.contains("pause"))
+                } else {
+                    false
+                };
+
+                if !objective_clearly_done && (on_search_engine || cookie_banner_present || on_media_player) {
+                    println!("[Agent Vérification Objectif] L'IA s'est arrêtée mais l'écran montre une étape intermédiaire (recherche/cookies/lecteur). Prolongation des passes...");
+                    let continuation_action = if cookie_banner_present {
+                        AgentAction::ClickButton { window: None, button_name: "Tout accepter".to_string() }
+                    } else if on_search_engine && (lower_user.contains("radio") || lower_user.contains("france inter")) {
+                        AgentAction::ClickElement { window: None, target_name: "Écouter en direct".to_string() }
+                    } else {
+                        AgentAction::Scroll { direction: "down".to_string(), amount: Some(1), window: None }
+                    };
+                    payload.actions.push(continuation_action);
+                    payload.narration = "Je poursuis la navigation pour finaliser votre demande...".to_string();
+                    stop_requested = false;
+                    if max_agent_passes < pass + 2 {
+                        max_agent_passes = (pass + 2).min(if is_local_llm { 12 } else { 15 });
+                    }
+                }
             }
         }
 
@@ -7299,7 +7418,7 @@ async fn call_llm_prompt(
                 payload.quick_suggestions = generate_fallback_suggestions_from_screen(&screen);
             }
             if !payload.narration.trim().is_empty() || !payload.quick_suggestions.is_empty() {
-                if !sanitize_for_tts(&payload.narration).trim().is_empty() {
+                if !sanitize_for_tts(&payload.narration).trim().is_empty() || !payload.quick_suggestions.is_empty() {
                     has_spoken = true;
                 }
                 let _ = event_tx.send(AgentEvent::ReplaceNarration {
@@ -7315,7 +7434,7 @@ async fn call_llm_prompt(
         }
 
         if !payload.narration.trim().is_empty() || !payload.quick_suggestions.is_empty() {
-            if !sanitize_for_tts(&payload.narration).trim().is_empty() {
+            if !sanitize_for_tts(&payload.narration).trim().is_empty() || !payload.quick_suggestions.is_empty() {
                 has_spoken = true;
             }
             let _ = event_tx.send(AgentEvent::ReplaceNarration {
@@ -7325,6 +7444,25 @@ async fn call_llm_prompt(
         }
 
         let actions_to_run = payload.actions;
+
+        // Si l'IA ouvre le navigateur pour une demande de radio/média, maintenir les passes actives pour naviguer dans la page web
+        let lower_user_cmd = safe_user_instruction.to_lowercase();
+        let is_media_request = lower_user_cmd.contains("radio")
+            || lower_user_cmd.contains("radio france")
+            || lower_user_cmd.contains("musique")
+            || lower_user_cmd.contains("fip")
+            || lower_user_cmd.contains("france inter")
+            || lower_user_cmd.contains("franceinfo")
+            || lower_user_cmd.contains("écouter")
+            || lower_user_cmd.contains("stream");
+        if pass == 1 && is_media_request && actions_to_run.iter().any(|a| matches!(a, AgentAction::NavigateToUrl { .. } | AgentAction::OpenBrowser { .. })) {
+            stop_requested = false;
+            if max_agent_passes < 6 {
+                max_agent_passes = 6;
+                TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
+            }
+            println!("[Agent Radio/Média - NAVIGATE_IN_WEBPAGE] Page ouverte : maintien des passes actives (max: {max_agent_passes}) pour naviguer dans la page web.");
+        }
 
         // Détection de boucle répétitive (actions identiques répétées)
         let current_action_signatures: Vec<String> = actions_to_run
@@ -7456,7 +7594,7 @@ async fn call_llm_prompt(
             let _ = undo_last_system_action();
         }
 
-        let max_clamp = if is_local_llm { 8 } else { 15 };
+        let max_clamp = if is_local_llm { 12 } else { 15 };
         let synced_passes = TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, max_clamp);
         if synced_passes > max_agent_passes && !stop_requested {
             max_agent_passes = synced_passes;
@@ -7574,6 +7712,9 @@ async fn call_llm_prompt(
                 safe_user_instruction,
                 next_pass = pass + 1
             ));
+            if is_media_request {
+                step_feedback.push_str("\n\n- [NAVIGATION PAGE WEB RADIO EN COURS - TAG NAVIGATE_IN_WEBPAGE] : La page web est maintenant ouverte. Examine les éléments interactifs à l'écran, valide/ferme les cookies si présents, et clique DIRECTEMENT sur 'Écouter', 'Direct', 'Play' ou la station pour lancer la lecture audio.");
+            }
             }
 
             history.lock().await.push(ChatMessage {
@@ -8098,6 +8239,12 @@ fn main() -> eframe::Result<()> {
 
     spawn_periodic_screen_monitor(cmd_tx.clone());
     spawn_agent_backend(cmd_rx, cmd_tx.clone(), event_tx.clone(), tts_tx.clone(), llm_config.clone());
+
+    if llm_config.provider == LlmProvider::Local {
+        std::thread::spawn(|| {
+            local_llm::init_local_llm();
+        });
+    }
 
     run_overlay_gui(
         event_tx,
