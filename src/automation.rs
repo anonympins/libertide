@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 pub use crate::scheduler::*;
 pub use crate::autostart::*;
+#[cfg(windows)]
 use crate::get_window_title;
 
 use crate::fs_util::{

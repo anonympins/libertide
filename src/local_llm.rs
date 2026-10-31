@@ -2033,7 +2033,7 @@ fn is_json_payload(content: &str) -> bool {
 }
 
 /// Extrait le texte réel de la demande utilisateur sans le bruit de préfixe
-fn extract_clean_user_message(content: &str) -> &str {
+pub fn extract_clean_user_message(content: &str) -> &str {
     let trimmed = content.trim();
     if let Some(pos) = trimmed.rfind("[Demande utilisateur]\n") {
         let after = trimmed[pos + "[Demande utilisateur]\n".len()..].trim();
@@ -2626,6 +2626,27 @@ impl LocalLlamaEngine {
     }
 }
 
+/// Résout les tags sémantiques pertinents pour n'importe quelle requête (utilisable par tous les LLM)
+pub fn resolve_query_tags(query: &str) -> Vec<CommandTag> {
+    let clean = query.trim();
+    if clean.is_empty() {
+        return vec![CommandTag::GeneralChitChat];
+    }
+    let fast_tags = fast_classify_intent(clean);
+    if !fast_tags.is_empty() {
+        return fast_tags;
+    }
+    if let Ok(lock) = LOCAL_ENGINE.lock() {
+        if let Some(ref engine) = *lock {
+            return engine.classify_intent(clean);
+        }
+    }
+    vec![
+        CommandTag::WebNavigateOrSearch,
+        CommandTag::ClickElementOrButton,
+    ]
+}
+
 pub fn get_or_load_local_llama(event_tx: &Sender<AgentEvent>) -> Result<(), String> {
     {
         let lock = LOCAL_ENGINE.lock().map_err(|e| e.to_string())?;
@@ -2732,13 +2753,11 @@ pub fn run_local_llama_completion(
         || system_prompt.contains("expert d'ergonomie et d'accessibilité")
         || system_prompt.contains("assistant de dictée vocale");
 
-    let effective_system_prompt = if is_specialized_task {
+    let effective_system_prompt = if is_specialized_task || system_prompt.contains("Tu es l'agent d'exploration Libertide") {
         system_prompt.trim().to_string()
     } else {
         let clean_goal = extract_clean_user_message(last_user_msg);
-        println!("[Local LLM] Extraction intention utilisateur : \"{}\"", clean_goal);
-        let tags = engine.classify_intent(clean_goal);
-        println!("[Local LLM Router] Tags finaux retenus : {:?}", tags);
+        let tags = resolve_query_tags(clean_goal);
         let (_, lang_name) = crate::get_system_locale_language();
         build_routed_system_prompt(&tags, &lang_name)
     };
