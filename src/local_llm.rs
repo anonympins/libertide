@@ -351,6 +351,16 @@ pub enum CommandTag {
     TravelAndFlightBooking,
     BrowserTabNavigation,
     NavigateInWebpage,
+    EcommerceAndShopping,
+    CodeAndDevelopment,
+    CommunicationAndMessaging,
+    FileManagementAndExplorer,
+    VideoAndEntertainment,
+    LockedInAndEyeTracking,
+    TremorAndSpasticityFilter,
+    NeurodivergentAndSensoryCalm,
+    AacSymbolCommunication,
+    VitalCareAndCaregiverAlert,
 }
 
 impl CommandTag {
@@ -377,6 +387,16 @@ impl CommandTag {
         Self::TravelAndFlightBooking,
         Self::BrowserTabNavigation,
         Self::NavigateInWebpage,
+        Self::EcommerceAndShopping,
+        Self::CodeAndDevelopment,
+        Self::CommunicationAndMessaging,
+        Self::FileManagementAndExplorer,
+        Self::VideoAndEntertainment,
+        Self::LockedInAndEyeTracking,
+        Self::TremorAndSpasticityFilter,
+        Self::NeurodivergentAndSensoryCalm,
+        Self::AacSymbolCommunication,
+        Self::VitalCareAndCaregiverAlert,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -403,6 +423,16 @@ impl CommandTag {
             Self::TravelAndFlightBooking => "TRAVEL_AND_FLIGHT_BOOKING",
             Self::BrowserTabNavigation => "BROWSER_TAB_NAVIGATION",
             Self::NavigateInWebpage => "NAVIGATE_IN_WEBPAGE",
+            Self::EcommerceAndShopping => "ECOMMERCE_AND_SHOPPING",
+            Self::CodeAndDevelopment => "CODE_AND_DEVELOPMENT",
+            Self::CommunicationAndMessaging => "COMMUNICATION_AND_MESSAGING",
+            Self::FileManagementAndExplorer => "FILE_MANAGEMENT_AND_EXPLORER",
+            Self::VideoAndEntertainment => "VIDEO_AND_ENTERTAINMENT",
+            Self::LockedInAndEyeTracking => "LOCKED_IN_AND_EYE_TRACKING",
+            Self::TremorAndSpasticityFilter => "TREMOR_AND_SPASTICITY_FILTER",
+            Self::NeurodivergentAndSensoryCalm => "NEURODIVERGENT_AND_SENSORY_CALM",
+            Self::AacSymbolCommunication => "AAC_SYMBOL_COMMUNICATION",
+            Self::VitalCareAndCaregiverAlert => "VITAL_CARE_AND_CAREGIVER_ALERT",
         }
     }
 
@@ -429,7 +459,17 @@ impl CommandTag {
             Self::RadioAndMusicStream => "Lecture de radio en direct, webradio, streaming musical, contrôle de lecture et médias web (navigate_to_url, click_button direct/play, set_volume)",
             Self::TravelAndFlightBooking => "Recherche et réservation de billets d'avion, comparatifs de vols, formulaires de voyage et filtres interactifs (show_floating_card form/table, navigate_to_url Google Flights)",
             Self::BrowserTabNavigation => "Gestion et recherche d'onglets de navigateur, bascule entre onglets, ouverture/fermeture d'onglets (click_element sur onglet, close_tab, navigate_to_url target new_tab)",
-            Self::NavigateInWebpage => "Navigation approfondie dans le contenu de la page web ouverte, acceptation des cookies, fermeture des popups, clic sur les liens/boutons de résultats et lancement de direct/audio (navigate_to_url, click_element, click_button, scroll)",
+            Self::NavigateInWebpage => "Navigation approfondie dans la page web ouverte avec Google Search comme référentiel de départ : acceptation des cookies, consultation des encarts, test des différents résultats via clics (navigate_to_url, click_element, click_button, scroll, navigate_back)",
+            Self::EcommerceAndShopping => "Achats en ligne, e-commerce, panier d'achat, validation de commande, recherche de produits, comparatifs de prix et boutiques marchandes (panier, commander, checkout, show_floating_card table)",
+            Self::CodeAndDevelopment => "Développement logiciel, inspection et lecture de code, éditeur (VSCode, IntelliJ, RustRover), fichiers sources (.rs, .py, .js, .json), terminal de build et erreurs de compilation (read_editor_content, run_command)",
+            Self::CommunicationAndMessaging => "Messagerie, e-mails, communication d'équipe et recherche de contacts (Teams, Outlook, Discord, Slack, WhatsApp, rédaction de message, show_floating_card fiche_contact)",
+            Self::FileManagementAndExplorer => "Gestion de fichiers et dossiers, Explorateur Windows / Finder, organisation de documents, ouverture de médias ou PDFs (open_file, open_app explorer, find_file)",
+            Self::VideoAndEntertainment => "Lecture de vidéos, films, séries, YouTube, Netflix, streaming vidéo, chaînes documentaires et divertissement (navigate_to_url, click_element vidéo, plein écran, space)",
+            Self::LockedInAndEyeTracking => "Commande oculaire, syndrome d'enfermement (Locked-in / SLA), poursuite du regard et clignement (show_floating_card aac_eye_grid, dwell prolongé)",
+            Self::TremorAndSpasticityFilter => "Filtrage des tremblements sévères, spasticité, ataxie, Parkinson et IMC (boutons géants, tolérance de frappe motrice, anti-rebond)",
+            Self::NeurodivergentAndSensoryCalm => "Sanctuaire sensoriel, autisme (TSA), surcharge cognitive, TDAH et épilepsie (mute_audio immédiat, micro-étapes, phrasé apaisant)",
+            Self::AacSymbolCommunication => "Communication Alternative et Améliorée (CAA), aphasie, pictogrammes, langage non-verbal (show_floating_card caa_board, expansion syntaxique)",
+            Self::VitalCareAndCaregiverAlert => "Soins vitaux, appel de l'auxiliaire de vie ou de l'aidant, posture, aspiration, détresse respiratoire (show_floating_card caregiver_alert, alerte multicanale)",
         }
     }
 
@@ -480,6 +520,26 @@ impl CommandTag {
             Some(Self::BrowserTabNavigation)
         } else if upper.contains("NAVIGATE_IN_WEBPAGE") || upper.contains("WEBPAGE") || upper.contains("PAGE_WEB") {
             Some(Self::NavigateInWebpage)
+        } else if upper.contains("ECOMMERCE") || upper.contains("SHOPPING") || upper.contains("PANIER") || upper.contains("ACHAT") || upper.contains("COMMANDE") {
+            Some(Self::EcommerceAndShopping)
+        } else if upper.contains("CODE") || upper.contains("DEV") || upper.contains("DEVELOP") || upper.contains("PROGRAM") || upper.contains("RUST") || upper.contains("PYTHON") {
+            Some(Self::CodeAndDevelopment)
+        } else if upper.contains("COMMUNICATION") || upper.contains("MESSAG") || upper.contains("MAIL") || upper.contains("EMAIL") || upper.contains("CONTACT") || upper.contains("TEAMS") || upper.contains("SLACK") {
+            Some(Self::CommunicationAndMessaging)
+        } else if upper.contains("FILE") || upper.contains("EXPLORER") || upper.contains("DOSSIER") || upper.contains("FICHIER") {
+            Some(Self::FileManagementAndExplorer)
+        } else if upper.contains("VIDEO") || upper.contains("ENTERTAIN") || upper.contains("YOUTUBE") || upper.contains("NETFLIX") || upper.contains("FILM") || upper.contains("SERIE") {
+            Some(Self::VideoAndEntertainment)
+        } else if upper.contains("LOCKED") || upper.contains("EYE") || upper.contains("OCULAIRE") || upper.contains("REGARD") || upper.contains("TOBII") || upper.contains("SLA") {
+            Some(Self::LockedInAndEyeTracking)
+        } else if upper.contains("TREMOR") || upper.contains("TREMBLE") || upper.contains("SPASTI") || upper.contains("PARKINSON") || upper.contains("ATAXIE") || upper.contains("IMC") {
+            Some(Self::TremorAndSpasticityFilter)
+        } else if upper.contains("SENSORY") || upper.contains("CALM") || upper.contains("AUTIS") || upper.contains("TSA") || upper.contains("SURCHARGE") || upper.contains("TDAH") {
+            Some(Self::NeurodivergentAndSensoryCalm)
+        } else if upper.contains("AAC") || upper.contains("CAA") || upper.contains("PICTO") || upper.contains("APHASI") || upper.contains("NON_VERBAL") {
+            Some(Self::AacSymbolCommunication)
+        } else if upper.contains("VITAL") || upper.contains("CAREGIVER") || upper.contains("SOIGNANT") || upper.contains("AIDANT") || upper.contains("ASPIRAT") || upper.contains("POSTURE") {
+            Some(Self::VitalCareAndCaregiverAlert)
         } else {
             None
         }
@@ -549,14 +609,101 @@ pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
     // 0 quater. Détection prioritaire : Vidéos, films, streaming, séries et divertissement
     if lower.contains("film") || lower.contains("films") || lower.contains("série") || lower.contains("series")
         || lower.contains("streaming") || lower.contains("cinéma") || lower.contains("cinema")
-        || lower.contains("vidéo") || lower.contains("video") || lower.contains("documentaire")
-        || lower.contains("replay") || lower.contains("arte") || lower.contains("netflix") || lower.contains("pluto") {
-        tags.push(CommandTag::WebNavigateOrSearch);
+        || lower.contains("vidéo") || lower.contains("video") || lower.contains("videos") || lower.contains("vidéos")
+        || lower.contains("documentaire") || lower.contains("replay") || lower.contains("arte")
+        || lower.contains("netflix") || lower.contains("pluto") || lower.contains("youtube") {
+        tags.push(CommandTag::VideoAndEntertainment);
         if !tags.contains(&CommandTag::NavigateInWebpage) {
             tags.push(CommandTag::NavigateInWebpage);
         }
-        if !tags.contains(&CommandTag::ClickElementOrButton) {
-            tags.push(CommandTag::ClickElementOrButton);
+        if !tags.contains(&CommandTag::WebNavigateOrSearch) {
+            tags.push(CommandTag::WebNavigateOrSearch);
+        }
+    }
+
+    // 0 quinquies. Détection prioritaire : E-commerce, panier et achats en ligne
+    if lower.contains("panier") || lower.contains("commander") || lower.contains("commande")
+        || lower.contains("acheter") || lower.contains("achat") || lower.contains("achats")
+        || lower.contains("amazon") || lower.contains("cdiscount") || lower.contains("fnac")
+        || lower.contains("aliexpress") || lower.contains("ebay") || lower.contains("prix de")
+        || lower.contains("combien coûte") || lower.contains("combien coute") || lower.contains("passer la commande")
+        || lower.contains("checkout") || lower.contains("cart") || lower.contains("ajouter au panier")
+        || lower.contains("voir le panier") || lower.contains("code promo") {
+        tags.push(CommandTag::EcommerceAndShopping);
+        if !tags.contains(&CommandTag::WebNavigateOrSearch) {
+            tags.push(CommandTag::WebNavigateOrSearch);
+        }
+    }
+
+    // 0 sexies. Détection prioritaire : Développement, code et IDE
+    if lower.contains("code") || lower.contains("coder") || lower.contains("fichier source")
+        || lower.contains("compil") || lower.contains("cargo") || lower.contains("git ")
+        || lower.contains("commit") || lower.contains("push") || lower.contains("pull")
+        || lower.contains("rust") || lower.contains("python") || lower.contains("javascript")
+        || lower.contains("typescript") || lower.contains("debug") || lower.contains("fonction")
+        || lower.contains("classe") || lower.contains("erreur de compilation") || lower.contains("main.rs")
+        || lower.contains("cargo.toml") || lower.contains("vscode") || lower.contains("rustrover") || lower.contains("intellij") {
+        tags.push(CommandTag::CodeAndDevelopment);
+    }
+
+    // 0 septies. Détection prioritaire : Communication, messageries et contacts
+    if lower.contains("mail") || lower.contains("email") || lower.contains("e-mail") || lower.contains("courriel")
+        || lower.contains("message") || lower.contains("écris à") || lower.contains("ecris a")
+        || lower.contains("contacter") || lower.contains("contacte") || lower.contains("teams")
+        || lower.contains("slack") || lower.contains("discord") || lower.contains("outlook")
+        || lower.contains("whatsapp") || lower.contains("gmail") || lower.contains("envoyer un message")
+        || lower.contains("coordonnées de") || lower.contains("coordonnees de")
+        || (lower.contains("numéro de") && (lower.contains("téléphone") || lower.contains("tel") || lower.contains("portable"))) {
+        tags.push(CommandTag::CommunicationAndMessaging);
+    }
+
+    // 0 octies. Détection prioritaire : Gestionnaire de fichiers, dossiers et documents
+    if lower.contains("dossier") || lower.contains("dossiers") || lower.contains("téléchargement")
+        || lower.contains("telechargement") || lower.contains("downloads") || lower.contains("documents")
+        || lower.contains("explorateur de fichiers") || lower.contains("ouvrir le pdf") || lower.contains("ouvre le pdf")
+        || lower.contains("ouvrir l'image") || lower.contains("ouvre l'image") || lower.contains("ouvre le fichier")
+        || lower.contains("ouvrir le fichier") || lower.contains("déplace le fichier") || lower.contains("renomme")
+        || (lower.contains("fichier") && (lower.contains("ouvre") || lower.contains("trouve") || lower.contains("cherche"))) {
+        tags.push(CommandTag::FileManagementAndExplorer);
+    }
+
+    // 0 nonies. Détection prioritaire : Commande oculaire pure et syndrome d'enfermement
+    if lower.contains("commande oculaire") || lower.contains("eye tracking") || lower.contains("eyetracker")
+        || lower.contains("regard") || lower.contains("tobii") || lower.contains("locked-in") || lower.contains("locked in")
+        || lower.contains("clignement") || lower.contains("cillement") || lower.contains("sla") || lower.contains("poursuite oculaire") {
+        tags.push(CommandTag::LockedInAndEyeTracking);
+        if !tags.contains(&CommandTag::MotorAndSwitchAccess) {
+            tags.push(CommandTag::MotorAndSwitchAccess);
+        }
+    }
+
+    // 0 decies. Détection prioritaire : Spasticité, tremblements moteurs sévères et ataxie
+    if lower.contains("tremblement") || lower.contains("tremblements") || lower.contains("spasticité") || lower.contains("spasticite")
+        || lower.contains("spasme") || lower.contains("spasmes") || lower.contains("parkinson") || lower.contains("ataxie")
+        || lower.contains("dystonie") || lower.contains("chorée") || lower.contains("choree") || lower.contains("clics involontaires") {
+        tags.push(CommandTag::TremorAndSpasticityFilter);
+        if !tags.contains(&CommandTag::MotorAndSwitchAccess) {
+            tags.push(CommandTag::MotorAndSwitchAccess);
+        }
+    }
+
+    // 0 undecies. Détection prioritaire : Surcharge sensorielle, calme cognitif et TSA
+    if lower.contains("surcharge sensorielle") || lower.contains("trop de bruit") || lower.contains("panique")
+        || lower.contains("autisme") || lower.contains("autiste") || lower.contains("tsa") || lower.contains("hypersensibilité")
+        || lower.contains("hypersensibilite") || lower.contains("éblouissement") || lower.contains("eblouissement") || lower.contains("calme l'écran") {
+        tags.push(CommandTag::NeurodivergentAndSensoryCalm);
+        if !tags.contains(&CommandTag::MuteAudio) {
+            tags.push(CommandTag::MuteAudio);
+        }
+    }
+
+    // 0 duodecies. Détection prioritaire : Communication Alternative et Améliorée (CAA) et aphasie
+    if lower.contains("pictogramme") || lower.contains("pictogrammes") || lower.contains("caa") || lower.contains("aac")
+        || lower.contains("aphasie") || lower.contains("aphasique") || lower.contains("non verbal") || lower.contains("non-verbal")
+        || lower.contains("tableau de communication") || lower.contains("porte-voix") || lower.contains("aide à parler") {
+        tags.push(CommandTag::AacSymbolCommunication);
+        if !tags.contains(&CommandTag::FloatingCardOrForm) {
+            tags.push(CommandTag::FloatingCardOrForm);
         }
     }
 
@@ -674,12 +821,14 @@ pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
         || lower.contains("froid") || lower.contains("chaud") || lower.contains("fauteuil")
         || lower.contains("repositionne") || lower.contains("appelle") {
         tags.push(CommandTag::CareAndComfort);
+        tags.push(CommandTag::VitalCareAndCaregiverAlert);
     }
 
     // Urgence vitale et secours
     if lower.contains("urgence") || lower.contains("secours") || lower.contains("samu") || lower.contains("pompier") || lower.contains("malaise") || lower.contains("15") || lower.contains("18") || lower.contains("112") {
         tags.push(CommandTag::EmergencyOrHealth);
         tags.push(CommandTag::CareAndComfort);
+        tags.push(CommandTag::VitalCareAndCaregiverAlert);
     }
 
     // Simplification cognitive et FALC (Facile à Lire et à Comprendre)
@@ -781,6 +930,92 @@ pub fn build_routed_system_prompt(tags: &[CommandTag], lang_name: &str) -> Strin
             effective_tags.push(CommandTag::ClickElementOrButton);
         }
     }
+    if effective_tags.contains(&CommandTag::EcommerceAndShopping) {
+        if !effective_tags.contains(&CommandTag::WebNavigateOrSearch) {
+            effective_tags.push(CommandTag::WebNavigateOrSearch);
+        }
+        if !effective_tags.contains(&CommandTag::NavigateInWebpage) {
+            effective_tags.push(CommandTag::NavigateInWebpage);
+        }
+        if !effective_tags.contains(&CommandTag::ClickElementOrButton) {
+            effective_tags.push(CommandTag::ClickElementOrButton);
+        }
+        if !effective_tags.contains(&CommandTag::FloatingCardOrForm) {
+            effective_tags.push(CommandTag::FloatingCardOrForm);
+        }
+    }
+    if effective_tags.contains(&CommandTag::CommunicationAndMessaging) {
+        if !effective_tags.contains(&CommandTag::ClickElementOrButton) {
+            effective_tags.push(CommandTag::ClickElementOrButton);
+        }
+        if !effective_tags.contains(&CommandTag::TextInputOrDictation) {
+            effective_tags.push(CommandTag::TextInputOrDictation);
+        }
+        if !effective_tags.contains(&CommandTag::FloatingCardOrForm) {
+            effective_tags.push(CommandTag::FloatingCardOrForm);
+        }
+    }
+    if effective_tags.contains(&CommandTag::CodeAndDevelopment) {
+        if !effective_tags.contains(&CommandTag::ScreenReadingOrSummary) {
+            effective_tags.push(CommandTag::ScreenReadingOrSummary);
+        }
+        if !effective_tags.contains(&CommandTag::TextInputOrDictation) {
+            effective_tags.push(CommandTag::TextInputOrDictation);
+        }
+    }
+    if effective_tags.contains(&CommandTag::FileManagementAndExplorer) {
+        if !effective_tags.contains(&CommandTag::AppManagement) {
+            effective_tags.push(CommandTag::AppManagement);
+        }
+    }
+    if effective_tags.contains(&CommandTag::VideoAndEntertainment) {
+        if !effective_tags.contains(&CommandTag::WebNavigateOrSearch) {
+            effective_tags.push(CommandTag::WebNavigateOrSearch);
+        }
+        if !effective_tags.contains(&CommandTag::NavigateInWebpage) {
+            effective_tags.push(CommandTag::NavigateInWebpage);
+        }
+        if !effective_tags.contains(&CommandTag::ClickElementOrButton) {
+            effective_tags.push(CommandTag::ClickElementOrButton);
+        }
+        if !effective_tags.contains(&CommandTag::VolumeControl) {
+            effective_tags.push(CommandTag::VolumeControl);
+        }
+    }
+    if effective_tags.contains(&CommandTag::LockedInAndEyeTracking) {
+        if !effective_tags.contains(&CommandTag::MotorAndSwitchAccess) {
+            effective_tags.push(CommandTag::MotorAndSwitchAccess);
+        }
+        if !effective_tags.contains(&CommandTag::FloatingCardOrForm) {
+            effective_tags.push(CommandTag::FloatingCardOrForm);
+        }
+    }
+    if effective_tags.contains(&CommandTag::TremorAndSpasticityFilter) {
+        if !effective_tags.contains(&CommandTag::MotorAndSwitchAccess) {
+            effective_tags.push(CommandTag::MotorAndSwitchAccess);
+        }
+        if !effective_tags.contains(&CommandTag::ClickElementOrButton) {
+            effective_tags.push(CommandTag::ClickElementOrButton);
+        }
+    }
+    if effective_tags.contains(&CommandTag::NeurodivergentAndSensoryCalm) {
+        if !effective_tags.contains(&CommandTag::MuteAudio) {
+            effective_tags.push(CommandTag::MuteAudio);
+        }
+        if !effective_tags.contains(&CommandTag::CognitiveAndClarity) {
+            effective_tags.push(CommandTag::CognitiveAndClarity);
+        }
+    }
+    if effective_tags.contains(&CommandTag::AacSymbolCommunication) {
+        if !effective_tags.contains(&CommandTag::FloatingCardOrForm) {
+            effective_tags.push(CommandTag::FloatingCardOrForm);
+        }
+    }
+    if effective_tags.contains(&CommandTag::VitalCareAndCaregiverAlert) {
+        if !effective_tags.contains(&CommandTag::EmergencyOrHealth) {
+            effective_tags.push(CommandTag::EmergencyOrHealth);
+        }
+    }
 
     let mut prompt = String::new();
 
@@ -839,18 +1074,20 @@ Règles de syntaxe JSON strictes :
             CommandTag::WebNavigateOrSearch => {
                 prompt.push_str(r#"
 Règles NAVIGATION WEB & RECHERCHE :
-- Outil majeur : ouvre directement le web via "navigate_to_url" (ex: "https://www.google.com/search?q=...") ou "open_search_browser".
-- RECHERCHE IMMÉDIATE SANS CONSEIL : Si l'utilisateur demande une recherche (ex: film, streaming, vidéo, cours, information), INTERDICTION de répondre par du texte passif. Émets IMMÉDIATEMENT {"action": "navigate_to_url", "url": "https://www.google.com/search?q=...", "target": "new_tab"} avec "next_passes": 5.
+- POINT DE DÉPART OBLIGATOIRE SUR GOOGLE SEARCH : Pour toute recherche d'information, météo (ex: météo Paris, prévisions), actualité ou service, le point de départ DOIT TOUJOURS ÊTRE une recherche Google via "navigate_to_url" ("https://www.google.com/search?q=termes+de+recherche"). INTERDICTION FORMELLE d'aller directement sur une URL présumée ou codée en dur (INTERDIT d'ouvrir directement meteofrance.com ou un site arbitraire : passe obligatoirement par Google Search d'abord).
+- RECHERCHE IMMÉDIATE SANS CONSEIL : Si l'utilisateur demande une recherche (météo, film, vidéo, information), INTERDICTION de répondre par du texte passif. Émets IMMÉDIATEMENT {"action": "navigate_to_url", "url": "https://www.google.com/search?q=...", "target": "new_tab"} avec "next_passes": 5.
 - INTERDICTION de fermer la fenêtre active (pas de "close_app" ni clic croix) pour chercher sur le web.
-- Clique directement sur le résultat textuel du sujet demandé, JAMAIS sur les filtres/onglets génériques du moteur ("Actualités", "Vidéos", "Images", "Outils").
-- Accepte systématiquement les bannières cookies ("Tout accepter").
-- Bannières notifications web/push -> clique sur la croix de fermeture ✕ ou "Fermer".
+- Accepte systématiquement les bannières cookies Google ("Tout accepter").
+- Clique directement sur le résultat textuel du sujet demandé parmi la liste des sites proposés par Google, JAMAIS sur les filtres/onglets génériques ("Actualités", "Vidéos", "Images", "Outils").
 - Pour revenir en arrière : "navigate_back".
 "#);
             }
             CommandTag::NavigateInWebpage => {
                 prompt.push_str(r#"
 Règles NAVIGATION DANS LA PAGE WEB (TAG NAVIGATE_IN_WEBPAGE) :
+- RÉFÉRENTIEL GOOGLE SEARCH : La page de résultats Google Search est le référentiel de départ. Tu dois tester et analyser les différents résultats fournis par Google.
+- Si Google affiche un encart météo / widget informatif direct en haut de page, lis-le et restitue la météo immédiatement dans "narration" en clôturant ("actions": [], "next_passes": 0).
+- Si une consultation détaillée est demandée ou nécessaire, clique sur le premier site de résultats pertinent (ex: premier lien de météo) via "click_element". Si ce site ne convient pas ou est bloqué, fais "navigate_back" pour tester le résultat suivant dans Google.
 - Quand le navigateur est ouvert ou qu'une page web est atteinte : INTERDICTION FORMELLE de t'arrêter à la simple ouverture ! Tu DOIS naviguer DANS la page web.
 - Étape 1 : Valide immédiatement les bandeaux de consentement ou cookies ("Tout accepter", "Accepter tout", "Autoriser").
 - Étape 2 : Ferme les popups/bannières intrusives de notifications web ("Fermer", croix ✕, "Plus tard").
@@ -1011,6 +1248,107 @@ Règles GESTION ET RECHERCHE D'ONGLETS DU NAVIGATEUR :
 - Pour rouvrir le dernier onglet fermé : "accessibility_shortcut": "reopen_tab" (Ctrl+Shift+T).
 "#);
             }
+            CommandTag::EcommerceAndShopping => {
+                prompt.push_str(r#"
+Règles STRATÉGIE E-COMMERCE & ACHATS EN LIGNE :
+- Étape 1 (Recherche produit) : Ouvre le site marchand ou comparateur via "navigate_to_url" vers le produit ou via recherche Google.
+- Étape 2 (Validation cookies) : Clique immédiatement sur "Tout accepter" pour dégager la vue.
+- Étape 3 (Analyse & Comparatif) : Extrais les caractéristiques clés, prix, frais de port et disponibilité. Si plusieurs offres sont présentes, projette un tableau comparatif via "show_floating_card" (card_type: "table", id: "comparatif_achats").
+- Étape 4 (Ajout panier & Consultation) : Clique sur "Ajouter au panier", puis "Voir le panier" / "Commander".
+- Étape 5 (GARDE-FOU STRICT DE PAIEMENT) : Dès que l'écran atteint l'étape de validation finale ou de paiement ("Payer", "Valider la commande", saisie CB) :
+  -> INTERDICTION FORMELLE de cliquer sur payer ou de renseigner des coordonnées bancaires de manière autonome !
+  -> STOPPE IMMÉDIATEMENT : renvoie "actions": [] et "next_passes": 0.
+  -> Récapitule dans "narration" : articles du panier, quantités, montant total TTC, adresse de livraison.
+  -> Propose dans "quick_suggestions" : ["Confirmer et payer", "Modifier le panier", "Annuler"].
+"#);
+            }
+            CommandTag::CodeAndDevelopment => {
+                prompt.push_str(r#"
+Règles DÉVELOPPEMENT LOGICIEL, CODE & TERMINAL :
+- Pour lire un fichier ou le code source ouvert dans l'éditeur (VSCode, IntelliJ, RustRover) : utilise "read_editor_content" avec "target": "nom_fichier.rs".
+- Pour ouvrir rapidement un fichier dans l'éditeur : utilise le raccourci universel (Ctrl+P pour VSCode, Ctrl+Shift+N pour IntelliJ) ou clique sur l'onglet de fichier.
+- Pour exécuter des commandes de compilation ou tests (cargo build, cargo test, git status) : utilise "run_command" ou injecte dans le terminal via "write_text" avec "press_enter": true.
+- Rendu de code : dans "narration" ou les fenêtres volantes Markdown, isole toujours le code dans des blocs avec syntaxe (```rust ... ```). Formate les fichiers et actions de test sous forme de liens cliquables [link="action:Tester le module"]⚡ Lancer les tests[/link].
+"#);
+            }
+            CommandTag::CommunicationAndMessaging => {
+                prompt.push_str(r#"
+Règles MESSAGERIE, E-MAILS & RECHERCHE DE CONTACTS :
+- Niveau 1 (Local) : Vérifie et focalise l'application de messagerie active (Teams, Outlook, Thunderbird, Slack, Discord) via "focus_window" et recherche le destinataire.
+- Niveau 2 (Web & Annuaires) : Si l'application locale n'est pas ouverte ou le contact introuvable, ouvre le web via "navigate_to_url" pour consulter l'intranet, l'annuaire d'entreprise ou LinkedIn.
+- Niveau 3 (Projection fiche contact) : Dès identification des coordonnées, projette OBLIGATOIREMENT une fiche volante de synthèse via "show_floating_card" (card_type: "stats", id: "fiche_contact", title: "Fiche contact : <Nom>", data: {"Nom": "...", "Email": "...", "Téléphone": "...", "Poste": "..."}).
+- Rédaction & Préparation d'envoi : Prépare le message avec "write_text", mais NE CLIQUE PAS sur "Envoyer" sans confirmation explicite de l'utilisateur dans "quick_suggestions".
+"#);
+            }
+            CommandTag::FileManagementAndExplorer => {
+                prompt.push_str(r#"
+Règles GESTION DE FICHIERS & EXPLORATEUR :
+- Pour ouvrir tout fichier, document, tableur, PDF ou image dans son logiciel par défaut : utilise impérativement l'action "open_file" avec "path": "chemin/vers/fichier.ext".
+- Pour lancer ou ouvrir un dossier dans l'Explorateur Windows / Finder : utilise "open_app" avec "name": "explorer.exe".
+- Formate systématiquement tous les documents ou fichiers découverts sous forme de liens cliquables interactifs [link="action:Ouvrir le fichier : nom.pdf"]📄 nom.pdf[/link] ou [link="action:Ouvrir l'image : photo.png"]🖼️ photo.png[/link].
+"#);
+            }
+            CommandTag::VideoAndEntertainment => {
+                prompt.push_str(r#"
+Règles VIDÉOS, FILMS, SÉRIES & DIVERTISSEMENT :
+- Étape 1 : Ouvre la plateforme vidéo demandée (YouTube, Netflix, Arte, streaming) via "navigate_to_url" (ex: "https://www.youtube.com/results?search_query=...").
+- Étape 2 : Valide immédiatement les bandeaux de consentement ou cookies ("Tout accepter").
+- Étape 3 : Clique directement sur la vidéo désirée ou sur l'élément [@video:...] via "click_element" ou "click_button".
+- Contrôle de lecture pendant le visionnage :
+  * Mettre en pause / reprendre la lecture : "accessibility_shortcut": "space" (ou clic sur le lecteur).
+  * Basculer en plein écran : "accessibility_shortcut": "f".
+  * Couper / remettre le son : "accessibility_shortcut": "m" ou "mute_audio".
+  * Régler le volume : "set_volume" ("up"|"down").
+- ARRÊT STRICT SUR OBJECTIF : Dès que la vidéo est lancée et en cours de lecture, STOPPE IMMÉDIATEMENT les passes ("actions": [], "next_passes": 0) pour laisser l'utilisateur regarder tranquillement.
+"#);
+            }
+            CommandTag::LockedInAndEyeTracking => {
+                prompt.push_str(r#"
+Règles COMMANDE OCULAIRE & SYNDROME D'ENFERMEMENT (LOCKED-IN / SLA / EYE-TRACKING) :
+- L'utilisateur contrôle l'interface exclusivement avec le regard ou un cillement résiduel sans aucune motricité des membres ni voix.
+- Règle 1 (Arbre binaire et quadrants AAC) : Projette IMMÉDIATEMENT une grille volante de sélection grand format via "show_floating_card" (card_type: "form" ou "table", id: "aac_eye_grid") découpée en 2 à 4 grandes zones d'options cliquables au regard.
+- Règle 2 (Zéro geste saccadé) : Regroupe les cibles avec un espacement généreux. Ne demande JAMAIS de saisie manuelle ou de clics multiples rapprochés.
+- Règle 3 (Confirmation par dwell passif) : Si une action doit être validée, propose des choix explicites avec temps de fixation long (1200 ms).
+- Règle 4 (Voix de synthèse expressive) : Dès que l'utilisateur choisit ou compose une phrase, énonce-la à voix haute pour son entourage via "narration" et le TTS sans délai.
+"#);
+            }
+            CommandTag::TremorAndSpasticityFilter => {
+                prompt.push_str(r#"
+Règles TREMBLEMENTS SÉVÈRES, SPASTICITÉ & IMC (PARKINSON / DYSTONIE / ATAXIE) :
+- L'utilisateur subit des tremblements, secousses ou contractions musculaires involontaires générant des clics multiples involontaires ou des erreurs de pointage.
+- Règle 1 (Cibles surdimensionnées) : N'utilise jamais de petits boutons système. Projette des boutons géants (taille minimale 100x80px) ou active les badges de numérotation grand format ("toggle_numbered_targets": true).
+- Règle 2 (Tolérance aux fautes de frappe motrices) : En cas de mot répété ou de lettres doublées involontairement dans la demande ('bboonjjourr', 'vveeuux'), corrige déterministement la consigne sans bloquer ni demander de réépeler.
+- Règle 3 (Protection anti-destruction) : INTERDICTION FORMELLE d'exécuter une fermeture d'application ("close_app"), suppression ("delete") ou action irréversible sans confirmation explicite à bouton géant unique dans "quick_suggestions".
+"#);
+            }
+            CommandTag::NeurodivergentAndSensoryCalm => {
+                prompt.push_str(r#"
+Règles SANCTUAIRE SENSORIEL & CALME COGNITIF (AUTISME / TSA / SURCHARGE SENSORIELLE / TDAH / ÉPILEPSIE) :
+- L'utilisateur est en surcharge sensorielle, crise de panique, shutdown autistique ou a besoin d'apaisement immédiat.
+- Règle 1 (Silence et dépouillement immédiats) : Émets IMMÉDIATEMENT "mute_audio" pour stopper tout flux sonore parasite (vidéos web en autoplay, musique, bruits d'arrière-plan).
+- Règle 2 (Voix et phrasé doux) : Formule une "narration" très courte (1 à 2 phrases max), avec un ton calme, neutre, prévisible et rassurant. Aucune formule anxiogène, aucun point d'exclamation multiple.
+- Règle 3 (Une seule micro-tâche) : Découpe la réalité en une seule micro-étape à la fois ("next_passes": 1). Ne propose jamais plus de 2 choix évidents dans "quick_suggestions" (ex: ["Continuer doucement", "Tout fermer et repos"]).
+- Règle 4 (Élimination du chaos visuel) : Si une page web clignote ou est surchargée de publicités, ferme-la ("navigate_back") ou projette une carte épurée 'markdown' dépouillée.
+"#);
+            }
+            CommandTag::AacSymbolCommunication => {
+                prompt.push_str(r#"
+Règles COMMUNICATION ALTERNATIVE & AMÉLIORÉE (CAA / APHASIE / NON-VERBAL / PICTOGRAMMES) :
+- Pour les personnes aphasiques (post-AVC), dysphasiques ou non-verbales s'exprimant par mots-clés bruts, pictogrammes ou symboles simples.
+- Règle 1 (Expansion syntaxique naturelle) : Si la demande est télégraphique (ex: 'eau soif', 'froid dehors', 'maman venir'), reformule-la en une phrase complète, polie et bienveillante pour l'entourage ("J'ai soif, pourrais-je avoir un verre d'eau s'il vous plaît ?").
+- Règle 2 (Tableau de communication dynamique) : Projette systématiquement une carte volante avec pictogrammes cliquables ou emojis via "show_floating_card" (card_type: "table" ou "markdown", id: "caa_board", title: "Tableau d'expression rapide").
+- Règle 3 (Porte-voix instantané) : La narration sert de porte-voix pour que l'ordinateur parle à la place de la personne auprès des soignants et de la famille.
+"#);
+            }
+            CommandTag::VitalCareAndCaregiverAlert => {
+                prompt.push_str(r#"
+Règles ALERTE SOIGNANT & SOINS VITAUX DU QUOTIDIEN (ASPIRATION / POSTURE / DOULEUR / RESPIRATION) :
+- Gestion des besoins physiologiques critiques ne relevant pas forcément du 15/SAMU mais nécessitant l'intervention immédiate de l'auxiliaire de vie ou de l'infirmier(e).
+- Règle 1 (Alerte visuelle et sonore soignant) : Projette OBLIGATOIREMENT une fenêtre volante plein écran grand format "show_floating_card" (card_type: "stats", id: "caregiver_alert", title: "🚨 APPEL SOIGNANT : BESOIN IMMÉDIAT", data: {"Besoin": "...", "Heure": "...", "Gravité": "Haute"}).
+- Règle 2 (Alerte multicanale sans abandon) : "next_passes": 10. Prépare simultanément un message ou appel vers le soignant ou l'aidant ("write_text", communication locale Teams/WhatsApp/mail).
+- Règle 3 (Maintien de l'attention et consignes d'attente) : Dans "narration", rassure la personne en lui indiquant que l'alerte est affichée et transmise, et guide doucement sa respiration.
+"#);
+            }
             CommandTag::GeneralChitChat => {
                 prompt.push_str(r#"
 Règles CONVERSATION :
@@ -1116,6 +1454,48 @@ Règles CONVERSATION :
                 prompt.push_str("- {\"action\": \"click_element\", \"target_name\": \"Nom de l'onglet ouvert\"}\n");
                 prompt.push_str("- {\"action\": \"accessibility_shortcut\", \"shortcut\": \"close_tab\"|\"reopen_tab\"}\n");
             }
+            CommandTag::EcommerceAndShopping => {
+                prompt.push_str("- {\"action\": \"click_button\", \"button_name\": \"Ajouter au panier\"}\n");
+                prompt.push_str("- {\"action\": \"click_element\", \"target_name\": \"Voir le panier\"}\n");
+                prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"comparatif_achats\", \"title\": \"Comparatif offres\", \"card_type\": \"table\", \"data\": {...}}\n");
+            }
+            CommandTag::CodeAndDevelopment => {
+                prompt.push_str("- {\"action\": \"read_editor_content\", \"window\": null, \"target\": \"nom_fichier.rs\"}\n");
+                prompt.push_str("- {\"action\": \"run_command\", \"command\": \"cargo test\"}\n");
+                prompt.push_str("- {\"action\": \"accessibility_shortcut\", \"shortcut\": \"ctrl+p\"|\"ctrl+shift+n\"}\n");
+            }
+            CommandTag::CommunicationAndMessaging => {
+                prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"fiche_contact\", \"title\": \"Fiche contact\", \"card_type\": \"stats\", \"data\": {...}}\n");
+                prompt.push_str("- {\"action\": \"write_text\", \"text\": \"...\", \"target\": \"message\"}\n");
+            }
+            CommandTag::FileManagementAndExplorer => {
+                prompt.push_str("- {\"action\": \"open_file\", \"path\": \"chemin/fichier.pdf\"}\n");
+                prompt.push_str("- {\"action\": \"open_app\", \"name\": \"explorer.exe\"}\n");
+            }
+            CommandTag::VideoAndEntertainment => {
+                prompt.push_str("- {\"action\": \"click_element\", \"target_name\": \"Titre de la vidéo\"}\n");
+                prompt.push_str("- {\"action\": \"accessibility_shortcut\", \"shortcut\": \"space\"|\"f\"|\"m\"}\n");
+                prompt.push_str("- {\"action\": \"set_volume\", \"command\": \"up\"|\"down\"}\n");
+            }
+            CommandTag::LockedInAndEyeTracking => {
+                prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"aac_eye_grid\", \"title\": \"Grille oculaire AAC\", \"card_type\": \"form\", \"data\": {...}}\n");
+                prompt.push_str("- {\"action\": \"click_numbered_target\", \"index\": 1}\n");
+            }
+            CommandTag::TremorAndSpasticityFilter => {
+                prompt.push_str("- {\"action\": \"toggle_numbered_targets\", \"enabled\": true}\n");
+                prompt.push_str("- {\"action\": \"click_numbered_target\", \"index\": 1}\n");
+            }
+            CommandTag::NeurodivergentAndSensoryCalm => {
+                prompt.push_str("- {\"action\": \"mute_audio\"}\n");
+                prompt.push_str("- {\"action\": \"navigate_back\"}\n");
+            }
+            CommandTag::AacSymbolCommunication => {
+                prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"caa_board\", \"title\": \"Tableau pictogrammes\", \"card_type\": \"markdown\", \"data\": {\"text\": \"...\"}}\n");
+            }
+            CommandTag::VitalCareAndCaregiverAlert => {
+                prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"caregiver_alert\", \"title\": \"🚨 APPEL SOIGNANT\", \"card_type\": \"stats\", \"data\": {...}}\n");
+                prompt.push_str("- {\"action\": \"mute_audio\"}\n");
+            }
             CommandTag::GeneralChitChat => {}
         }
     }
@@ -1158,6 +1538,7 @@ Règles de syntaxe JSON strictes :
 Règles de passes, navigation web et recherche :
 - RECHERCHE WEB ET NAVIGATION (OUTIL PRINCIPAL) :
   * La recherche web et la navigation sont ton OUTIL MAJEUR dès qu'une information, un média (radio, musique, vidéo), une météo, un achat ou un service est demandé.
+  * GOOGLE COMME POINT DE DÉPART OBLIGATOIRE : Pour la météo, les recherches et questions, le point de départ DOIT TOUJOURS ÊTRE Google Search ("https://www.google.com/search?q=..."). N'invente JAMAIS d'URL directe (pas de meteofrance.com direct) : commence toujours par Google pour explorer et tester les différents résultats.
   * Ouvre DIRECTEMENT le web via "navigate_to_url" (ex: "https://www.google.com/search?q=...") ou "open_search_browser".
   * INTERDICTION FORMELLE DE FERMER LA FENÊTRE ACTIVE : Ne ferme JAMAIS la fenêtre actuelle (pas de "close_app", ni de clic sur "Fermer (croix ✕)") pour lancer une recherche ou ouvrir un site. Conserve les applications de l'utilisateur et ouvre directement le navigateur par-dessus.
   * Ne te laisse pas happer par la fenêtre active : si elle ne correspond pas à la demande (ex: éditeur de code, terminal, document), n'interagis pas au hasard avec et ne tente pas de la fermer ; lance immédiatement la navigation web !
