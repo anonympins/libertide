@@ -4,6 +4,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.8] - 2026-11-08
+
+### 🧠 Local LLM Lineup Overhaul & 1B Specificities Deprecation (`local_llm.rs`, `types.rs`, `main.rs`)
+- **Deprecation & Clean-up of Sub-1B & 1B Constraints**:
+  - Completely removed ultra-lightweight sub-1B models (Qwen 0.5B) and stripped-down prompt workarounds (`Tier1B` heuristic forks) that restricted reasoning complexity.
+  - Unified local model tiers (`ModelTier::Local` vs `ModelTier::Remote`) to guarantee deterministic JSON formatting and prevent truncated reasoning passes.
+  - Standardized default local model to **Qwen 2.5 1.5B Instruct** (`qwen2.5-1.5b-instruct-q4_k_m.gguf`, ~986 MB).
+  - Expanded high-capacity local model lineup up to 7B/8B in `Q4_K_M` quantization:
+    - **Qwen 2.5 7B Instruct** (~4.7 GB, advanced autonomous reasoning and complex DOM planning).
+    - **Meta-Llama 3.1 8B Instruct** (~4.9 GB, high-precision instruction following).
+  - **Asynchronous Preloading & Disk Space Management**:
+    - Added `init_local_llm`: preloads the active GGUF model into VRAM/RAM during application boot.
+    - Added `delete_preset_model`: one-click deletion of unused local GGUF models directly within the Settings dialog to reclaim disk space.
+
+### 🧭 Universal Modular LLM Router & 32 Semantic Domains (`local_llm.rs`, `main.rs`)
+- **Dynamic Intent Classification & Modular Prompt Injection**:
+  - Replaced monolithic, token-heavy system prompts with a targeted modular router (`CommandTag`) covering **32 specialized accessibility & interaction domains**:
+    - Core navigation & web: `WebNavigateOrSearch`, `NavigateInWebpage`, `BrowserTabNavigation`, `RadioAndMusicStream`, `VideoAndEntertainment`, `TravelAndFlightBooking`, `EcommerceAndShopping`.
+    - Accessibility & specialized care: `MotorAndSwitchAccess`, `VisualAccessibility`, `LockedInAndEyeTracking`, `TremorAndSpasticityFilter`, `NeurodivergentAndSensoryCalm`, `AacSymbolCommunication`, `VitalCareAndCaregiverAlert`, `CareAndComfort`, `CognitiveAndClarity`.
+    - Productivity & dev: `CodeAndDevelopment`, `CommunicationAndMessaging`, `FileManagementAndExplorer`, `ScheduleTask`, `TextInputOrDictation`.
+  - **Fast Deterministic Intent Classifier (`fast_classify_intent`)**:
+    - Zero-latency heuristic pre-classification catching domain-specific keywords and regular patterns prior to LLM evaluation.
+    - Automatic synergistic domain expansion (e.g., `RadioAndMusicStream` automatically mounts `NavigateInWebpage`, `ClickElementOrButton`, and `VolumeControl`).
+  - **Strict Multi-Lingual Enforcement (`lang_name`)**:
+    - System prompts dynamically enforce the user's active locale across all outputs, preventing English leaks when parsing foreign web pages.
+
+### 🛠️ Robust JSON Repair Pipeline & Guardrails for Local Models (`local_llm.rs`)
+- **Automated Output Sanitization Engine**:
+  - Implemented `repair_actions_field`, `repair_single_action_item`, and `clean_action_target_str`:
+    - Automatically repairs malformed JSON syntax produced by small language models (unquoted attributes, missing object wrappers, unescaped single quotes `\'`, or invalid colon separators inside arrays).
+    - Strips UI element type indicators (e.g. `[bouton]`, `[lien]`, `[onglet]`) and `#ID` prefixes from action targets so that native automation handlers receive clean text labels.
+  - **Programmatic Loop Breaker & Auto-Stop**:
+    - If the model emits an empty `actions` array (`[]`), `next_passes` is automatically forced to `0` to prevent indefinite exploratory loops.
+    - Consecutive repeat-action detector halting execution when identical actions are cycled across reasoning passes.
+
+### ⚙️ Inference Prompt Customization (`LocalLlmOptions`, `theme.rs`, `main.rs`)
+- **Fine-Grained Context Controls**:
+  - Added user-configurable inference flags persisted in `.env`:
+    - `LOCAL_LLM_MINIMAL_MODE`: switches between concise and full prompt instructions.
+    - `LOCAL_LLM_ACTIVE_WIN_ONLY`: isolates foreground window context to reduce prompt token footprint.
+    - `LOCAL_LLM_FEEDBACK`: toggles injection of execution reports from previous steps.
+    - `LOCAL_LLM_HISTORY`: toggles multi-turn conversation memory vs single-query isolation.
+
+---
 ## [0.6.7] - 2026-10-30
 
 ### 🧠 Embedded Local LLM Engine & Offline Inference (`local_llm.rs`, `main.rs`, `types.rs`)

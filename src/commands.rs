@@ -27,6 +27,26 @@ use crate::window_util::*;
 #[cfg(windows)]
 const CREATE_NEW_CONSOLE: u32 = 0x00000010;
 
+fn sanitize_target_name(target: &str) -> String {
+    let t = target.trim();
+    let without_hash = if let Some(rest) = t.strip_prefix('#') {
+        rest.trim_start_matches(|c: char| c.is_ascii_digit()).trim_start()
+    } else {
+        t
+    };
+    let without_type = if without_hash.starts_with('[') {
+        if let Some(pos) = without_hash.find(']') {
+            without_hash[pos + 1..].trim()
+        } else {
+            without_hash
+        }
+    } else {
+        without_hash
+    };
+    let clean = without_type.trim_matches('"').trim_matches('\'').trim();
+    if clean.is_empty() { t.to_string() } else { clean.to_string() }
+}
+
 #[cfg(windows)]
 pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> String {
     if actions.is_empty() {
@@ -137,6 +157,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
     let mut user_windows = list_user_windows();
     let mut active_user_hwnd = get_active_or_best_window(&user_windows);
     let mut preferred_target_hwnd = newly_spawned_hwnd.or(active_user_hwnd);
+    let mut click_executed_in_batch = false;
 
     for (idx, action) in actions.iter().enumerate() {
         if is_request_cancelled(request_id) {
@@ -344,7 +365,15 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 }
             }
             AgentAction::ClickElement { window, target_name } => {
-                let is_browser_target = is_address_bar_target(target_name) || is_browser_chrome_target(target_name);
+                if click_executed_in_batch {
+                    println!("[Actions] Deuxième clic consécutif ignoré dans la même passe ('{}') : différé.", target_name);
+                    feedback.push(format!("Clic sur '{}' différé à la passe suivante.", target_name));
+                    continue;
+                }
+                click_executed_in_batch = true;
+                let cleaned_name = sanitize_target_name(target_name);
+                let effective_target = if !cleaned_name.is_empty() { cleaned_name.as_str() } else { target_name.as_str() };
+                let is_browser_target = is_address_bar_target(effective_target) || is_browser_chrome_target(effective_target);
                 let target_hwnd = match window.as_deref() {
                     Some(w) if !w.trim().is_empty() => {
                         find_windows_matching(w, &user_windows, active_user_hwnd).first().copied()
@@ -366,14 +395,14 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     let is_browser = user_windows.iter().find(|(h, _)| *h == hwnd).map_or(false, |(h, t)| is_browser_hwnd(*h, t));
 
                     // Dérivation immédiate vers le raccourci universel Alt+D / Ctrl+L si la barre d'adresse est ciblée
-                    if is_browser && is_address_bar_target(target_name) {
+                    if is_browser && is_address_bar_target(effective_target) {
                         println!("[Actions] Activation directe barre d'adresse (Alt+D / Ctrl+L) sur [HWND {:?}]", hwnd.0);
                         focus_browser_address_bar(hwnd);
                         feedback.push("Barre d'adresse sélectionnée via raccourci universel (Alt+D / Ctrl+L).".to_string());
                         continue;
                     }
 
-                    println!("[Actions] Clic sur l'élément [HWND {:?}] pour '{}'", hwnd.0, target_name);
+                    println!("[Actions] Clic sur l'élément [HWND {:?}] pour '{}' (nettoyé: '{}')", hwnd.0, target_name, effective_target);
                     force_foreground_window(hwnd);
                     restore_if_iconic(hwnd);
                     std::thread::sleep(Duration::from_millis(80));
@@ -384,7 +413,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         elements = list_interactive_elements(hwnd);
                     }
 
-                    if let Some(elem) = find_best_element(&elements, target_name) {
+                    if let Some(elem) = find_best_element(&elements, effective_target) {
                         // Détection structurelle : zone de saisie située dans le chrome navigateur -> barre d'adresse
                         if is_browser && elem.is_browser_chrome && (elem.is_edit_or_textarea || elem.is_input) {
                             println!("[Actions] Détection structurelle : zone de saisie dans le chrome navigateur résolue -> focus_browser_address_bar");
@@ -395,14 +424,14 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         println!("[Actions] Élément/lien trouvé : name='{}', id='{}', type='{}', clic en ({}, {})", elem.name, elem.automation_id, elem.localized_type, elem.click_x, elem.click_y);
                         unsafe { let _ = elem.element.SetFocus(); }
                         click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
-                        feedback.push(format!("Clic effectué sur l'élément '{}'.", target_name));
+                        feedback.push(format!("Clic effectué sur l'élément '{}'.", effective_target));
                     } else {
                         // Repli : vérifier si l'élément se trouve dans une notification active
                         let mut found_toast = None;
                         for (w_h, w_t) in &user_windows {
                             if *w_h != hwnd && (w_t.to_lowercase().contains("notification") || w_t.to_lowercase().contains("toast")) {
                                 let toast_elems = list_interactive_elements(*w_h);
-                                if let Some(elem) = find_best_element(&toast_elems, target_name) {
+                                if let Some(elem) = find_best_element(&toast_elems, effective_target) {
                                     found_toast = Some((*w_h, elem.clone()));
                                     break;
                                 }
@@ -412,10 +441,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                             force_foreground_window(toast_hwnd);
                             unsafe { let _ = elem.element.SetFocus(); }
                             click_element(elem.click_x, elem.click_y, Some(&elem.element), elem.pattern.as_ref());
-                            feedback.push(format!("Clic effectué sur l'élément '{}' (Notification).", target_name));
+                            feedback.push(format!("Clic effectué sur l'élément '{}' (Notification).", effective_target));
                         } else {
-                            println!("[Actions] Aucun élément/lien correspondant trouvé pour '{}'", target_name);
-                            feedback.push(format!("Élément ou lien '{}' introuvable à l'écran.", target_name));
+                            println!("[Actions] Aucun élément/lien correspondant trouvé pour '{}'", effective_target);
+                            feedback.push(format!("Élément ou lien '{}' introuvable à l'écran.", effective_target));
                         }
                     }
                 }
@@ -539,6 +568,12 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 }
             }
             AgentAction::ClickButton { window, button_name } => {
+                if click_executed_in_batch {
+                    println!("[Actions] Clic bouton consécutif ignoré dans la même passe ('{}').", button_name);
+                    feedback.push(format!("Clic sur bouton '{}' différé.", button_name));
+                    continue;
+                }
+                click_executed_in_batch = true;
                 let is_browser_target = is_browser_chrome_target(button_name);
                 let target_hwnd = match window.as_deref() {
                     Some(w) if !w.trim().is_empty() => {
@@ -868,9 +903,54 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                                 feedback.push(format!("Texte inséré dans le champ validé '{}'.", elem.name));
                                 handled = true;
                             } else {
-                                println!("[Actions] Rejet : aucun champ interactable correspondant à '{}'", target_desc);
-                                feedback.push(format!("Ciblage rejeté : le champ interactable '{}' est introuvable parmi les éléments réels de l'écran. Aucune cible arbitraire n'a été sélectionnée.", target_desc));
-                                handled = true;
+                                println!("[Actions] Champ '{}' non trouvé directement, recherche d'un champ de recherche ou saisie de repli", target_desc);
+                                let td_low = target_desc.to_lowercase().replace('_', " ");
+                                let is_search = td_low.contains("search") || td_low.contains("recherch") || td_low.contains("barre");
+                                let has_web = elements.iter().any(|e| e.is_web_content && (e.is_explicit_textarea || e.is_edit_or_textarea || e.is_input));
+
+                                let fallback_elem = if is_search {
+                                    elements.iter().find(|e| {
+                                        (e.is_input || e.is_edit_or_textarea) && {
+                                            let combined = format!("{} {} {}", e.name, e.automation_id, e.class_name).to_lowercase();
+                                            combined.contains("search") || combined.contains("recherch") || combined.contains("query")
+                                        }
+                                    })
+                                } else {
+                                    None
+                                }
+                                .or_else(|| {
+                                    elements
+                                        .iter()
+                                        .filter(|e| {
+                                            if has_web && e.is_browser_chrome {
+                                                return false;
+                                            }
+                                            e.is_input || e.is_edit_or_textarea || e.is_explicit_textarea
+                                        })
+                                        .max_by_key(|e| (e.is_web_content, e.is_explicit_textarea, e.area))
+                                });
+
+                                if let Some(fe) = fallback_elem {
+                                    println!("[Actions] Champ de repli trouvé : '{}' [id='{}']", fe.name, fe.automation_id);
+                                    unsafe { let _ = fe.element.SetFocus(); }
+                                    click_element(fe.click_x, fe.click_y, Some(&fe.element), fe.pattern.as_ref());
+                                    std::thread::sleep(Duration::from_millis(50));
+                                    send_hotkey(&[VK_CONTROL], VK_A);
+                                    std::thread::sleep(Duration::from_millis(30));
+                                    set_clipboard_text(text);
+                                    std::thread::sleep(Duration::from_millis(30));
+                                    send_paste();
+                                    if should_enter {
+                                        std::thread::sleep(Duration::from_millis(60));
+                                        send_hotkey(&[], VK_RETURN);
+                                    }
+                                    feedback.push(format!("Texte inséré dans le champ '{}'.", fe.name));
+                                    handled = true;
+                                } else {
+                                    println!("[Actions] Rejet : aucun champ interactable correspondant à '{}'", target_desc);
+                                    feedback.push(format!("Ciblage rejeté : le champ interactable '{}' est introuvable parmi les éléments réels de l'écran.", target_desc));
+                                    handled = true;
+                                }
                             }
                         }
                     } else if let Some(hwnd) = target_hwnd.or(active_user_hwnd).or(preferred_target_hwnd) {
@@ -2368,6 +2448,11 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 feedback.push(format!("Mode de ciblage par numéros {desc}."));
             }
             AgentAction::ClickNumberedTarget { index } => {
+                if click_executed_in_batch {
+                    println!("[Actions] Clic badge consécutif ignoré dans la même passe (#{}).", index);
+                    continue;
+                }
+                click_executed_in_batch = true;
                 feedback.push(format!("Clic sur le badge numéro {index} déclenché."));
             }
             AgentAction::LiveSubtitles { target_window, enabled } => {
@@ -2666,9 +2751,30 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 feedback.push(format!("Mode de ciblage par numéros {desc}."));
             }
             AgentAction::ClickNumberedTarget { index } => {
-                feedback.push(format!("Clic sur le badge numéro {index} déclenché."));
+                let targets = collect_numbered_targets_for_active_window();
+                if let Some(matched) = targets.iter().find(|t| t.index == *index) {
+                    click_element(matched.click_x, matched.click_y, None, None);
+                    feedback.push(format!("Clic effectué sur le badge #{} ('{}').", index, matched.name));
+                } else {
+                    feedback.push(format!("Clic sur le badge numéro {index} déclenché."));
+                }
             }
             AgentAction::ClickElement { target_name, .. } => {
+                let target_num_opt = target_name
+                    .trim()
+                    .strip_prefix('#')
+                    .unwrap_or(target_name.trim())
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<usize>().ok());
+                if let Some(idx) = target_num_opt {
+                    let targets = collect_numbered_targets_for_active_window();
+                    if let Some(matched) = targets.iter().find(|t| t.index == idx) {
+                        click_element(matched.click_x, matched.click_y, None, None);
+                        feedback.push(format!("Clic effectué sur le contrôle #{} ('{}').", idx, matched.name));
+                        continue;
+                    }
+                }
                 let elements = list_interactive_elements("");
                 if let Some(elem) = find_best_element(&elements, target_name) {
                     click_element(elem.click_x, elem.click_y, None, None);
@@ -2678,6 +2784,21 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 }
             }
             AgentAction::ClickButton { button_name, .. } => {
+                let target_num_opt = button_name
+                    .trim()
+                    .strip_prefix('#')
+                    .unwrap_or(button_name.trim())
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<usize>().ok());
+                if let Some(idx) = target_num_opt {
+                    let targets = collect_numbered_targets_for_active_window();
+                    if let Some(matched) = targets.iter().find(|t| t.index == idx) {
+                        click_element(matched.click_x, matched.click_y, None, None);
+                        feedback.push(format!("Clic effectué sur le bouton #{} ('{}').", idx, matched.name));
+                        continue;
+                    }
+                }
                 let elements = list_interactive_elements("");
                 if let Some(elem) = find_best_button_element(&elements, button_name) {
                     click_element(elem.click_x, elem.click_y, None, None);
@@ -2775,7 +2896,7 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
             }
             AgentAction::SetReasoningPasses { passes, reason } => {
                 let clamped = (*passes).clamp(1, 15);
-                TARGET_REASONING_PASSES.store(clamped, Ordering::SeqCst);
+                TARGET_REASONING_PASSES.fetch_max(clamped, Ordering::SeqCst);
                 let reason_desc = reason.as_deref().unwrap_or("ajustement au contexte d'urgence");
                 feedback.push(format!("Budget de raisonnement configuré à {} passes ({reason_desc}).", clamped));
             }

@@ -118,6 +118,7 @@ pub struct OverlayApp {
     current_win_h: f32,
     is_hidden: bool,
     mouse_passthrough: bool,
+    is_streaming_narration: bool,
 
     // Boîte modale de configuration de la clé API
     show_api_key_modal: bool,
@@ -129,6 +130,7 @@ pub struct OverlayApp {
     api_key_error: Option<String>,
 
     local_download_progress: Option<(f32, f32, f32, f32)>,
+    local_llm_options: local_llm::LocalLlmOptions,
 
     // Suggestions d'applications en direct (PATH & Levenshtein)
     input_suggestions: Vec<String>,
@@ -139,6 +141,87 @@ pub struct OverlayApp {
     macro_shortcut_input: String,
     macro_text_input: String,
     macro_error: Option<String>,
+}
+
+/// Formate les éléments interactifs d'une fenêtre de manière ultra-compacte pour les petits LLMs locaux
+pub fn format_compact_window_elements(win_title: &str, targets: &[NumberedElementTarget]) -> String {
+    let mut out = String::new();
+    let title_clean = win_title.trim();
+    if !title_clean.is_empty() {
+        out.push_str(&format!("[Fenêtre active au premier plan : \"{}\"]\n", title_clean));
+    } else {
+        out.push_str("[Fenêtre active au premier plan]\n");
+    }
+    if targets.is_empty() {
+        out.push_str("(Aucun contrôle interactif identifié)\n");
+    } else {
+        out.push_str("Contrôles interactifs détectés :\n");
+        for t in targets.iter().take(110) {
+            let role = match t.role.as_str() {
+                "bouton" | "button" => "bouton",
+                "champ de saisie" | "input" => "saisie",
+                "zone de texte" | "textarea" => "texte",
+                "lien" | "link" => "lien",
+                "onglet" | "tab" => "onglet",
+                "case à cocher" | "checkbox" => "case",
+                "liste déroulante" | "select" | "combobox" => "menu",
+                other => other,
+            };
+            let name = t.name.trim();
+            let val = t.value.trim();
+            if !name.is_empty() && !val.is_empty() && val != name {
+                out.push_str(&format!("- #{} [{}] \"{}\" (val: \"{}\")\n", t.index, role, name, val));
+            } else if !name.is_empty() {
+                out.push_str(&format!("- #{} [{}] \"{}\"\n", t.index, role, name));
+            } else if !val.is_empty() {
+                out.push_str(&format!("- #{} [{}] val: \"{}\"\n", t.index, role, val));
+            } else {
+                out.push_str(&format!("- #{} [{}]\n", t.index, role));
+            }
+        }
+        if targets.len() > 110 {
+            out.push_str(&format!("... et {} autres éléments non listés.\n", targets.len() - 110));
+        }
+    }
+    out
+}
+
+/// Extrait les derniers messages de l'historique en conservant au maximum `max_user_msgs` messages utilisateur
+fn get_recent_history_capped_at_user_messages(history: &[ChatMessage], max_user_msgs: usize) -> Vec<ChatMessage> {
+    let mut user_count = 0;
+    let mut start_idx = 0;
+    for (i, msg) in history.iter().enumerate().rev() {
+        if msg.role == "user" {
+            user_count += 1;
+            if user_count == max_user_msgs {
+                start_idx = i;
+                break;
+            }
+        }
+    }
+    let mut recent = history[start_idx..].to_vec();
+    let user_indices: Vec<usize> = recent
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == "user")
+        .map(|(i, _)| i)
+        .collect();
+
+    if let Some(&last_user_idx) = user_indices.last() {
+        for &idx in &user_indices {
+            if idx != last_user_idx {
+                let content = &recent[idx].content;
+                if let Some(pos) = content.rfind("[Demande utilisateur]\n") {
+                    recent[idx].content = content[pos + "[Demande utilisateur]\n".len()..].trim().to_string();
+                } else if let Some(pos) = content.find("[État actuel de l'écran]") {
+                    if let Some(end_pos) = content[pos..].find("\n\n") {
+                        recent[idx].content = content[pos + end_pos + 2..].trim().to_string();
+                    }
+                }
+            }
+        }
+    }
+    recent
 }
 
 fn extract_badge_number(text: &str) -> Option<usize> {
@@ -494,7 +577,12 @@ impl OverlayApp {
         } else {
             (t!("speech.waiting_instructions").to_string(), Vec::new())
         };
-        let _ = tts_sender.send(TtsCommand::Speak(initial_subtitle.clone()));
+        let initial_speech = if let Some(sug_speech) = format_suggestions_for_speech(&initial_suggestions) {
+            format!("{initial_subtitle}\n\n{sug_speech}")
+        } else {
+            initial_subtitle.clone()
+        };
+        let _ = tts_sender.send(TtsCommand::Speak(initial_speech));
 
         let dwell_millis = std::env::var("DWELL_TIME_MS")
             .ok()
@@ -591,6 +679,7 @@ impl OverlayApp {
             current_win_h: 196.0,
             is_hidden: false,
             mouse_passthrough: false,
+            is_streaming_narration: false,
             show_api_key_modal: has_no_key,
             api_key_input: llm_config.api_key.clone(),
             model_input: llm_config.model.clone(),
@@ -599,6 +688,7 @@ impl OverlayApp {
             show_api_key_plain: false,
             api_key_error: None,
             local_download_progress: None,
+            local_llm_options: local_llm::get_local_llm_options(),
             input_suggestions: Vec::new(),
             last_suggestion_query: String::new(),
             macros,
@@ -728,6 +818,7 @@ impl OverlayApp {
     }
 
     pub fn stop_speaking(&mut self) {
+        self.is_streaming_narration = false;
         let _ = self.tts_sender.send(TtsCommand::Stop);
         set_tts_audio_level(0.0);
         self.smoothed_audio_level = 0.0;
@@ -743,6 +834,7 @@ impl OverlayApp {
     fn trigger_emergency_stop(&mut self, _ctx: &egui::Context) {
         self.continuous_mode = false;
         self.dictation_mode = false;
+        self.is_streaming_narration = false;
         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
         cancel_all_scheduled_tasks();
         floating_window::stop_live_subtitles();
@@ -1624,8 +1716,24 @@ impl eframe::App for OverlayApp {
                         entry.screen_size_kb = Some(kb);
                     }
                 }
+                AgentEvent::NarrationStart => {
+                    self.is_streaming_narration = true;
+                    self.chat_history.push(ChatEntry {
+                        role: ChatRole::Agent,
+                        text: String::new(),
+                        timestamp: current_time_str(),
+                        quick_suggestions: Vec::new(),
+                        screen_size_kb: None,
+                    });
+                }
                 AgentEvent::NarrationChunk(chunk) => {
-                    if let Some(last) = self.chat_history.last_mut() {
+                    if self.is_streaming_narration {
+                        if let Some(last) = self.chat_history.last_mut() {
+                            if matches!(last.role, ChatRole::Agent) {
+                                last.text.push_str(&chunk);
+                            }
+                        }
+                    } else if let Some(last) = self.chat_history.last_mut() {
                         if matches!(last.role, ChatRole::Agent) {
                             last.text.push_str(&chunk);
                         } else {
@@ -1648,21 +1756,58 @@ impl eframe::App for OverlayApp {
                     }
                 }
                 AgentEvent::ReplaceNarration { text, quick_suggestions } => {
+                    let was_streaming = self.is_streaming_narration;
+                    self.is_streaming_narration = false;
+
                     if text.trim().is_empty() && quick_suggestions.is_empty() {
                         continue;
                     }
                     if text.trim().is_empty() {
                         if let Some(last) = self.chat_history.last_mut().filter(|e| e.role == ChatRole::Agent) {
-                            for sug in quick_suggestions {
+                            for sug in &quick_suggestions {
                                 if !last.quick_suggestions.iter().any(|s| s.as_str() == sug.as_str()) {
-                                    last.quick_suggestions.push(sug);
+                                    last.quick_suggestions.push(sug.clone());
                                 }
                             }
                         }
+                        if let Some(sug_speech) = format_suggestions_for_speech(&quick_suggestions) {
+                            if !sanitize_for_tts(&sug_speech).trim().is_empty() {
+                                self.status = AgentStatus::Speaking;
+                                let _ = self.tts_sender.send(TtsCommand::Enqueue(sug_speech));
+                            }
+                        }
+                    } else if was_streaming || self.llm_config.provider == LlmProvider::Local {
+                        if let Some(last) = self.chat_history.last_mut().filter(|e| e.role == ChatRole::Agent) {
+                            last.text = text.clone();
+                            last.quick_suggestions = quick_suggestions.clone();
+                        } else {
+                            self.chat_history.push(ChatEntry {
+                                role: ChatRole::Agent,
+                                text: text.clone(),
+                                timestamp: current_time_str(),
+                                quick_suggestions: quick_suggestions.clone(),
+                                screen_size_kb: None,
+                            });
+                        }
+                        if let Some(sug_speech) = format_suggestions_for_speech(&quick_suggestions) {
+                            if !sanitize_for_tts(&sug_speech).trim().is_empty() {
+                                self.status = AgentStatus::Speaking;
+                                let _ = self.tts_sender.send(TtsCommand::Enqueue(sug_speech));
+                            }
+                        }
                     } else {
-                        if !sanitize_for_tts(&text).trim().is_empty() {
+                        let full_speech = if let Some(sug_speech) = format_suggestions_for_speech(&quick_suggestions) {
+                            if !sanitize_for_tts(&text).trim().is_empty() {
+                                format!("{text}\n\n{sug_speech}")
+                            } else {
+                                sug_speech
+                            }
+                        } else {
+                            text.clone()
+                        };
+                        if !sanitize_for_tts(&full_speech).trim().is_empty() {
                             self.status = AgentStatus::Speaking;
-                            let _ = self.tts_sender.send(TtsCommand::Speak(text.clone()));
+                            let _ = self.tts_sender.send(TtsCommand::Speak(full_speech));
                         }
                         self.chat_history.push(ChatEntry {
                             role: ChatRole::Agent,
@@ -3972,6 +4117,23 @@ impl eframe::App for OverlayApp {
                                             }
                                         }
 
+                                        // Interception de la touche Entrée (sans Shift) AVANT que TextEdit n'insère un saut de ligne
+                                        let enter_pressed_before = is_input_focused
+                                            && !is_modal_open
+                                            && !is_other_typing
+                                            && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+
+                                        if enter_pressed_before {
+                                            enter_hit = true;
+                                            ctx.input_mut(|i| {
+                                                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                                                i.events.retain(|e| !matches!(e, egui::Event::Text(ref t) if t == "\n" || t == "\r"));
+                                            });
+                                            while self.input_text.ends_with('\n') || self.input_text.ends_with('\r') {
+                                                self.input_text.pop();
+                                            }
+                                        }
+
                                         let paste_hit = ctx.input(|i| {
                                             i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
                                                 || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
@@ -4126,10 +4288,15 @@ impl eframe::App for OverlayApp {
                                             let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
                                         }
 
-                                        enter_hit = (response.lost_focus() || response.has_focus())
-                                            && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-                                        if enter_hit {
-                                            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                                        if !enter_hit && !is_modal_open && !is_other_typing {
+                                            enter_hit = response.has_focus()
+                                                && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                                            if enter_hit {
+                                                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                                                while self.input_text.ends_with('\n') || self.input_text.ends_with('\r') {
+                                                    self.input_text.pop();
+                                                }
+                                            }
                                         }
                                     });
 
@@ -4157,6 +4324,7 @@ impl eframe::App for OverlayApp {
                                         let enter_with_text = enter_hit && !self.input_text.trim().is_empty();
 
                                         if analyze_btn_hit || enter_with_text {
+                                            println!("[UI Input] Validation déclenchée (analyze_btn={}, enter_hit={}, texte=\"{}\")", analyze_btn_hit, enter_hit, self.input_text.trim());
                                             self.stop_speaking();
                                             if self.is_recording {
                                                 self.stop_recording();
@@ -4175,9 +4343,11 @@ impl eframe::App for OverlayApp {
 
                                             let norm_prompt = normalize_for_command_match(&prompt);
                                             if is_start_subtitles_command(&norm_prompt) {
+                                                println!("[UI Input] Commande démarrage sous-titres détectée");
                                                 self.start_live_subtitles(None);
                                                 return;
                                             } else if is_stop_subtitles_command(&norm_prompt) {
+                                                println!("[UI Input] Commande arrêt sous-titres détectée");
                                                 self.stop_live_subtitles();
                                                 return;
                                             }
@@ -4206,10 +4376,15 @@ impl eframe::App for OverlayApp {
 
                                             // 1. Bascule du mode survol/numéros
                                             if is_switch_access_command(&norm_prompt) {
+                                                println!("[UI Input] Commande bascule switch_access détectée");
                                                 self.toggle_switch_access_mode(None);
-                                            } else if self.switch_access_mode {
+                                                return;
+                                            }
+
                                             // 2. Détection directe du numéro en mode survol/numéros actif
+                                            if self.switch_access_mode {
                                                 if let Some(idx) = extract_badge_number(&norm_prompt) {
+                                                    println!("[UI Input] Numéro de badge #{} détecté en mode survol", idx);
                                                     self.chat_history.push(ChatEntry {
                                                         role: ChatRole::User,
                                                         text: prompt,
@@ -4221,8 +4396,10 @@ impl eframe::App for OverlayApp {
                                                     self.status = AgentStatus::Idle;
                                                     return;
                                                 }
-                                            // 3. Raccourcis de navigation immédiate (si pas un numéro)
-                                            } else {
+                                            }
+
+                                            println!("[UI Input] Traitement de la requête utilisateur : \"{}\"", prompt);
+
                                             if norm_prompt == "annule" || norm_prompt == "annuler" || norm_prompt == "undo" {
                                                 let undo_feedback = if let Some(fb) = undo_last_system_action() {
                                                     fb
@@ -4320,9 +4497,9 @@ impl eframe::App for OverlayApp {
                                                 });
                                                 let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                                             } else {
+                                                println!("[UI Input] Envoi de AgentCommand::Prompt vers le backend : \"{}\"", prompt);
                                                 self.status = AgentStatus::Thinking;
                                                 let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
-                                            }
                                             }
                                         }
 
@@ -4613,7 +4790,12 @@ impl eframe::App for OverlayApp {
                                             let dwell_triggered = apply_dwell_to_response(ui, dwell_state, msg_dwell_id, &interact_resp);
                                             if dwell_triggered {
                                                 dwell_state.lock_id(msg_dwell_id, Duration::from_secs(6));
-                                                speak_message = Some(entry.text.clone());
+                                                let speech = if let Some(sug_speech) = format_suggestions_for_speech(&entry.quick_suggestions) {
+                                                    format!("{}\n\n{}", entry.text, sug_speech)
+                                                } else {
+                                                    entry.text.clone()
+                                                };
+                                                speak_message = Some(speech);
                                             }
 
                                             if interact_resp.clicked() {
@@ -5229,6 +5411,12 @@ impl eframe::App for OverlayApp {
                             ui.separator();
                             ui.add_space(4.0);
 
+                            let max_scroll_h = (work_area.h * 0.82 - 50.0).clamp(240.0, 600.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt("settings_modal_scroll")
+                                .auto_shrink([true, true])
+                                .max_height(max_scroll_h)
+                                .show(ui, |ui| {
                             match self.settings_tab {
                                 SettingsTab::LlmProvider => {
                             // --- Onglet Fournisseur LLM ---
@@ -5284,6 +5472,18 @@ impl eframe::App for OverlayApp {
                                         let _ = write_env_var_to_file(".env", "LLM_PROVIDER", self.selected_provider_modal.display_name());
                                         std::env::set_var("LLM_PROVIDER", self.selected_provider_modal.display_name());
                                         self.llm_config = resolve_llm_config();
+
+                                        let tier = local_llm::resolve_model_tier(self.selected_provider_modal, Some(local_llm::get_active_preset()));
+                                        let rec = tier.default_options();
+                                        self.local_llm_options = rec;
+                                        local_llm::set_local_llm_options(rec);
+
+                                        if self.selected_provider_modal == LlmProvider::Local {
+                                            std::thread::spawn(|| {
+                                                local_llm::init_local_llm();
+                                            });
+                                        }
+
                                         play_earcon(Earcon::Success);
                                     }
                                 } else {
@@ -5315,6 +5515,7 @@ impl eframe::App for OverlayApp {
 
                                         ui.add_space(4.0);
 
+                                        let mut model_to_delete = None;
                                         for preset in local_llm::MODEL_PRESETS {
                                             let is_active = active_preset.id == preset.id;
                                             let is_installed = local_llm::is_preset_downloaded(preset);
@@ -5330,6 +5531,11 @@ impl eframe::App for OverlayApp {
                                                     std::env::set_var("LLM_MODEL", preset.filename);
                                                     let _ = write_env_var_to_file(".env", "LOCAL_LLAMA_MODEL", preset.filename);
                                                     std::env::set_var("LOCAL_LLAMA_MODEL", preset.filename);
+
+                                                    let rec = preset.tier().default_options();
+                                                    self.local_llm_options = rec;
+                                                    local_llm::set_local_llm_options(rec);
+
                                                     play_earcon(Earcon::Success);
                                                 }
 
@@ -5350,6 +5556,11 @@ impl eframe::App for OverlayApp {
                                                         .color(egui::Color32::from_rgb(100, 225, 130))
                                                         .strong(),
                                                     );
+                                                    if ui.small_button("🗑")
+                                                        .on_hover_text("Supprimer ce fichier pour libérer l'espace disque")
+                                                        .clicked() {
+                                                        model_to_delete = Some(preset);
+                                                    }
                                                 } else {
                                                 ui.label(
                                                         egui::RichText::new("⚠️ Non téléchargé")
@@ -5358,6 +5569,18 @@ impl eframe::App for OverlayApp {
                                                     );
                                                 }
                                             });
+                                        }
+
+                                        if let Some(p) = model_to_delete {
+                                            match local_llm::delete_preset_model(p) {
+                                                Ok(()) => {
+                                                    play_earcon(Earcon::Success);
+                                                    self.api_key_error = None;
+                                                }
+                                                Err(e) => {
+                                                    self.api_key_error = Some(e);
+                                                }
+                                            }
                                         }
 
                                         ui.add_space(6.0);
@@ -5375,7 +5598,9 @@ impl eframe::App for OverlayApp {
                                             let btn_text = format!("⬇ Télécharger {} ({})", p.name, p.size_desc);
                                             if ui.button(egui::RichText::new(btn_text).strong().color(theme.accent)).clicked() {
                                                 std::thread::spawn(move || {
-                                                    let _ = local_llm::ensure_llama_model_downloaded_for_preset(&p, &event_tx_clone);
+                                                    if local_llm::ensure_llama_model_downloaded_for_preset(&p, &event_tx_clone).is_ok() {
+                                                        local_llm::init_local_llm();
+                                                    }
                                                 });
                                             }
                                         } else {
@@ -5389,6 +5614,60 @@ impl eframe::App for OverlayApp {
                                             );
                                         }
                                     });
+
+                                    ui.add_space(6.0);
+                                    egui::Frame::new()
+                                        .fill(theme.panel_bg)
+                                        .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                        .corner_radius(egui::CornerRadius::same(8))
+                                        .inner_margin(egui::Margin::symmetric(10, 8))
+                                        .show(ui, |ui| {
+                                            let mut opts = self.local_llm_options;
+                                            let mut changed = false;
+                                            let current_tier = active_preset.tier();
+
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new("⚙️ Paramètres du prompt d'inférence :")
+                                                        .size(11.0)
+                                                        .color(theme.accent)
+                                                        .strong(),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(format!("({})", current_tier.name()))
+                                                        .size(9.5)
+                                                        .color(theme.text_secondary),
+                                                );
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    if ui.small_button("⚡ Réglages conseillés").on_hover_text("Rétablir les options recommandées pour ce modèle").clicked() {
+                                                        opts = current_tier.default_options();
+                                                        changed = true;
+                                                    }
+                                                });
+                                            });
+                                            ui.add_space(4.0);
+
+                                            if ui.checkbox(&mut opts.minimal_mode, "Mode prompt minimaliste (recommandé pour modèles locaux)").on_hover_text("Utilise des consignes concises au lieu du prompt cloud étendu, réduisant les erreurs de format JSON").changed() {
+                                                changed = true;
+                                            }
+
+                                            if ui.checkbox(&mut opts.active_window_only, "Fenêtre principale uniquement (exclure les autres fenêtres / cartes)").on_hover_text("N'injecte que les données de la fenêtre active pour économiser le budget de tokens").changed() {
+                                                changed = true;
+                                            }
+
+                                            if ui.checkbox(&mut opts.include_feedback, "Inclure les rapports de retour des commandes exécutées").on_hover_text("Transmet les logs détaillés d'exécution des étapes précédentes (désactiver allège le contexte)").changed() {
+                                                changed = true;
+                                            }
+
+                                            if ui.checkbox(&mut opts.include_history, "Prendre en compte l'historique de conversation").on_hover_text("Si décoché, chaque requête est traitée de manière isolée sans être polluée par les échanges passés").changed() {
+                                                changed = true;
+                                            }
+
+                                            if changed {
+                                                self.local_llm_options = opts;
+                                                local_llm::set_local_llm_options(opts);
+                                            }
+                                        });
                             } else {
 
                             ui.add_space(4.0);
@@ -5606,6 +5885,9 @@ impl eframe::App for OverlayApp {
                                         self.llm_config.model = active_p.name.to_string();
                                         self.show_api_key_modal = false;
                                         self.api_key_error = None;
+                                        std::thread::spawn(|| {
+                                            local_llm::init_local_llm();
+                                        });
                                     } else if let Err(e) = write_env_var_to_file(".env", env_var_target, key) {
                                         self.api_key_error = Some(t!("ui.api_key_write_err", err = e).to_string());
                                     } else if let Err(e) = write_env_var_to_file(".env", env_model_target, model) {
@@ -6015,6 +6297,7 @@ impl eframe::App for OverlayApp {
                                     }
                                 }
                             }
+                                });
                         });
                 }
 
@@ -6326,157 +6609,7 @@ async fn compact_history_if_needed(
 }
 
 pub fn build_standard_system_instructions(lang_name: &str) -> String {
-    format!(r###"Tu es l'agent d'exploration Libertide multiplateforme (Windows, macOS, Linux).
-Réponds STRICTEMENT en JSON sans texte hors JSON. "narration" concise rédigée impérativement dans la langue du système de l'utilisateur : {lang_name} (max 2 phrases).
-
-Règles principales :
-1. Filtrage requête : Bruit/inintelligible -> "invalid_request": true. Salutations/chit-chat -> "invalid_request": false, "actions": [], narration courtoise.
-2. Budget de raisonnement autonome et passes profondes ("next_passes": 1..15 ou action "set_reasoning_passes") :
-    - ÉVALUATION ET PILOTAGE DU BUDGET PAR LE MODÈLE : Tu gères toi-même le nombre de passes d'exécution nécessaires via le champ racine "next_passes" ou l'action "set_reasoning_passes" :
-      * Basse importance / Réponse directe / Simple clic / Tâche ponctuelle rapide ("vite", "juste un coup d'œil", information simple) : 1 à 3 passes.
-      * Importance normale / Tâche standard multi-étapes (navigation web, formulaire, lecture, interaction applicative standard) : 4 à 7 passes.
-      * Haute importance / Recherche approfondie / Mission de contact / Comparatif de produits ou services / Benchmarks / Enquêtes : Tu DOIS impérativement t'allouer un budget de passes profondes ("next_passes": 8 à 12) dès la première passe et ne JAMAIS clore prématurément.
-      * Importance critique / Urgence vitale explicite / Grand départ précipité : 13 à 15 passes.
-    - MODULATION DYNAMIQUE CONTINUE : À chaque passe, réévalue et ajuste "next_passes" selon l'état d'avancement. Si la tâche exige plus d'étapes d'exploration, augmente le budget via "next_passes" ou "set_reasoning_passes".
- 3. PROTOCOLE URGENCE VITALE & SANTÉ :
-   - CAS 1 - DEMANDE EXPLICITE D'ALERTE / SECOURS (ex: "alerte Robin je fais un malaise", "appelle le 15", "aide médicale d'urgence") :
-     * IMMÉDIATEMENT "next_passes": 15.
-     * SANS ATTENDRE : exécute immédiatement l'envoi d'alerte ("actions": [...]).
-     * Narration : 1 phrase courte confirmant l'envoi + rappelle secours (15 SAMU, 18 Pompiers, 112).
-     * Silence parasite : appelle "mute_audio" (isole bruits tiers, garde voix Libertide audible).
-     * PIVOT OBLIGATOIRE : Tant que l'alerte n'est pas envoyée et qu'il reste des passes, INTERDICTION de renvoyer "actions": [].
-   - CAS 2 - DIDASCALIES (*gémissements*, *soupir*, *aïe*, [pleurs], etc.), JEU DE RÔLE, CITATION OU SITUATION AMBIGUË SANS DEMANDE FORMELLE :
-     * INTERDICTION STRICTE DE PANIQUER OU D'ENVOYER DES MESSAGES À DES TIERS : conserve impérativement "actions": [].
-     * Reste calme et attentif. Vérifie la situation dans la narration (ex: "J'ai perçu des signes de malaise (*gémissements*). Avez-vous besoin d'une assistance ou d'alerter un proche ?").
-     * Fournis OBLIGATOIREMENT une demande de confirmation dans "quick_suggestions" : ["Oui, alerter mes proches / secours", "Non, tout va bien / fausse alerte"].
-   - Départ précipité : autonomie pour sauver fichiers et fermer session / verrouiller écran.
- 3bis. PROTOCOLE D'ANALYSE APPROFONDIE STRATÉGIQUE (CONTACTS, PRODUITS ET SERVICES) :
-   - Dès que la demande implique de trouver ou contacter une personne, trouver des coordonnées, ou rechercher / comparer des produits et services :
-     * GESTION DU BUDGET : Définis immédiatement "next_passes": 8 à 12 (ou appelle l'action "set_reasoning_passes": 10). INTERDICTION de clore la mission en 1 seule passe ou de poser une question passive avec "actions": [].
-     * VOLET CONTACTS & COMMUNICATION ("contacte...", "écris à...", "trouve le contact", "appelle...") :
-       - Niveau 1 (Local) : Vérifie et sélectionne les messageries ou logiciels mail ouverts (Teams, Outlook, WhatsApp, Discord, Slack) et cherche le contact.
-       - Niveau 2 (Web & Annuaires pros) : Si absent en local ou application fermée, ouvre le navigateur ("navigate_to_url") pour chercher sur le web, LinkedIn, annuaires d'entreprises ou pages professionnelles.
-       - Niveau 3 (Projection fiche contact) : Dès identification des coordonnées (email, téléphone, poste, profil), projette OBLIGATOIREMENT une fiche volante de synthèse via "show_floating_card" (card_type: "stats", id: "fiche_contact", title: "Fiche contact : <Nom>", data: {{"Nom": "...", "Email": "...", "Téléphone": "...", "Poste / Société": "...", "Source": "..."}}), puis prépare le canal de communication (mailto:, message, appel).
-     * VOLET PRODUITS & SERVICES ("compare...", "meilleur...", "prix de...", "trouve une offre/produit") :
-       - Niveau 1 (Exploration web) : Ouvre le navigateur ("navigate_to_url") sur les moteurs, comparateurs ou sites marchands de référence.
-       - Niveau 2 (Extraction métrique) : Relève systématiquement prix, spécifications, disponibilité et notes/avis.
-       - Niveau 3 (Tableau comparatif volant) : Projette OBLIGATOIREMENT un tableau comparatif structuré dans une fenêtre volante via "show_floating_card" (card_type: "table", title: "Comparatif offres", data: {{"headers": ["Modèle / Offre", "Prix", "Caractéristiques", "Avis"], "rows": [["...", "...", "...", "..."]]}}).
-     * POLITIQUE DE PIVOT EN CAS D'ÉCHEC (TOUS VOLETS) :
-       - L'absence de résultat ou le blocage sur un premier canal (ex: contact absent dans Teams, page web non accessible) NE MET PAS FIN À LA MISSION. C'est un ordre de PIVOT IMMÉDIAT vers le canal suivant (local -> web -> annuaires) sans renvoyer "actions": [].
-       - Tant que tous les canaux n'ont pas été explorés et que les résultats ne sont pas projetés dans une fenêtre volante ("show_floating_card"), INTERDICTION de renvoyer "actions": [].
- 3ter. PROTOCOLE RÉSUMÉ DE PAGE ET SYNTHÈSE DE CONTENU ("résume cette page", "synthèse", "de quoi ça parle", "fais un résumé") :
-   - Dès que l'utilisateur souhaite résumer ou analyser une page web, un document ou un ensemble d'informations à l'écran :
-     * Analyse minutieusement le texte, titres et points clés de la page.
-     * Projette SYSTÉMATIQUEMENT une fenêtre volante au format Markdown via l'action "show_floating_card" :
-       card_type: "markdown", id: "resume_page", title: "Résumé : <Titre de la page/sujet>", data: {{"text": "# SLICE Docus — Synthèse de la chaîne\n\n## Identité\n- **Chaîne** : @SliceDocus — **56,4 k abonnés**, **875 vidéos**.\n\n## Vidéos récentes / populaires\n- ▶ La guerre des satellites qui redessine notre monde (2,7 k vues, il y a 20 h)\n- ▶ Galea: les trésors engloutis de Venise (5 k vues, il y a 3 j)\n- ▶ Bio-invasion | Fourmis de feu (95 k vues, il y a 7 j)\n\n## À retenir\n- Formats longs de 34 à 55 min...\n\n> Cliquez sur une vidéo ci-dessus pour la lancer."}}.
-     * LIENS D'ACTION & VIDÉOS CLIQUABLES : Dans le texte Markdown et la narration, insère systématiquement des liens cliquables via la macro `[link="action:consigne_ou_url"]Icône Libellé[/link]` (ou en Markdown `Icône Libellé`). Un clic sur le lien ouvre l'URL ou envoie immédiatement la consigne à l'agent.
-     * Dans ta "narration" vocale : sois très concis (1 à 2 phrases) pour confirmer oralement que la synthèse est projetée dans la fenêtre volante.
-     * Fournis des suggestions rapides utiles dans "quick_suggestions" (ex: ["Lancer la vidéo 1", "Lancer la vidéo 2", "Fermer le résumé"]).
-4. Interface & Ciblage :
-   - Hôte navigateur : préfixe "[Navigateur]" (ex: "[Navigateur] Barre d'adresse").
-   - Contenu web : libellé direct sans préfixe issu de "[Page web - ...]".
-   - ACCEPTATION AUTOMATIQUE DES COOKIES : Dès qu'une bannière de cookies ou consentement RGPD est présent, clique SYSTÉMATIQUEMENT et immédiatement sur le bouton pour tout accepter ("Tout accepter", "Accepter tout", "Autoriser", "J'accepte", "Continuer sans refuser") sans demander de confirmation.
-   - BANNIÈRES DE NOTIFICATION WEB, PUSH & NEWSLETTERS ("Activez les notifications", "Ne manquez rien", etc.) : Ce ne sont PAS des notifications système Windows (toasts). Ce sont des popups ou bannières intrusives sur la page web. Tu DOIS SYSTÉMATIQUEMENT les traiter immédiatement pour débloquer la page : clique en priorité sur la croix de fermeture ("Fermer (croix ✕)", "croix", "Fermer", "Plus tard", "Refuser", "Non merci"), ou sur "Activer" si demandé ou si aucune option de fermeture n'est présente. Ne laisse JAMAIS une bannière de notification web bloquer la page sans la valider ou la fermer !
-   - LECTURE DES NOTIFICATIONS SYSTÈME (TOASTS) : Dès qu'une notification Windows ou un toast est présent, lis impérativement son titre et son contenu dans ta "narration" pour informer l'utilisateur, mais LAISSE-LA TRANQUILLE (ne tente pas de la fermer, ne clique pas dessus et laisse le système la gérer).
-   - ALERTES & MESSAGES D'ERREUR (FERMETURE SYSTÉMATIQUE APRÈS LECTURE) : Dès qu'une boîte de dialogue d'alerte, un popup d'avertissement ou un message d'erreur est à l'écran, lis-le clairement ou résume-le dans ta "narration", puis FERME-LA SYSTÉMATIQUEMENT en cliquant sur son bouton de fermeture/validation ("OK", "Fermer", "Annuler", "Continuer", croix) pour débloquer l'écran et poursuivre ton travail. Ne JAMAIS envoyer "escape".
-   - PRIORITÉ ABSOLUE AUX CHANGEMENTS WEB : Si des informations, boutons ou données sont présent sur la page web (signalés sous 'INFORMATIONS WEB MODIFIÉES / NOUVELLES'), ils priment impérativement sur tous les éléments statiques et les autres fenêtres. Base en priorité absolue tes actions ou réponses sur ces changements.
-   - OBLIGATION DE CIBLAGE EXPLICITE DU CHAMP : Pour toute saisie, sélection ou clic ("write_text", "replace_field_text", "clear_text", "focus_element", "click_element", "click_button"), tu DOIS IMPÉRATIVEMENT renseigner le champ interactable précis visé ("target", "target_name" ou "button_name") en utilisant sa macro ou son identifiant exact observé à l'écran (ex: input, select, textarea, combobox, bouton, lien, video, audio).
-   - LECTEURS VIDÉO & AUDIO : Les balises vidéo et audio sont des éléments interactables (signalés par [@video:...], [@audio:...], ou [video]/[audio]). Pour lancer la lecture, mettre en pause ou interagir avec un média, utilise "click_element" ou "click_button" en ciblant la vidéo, l'audio ou ses contrôles de lecture ("play", "lecture", etc.).
-   - SÉCURITÉ DU CIBLAGE : "target": null et les cibles génériques ou fictives sont STRICTEMENT INTERDITES. Le moteur d'exécution valide déterministement chaque élément contre l'arbre réel de l'écran ; toute cible non vérifiable ou absente sera rejetée par sécurité.
-   - Raccourcis clavier & touches : utilise OBLIGATOIREMENT "accessibility_shortcut" avec le nom ou la combinaison de touches exacte (ex: "action_center", "open_settings", "ctrl+shift+b", "ctrl+t", "enter", "close_tab", "copy", "undo", "space"). Ne JAMAIS envoyer "run_command" pour simuler des touches ou des raccourcis système !
-   - Lecture code/fichier : "read_editor_content" (focalise et extrait Ctrl+A/Ctrl+C).
-   - Onglet/page : "accessibility_shortcut": "close_tab" (jamais "close_app" pour un onglet).
-   - DISTINCTION ABSOLUE ENTRE "open_search" ET "open_search_browser" (2 COMMANDES DISTINCTES) :
-     * "open_search" (ou accessibility_shortcut: "open_search") : Recherche SYSTÈME / OS locale (Win+S). Sert STRICTEMENT ET UNIQUEMENT à rechercher un fichier local, une application installée ou un paramètre Windows sur l'ordinateur. INTERDICTION FORMELLE d'utiliser "open_search" pour chercher sur internet ou sur le web !
-     * "open_search_browser" (ou "focus_address_bar" / accessibility_shortcut: "open_search_browser") : Recherche WEB / NAVIGATEUR. Sert SYSTÉMATIQUEMENT pour chercher sur le web, aller sur internet, ou saisir une requête dans l'omnibox/barre d'adresse du navigateur. Si l'utilisateur demande de chercher sur le web, Google, YouTube, la météo, un produit, etc., utilise TOUJOURS "open_search_browser" (ou "focus_address_bar" / "navigate_to_url").
-4bis. RÈGLES DE LIENS INTERACTIFS & MACRO [link="cible"]label[/link] (CHAT & FENÊTRES VOLANTES) :
-   - RÈGLE D'OR : Tout élément multimédia, ressource, fichier, page web, action ou suggestion mentionné dans "narration" ou dans une fenêtre volante ("show_floating_card") DOIT IMPÉRATIVEMENT être formaté sous forme de lien cliquable, prioritairement avec la macro robuste `[link="cible"]Icône Libellé[/link]` (ou en Markdown `Icône Libellé`).
-   - LIENS DANS LES TABLEAUX MARKDOWN : Tu PEUX et DOIS insérer des liens `[link="..."]...[/link]` à l'intérieur des cellules de tableaux Markdown ou de fenêtres volantes (ex: `| Produit | Action | Prix |\n| --- | --- | --- |\n| Drone Pro | [link="action:Commander Drone Pro"]⚡ Commander[/link] | 299€ |`).
-   - AVANTAGE MAJEUR DE LA MACRO `[link="..."]...[/link]` : Elle évite tout conflit de parenthèses imbriquées dans les requêtes et les URLs complexes.
-   - RÉACTIVITÉ DANS LE CHAT LIBERTIDE : Un clic sur un lien dans le chat ou dans une carte volante insère et envoie automatiquement la consigne dans le chat et déclenche l'exécution par l'agent. La synthèse vocale (TTS) prononce uniquement le libellé sans lire la cible technique ni les balises.
-   - TYPOLOGIE DES MACROS OBLIGATOIRES :
-     * Vidéos (YouTube, streaming) : `[link="action:Lancer la vidéo : Titre"]▶ Titre[/link]` ou `[link="https://..."]▶ Titre[/link]` (INTERDICTION d'énumérer des vidéos sans lien).
-     * Audio & Musique (Spotify, radios, podcasts) : `[link="action:Lancer l'audio : Titre"]🎵 Titre[/link]`.
-     * Images & Visuels : `[link="action:Ouvrir l'image : chemin_ou_titre"]🖼️ Titre[/link]`.
-     * Documents & PDF (tableurs, rapports, logs) : `[link="action:Ouvrir le fichier : nom.pdf"]📄 nom.pdf[/link]`.
-     * Liens Web & Articles : `[link="https://..."]🌐 Nom du site[/link]`.
-     * Actions & Clics système : `[link="action:Valider le panier"]⚡ Valider le panier[/link]`.
-     * Suggestions de choix : `[link="action:Consigne suggérée"]💡 Option recommandée[/link]`.
-5. Audio, Volume & Paramètres système (RÈGLE ABSOLUE ANTI-TERMINAL) :
-   - INTERDICTION STRICTE d'utiliser "run_command" avec "explorer.exe", "start ms-settings:sound", "cmd" ou toute commande console pour le son ou les réglages. L'invite de commande ne doit JAMAIS s'ouvrir pour gérer le son !
-   - Actions dédiées pour l'audio et les paramètres :
-     * Réglage natif du volume : action "set_volume" ("up"|"down"|"mute"|"unmute"|"min") ou "mute_audio".
-     * Panneau des réglages audio et choix de sortie (casque/haut-parleur) : action "accessibility_shortcut": "action_center" (ou "sound_settings", simule Win+A sans aucune invite de commande) ou "open_settings" (Win+I).
-     * Raccourcis multimédia universels : "accessibility_shortcut": "volume_up" | "volume_down" | "mute_volume".
-     * Lecteurs vidéo & musique (YouTube, Deezer, Spotify) : utilise directement "click_button" avec le libellé observé (ex: "Désactiver le son (m)", "Pause (k)") ou "accessibility_shortcut": "m" / "k" / "space". Ne quitte jamais la page pour régler un média web !
-   - "focus_address_bar" pour cibler la barre d'adresse du navigateur.
-6. Navigation & Web :
-   - "navigate_to_url" ouvre par défaut un nouvel onglet ("target": "new_tab").
-   - Achat : panier -> valider panier -> AVANT paiement stopper avec "actions": [] et demander confirmation.
-   - "scroll" ("down"|"up"|"bottom"|"top", amount: 1..2) pour explorer.
-   - RETOUR EN ARRIÈRE & UNDO NAVIGATION : "navigate_back" (ou "accessibility_shortcut": "browser_back", Alt+Gauche) pour revenir immédiatement à la page ou aux résultats précédents si une navigation s'est trompée de page, mène à une impasse ou à un tag erroné. "navigate_forward" pour avancer.
-7. Autres actions :
-   - Mode survol / numéros ("click_numbered_target") :
-     * Le mode survol (qui affiche les numéros) est activé/désactivé par l'utilisateur localement ("mode survol", bouton 🎯). Tu ne dois PAS utiliser d'action pour le basculer.
-     * Pour cliquer directement sur un numéro ou badge visible à l'écran, utilise l'action `{{"action": "click_numbered_target", "index": N}}` (ex: 1, 2, 3...).
-     * Après un clic, les numéros sont automatiquement rafraîchis.
-   - Immersion : "activate_immersion" (Win+Ctrl+D), "deactivate_immersion".
-   - Temporisation & Différé : "schedule_prompt" (delay_seconds: 1..3600, prompt: "...") ou "schedule_prompts" (tasks: [{{"delay_seconds": 10, "prompt": "..."}}]) pour différer des consignes futures (téléchargement en cours, rappel, temporisation). "cancel_scheduled_tasks" pour annuler immédiatement toutes les commandes différées / timers en attente.
-   - Fichiers & Documents : "open_file" (path: "chemin/fichier.ext") pour ouvrir directement toute image, vidéo, PDF, tableur ou document dans son application système par défaut (selon extension / MIME type).
-   - Fenêtres volantes d'analyse & formulaires de requête interactifs : "show_floating_card" (id: "...", title: "...", card_type: "form"|"table"|"stats"|"markdown", data: {{...}}) pour projeter une fenêtre volante avec un formulaire interactif de filtres/requête (inputs, jauges/sliders numériques, selectbox, radio, checkbox pour recherche personnalisée de vols, hôtels, shopping), un tableau comparatif, des données chiffrées ou une fiche technique. Pour "markdown", insère des liens cliquables `[link="action:..."]⚡ Libellé[/link]` pour permettre à l'utilisateur de piloter les choix ou actions directement depuis la fenêtre volante.
-   - Fermeture carte : "close_floating_card" (id: "..."). Formate tous les choix, suggestions et références sous forme de liens cliquables cliquables au clic dans le chat.
-   - Sous-titres en direct (Loopback audio système) : Dès que l'utilisateur demande d'afficher les sous-titres, transcrire le son du PC, une vidéo ou un stream en direct ("sous-titres en direct", "transcris le son", "active les sous-titres"), utilise impérativement l'action "live_subtitles" ({{"action": "live_subtitles", "enabled": true, "target_window": null}}) ou "show_floating_card" ({{"id": "live_subtitles", "title": "Sous-titres en direct", "card_type": "subtitles", "data": {{"text": ""}}}}). Pour les arrêter, utilise "live_subtitles" ({{"action": "live_subtitles", "enabled": false}}) ou "close_floating_card" ({{"id": "live_subtitles"}}).
- 8. Fin de passes : Dès que "actions" est vide (tâche finie ou choix requis), fournis OBLIGATOIREMENT 2 à 4 suggestions concrètes dans "quick_suggestions".
-
-Format JSON obligatoire :
-{{
-  "narration": "Explication vocale concise ou vide.",
-  "next_passes": 5,
-  "actions": [
-    {{"action": "open_app", "name": "nom_executable"}},
-    {{"action": "open_search"}},
-    {{"action": "open_search_browser"}},
-    {{"action": "navigate_back"}},
-    {{"action": "navigate_forward"}},
-    {{"action": "undo"}},
-    {{"action": "redo"}},
-    {{"action": "close_app", "name": "nom_ou_titre"}},
-    {{"action": "click_element", "window": null, "target_name": "nom"}},
-    {{"action": "click_button", "window": null, "button_name": "nom"}},
-    {{"action": "focus_element", "window": null, "target_name": "nom"}},
-    {{"action": "scroll", "direction": "down"|"up"|"bottom"|"top", "amount": 1, "window": null}},
-    {{"action": "focus_window", "title": null, "pid": null}},
-    {{"action": "focus_address_bar", "window": null}},
-    {{"action": "read_editor_content", "window": null, "target": null}},
-    {{"action": "clear_text", "window": null}},
-    {{"action": "write_text", "text": "...", "target": null, "press_enter": false}},
-    {{"action": "dictate", "text": "...", "window": null, "target": null, "press_enter": false}},
-    {{"action": "activate_dictation", "window": null, "target": null}},
-    {{"action": "deactivate_dictation"}},
-    {{"action": "toggle_dictation"}},
-    {{"action": "select_text_between", "from": "...", "to": "...", "window": null, "target": null}},
-    {{"action": "replace_field_text", "text": "...", "target": null}},
-    {{"action": "run_command", "command": "..."}},
-    {{"action": "kill_process", "pid": null, "name": null}},
-    {{"action": "navigate_to_url", "url": "...", "target": "new_tab"|"current_tab"|"new_window"}},
-    {{"action": "accessibility_shortcut", "shortcut": "browser_back"|"browser_forward"|"open_search"|"open_search_browser"|"action_center"|"open_settings"|"sound_settings"|"volume_up"|"volume_down"|"mute_volume"|"enter"|"escape"|"space"|"close_tab"|"refresh_page"|"ctrl+shift+b"|"<combinaison_touches>"}},
-    {{"action": "deactivate_immersion"}},
-    {{"action": "set_reasoning_passes", "passes": 5, "reason": null}},
-    {{"action": "schedule_prompt", "delay_seconds": 10, "prompt": "..."}},
-    {{"action": "schedule_prompts", "tasks": [{{"delay_seconds": 10, "prompt": "..."}}]}},
-    {{"action": "cancel_scheduled_tasks"}},
-    {{"action": "mute_audio"}},
-    {{"action": "set_volume", "command": "mute"|"unmute"|"down"|"up"|"min"}},
-    {{"action": "live_subtitles", "enabled": true, "target_window": null}},
-    {{"action": "click_numbered_target", "index": 1}},
-    {{"action": "open_file", "path": "chemin/vers/image_ou_doc.png"}},
-    {{"action": "show_floating_card", "id": "stats_1", "title": "Tableau comparatif", "card_type": "markdown", "data": {{"text": "| Modèle | Lien / Action | Prix |\n| --- | --- | --- |\n| Produit A | [link=\"action:Commander Produit A\"]⚡ Commander[/link] | 49€ |\n| Produit B | [link=\"action:Commander Produit B\"]⚡ Commander[/link] | 59€ |"}}}},
-    {{"action": "show_floating_card", "id": "vol_search", "title": "Filtres Billet d'Avion", "card_type": "form", "data": {{"submit_label": "Rechercher les vols", "prompt_prefix": "Recherche de vol avec les critères suivants :", "fields": [{{"id": "depart", "label": "Ville de départ", "type": "text", "value": "Paris"}}, {{"id": "destination", "label": "Destination", "type": "text", "value": "Tokyo"}}, {{"id": "prix_max", "label": "Budget maximum", "type": "number_slider", "min": 200, "max": 3000, "step": 50, "value": 900, "unit": "€"}}, {{"id": "classe", "label": "Classe", "type": "select", "options": ["Économique", "Premium", "Affaires"], "selected": "Économique"}}, {{"id": "direct", "label": "Vols directs seulement", "type": "checkbox", "checked": true}}, {{"id": "bagage", "label": "Bagages", "type": "radio", "options": ["Cabine seul", "1 bagage en soute", "2 bagages en soute"], "selected": "1 bagage en soute"}}]}}}},
-    {{"action": "show_floating_card", "id": "resume_page", "title": "Résumé de la page", "card_type": "markdown", "data": {{"text": "# SLICE Docus — Synthèse\n## Vidéos populaires\n- [link=\"action:Lancer la vidéo : La guerre des satellites\"]▶ La guerre des satellites (2,7 k vues)[/link]\n- [link=\"action:Lancer la vidéo : Bio-invasion\"]▶ Bio-invasion (95 k vues)[/link]\n\n> Cliquez sur une vidéo pour la lancer."}}}},
-     {{"action": "close_floating_card", "id": "stats_1"}}
-  ],
-  "quick_suggestions": ["Option 1", "Option 2"]
-}}"###)
+    local_llm::build_routed_system_prompt(local_llm::CommandTag::ALL, lang_name)
 }
 
 const DICTATION_SYSTEM_INSTRUCTIONS: &str = r#"Tu es l'assistant de dictée vocale et de saisie textuelle pour Windows.
@@ -6513,12 +6646,29 @@ enum PromptTrigger {
     Immersion { screen_changed: bool },
 }
 
+fn url_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for b in input.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            _ => {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
+}
+
 async fn call_llm_prompt(
     llm_config: LlmConfig,
     user_instruction: String,
     full_prompt: String,
     history: Arc<tokio::sync::Mutex<Vec<ChatMessage>>>,
     event_tx: StdSender<AgentEvent>,
+    tts_tx: StdSender<TtsCommand>,
     last_call_time: Arc<tokio::sync::Mutex<Option<Instant>>>,
     trigger: PromptTrigger,
     request_id: u64,
@@ -6552,17 +6702,18 @@ async fn call_llm_prompt(
     let client = reqwest::Client::new();
     let (_, system_lang) = get_system_locale_language();
     let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::SeqCst);
+    let is_local_llm = llm_config.provider == LlmProvider::Local;
+    let local_opts = local_llm::get_local_llm_options();
     let system_instructions = if is_dictation {
         DICTATION_SYSTEM_INSTRUCTIONS.to_string()
-    } else if llm_config.provider == LlmProvider::Local {
-        let preset = local_llm::get_active_preset();
-        if preset.is_sub_1b {
-            local_llm::COMPACT_SYSTEM_PROMPT.to_string()
-        } else {
-            build_standard_system_instructions(&system_lang)
-        }
     } else {
-        build_standard_system_instructions(&system_lang)
+        let clean_goal = local_llm::extract_clean_user_message(&user_instruction);
+        let tags = local_llm::resolve_query_tags(clean_goal);
+        println!(
+            "[Universal LLM Router] Modèle: {:?} ({}) | Consigne: \"{}\" | Tags: {:?}",
+            llm_config.provider, llm_config.model, clean_goal, tags
+        );
+        local_llm::build_routed_system_prompt(&tags, &system_lang)
     };
 
     let safe_user_instruction = truncate_with_notice(&user_instruction, 1000);
@@ -6571,17 +6722,15 @@ async fn call_llm_prompt(
         let mut hist_guard = history.lock().await;
         hist_guard.push(ChatMessage {
             role: "user".to_string(),
-            content: safe_full_prompt,
+            content: safe_full_prompt.clone(),
         });
     }
 
-    let mut max_agent_passes = if llm_config.provider == LlmProvider::Local && local_llm::get_active_preset().is_sub_1b {
-        1
-    } else {
-        TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, 15)
-    };
+    let mut max_agent_passes = TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, 15);
     let mut has_spoken = false;
     let mut pass = 1;
+    let mut consecutive_repeat_count = 0usize;
+    let mut last_executed_actions: Vec<String> = Vec::new();
 
     while pass <= max_agent_passes {
         if is_request_cancelled(request_id) {
@@ -6620,14 +6769,22 @@ async fn call_llm_prompt(
             return;
         }
 
-        let hist_snapshot = history.lock().await.clone();
+        let hist_snapshot = if !local_opts.include_history {
+            vec![ChatMessage {
+                role: "user".to_string(),
+                content: safe_full_prompt.clone(),
+            }]
+        } else {
+            let guard = history.lock().await;
+            get_recent_history_capped_at_user_messages(&guard, 4)
+        };
 
         let (temperature, max_tokens) = if is_dictation {
             (0.3, 300)
         } else if llm_config.provider == LlmProvider::Local {
             (0.2, 1000)
         } else {
-            (0.7, 1800)
+            (0.5, 1800)
         };
 
         let mut attempts = 0;
@@ -6646,7 +6803,7 @@ async fn call_llm_prompt(
                     &hist_snapshot,
                     max_tokens,
                     &event_tx,
-                    None,
+                    Some(&tts_tx),
                 ) {
                     Ok(raw_content) => {
                         history.lock().await.push(ChatMessage {
@@ -6793,12 +6950,36 @@ async fn call_llm_prompt(
             return;
         }
 
-        // Prise en compte immédiate du champ racine next_passes
-        if let Some(np) = payload.next_passes {
-            let clamped = np.clamp(1, 15);
-            max_agent_passes = clamped;
-            TARGET_REASONING_PASSES.store(clamped, Ordering::SeqCst);
-            println!("[Agent] Quota de raisonnement mis à jour via next_passes : {max_agent_passes} passe(s) max");
+        // Prise en compte immédiate du champ racine next_passes ou de l'action set_reasoning_passes (neutralisé en cas de répétition)
+        let requested_passes = if consecutive_repeat_count == 0 {
+            payload.next_passes.or_else(|| {
+                payload.actions.iter().find_map(|act| match act {
+                    AgentAction::SetReasoningPasses { passes, .. } => Some(*passes),
+                    _ => None,
+                })
+            })
+        } else {
+            None
+        };
+
+        let mut stop_requested = false;
+        if let Some(np) = requested_passes {
+            const MAX_LIMIT: usize = 15;
+            if np == 0 || (payload.actions.is_empty() && pass >= 1) {
+                max_agent_passes = pass;
+                TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
+                stop_requested = true;
+                println!("[Agent] Arrêt demandé (next_passes: {np}) : fin après la passe courante ({pass}).");
+            } else if np <= pass && pass > 1 {
+                max_agent_passes = pass;
+                TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
+                stop_requested = true;
+                println!("[Agent] Quota de passes atteint (next_passes: {np} <= passe {pass}) : arrêt à cette passe.");
+            } else {
+                max_agent_passes = np.clamp(pass, MAX_LIMIT);
+                TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
+                println!("[Agent] Quota de raisonnement mis à jour via next_passes (+{np}) : {max_agent_passes} passe(s) max");
+            }
         }
 
         if payload.invalid_request
@@ -6929,6 +7110,87 @@ async fn call_llm_prompt(
         }
 
         if payload.actions.is_empty() {
+            let lower_user = safe_user_instruction.to_lowercase();
+            let is_action_request = lower_user.starts_with("mets")
+                || lower_user.starts_with("lance")
+                || lower_user.starts_with("ouvre")
+                || lower_user.starts_with("cherche")
+                || lower_user.starts_with("trouve")
+                || lower_user.starts_with("joue")
+                || lower_user.starts_with("écoute")
+                || lower_user.starts_with("fais")
+                || lower_user.contains("cherche")
+                || lower_user.contains("recherche")
+                || lower_user.contains("radio")
+                || lower_user.contains("musique")
+                || lower_user.contains("film")
+                || lower_user.contains("streaming")
+                || lower_user.contains("vidéo")
+                || lower_user.contains("video");
+
+            let lower_narration = payload.narration.to_lowercase();
+            let is_passive_excuse = lower_narration.contains("il faudrait")
+                || lower_narration.contains("faudrait ouvrir")
+                || lower_narration.contains("aucune radio")
+                || lower_narration.contains("aucun média")
+                || lower_narration.contains("aucun resultat")
+                || lower_narration.contains("vous pouvez")
+                || lower_narration.contains("il existe plusieurs")
+                || lower_narration.contains("pour trouver")
+                || lower_narration.contains("voici comment")
+                || lower_narration.contains("méthode");
+
+            // Si l'utilisateur voulait une action concrète et que l'IA a abandonné ou s'est défaussée :
+            if (is_action_request || is_passive_excuse) && pass == 1 {
+                println!("[Agent Résilience] L'IA s'est défaussée sans action pour \"{}\". Forçage d'une action de recherche / média...", safe_user_instruction);
+                let target_query = if lower_user.contains("radio") {
+                    "https://www.radiofrance.fr".to_string()
+                } else {
+                    format!("https://www.google.com/search?q={}", url_encode(&safe_user_instruction))
+                };
+                payload.actions.push(AgentAction::NavigateToUrl {
+                    url: target_query,
+                    target: Some("new_tab".to_string()),
+                    new_window: Default::default(),
+                    window: Default::default(),
+                });
+                payload.narration = format!("J'ouvre le navigateur pour lancer {} immédiatement.", safe_user_instruction);
+                stop_requested = false;
+                max_agent_passes = 6.max(max_agent_passes);
+                TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
+            } else if is_action_request && pass < max_agent_passes && consecutive_repeat_count == 0 {
+                // Vérifier si l'écran est resté sur une étape intermédiaire (moteur de recherche, cookies, etc.)
+                let screen_now = {
+                    LAST_SCREEN_SUMMARY.lock().ok().and_then(|s| s.clone()).unwrap_or_default().to_lowercase()
+                };
+                let on_search_engine = screen_now.contains("google") || screen_now.contains("bing") || screen_now.contains("recherche");
+                let cookie_banner_present = screen_now.contains("cookie") || screen_now.contains("consentement") || screen_now.contains("tout accepter");
+                let on_media_player = screen_now.contains("direct") || screen_now.contains("écouter") || screen_now.contains("lecture") || screen_now.contains("play");
+
+                let objective_clearly_done = if lower_user.contains("radio") || lower_user.contains("musique") {
+                    !on_search_engine && (screen_now.contains("[@audio:") || screen_now.contains("en direct") || screen_now.contains("pause"))
+                } else {
+                    false
+                };
+
+                if !objective_clearly_done && (on_search_engine || cookie_banner_present || on_media_player) {
+                    println!("[Agent Vérification Objectif] L'IA s'est arrêtée mais l'écran montre une étape intermédiaire (recherche/cookies/lecteur). Prolongation des passes...");
+                    let continuation_action = if cookie_banner_present {
+                        AgentAction::ClickButton { window: None, button_name: "Tout accepter".to_string() }
+                    } else if on_search_engine && (lower_user.contains("radio") || lower_user.contains("france inter")) {
+                        AgentAction::ClickElement { window: None, target_name: "Écouter en direct".to_string() }
+                    } else {
+                        AgentAction::Scroll { direction: "down".to_string(), amount: Some(1), window: None }
+                    };
+                    payload.actions.push(continuation_action);
+                    payload.narration = "Je poursuis la navigation pour finaliser votre demande...".to_string();
+                    stop_requested = false;
+                    max_agent_passes = (pass + 2).min(15);
+                }
+            }
+        }
+
+        if payload.actions.is_empty() {
             println!("[Agent] Tâche accomplie : aucune action supplémentaire. Fin de la séquence après {} passe(s).", pass);
             if payload.quick_suggestions.is_empty() {
                 let screen = {
@@ -6942,7 +7204,7 @@ async fn call_llm_prompt(
                 payload.quick_suggestions = generate_fallback_suggestions_from_screen(&screen);
             }
             if !payload.narration.trim().is_empty() || !payload.quick_suggestions.is_empty() {
-                if !sanitize_for_tts(&payload.narration).trim().is_empty() {
+                if !sanitize_for_tts(&payload.narration).trim().is_empty() || !payload.quick_suggestions.is_empty() {
                     has_spoken = true;
                 }
                 let _ = event_tx.send(AgentEvent::ReplaceNarration {
@@ -6958,7 +7220,7 @@ async fn call_llm_prompt(
         }
 
         if !payload.narration.trim().is_empty() || !payload.quick_suggestions.is_empty() {
-            if !sanitize_for_tts(&payload.narration).trim().is_empty() {
+            if !sanitize_for_tts(&payload.narration).trim().is_empty() || !payload.quick_suggestions.is_empty() {
                 has_spoken = true;
             }
             let _ = event_tx.send(AgentEvent::ReplaceNarration {
@@ -6968,6 +7230,54 @@ async fn call_llm_prompt(
         }
 
         let actions_to_run = payload.actions;
+
+        // Si l'IA ouvre le navigateur pour une demande de radio/média, maintenir les passes actives pour naviguer dans la page web
+        let lower_user_cmd = safe_user_instruction.to_lowercase();
+        let is_media_request = lower_user_cmd.contains("radio")
+            || lower_user_cmd.contains("radio france")
+            || lower_user_cmd.contains("musique")
+            || lower_user_cmd.contains("fip")
+            || lower_user_cmd.contains("france inter")
+            || lower_user_cmd.contains("franceinfo")
+            || lower_user_cmd.contains("écouter")
+            || lower_user_cmd.contains("stream");
+        if pass == 1 && is_media_request && actions_to_run.iter().any(|a| matches!(a, AgentAction::NavigateToUrl { .. } | AgentAction::OpenBrowser { .. })) {
+            stop_requested = false;
+            if max_agent_passes < 6 {
+                max_agent_passes = 6;
+                TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
+            }
+            println!("[Agent Radio/Média - NAVIGATE_IN_WEBPAGE] Page ouverte : maintien des passes actives (max: {max_agent_passes}) pour naviguer dans la page web.");
+        }
+
+        // Détection de boucle répétitive (actions identiques répétées)
+        let current_action_signatures: Vec<String> = actions_to_run
+            .iter()
+            .filter(|a| !matches!(a, AgentAction::SetReasoningPasses { .. }))
+            .map(|a| format!("{:?}", a))
+            .collect();
+
+        if !current_action_signatures.is_empty() && current_action_signatures == last_executed_actions {
+            consecutive_repeat_count += 1;
+            println!("[Agent] Répétition d'action détectée (occurrence {}) : {:?}", consecutive_repeat_count, current_action_signatures);
+            if consecutive_repeat_count >= 2 {
+                println!("[Agent] Boucle répétitive interrompue (action identique répétée {} fois consécutives).", consecutive_repeat_count + 1);
+                if !payload.narration.trim().is_empty() || !payload.quick_suggestions.is_empty() {
+                    let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                        text: payload.narration.clone(),
+                        quick_suggestions: payload.quick_suggestions.clone(),
+                    });
+                }
+                break;
+            }
+        } else {
+            consecutive_repeat_count = 0;
+        }
+        last_executed_actions = current_action_signatures;
+
+        let has_concrete_actions = actions_to_run.iter().any(|a| {
+            !matches!(a, AgentAction::SetReasoningPasses { .. })
+        });
 
         let has_web_action = actions_to_run.iter().any(|a| {
             matches!(
@@ -6982,7 +7292,6 @@ async fn call_llm_prompt(
             )
         });
 
-        let is_local_sub_1b = llm_config.provider == LlmProvider::Local && local_llm::get_active_preset().is_sub_1b;
         let (report, screen_after) = tokio::task::spawn_blocking(move || {
             if is_request_cancelled(request_id) {
                 return ("Actions interrompues.".to_string(), String::new());
@@ -6992,7 +7301,7 @@ async fn call_llm_prompt(
                 if is_request_cancelled(request_id) {
                     return (rep, String::new());
                 }
-                if is_dictation || is_local_sub_1b {
+                if is_dictation {
                     return (rep, String::new());
                 }
                 let wait_ms = if has_web_action { 2200 } else { 1200 };
@@ -7001,9 +7310,34 @@ async fn call_llm_prompt(
                     return (rep, String::new());
                 }
                 #[cfg(windows)]
-                let sc = summarize_screen_state(None, true);
+                let sc = if local_opts.active_window_only {
+                    let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+                    let current_pid = std::process::id();
+                    let (fg_pid, _) = get_window_process_info(fg);
+                    let target = if !fg.0.is_null() && fg_pid != current_pid && !is_window_hung(fg) {
+                        Some(fg)
+                    } else {
+                        LAST_EXTERNAL_HWND.lock().ok().and_then(|g| *g).map(|raw| windows::Win32::Foundation::HWND(raw as _)).filter(|&h| !h.0.is_null() && !is_window_hung(h))
+                    };
+                    if let Some(h) = target {
+                        if get_window_process_info(h).0 != current_pid {
+                            extract_window_text_only(h)
+                        } else {
+                            summarize_screen_state(None, true)
+                        }
+                    } else {
+                        summarize_screen_state(None, true)
+                    }
+                } else {
+                    summarize_screen_state(None, true)
+                };
                 #[cfg(not(windows))]
-                let sc = summarize_screen_state(None, false);
+                let sc = if local_opts.active_window_only {
+                    let targets = collect_numbered_targets_for_active_window();
+                    format_compact_window_elements("Fenêtre active", &targets)
+                } else {
+                    summarize_screen_state(None, false)
+                };
                 (rep, sc)
             }));
             match outcome {
@@ -7028,15 +7362,15 @@ async fn call_llm_prompt(
             let _ = undo_last_system_action();
         }
 
-        // Re-synchronisation du quota de passes si l'action SetReasoningPasses a été invoquée
-        let synced_passes = TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, 15);
-        if synced_passes != max_agent_passes {
+        const MAX_CLAMP: usize = 15;
+        let synced_passes = TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, MAX_CLAMP);
+        if synced_passes > max_agent_passes && !stop_requested {
             max_agent_passes = synced_passes;
             println!("[Agent] Quota de raisonnement resynchronisé avec TARGET_REASONING_PASSES : {max_agent_passes} passe(s) max");
         }
 
-        if is_dictation || (llm_config.provider == LlmProvider::Local && local_llm::get_active_preset().is_sub_1b) {
-            println!("[Local/Dictée] Action exécutée instantanément, fin de séquence.");
+        if is_dictation {
+            println!("[Dictée] Action exécutée instantanément, fin de séquence.");
             break;
         }
 
@@ -7046,27 +7380,43 @@ async fn call_llm_prompt(
             }
         }
 
+        // Passe automatique de réévaluation post-action :
+        // Si des actions concrètes viennent d'être exécutées et que la dernière passe autorisée venait d'être atteinte,
+        // une passe supplémentaire de réévaluation est automatiquement allouée afin que l'agent puisse observer
+        // le nouvel état de l'écran plutôt que de clore la tâche à l'aveugle.
+        if !stop_requested && pass >= max_agent_passes && has_concrete_actions && max_agent_passes < MAX_CLAMP && consecutive_repeat_count == 0 {
+            max_agent_passes += 1;
+            TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
+            println!("[Agent] Passe de réévaluation post-action allouée automatiquement (passe {pass}/{max_agent_passes}).");
+        }
+
         if pass < max_agent_passes {
-            let compact_report = truncate_with_notice(&report, 10000);
-            let mut step_feedback = format!("[Retour d'exécution étape {pass}] :\n{compact_report}");
-            if !screen_after.trim().is_empty() {
-                let screen_after_clean = if screen_after.contains("<html") || screen_after.contains("<table") || screen_after.contains("<body") {
-                    html_util::sanitize_html_to_markdown(&screen_after)
-                } else {
-                    screen_after.clone()
-                };
-                let max_screen = if screen_after_clean.contains("[Page web") || screen_after_clean.contains("[Navigateur]") {
-                    15360
-                } else {
-                    12000
-                };
-                let safe_screen = truncate_with_notice(screen_after_clean.trim(), max_screen);
-                step_feedback.push_str(&format!("\n\n[État de l'écran suite aux actions] :\n{safe_screen}"));
+            let mut step_feedback = String::new();
+            let include_feedback = local_opts.include_feedback;
+            if include_feedback {
+                if !screen_after.trim().is_empty() {
+                    let screen_after_clean = if screen_after.contains("<html") || screen_after.contains("<table") || screen_after.contains("<body") {
+                        html_util::sanitize_html_to_markdown(&screen_after)
+                    } else {
+                        screen_after.clone()
+                    };
+                    let max_screen = if screen_after_clean.contains("[Page web") || screen_after_clean.contains("[Navigateur]") {
+                        15360
+                    } else {
+                        12000
+                    };
+                    let safe_screen = truncate_with_notice(screen_after_clean.trim(), max_screen);
+                    step_feedback.push_str(&format!("[État de l'écran suite aux actions] :\n{safe_screen}\n\n"));
+                }
+                let compact_report = truncate_with_notice(&report, 1500);
+                step_feedback.push_str(&format!("[Retour d'exécution étape {pass}] :\n{compact_report}"));
             }
 
             // Injection de l'état des fenêtres volantes ouvertes dans les étapes multi-passes
-            if let Ok(guard) = OPEN_FLOATING_CARDS.lock() {
-                if !guard.is_empty() {
+            let active_win_only = local_opts.active_window_only;
+            if !active_win_only {
+                if let Ok(guard) = OPEN_FLOATING_CARDS.lock() {
+                    if !guard.is_empty() {
                     step_feedback.push_str("\n\n[Fenêtres volantes ouvertes à l'écran] :\n");
                     for c in guard.iter() {
                         step_feedback.push_str(&format!("- ID: \"{}\" | Titre: \"{}\" | Type: \"{}\"\n", c.id, c.title, c.card_type));
@@ -7076,34 +7426,28 @@ async fn call_llm_prompt(
                         }
                     }
                     step_feedback.push_str("RÈGLE DE FUSION IMPÉRATIVE : Conserve et fusionne les éléments déjà présents ci-dessus avec les nouvelles informations dans \"show_floating_card\". Ne ferme JAMAIS la carte (\"close_floating_card\") !");
+                    }
                 }
             }
 
-            if llm_config.provider == LlmProvider::Local && local_llm::get_active_preset().is_sub_1b {
-                step_feedback.push_str(&format!(
-                    "\n\n[Consigne étape] : Poursuis : \"{}\". Choisis l'action suivante en JSON.",
-                    safe_user_instruction
-                ));
-            } else {
-            step_feedback.push_str(&format!(
-                "\n\n[Consigne étape] : Poursuis : \"{}\".\n\
-                - RÈGLE D'OR : Réponds STRICTEMENT et UNIQUEMENT avec un objet JSON valide (contenant \"narration\", \"next_passes\", \"actions\", \"quick_suggestions\"). Aucun texte libre ou markdown en dehors du JSON.\n\
-                - Audio, son & paramètres OS -> INTERDICTION de faire 'run_command' (cmd/explorer). Utilise 'set_volume', 'mute_audio' ou 'accessibility_shortcut' ('action_center' Win+A, 'open_settings' Win+I, 'm', 'space').\n\
+            let mut step_prompt = format!(
+                "\n\n[Étape {next_pass}] Vérification d'avancement pour l'objectif : \"{}\".\n\
+                - RÈGLE LINGUISTIQUE STRICTE : Traduis et formule TOUT impérativement en {system_lang} dans \"narration\" et les suggestions.\n\
+                - TANT QUE L'OBJECTIF N'EST PAS SATISFAIT : continue les passes, choisis l'action suivante en JSON.\n\
+                - DÉTECTION DE BOUCLE : si l'action précédente a échoué ou que l'écran stagne, pivote (autre lien/bouton, scroll, navigate_back).\n\
+                - Dès que l'objectif initial est ATTEINT (application ouverte, information trouvée, action exécutée, média en cours), ARRÊTE IMMÉDIATEMENT : renvoie \"actions\": [], \"next_passes\": 0 et décris en détail la situation et le résultat dans \"narration\" rédigée en {system_lang}.\n\
+                - UN SEUL CLIC PAR PASSE : 1 seule action concrète à la fois. Clique directement sur le résultat du sujet visé avec \"click_element\" ou \"click_button\".\n\
                 - Bannière cookies -> clique automatiquement 'Tout accepter' / 'Accepter'.\n\
-                - Bannière de notification web / push ('Activez les notifications franceinfo...', etc.) -> traite-la immédiatement en cliquant sur la croix 'Fermer (croix ✕)' / 'Fermer' / 'Refuser' / 'Plus tard' ou 'Activer' pour libérer la vue.\n\
-                - Pour lancer ou contrôler une vidéo ou un audio -> clique directement sur l'élément vidéo/audio ou son bouton de lecture ('play' / 'lecture').\n\
-                - Sous-titres en direct & transcription du son -> émets 'live_subtitles' (enabled: true) ou 'show_floating_card' (card_type: 'subtitles').\n\
-                - Notification système (toast) -> lis son contenu dans ta narration et laisse-la tranquille (ne la ferme pas).\n\
-                - Alerte / modale d'erreur -> lis le message dans ta narration, puis clique impérativement sur 'OK' / 'Fermer' pour la refermer.\n\
-                - Fenêtre volante Markdown -> insère des liens cliquables [link=\"action:...\"]Texte[/link] pour permettre à l'utilisateur de déclencher des suites ou choix en un clic.\n\
-                - Liens interactifs -> Formate SYSTÉMATIQUEMENT vidéos, audios, images, PDF/fichiers et actions en liens cliquables via la macro [link=\"action:...\"]Icône Libellé[/link] ou [link=\"https://...\"]🌐 Web[/link] (y compris dans les cellules de tableaux Markdown). Le clic envoie directement la commande dans le chat de Libertide.\n\
-                - Fenêtre volante (\"show_floating_card\") -> CONSERVE et FUSIONNE impérativement les données précédentes avec les nouvelles (ne supprime pas les éléments déjà trouvés lors des passes précédentes). INTERDICTION d'émettre \"close_floating_card\" pour une carte que tu viens d'ouvrir ou mettre à jour.\n\
-                 - Mission approfondie (contact / produit / service) -> définis 'next_passes' (8 à 12), explore méthodiquement (local -> web -> annuaires) et projette les résultats dans 'show_floating_card'. Ne renvoie pas 'actions': [] tant que les résultats ne sont pas trouvés.\n\
-                - Échec/blocage -> pivote immédiatement vers une alternative (app, web, autre fenêtre). Ne renvoie JAMAIS 'actions': [] si l'objectif n'est pas achevé.\n\
-                - Tâche finie ou choix requis -> 'actions': [] + 2 à 4 'quick_suggestions'.",
-                safe_user_instruction
-            ));
+                - Bannières de notification web / push -> clique sur la croix ✕ pour libérer la vue.\n\
+                - Audio, son & paramètres OS -> INTERDICTION de faire 'run_command' (utilise 'set_volume' ou 'mute_audio').\n\
+                Réponds STRICTEMENT en JSON.",
+                safe_user_instruction,
+                next_pass = pass + 1
+            );
+            if is_media_request {
+                step_prompt.push_str("\n\n- [NAVIGATION MÉDIA EN COURS] : Valide/ferme les cookies si présents, et clique DIRECTEMENT sur 'Écouter', 'Direct', 'Play' ou la station pour lancer la lecture audio.");
             }
+            step_feedback.push_str(&step_prompt);
 
             history.lock().await.push(ChatMessage {
                 role: "user".to_string(),
@@ -7191,6 +7535,7 @@ fn spawn_agent_backend(
                         });
                     }
                     AgentCommand::Prompt(prompt) => {
+                        println!("[Backend Tokio] AgentCommand::Prompt reçu : \"{}\"", prompt);
                         if prompt.trim().is_empty() || !prompt.chars().any(|c| c.is_alphanumeric()) {
                             println!("[Agent] Commande vide ignorée (bruit parasite), aucune requête LLM.");
                             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
@@ -7208,6 +7553,7 @@ fn spawn_agent_backend(
                         let history = history.clone();
                         let last_call_time = last_call_time.clone();
                         let event_tx = event_tx.clone();
+                        let task_tts_tx = bg_tts_tx.clone();
                         let mut current_llm_config = resolve_llm_config();
                         if current_llm_config.provider == LlmProvider::Local {
                             current_llm_config.model = local_llm::get_active_preset().name.to_string();
@@ -7218,6 +7564,7 @@ fn spawn_agent_backend(
                                 return;
                             }
                             if let Some(cli_feedback) = try_execute_direct_cli(&prompt) {
+                                println!("[Backend Tokio] Commande CLI directe exécutée : {}", cli_feedback);
                                 if is_request_cancelled(request_id) { return; }
                                 let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
                                 let _ = event_tx.send(AgentEvent::ReplaceNarration {
@@ -7226,6 +7573,7 @@ fn spawn_agent_backend(
                                 });
                                 let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                             } else if let Some(text_to_write) = parse_write_command(&prompt) {
+                                println!("[Backend Tokio] Commande d'écriture directe détectée");
                                 if is_request_cancelled(request_id) { return; }
                                 let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
                                 let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
@@ -7239,6 +7587,7 @@ fn spawn_agent_backend(
                                 });
                                 let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                             } else if IS_DICTATION_ACTIVE.load(Ordering::SeqCst) {
+                                println!("[Backend Tokio] Mode dictée actif, prompt dédié envoyé");
                                 if is_request_cancelled(request_id) { return; }
                                 let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
                                 let final_prompt = format!(
@@ -7250,32 +7599,46 @@ fn spawn_agent_backend(
                                     final_prompt,
                                     history,
                                     event_tx,
-                                    last_call_time,
-                                    PromptTrigger::User,
-                                    request_id,
-                                ).await;
-                            } else if current_llm_config.provider == LlmProvider::Local && local_llm::get_active_preset().is_sub_1b {
-                                if is_request_cancelled(request_id) { return; }
-                                let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
-                                let final_prompt = format!("[Demande utilisateur]\n{prompt}");
-                                call_llm_prompt(
-                                    current_llm_config,
-                                    prompt.clone(),
-                                    final_prompt,
-                                    history,
-                                    event_tx,
+                                    task_tts_tx.clone(),
                                     last_call_time,
                                     PromptTrigger::User,
                                     request_id,
                                 ).await;
                             } else {
-                                let (field_content, screen_state): (Option<String>, String) = tokio::task::spawn_blocking(|| {
+                                println!("[Backend Tokio] Collecte de l'état de l'écran et préparation de l'appel LLM...");
+                                let active_win_only = local_llm::get_local_llm_options().active_window_only;
+                                let (field_content, screen_state): (Option<String>, String) = tokio::task::spawn_blocking(move || {
                                     #[cfg(windows)]
                                     {
-                                        (get_active_field_content(), summarize_screen_state(None, true))
+                                        if active_win_only {
+                                            let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+                                            let current_pid = std::process::id();
+                                            let (fg_pid, _) = get_window_process_info(fg);
+                                            let target = if !fg.0.is_null() && fg_pid != current_pid && !is_window_hung(fg) {
+                                                Some(fg)
+                                            } else {
+                                                LAST_EXTERNAL_HWND.lock().ok().and_then(|g| *g).map(|raw| windows::Win32::Foundation::HWND(raw as _)).filter(|&h| !h.0.is_null() && !is_window_hung(h))
+                                            };
+                                            if let Some(h) = target {
+                                                if get_window_process_info(h).0 != current_pid {
+                                                    (get_active_field_content(), extract_window_text_only(h))
+                                                } else {
+                                                    (get_active_field_content(), summarize_screen_state(None, true))
+                                                }
+                                            } else {
+                                                (get_active_field_content(), summarize_screen_state(None, true))
+                                            }
+                                        } else {
+                                            (get_active_field_content(), summarize_screen_state(None, true))
+                                        }
                                     }
                                     #[cfg(not(windows))]
                                     {
+                                        if active_win_only {
+                                            let targets = collect_numbered_targets_for_active_window();
+                                            let compact_ui = format_compact_window_elements("Fenêtre active", &targets);
+                                            return (get_active_field_content(), compact_ui);
+                                        }
                                         (get_active_field_content(), summarize_screen_state(None, false))
                                     }
                                 }).await.unwrap_or((None, String::new()));
@@ -7313,22 +7676,27 @@ fn spawn_agent_backend(
                                 }
 
                             // 1. Injection automatique de l'état des fenêtres volantes ouvertes au LLM
-                            if let Ok(guard) = OPEN_FLOATING_CARDS.lock() {
-                                if !guard.is_empty() {
-                                    let mut card_section = String::from("[Fenêtres volantes actuellement ouvertes à l'écran] :\n");
-                                    for c in guard.iter() {
-                                        card_section.push_str(&format!("- ID: \"{}\" | Titre: \"{}\" | Type: \"{}\"\n", c.id, c.title, c.card_type));
-                                        if !c.content_preview.is_empty() {
-                                            let preview = truncate_with_notice(&c.content_preview, 1500);
-                                            card_section.push_str(&format!("  [Contenu actuel déjà affiché à conserver/fusionner] :\n\"\"\"\n{}\n\"\"\"\n", preview.trim()));
+                            if !active_win_only {
+                                if let Ok(guard) = OPEN_FLOATING_CARDS.lock() {
+                                    if !guard.is_empty() {
+                                        let mut card_section = String::from("[Fenêtres volantes actuellement ouvertes à l'écran] :\n");
+                                        for c in guard.iter() {
+                                            card_section.push_str(&format!("- ID: \"{}\" | Titre: \"{}\" | Type: \"{}\"\n", c.id, c.title, c.card_type));
+                                            if !c.content_preview.is_empty() {
+                                                let preview = truncate_with_notice(&c.content_preview, 1500);
+                                                card_section.push_str(&format!("  [Contenu actuel déjà affiché à conserver/fusionner] :\n\"\"\"\n{}\n\"\"\"\n", preview.trim()));
+                                            }
                                         }
+                                        card_section.push_str("Instruction : Ces fenêtres volantes sont déjà affichées à l'écran. Si ta réponse apporte de nouvelles données, une synthèse ou une mise à jour, réémets impérativement \"show_floating_card\" avec le même ID en FUSIONNANT les données existantes. Ne ferme JAMAIS la carte si tu la mets à jour.");
+                                        prompt_sections.push(card_section);
                                     }
-                                    card_section.push_str("Instruction : Ces fenêtres volantes sont déjà affichées à l'écran. Si ta réponse apporte de nouvelles données, une synthèse ou une mise à jour, réémets impérativement \"show_floating_card\" avec le même ID en FUSIONNANT les données existantes. Ne ferme JAMAIS la carte si tu la mets à jour.");
-                                    prompt_sections.push(card_section);
                                 }
                             }
 
-                                prompt_sections.push(format!("[Demande utilisateur]\n{prompt}"));
+                                let (_, prompt_lang) = get_system_locale_language();
+                                prompt_sections.push(format!(
+                                    "[Demande utilisateur]\n{prompt}\n\n[Consigne linguistique impérative]\nFormule impérativement ta \"narration\" et tes suggestions en {prompt_lang}. Traduis tout contenu d'écran vers le {prompt_lang}."
+                                ));
                                 let final_prompt = prompt_sections.join("\n\n");
 
                                 call_llm_prompt(
@@ -7337,6 +7705,7 @@ fn spawn_agent_backend(
                                     final_prompt,
                                     history,
                                     event_tx,
+                                    task_tts_tx,
                                     last_call_time,
                                     PromptTrigger::User,
                                     request_id,
@@ -7371,7 +7740,7 @@ fn spawn_agent_backend(
                     }
                     AgentCommand::PeriodicScreenCheck => {
                         if IS_EMERGENCY_STOPPED.load(Ordering::SeqCst)
-                            || (bg_llm_config.provider == LlmProvider::Local && local_llm::get_active_preset().is_sub_1b)
+                            || bg_llm_config.provider == LlmProvider::Local
                         {
                             continue;
                         }
@@ -7386,6 +7755,7 @@ fn spawn_agent_backend(
                         let history = history.clone();
                         let last_call_time = last_call_time.clone();
                         let event_tx = event_tx.clone();
+                        let task_tts_tx = bg_tts_tx.clone();
                         let mut current_llm_config = resolve_llm_config();
                         if current_llm_config.provider == LlmProvider::Local {
                             current_llm_config.model = local_llm::get_active_preset().name.to_string();
@@ -7442,7 +7812,7 @@ fn spawn_agent_backend(
                                 };
 
                                 println!("[Immersion] Changement détecté (diff: {} octets), transmission du diff au LLM...", screen_diff.len());
-                                call_llm_prompt(current_llm_config, "Suivi immersion".to_string(), immersion_prompt, history, event_tx, last_call_time, PromptTrigger::Immersion { screen_changed: true }, request_id).await;
+                                call_llm_prompt(current_llm_config, "Suivi immersion".to_string(), immersion_prompt, history, event_tx, task_tts_tx.clone(), last_call_time, PromptTrigger::Immersion { screen_changed: true }, request_id).await;
                                 return;
                             }
 
@@ -7472,7 +7842,7 @@ fn spawn_agent_backend(
                                     truncate_with_notice(&current_summary, 1500)
                                 );
 
-                                call_llm_prompt(current_llm_config, "Surveillance écran".to_string(), diff_prompt, history, event_tx, last_call_time, PromptTrigger::Surveillance, request_id).await;
+                                call_llm_prompt(current_llm_config, "Surveillance écran".to_string(), diff_prompt, history, event_tx, task_tts_tx, last_call_time, PromptTrigger::Surveillance, request_id).await;
                             } else {
                                 println!("[Surveillance] Premier instantané d'écran enregistré.");
                             }
@@ -7573,6 +7943,12 @@ fn main() -> eframe::Result<()> {
 
     spawn_periodic_screen_monitor(cmd_tx.clone());
     spawn_agent_backend(cmd_rx, cmd_tx.clone(), event_tx.clone(), tts_tx.clone(), llm_config.clone());
+
+    if llm_config.provider == LlmProvider::Local {
+        std::thread::spawn(|| {
+            local_llm::init_local_llm();
+        });
+    }
 
     run_overlay_gui(
         event_tx,

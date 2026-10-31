@@ -362,12 +362,22 @@ pub fn list_user_windows() -> Vec<(HWND, String)> {
     unsafe {
         let _ = EnumWindows(Some(enum_windows_callback), LPARAM(&mut list as *mut _ as isize));
     }
+    let current_pid = std::process::id();
     list.into_iter()
-        .filter(|(_, title): &(_, _)| {
+        .filter(|(h, title): &(HWND, String)| {
             let t = title.trim();
-            !t.is_empty()
-                && t != "Libertide overlay"
-                && t != "Program Manager"
+            if t.is_empty() || t == "Program Manager" {
+                return false;
+            }
+            let (pid, _) = get_window_process_info(*h);
+            if pid == current_pid {
+                return false;
+            }
+            let t_lower = t.to_lowercase();
+            if t_lower.contains("libertide") {
+                return false;
+            }
+            true
         })
         .collect()
 }

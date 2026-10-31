@@ -339,6 +339,12 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
         eprintln!("[UIA] Fenêtre {:?} figée (sablier). Inspection UI ignorée.", hwnd.0);
         return results;
     }
+    let (pid, _) = get_window_process_info(hwnd);
+    let current_pid = std::process::id();
+    if pid == current_pid {
+        // Exclure formellement l'overlay et toutes les fenêtres de Libertide
+        return results;
+    }
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let uia: Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
@@ -1625,6 +1631,7 @@ pub fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Op
     let target_words = clean_words(target);
     let is_target_short = target_words.len() <= 5 && target.len() <= 40;
     let is_chrome_target = is_browser_chrome_target(target);
+    let is_win_ctrl = crate::automation::is_window_control_target(target);
     let has_web_content = elements.iter().any(|e| e.is_web_content);
     const MIN_CONFIDENCE_SCORE: f32 = 35.0;
 
@@ -1633,7 +1640,9 @@ pub fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Op
         .filter_map(|elem| {
             let mut chrome_bias = 0.0f32;
             if has_web_content {
-                if is_chrome_target {
+                if is_win_ctrl {
+                    if elem.is_browser_chrome { chrome_bias += 50.0; }
+                } else if is_chrome_target {
                     if elem.is_browser_chrome { chrome_bias += 50.0; } else { chrome_bias -= 40.0; }
                 } else if elem.is_browser_chrome {
                     chrome_bias -= 45.0;
@@ -1713,6 +1722,7 @@ pub fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Op
 #[cfg(windows)]
 pub fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Option<&'a UiaElementInfo> {
     let is_chrome_target = is_browser_chrome_target(target);
+    let is_win_ctrl = crate::automation::is_window_control_target(target);
     let has_web_content = elements.iter().any(|e| e.is_web_content);
     const MIN_CONFIDENCE_SCORE: f32 = 40.0;
     let mut scored: Vec<(f32, &'a UiaElementInfo)> = elements
@@ -1724,7 +1734,9 @@ pub fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str
             }
             let mut chrome_bias = 0.0f32;
             if has_web_content {
-                if is_chrome_target {
+                if is_win_ctrl {
+                    if elem.is_browser_chrome { chrome_bias += 50.0; }
+                } else if is_chrome_target {
                     if elem.is_browser_chrome { chrome_bias += 50.0; } else { chrome_bias -= 40.0; }
                 } else if elem.is_browser_chrome {
                     chrome_bias -= 45.0;
@@ -2142,6 +2154,11 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
     if let Some(id_part) = prop_clean.strip_prefix('#') {
         let id_clean = id_part.trim();
         if !id_clean.is_empty() {
+            if let Ok(target_idx) = id_clean.parse::<usize>() {
+                if elem.index == target_idx {
+                    return Some(520.0);
+                }
+            }
             if elem.automation_id.eq_ignore_ascii_case(id_clean) {
                 return Some(500.0);
             }
@@ -2153,6 +2170,12 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
             if elem.name.eq_ignore_ascii_case(id_clean) {
                 return Some(420.0);
             }
+        }
+    }
+
+    if let Ok(target_idx) = prop_clean.parse::<usize>() {
+        if elem.index == target_idx {
+            return Some(520.0);
         }
     }
 
@@ -2251,14 +2274,18 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
         }
     }
 
-    let is_elem_cross = elem.name.contains("croix")
+    let is_elem_cross = elem.name.contains("Fermer la fenêtre")
+        || elem.name.contains("Fermer (croix")
+        || elem.name.contains("croix")
         || elem.name.contains('✕')
         || elem.name.contains('×')
         || elem.name.eq_ignore_ascii_case("fermer")
         || elem.name.eq_ignore_ascii_case("close")
         || elem.class_name.contains("close")
         || elem.automation_id.to_lowercase().contains("close");
-    let is_prop_cross = prop_lower.contains("croix")
+    let is_prop_cross = prop_lower.contains("fermer la fen")
+        || prop_lower.contains("close window")
+        || prop_lower.contains("croix")
         || prop_lower == "fermer"
         || prop_lower == "close"
         || prop_lower == "x"
@@ -2266,6 +2293,37 @@ fn score_single_proposition(elem: &UiaElementInfo, prop: &str) -> Option<f32> {
         || prop_lower.contains("fermer le bandeau");
     if is_elem_cross && is_prop_cross {
         return Some(550.0);
+    }
+
+    let is_elem_min = elem.name.contains("Réduire la fenêtre")
+        || elem.automation_id.to_lowercase().contains("minimize");
+    let is_prop_min = prop_lower.contains("réduire la fen")
+        || prop_lower.contains("reduire la fen")
+        || prop_lower.contains("minimize")
+        || prop_lower == "réduire"
+        || prop_lower == "reduire";
+    if is_elem_min && is_prop_min {
+        return Some(560.0);
+    }
+
+    let is_elem_max = elem.name.contains("Agrandir")
+        || elem.name.contains("Restaurer")
+        || elem.automation_id.to_lowercase().contains("maximize")
+        || elem.automation_id.to_lowercase().contains("restore");
+    let is_prop_max = prop_lower.contains("agrandir")
+        || prop_lower.contains("restaurer")
+        || prop_lower.contains("maximize")
+        || prop_lower.contains("restore");
+    if is_elem_max && is_prop_max {
+        return Some(560.0);
+    }
+
+    let is_search_query = prop_lower.contains("search") || prop_lower.contains("recherch") || prop_lower.contains("query");
+    if is_search_query && (elem.is_input || elem.is_edit_or_textarea) {
+        let elem_str = format!("{} {} {} {}", elem.name, elem.automation_id, elem.aria_role, elem.class_name).to_lowercase();
+        if elem_str.contains("search") || elem_str.contains("recherch") || elem_str.contains("query") || elem_str.contains("find") {
+            return Some(480.0);
+        }
     }
 
     let ecom_bonus = ecommerce_match_bonus(prop_clean, &elem.name)
