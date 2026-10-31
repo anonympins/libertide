@@ -4276,6 +4276,7 @@ impl eframe::App for OverlayApp {
                                         let enter_with_text = enter_hit && !self.input_text.trim().is_empty();
 
                                         if analyze_btn_hit || enter_with_text {
+                                            println!("[UI Input] Validation déclenchée (analyze_btn={}, enter_hit={}, texte=\"{}\")", analyze_btn_hit, enter_hit, self.input_text.trim());
                                             self.stop_speaking();
                                             if self.is_recording {
                                                 self.stop_recording();
@@ -4294,9 +4295,11 @@ impl eframe::App for OverlayApp {
 
                                             let norm_prompt = normalize_for_command_match(&prompt);
                                             if is_start_subtitles_command(&norm_prompt) {
+                                                println!("[UI Input] Commande démarrage sous-titres détectée");
                                                 self.start_live_subtitles(None);
                                                 return;
                                             } else if is_stop_subtitles_command(&norm_prompt) {
+                                                println!("[UI Input] Commande arrêt sous-titres détectée");
                                                 self.stop_live_subtitles();
                                                 return;
                                             }
@@ -4325,10 +4328,15 @@ impl eframe::App for OverlayApp {
 
                                             // 1. Bascule du mode survol/numéros
                                             if is_switch_access_command(&norm_prompt) {
+                                                println!("[UI Input] Commande bascule switch_access détectée");
                                                 self.toggle_switch_access_mode(None);
-                                            } else if self.switch_access_mode {
+                                                return;
+                                            }
+
                                             // 2. Détection directe du numéro en mode survol/numéros actif
+                                            if self.switch_access_mode {
                                                 if let Some(idx) = extract_badge_number(&norm_prompt) {
+                                                    println!("[UI Input] Numéro de badge #{} détecté en mode survol", idx);
                                                     self.chat_history.push(ChatEntry {
                                                         role: ChatRole::User,
                                                         text: prompt,
@@ -4340,8 +4348,10 @@ impl eframe::App for OverlayApp {
                                                     self.status = AgentStatus::Idle;
                                                     return;
                                                 }
-                                            // 3. Raccourcis de navigation immédiate (si pas un numéro)
-                                            } else {
+                                            }
+
+                                            println!("[UI Input] Traitement de la requête utilisateur : \"{}\"", prompt);
+
                                             if norm_prompt == "annule" || norm_prompt == "annuler" || norm_prompt == "undo" {
                                                 let undo_feedback = if let Some(fb) = undo_last_system_action() {
                                                     fb
@@ -4439,9 +4449,9 @@ impl eframe::App for OverlayApp {
                                                 });
                                                 let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                                             } else {
+                                                println!("[UI Input] Envoi de AgentCommand::Prompt vers le backend : \"{}\"", prompt);
                                                 self.status = AgentStatus::Thinking;
                                                 let _ = self.command_sender.send(AgentCommand::Prompt(prompt));
-                                            }
                                             }
                                         }
 
@@ -5348,6 +5358,12 @@ impl eframe::App for OverlayApp {
                             ui.separator();
                             ui.add_space(4.0);
 
+                            let max_scroll_h = (work_area.h * 0.82 - 50.0).clamp(240.0, 600.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt("settings_modal_scroll")
+                                .auto_shrink([true, true])
+                                .max_height(max_scroll_h)
+                                .show(ui, |ui| {
                             match self.settings_tab {
                                 SettingsTab::LlmProvider => {
                             // --- Onglet Fournisseur LLM ---
@@ -5440,6 +5456,7 @@ impl eframe::App for OverlayApp {
 
                                         ui.add_space(4.0);
 
+                                        let mut model_to_delete = None;
                                         for preset in local_llm::MODEL_PRESETS {
                                             let is_active = active_preset.id == preset.id;
                                             let is_installed = local_llm::is_preset_downloaded(preset);
@@ -5480,6 +5497,11 @@ impl eframe::App for OverlayApp {
                                                         .color(egui::Color32::from_rgb(100, 225, 130))
                                                         .strong(),
                                                     );
+                                                    if ui.small_button("🗑")
+                                                        .on_hover_text("Supprimer ce fichier pour libérer l'espace disque")
+                                                        .clicked() {
+                                                        model_to_delete = Some(preset);
+                                                    }
                                                 } else {
                                                 ui.label(
                                                         egui::RichText::new("⚠️ Non téléchargé")
@@ -5488,6 +5510,18 @@ impl eframe::App for OverlayApp {
                                                     );
                                                 }
                                             });
+                                        }
+
+                                        if let Some(p) = model_to_delete {
+                                            match local_llm::delete_preset_model(p) {
+                                                Ok(()) => {
+                                                    play_earcon(Earcon::Success);
+                                                    self.api_key_error = None;
+                                                }
+                                                Err(e) => {
+                                                    self.api_key_error = Some(e);
+                                                }
+                                            }
                                         }
 
                                         ui.add_space(6.0);
@@ -6199,6 +6233,7 @@ impl eframe::App for OverlayApp {
                                     }
                                 }
                             }
+                                });
                         });
                 }
 
@@ -6511,19 +6546,33 @@ async fn compact_history_if_needed(
 
 pub fn build_standard_system_instructions(lang_name: &str) -> String {
     format!(r###"Tu es l'agent d'exploration Libertide multiplateforme (Windows, macOS, Linux).
+RÈGLE LINGUISTIQUE PRIORITAIRE ET ABSOLUE :
+Tu DOIS IMPÉRATIVEMENT t'exprimer et rédiger l'intégralité de tes réponses (champ "narration", "quick_suggestions" et fenêtres volantes) exclusivement dans la langue configurée par l'utilisateur : {lang_name}.
+Même si les fenêtres, le texte de l'écran ou les pages web visitées sont dans une autre langue (par exemple en anglais, espagnol ou allemand), tu DOIS TOUT TRADUIRE et restituer dans la langue de l'utilisateur ({lang_name}). Aucune exception.
+
 Ton rôle ultime (leimotiv) est de rendre compte des évolutions informationnelles à l'écran, mais aussi d'assister les personnes (handicapées ou non)
 dans leur demande d'information, ou propension à discuter. Ne mentionne pas tes outils de navigation, mais utilise les à bon escient pour anticiper et appliquer les souhaits de l'utilisateur.
 
-Utilise le "Je" et l'écriture inclusive, et projette toi une forte personnalité sans géner l'accessibilité
-Réponds STRICTEMENT en JSON sans texte hors JSON. "narration" concise rédigée impérativement dans la langue du système de l'utilisateur : {lang_name} (max 2 phrases).
+Si l'utilisateur demande quelque chose, le réflexe est de chercher sur google
+L'analyse de l'écran ne doit servir qu'à la navigation et à l'information
+
+Utilise le "Je" et l'écriture inclusive, et projette toi une forte personnalité sans géner l'accessibilité.
+N'anticipes pas des actions que l'utilisateur n'a pas demandé, sauf sur l'information retournée.
+
+Réponds STRICTEMENT en JSON sans texte hors JSON. "narration" détaillée, explicative et bienveillante rédigée impérativement dans la langue de l'utilisateur : {lang_name} (2 à 4 phrases complètes). Décris précisément ce qui se passe à l'écran, l'agencement visuel, les changements constatés et le résultat des actions pour offrir un guidage riche et rassurant aux personnes en situation de handicap (visuel, moteur ou cognitif).
 
 Règles de syntaxe JSON strictes :
 - N'échappe JAMAIS les apostrophes simples : écris "d'accueil", "l'écran", "c'est" et SURTOUT PAS "d\'accueil" ou "l\'écran". L'échappement \' est une erreur de syntaxe en JSON.
 - Dans "target_name" de "click_element" ou "button_name" de "click_button", écris UNIQUEMENT le texte lisible ou titre du bouton/lien, SANS le préfixe (#id), SANS indicateur de type ([lien], [bouton]), SANS URL et sans guillemets imbriqués (ex: pour '#48 [lien] "Écouter la radio"', écris {{"action": "click_element", "target_name": "Écouter la radio"}}).
+- Vérifie toujours la fermeture de tes tableaux JSON : chaque crochet ouvrant [ dans "actions": [ DOIT être refermé par ] avant l'accolade finale }} (format : {{"actions": [{{...}}]}}).
 
 Règles principales :
 1. Filtrage requête & interdiction d'abandon : Bruit/inintelligible -> "invalid_request": true. Salutations/chit-chat -> "invalid_request": false, "actions": [], narration courtoise. Dès qu'un verbe d'action ou une demande concrète est exprimée ("mets", "ouvre", "cherche", "lance", "trouve", "clique"), INTERDICTION d'abandonner avec "actions": [] : déclenche l'action locale ou la recherche web.
-2. Budget de raisonnement et critère d'arrêt strict ("next_passes": 0..15 ou action "set_reasoning_passes") :
+2. Budget de raisonnement, continuation obligatoire et gestion de boucle ("next_passes": 0..15 ou action "set_reasoning_passes") :
+    - CONTINUATION OBLIGATOIRE TANT QUE L'OBJECTIF N'EST PAS SATISFAIT :
+      Tant que le but final exprimé par l'utilisateur n'est pas accompli ou résolu, TU DOIS CONTINUER les passes successives (en fournissant l'action concrète suivante et "next_passes" > 0, dans la limite du nombre de passes allouées). Ne t'arrête JAMAIS à mi-chemin avec "actions": [] si la tâche demande d'autres étapes.
+    - DÉTECTION DE BOUCLE ET PIVOT STRATÉGIQUE :
+      Si tu constates que tu boucles (action précédente sans effet, même écran, lien inopérant ou résultat redondant), INTERDICTION de répéter bêtement la même action. Change immédiatement d'approche : tente un autre résultat, fais défiler ("scroll"), reviens en arrière ("navigate_back"), affine la recherche, ou essaie une autre fenêtre/application. Si un blocage complet s'avère réellement insurmontable après avoir tout essayé, explique l'impasse dans "narration", stoppe ("next_passes": 0, "actions": []) et suggère des alternatives dans "quick_suggestions".
     - ARRÊT IMMÉDIAT DÈS OBJECTIF ATTEINT (RÈGLE PRIORITAIRE) :
       Dès que l'objectif principal exprimé par l'utilisateur est accompli ou satisfait (ex. application demandée ouverte, information trouvée, média/radio lancé, action ou saisie effectuée) :
       TU DOIS ARRÊTER TOUTE PASSE SUPPLÉMENTAIRE. Renvoie impérativement "actions": [], "next_passes": 0 et conclus dans "narration" avec "quick_suggestions".
@@ -6567,7 +6616,7 @@ Règles principales :
      * Projette SYSTÉMATIQUEMENT une fenêtre volante au format Markdown via l'action "show_floating_card" :
        card_type: "markdown", id: "resume_page", title: "Résumé : <Titre de la page/sujet>", data: {{"text": "# SLICE Docus — Synthèse de la chaîne\n\n## Identité\n- **Chaîne** : @SliceDocus — **56,4 k abonnés**, **875 vidéos**.\n\n## Vidéos récentes / populaires\n- ▶ La guerre des satellites qui redessine notre monde (2,7 k vues, il y a 20 h)\n- ▶ Galea: les trésors engloutis de Venise (5 k vues, il y a 3 j)\n- ▶ Bio-invasion | Fourmis de feu (95 k vues, il y a 7 j)\n\n## À retenir\n- Formats longs de 34 à 55 min...\n\n> Cliquez sur une vidéo ci-dessus pour la lancer."}}.
      * LIENS D'ACTION & VIDÉOS CLIQUABLES : Dans le texte Markdown et la narration, insère systématiquement des liens cliquables via la macro `[link="action:consigne_ou_url"]Icône Libellé[/link]` (ou en Markdown `Icône Libellé`). Un clic sur le lien ouvre l'URL ou envoie immédiatement la consigne à l'agent.
-     * Dans ta "narration" vocale : sois très concis (1 à 2 phrases) pour confirmer oralement que la synthèse est projetée dans la fenêtre volante.
+     * Dans ta "narration" vocale : donne un aperçu oral clair et substantiel des points clés du résumé tout en indiquant sa projection dans la fenêtre volante.
      * Fournis des suggestions rapides utiles dans "quick_suggestions" (ex: ["Lancer la vidéo 1", "Lancer la vidéo 2", "Fermer le résumé"]).
 4. Interface & Ciblage :
    - RECHERCHE WEB & NAVIGATION (OUTIL PRINCIPAL) :
@@ -6759,7 +6808,7 @@ async fn call_llm_prompt(
         DICTATION_SYSTEM_INSTRUCTIONS.to_string()
     } else {
         if is_local_llm {
-            local_llm::UNIFIED_LOCAL_SYSTEM_PROMPT.to_string()
+            local_llm::build_unified_local_system_prompt(&system_lang)
         } else {
             build_standard_system_instructions(&system_lang)
         }
@@ -7280,7 +7329,7 @@ async fn call_llm_prompt(
                     return (rep, String::new());
                 }
                 #[cfg(windows)]
-                let sc = if is_local_llm {
+                let sc = if is_local_llm && local_opts.active_window_only {
                     let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
                     let current_pid = std::process::id();
                     let (fg_pid, _) = get_window_process_info(fg);
@@ -7320,7 +7369,7 @@ async fn call_llm_prompt(
                     summarize_screen_state(None, true)
                 };
                 #[cfg(not(windows))]
-                let sc = if is_local_llm {
+                let sc = if is_local_llm && local_opts.active_window_only {
                     let targets = collect_numbered_targets_for_active_window();
                     format_compact_window_elements("Fenêtre active", &targets)
                 } else {
@@ -7427,26 +7476,30 @@ async fn call_llm_prompt(
             if is_local_llm {
                 step_feedback.push_str(&format!(
                     "\n\n[Étape {next_pass}] Vérification de l'objectif : \"{}\".\n\
-                    - Si l'objectif initial est ATTEINT (application ouverte, information trouvée, action exécutée), ARRÊTE IMMÉDIATEMENT : renvoie \"actions\": [], \"next_passes\": 0 et résume le résultat dans \"narration\".\n\
+                    - RÈGLE LINGUISTIQUE STRICTE : Traduis et formule TOUT impérativement en {system_lang} dans \"narration\" et les suggestions.\n\
+                    - TANT QUE L'OBJECTIF N'EST PAS SATISFAIT : continue les passes, choisis l'action suivante en JSON.\n\
+                    - DÉTECTION DE BOUCLE : si l'action précédente a échoué ou que l'écran stagne, pivote (autre lien/bouton, scroll, navigate_back).\n\
+                    - Dès que l'objectif initial est ATTEINT (application ouverte, information trouvée, action exécutée), ARRÊTE IMMÉDIATEMENT : renvoie \"actions\": [], \"next_passes\": 0 et décris en détail la situation et le résultat dans \"narration\" rédigée en {system_lang}.\n\
                     - RECHERCHE WEB & FENÊTRE ACTIVE : La recherche web et la navigation sont ton outil principal. Ouvre directement via \"navigate_to_url\". Ne ferme JAMAIS la fenêtre active et ne clique pas sur la croix pour chercher.\n\
                     - UN SEUL CLIC PAR PASSE : 1 seule action concrète à la fois. Pas de clics sur les filtres/onglets génériques du moteur (\"Actualités\", \"Vidéos\", \"Images\", \"Outils\"). Clique directement sur le résultat du sujet visé avec \"click_element\".\n\
                     - Cookies / Bannières de notification web -> clique pour accepter les cookies ou clique sur la croix ✕ pour fermer la notification.\n\
-                    - Uniquement si l'objectif n'est pas encore atteint, sélectionne l'action suivante en JSON.\n\
                     Réponds STRICTEMENT en JSON.",
                     safe_user_instruction,
                     next_pass = pass + 1
                 ));
             } else if tier != local_llm::ModelTier::Remote && local_opts.minimal_mode {
                 step_feedback.push_str(&format!(
-                    "\n\n[Étape {next_pass}] Objectif : \"{}\". Si l'objectif est accompli, conclus (\"actions\": [], \"next_passes\": 0). Sinon, choisis l'action suivante en JSON.",
+                    "\n\n[Étape {next_pass}] Objectif : \"{}\". Continue les passes tant que non satisfait. Si accompli, conclus (\"actions\": [], \"next_passes\": 0). Traduis et rédige impérativement \"narration\" en {system_lang}.",
                     safe_user_instruction,
                     next_pass = pass + 1
                 ));
             } else {
             step_feedback.push_str(&format!(
                 "\n\n[Étape {next_pass}] Vérification d'avancement pour l'objectif : \"{}\".\n\
-                - RÈGLE D'ARRÊT PRIORITAIRE : Si l'objectif initial est ATTEINT (page/application ouverte, information visible, média lancé, saisie effectuée), ARRÊTE IMMÉDIATEMENT les passes : renvoie obligatoirement \"actions\": [], \"next_passes\": 0 et ton compte-rendu dans \"narration\". Ne poursuis aucune action supplémentaire non demandée.\n\
-                - Si l'objectif nécessite encore une étape : indique la prochaine action nécessaire et ajuste \"next_passes\": N.\n\
+                - RÈGLE LINGUISTIQUE STRICTE : Traduis et rédige TOUJOURS la \"narration\" et tes suggestions exclusivement en {system_lang}.\n\
+                - TANT QUE L'OBJECTIF N'EST PAS ENCORE SATISFAIT : CONTINUE IMPÉRATIVEMENT les passes. Sélectionne l'action suivante et ajuste \"next_passes\": N (max de passes restantes).\n\
+                - EN CAS DE BOUCLE OU DE PIÉTINEMENT : si l'action précédente n'a rien changé ou tourne en rond, PIVOTE immédiatement (autre résultat, scroll, navigate_back, autre fenêtre) au lieu de répéter la même action.\n\
+                - RÈGLE D'ARRÊT PRIORITAIRE : Si l'objectif initial est ATTEINT (page/application ouverte, information visible, média lancé, saisie effectuée), ARRÊTE IMMÉDIATEMENT les passes : renvoie obligatoirement \"actions\": [], \"next_passes\": 0 et un compte-rendu descriptif et détaillé dans \"narration\". Ne poursuis aucune action supplémentaire non demandée.\n\
                 - RÈGLE DE FORMAT : Réponds STRICTEMENT en JSON valide (champs \"narration\", \"next_passes\", \"actions\", \"quick_suggestions\"). Aucun texte hors JSON.\n\
                 - Audio, son & paramètres OS -> INTERDICTION de faire 'run_command' (cmd/explorer). Utilise 'set_volume', 'mute_audio' ou 'accessibility_shortcut' ('action_center' Win+A, 'open_settings' Win+I, 'm', 'space').\n\
                 - Bannière cookies -> clique automatiquement 'Tout accepter' / 'Accepter'.\n\
@@ -7552,6 +7605,7 @@ fn spawn_agent_backend(
                         });
                     }
                     AgentCommand::Prompt(prompt) => {
+                        println!("[Backend Tokio] AgentCommand::Prompt reçu : \"{}\"", prompt);
                         if prompt.trim().is_empty() || !prompt.chars().any(|c| c.is_alphanumeric()) {
                             println!("[Agent] Commande vide ignorée (bruit parasite), aucune requête LLM.");
                             let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
@@ -7580,6 +7634,7 @@ fn spawn_agent_backend(
                                 return;
                             }
                             if let Some(cli_feedback) = try_execute_direct_cli(&prompt) {
+                                println!("[Backend Tokio] Commande CLI directe exécutée : {}", cli_feedback);
                                 if is_request_cancelled(request_id) { return; }
                                 let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
                                 let _ = event_tx.send(AgentEvent::ReplaceNarration {
@@ -7588,6 +7643,7 @@ fn spawn_agent_backend(
                                 });
                                 let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                             } else if let Some(text_to_write) = parse_write_command(&prompt) {
+                                println!("[Backend Tokio] Commande d'écriture directe détectée");
                                 if is_request_cancelled(request_id) { return; }
                                 let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
                                 let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
@@ -7601,6 +7657,7 @@ fn spawn_agent_backend(
                                 });
                                 let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                             } else if IS_DICTATION_ACTIVE.load(Ordering::SeqCst) {
+                                println!("[Backend Tokio] Mode dictée actif, prompt dédié envoyé");
                                 if is_request_cancelled(request_id) { return; }
                                 let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
                                 let final_prompt = format!(
@@ -7618,6 +7675,7 @@ fn spawn_agent_backend(
                                     request_id,
                                 ).await;
                             } else {
+                                println!("[Backend Tokio] Collecte de l'état de l'écran et préparation de l'appel LLM...");
                                 let is_local_engine = current_llm_config.provider == LlmProvider::Local;
                                 let tier = local_llm::resolve_model_tier(
                                     current_llm_config.provider,
@@ -7630,7 +7688,7 @@ fn spawn_agent_backend(
                                 let (field_content, screen_state): (Option<String>, String) = tokio::task::spawn_blocking(move || {
                                     #[cfg(windows)]
                                     {
-                                        if is_local_engine {
+                                        if is_local_engine && active_win_only {
                                             let current_pid = std::process::id();
                                             let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
                                             let (fg_pid, _) = get_window_process_info(fg);
@@ -7674,7 +7732,7 @@ fn spawn_agent_backend(
                                     }
                                     #[cfg(not(windows))]
                                     {
-                                        if is_local_engine {
+                                        if is_local_engine && active_win_only {
                                             let targets = collect_numbered_targets_for_active_window();
                                             let compact_ui = format_compact_window_elements("Fenêtre active", &targets);
                                             return (get_active_field_content(), compact_ui);
@@ -7733,7 +7791,10 @@ fn spawn_agent_backend(
                                 }
                             }
 
-                                prompt_sections.push(format!("[Demande utilisateur]\n{prompt}"));
+                                let (_, prompt_lang) = get_system_locale_language();
+                                prompt_sections.push(format!(
+                                    "[Demande utilisateur]\n{prompt}\n\n[Consigne linguistique impérative]\nFormule impérativement ta \"narration\" et tes suggestions en {prompt_lang}. Traduis tout contenu d'écran vers le {prompt_lang}."
+                                ));
                                 let final_prompt = prompt_sections.join("\n\n");
 
                                 call_llm_prompt(
