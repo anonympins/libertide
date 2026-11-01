@@ -5293,11 +5293,14 @@ impl eframe::App for OverlayApp {
 
                 // Boîte modale de configuration (Fournisseurs LLM & Thèmes d'accessibilité)
                 if self.show_api_key_modal {
+                    let modal_w = (win_w - 20.0).max(340.0);
+                    let modal_h = (active_win_h - 16.0).max(180.0);
                     egui::Window::new("settings_modal")
                         .title_bar(false)
                         .collapsible(false)
                         .resizable(false)
                         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                        .fixed_size(egui::vec2(modal_w, modal_h))
                         .frame(
                             egui::Frame::new()
                                 .fill(theme.modal_bg)
@@ -5411,10 +5414,10 @@ impl eframe::App for OverlayApp {
                             ui.separator();
                             ui.add_space(4.0);
 
-                            let max_scroll_h = (work_area.h * 0.82 - 50.0).clamp(240.0, 600.0);
+                            let max_scroll_h = (modal_h - 58.0).max(150.0);
                             egui::ScrollArea::vertical()
                                 .id_salt("settings_modal_scroll")
-                                .auto_shrink([true, true])
+                                .auto_shrink([false, false])
                                 .max_height(max_scroll_h)
                                 .show(ui, |ui| {
                             match self.settings_tab {

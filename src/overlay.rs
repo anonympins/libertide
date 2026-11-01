@@ -1759,11 +1759,18 @@ pub fn compute_and_sync_overlay_geometry(
     let max_chat_h = (work_area.h - control_h - 40.0).clamp(min_chat_h, 560.0);
     let current_chat_h = chat_height.clamp(min_chat_h, max_chat_h);
 
-    let modal_min_h = if show_api_key_modal { 380.0f32.min(work_area.h) } else { min_win_h };
-    let target_win_h = (padding + current_chat_h + padding + control_h + padding)
-        .max(modal_min_h)
-        .min(work_area.h)
-        .round();
+    let modal_target_h = if show_api_key_modal {
+        (work_area.h * 0.94).round().clamp(min_win_h, work_area.h)
+    } else {
+        min_win_h
+    };
+    let target_win_h = if show_api_key_modal {
+        modal_target_h
+    } else {
+        (padding + current_chat_h + padding + control_h + padding)
+            .min(work_area.h)
+            .round()
+    };
     let active_win_h = if *position_initialized {
         inner_rect_opt.map_or(*current_win_h, |r| r.height().max(min_win_h))
     } else {
