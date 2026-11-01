@@ -69,6 +69,8 @@ jobs:
         run: cargo test --release --target ${{ matrix.target }} --features vulkan
 
       - name: Build optimized release executable
+        env:
+          RUSTFLAGS: "-C link-arg=/SUBSYSTEM:WINDOWS -C link-arg=/ENTRY:mainCRTStartup"
         run: cargo build --release --target ${{ matrix.target }} --features vulkan
 
       - name: Prepare distribution package
