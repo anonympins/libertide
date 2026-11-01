@@ -16,13 +16,41 @@ use crate::types::{AgentEvent, AgentStatus, AudioCommand};
 
 /// Détecte les bruits parasites, didascalies ou hallucinations fréquentes de Whisper sur le silence
 fn is_hallucination_or_noise(text: &str) -> bool {
-    let lower = text.trim().to_lowercase();
-    let clean: String = lower.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
-    let clean_str = clean.trim();
-    let words: Vec<&str> = clean_str.split_whitespace().collect();
-    if words.is_empty() {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
         return true;
     }
+    if (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        || (trimmed.starts_with('(') && trimmed.ends_with(')'))
+        || (trimmed.starts_with('*') && trimmed.ends_with('*'))
+        || (trimmed.starts_with('♪') || trimmed.ends_with('♪'))
+        || (trimmed.starts_with('♫') || trimmed.ends_with('♫'))
+        || trimmed.chars().all(|c| !c.is_alphanumeric())
+    {
+        return true;
+    }
+
+    let normalized: String = trimmed
+        .to_lowercase()
+        .replace(['’', '‘', 'ʼ', 'ʻ', '\'', '-', '_', '.'], " ")
+        .chars()
+        .map(|c| match c {
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'à' | 'â' | 'ä' => 'a',
+            'î' | 'ï' => 'i',
+            'ô' | 'ö' => 'o',
+            'ù' | 'û' | 'ü' => 'u',
+            'ç' => 'c',
+            _ => c,
+        })
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect();
+
+    let clean_str = normalized.split_whitespace().collect::<Vec<&str>>().join(" ");
+    if clean_str.is_empty() {
+        return true;
+    }
+
     const EXACT_NOISE_PHRASES: &[&str] = &[
         "merci",
         "merci beaucoup",
@@ -53,14 +81,8 @@ fn is_hallucination_or_noise(text: &str) -> bool {
         "au revoir",
         "bye",
     ];
-    let trimmed = text.trim();
+
     EXACT_NOISE_PHRASES.iter().any(|&p| clean_str == p)
-        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
-        || (trimmed.starts_with('(') && trimmed.ends_with(')'))
-        || (trimmed.starts_with('*') && trimmed.ends_with('*'))
-        || (trimmed.starts_with('♪') || trimmed.ends_with('♪'))
-        || (trimmed.starts_with('♫') || trimmed.ends_with('♫'))
-        || trimmed.chars().all(|c| !c.is_alphanumeric())
 }
 
 /// Filtre biquad Butterworth passe-bas pour éliminer l'aliasing avant décimation
