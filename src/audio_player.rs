@@ -75,7 +75,7 @@ impl AudioPlayer {
                 if raw_samples.is_empty() {
                     continue;
                 }
-                let converted = resample_linear(&raw_samples, 24000, sample_rate, channels);
+                let converted = resample_audio(&raw_samples, 24000, sample_rate, channels);
                 let mut buf = ring_buffer.lock().unwrap();
                 buf.extend(converted);
             }
@@ -89,7 +89,7 @@ impl AudioPlayer {
     }
 }
 
-fn resample_linear(input: &[f32], src_rate: u32, dst_rate: u32, dst_channels: usize) -> Vec<f32> {
+fn resample_audio(input: &[f32], src_rate: u32, dst_rate: u32, dst_channels: usize) -> Vec<f32> {
     if input.is_empty() {
         return Vec::new();
     }
@@ -108,12 +108,31 @@ fn resample_linear(input: &[f32], src_rate: u32, dst_rate: u32, dst_channels: us
     let ratio = dst_rate as f64 / src_rate as f64;
     let out_len = (input.len() as f64 * ratio) as usize;
     let mut out = Vec::with_capacity(out_len * dst_channels);
+    let max_idx = input.len().saturating_sub(1);
+
     for i in 0..out_len {
         let src_idx = i as f64 / ratio;
-        let idx0 = src_idx.floor() as usize;
-        let idx1 = (idx0 + 1).min(input.len() - 1);
-        let frac = (src_idx - idx0 as f64) as f32;
-        let s = input[idx0] * (1.0 - frac) + input[idx1] * frac;
+        let idx1 = src_idx.floor() as usize;
+        let idx0 = idx1.saturating_sub(1);
+        let idx2 = (idx1 + 1).min(max_idx);
+        let idx3 = (idx1 + 2).min(max_idx);
+
+        let t = (src_idx - idx1 as f64) as f32;
+        let t2 = t * t;
+        let t3 = t2 * t;
+
+        let p0 = input[idx0];
+        let p1 = input[idx1.min(max_idx)];
+        let p2 = input[idx2];
+        let p3 = input[idx3];
+
+        let s = 0.5 * (
+            (2.0 * p1) +
+            (-p0 + p2) * t +
+            (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+            (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+        );
+
         for _ in 0..dst_channels {
             out.push(s);
         }

@@ -20,7 +20,6 @@ pub fn current_datetime_full_str() -> String {
             "juillet", "août", "septembre", "octobre", "novembre", "décembre",
         ];
 
-        let day_name = DAYS.get(st.day_of_week as usize).unwrap_or(&"");
         let day_name = DAYS.get(st.wDayOfWeek as usize).unwrap_or(&"");
         let month_name = MONTHS.get(st.wMonth as usize).unwrap_or(&"");
 

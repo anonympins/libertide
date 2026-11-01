@@ -472,6 +472,9 @@ pub fn recognize_texts_ocrs(
         return Vec::new();
     };
 
+    let scale_x = if w > 0 { (window_rect[2] - window_rect[0]).max(1) as f32 / w as f32 } else { 1.0 };
+    let scale_y = if h > 0 { (window_rect[3] - window_rect[1]).max(1) as f32 / h as f32 } else { 1.0 };
+
     let mut out = Vec::new();
     for (line, text_opt) in line_rects.iter().zip(texts.into_iter()) {
         if let Some(txt) = text_opt {
@@ -490,10 +493,10 @@ pub fn recognize_texts_ocrs(
                     }
                 }
                 if min_x < max_x && min_y < max_y {
-                    let x0 = window_rect[0] + min_x;
-                    let y0 = window_rect[1] + min_y;
-                    let x1 = window_rect[0] + max_x;
-                    let y1 = window_rect[1] + max_y;
+                    let x0 = window_rect[0] + (min_x as f32 * scale_x).round() as i32;
+                    let y0 = window_rect[1] + (min_y as f32 * scale_y).round() as i32;
+                    let x1 = window_rect[0] + (max_x as f32 * scale_x).round() as i32;
+                    let y1 = window_rect[1] + (max_y as f32 * scale_y).round() as i32;
                     out.push((s, [x0, y0, x1, y1]));
                 }
             }
@@ -542,9 +545,118 @@ extern "C" {
     fn dlclose(handle: *mut std::ffi::c_void) -> std::ffi::c_int;
 }
 
+/// Décodage du format PPM P6 (binaire RGB) en tampon BGRA 32 bits (< 2 ms)
+#[cfg(target_os = "linux")]
+fn parse_ppm_p6(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    if data.len() < 10 || &data[0..2] != b"P6" {
+        return None;
+    }
+    let mut idx = 2;
+    let mut tokens = Vec::with_capacity(3);
+
+    while tokens.len() < 3 && idx < data.len() {
+        while idx < data.len() {
+            if data[idx] == b'#' {
+                while idx < data.len() && data[idx] != b'\n' {
+                    idx += 1;
+                }
+            } else if data[idx].is_ascii_whitespace() {
+                idx += 1;
+            } else {
+                break;
+            }
+        }
+        if idx >= data.len() {
+            break;
+        }
+        let start = idx;
+        while idx < data.len() && !data[idx].is_ascii_whitespace() && data[idx] != b'#' {
+            idx += 1;
+        }
+        let token_str = std::str::from_utf8(&data[start..idx]).ok()?;
+        let num: u32 = token_str.parse().ok()?;
+        tokens.push(num);
+    }
+
+    if tokens.len() != 3 {
+        return None;
+    }
+
+    let w = tokens[0];
+    let h = tokens[1];
+    let max_val = tokens[2];
+    if w == 0 || h == 0 || max_val == 0 {
+        return None;
+    }
+
+    if idx < data.len() && data[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+
+    let payload = &data[idx..];
+    let is_16bit = max_val > 255;
+    let bytes_per_pixel = if is_16bit { 6 } else { 3 };
+    let expected_len = (w as usize) * (h as usize) * bytes_per_pixel;
+
+    if payload.len() < expected_len {
+        return None;
+    }
+
+    let mut buffer = vec![0u8; (w * h * 4) as usize];
+    if !is_16bit && max_val == 255 {
+        for i in 0..(w * h) as usize {
+            let src = i * 3;
+            let dst = i * 4;
+            buffer[dst] = payload[src + 2];     // B
+            buffer[dst + 1] = payload[src + 1]; // G
+            buffer[dst + 2] = payload[src];     // R
+            buffer[dst + 3] = 255;              // A
+        }
+    } else if !is_16bit {
+        for i in 0..(w * h) as usize {
+            let src = i * 3;
+            let dst = i * 4;
+            buffer[dst] = ((payload[src + 2] as u32 * 255) / max_val) as u8;
+            buffer[dst + 1] = ((payload[src + 1] as u32 * 255) / max_val) as u8;
+            buffer[dst + 2] = ((payload[src] as u32 * 255) / max_val) as u8;
+            buffer[dst + 3] = 255;
+        }
+    } else {
+        for i in 0..(w * h) as usize {
+            let src = i * 6;
+            let dst = i * 4;
+            buffer[dst] = (u16::from_be_bytes([payload[src + 4], payload[src + 5]]) as u32 * 255 / max_val) as u8;
+            buffer[dst + 1] = (u16::from_be_bytes([payload[src + 2], payload[src + 3]]) as u32 * 255 / max_val) as u8;
+            buffer[dst + 2] = (u16::from_be_bytes([payload[src], payload[src + 1]]) as u32 * 255 / max_val) as u8;
+            buffer[dst + 3] = 255;
+        }
+    }
+
+    Some((buffer, w, h))
+}
+
+/// Capture native sous Linux Wayland via `grim` (< 8 ms)
+#[cfg(target_os = "linux")]
+fn capture_window_wayland(rect: [i32; 4]) -> Option<(Vec<u8>, u32, u32)> {
+    let w = (rect[2] - rect[0]).max(1);
+    let h = (rect[3] - rect[1]).max(1);
+    let geom = format!("{},{} {}x{}", rect[0].max(0), rect[1].max(0), w, h);
+
+    let output = std::process::Command::new("grim")
+        .args(["-g", &geom, "-t", "ppm", "-"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+
+    parse_ppm_p6(&output.stdout)
+}
+
 /// Capture native sous Linux via X11 / XGetImage (< 4 ms)
 #[cfg(target_os = "linux")]
-pub fn capture_window_rgba(_hwnd: HWND, rect: [i32; 4]) -> Option<(Vec<u8>, u32, u32)> {
+fn capture_window_x11(_hwnd: HWND, rect: [i32; 4]) -> Option<(Vec<u8>, u32, u32)> {
     unsafe {
         const RTLD_LAZY: std::ffi::c_int = 1;
 
@@ -646,6 +758,27 @@ pub fn capture_window_rgba(_hwnd: HWND, rect: [i32; 4]) -> Option<(Vec<u8>, u32,
         dlclose(handle);
 
         Some((buffer, img_w, img_h))
+    }
+}
+
+/// Capture sous Linux avec bascule intelligente Wayland (grim) / X11 (XGetImage)
+#[cfg(target_os = "linux")]
+pub fn capture_window_rgba(hwnd: HWND, rect: [i32; 4]) -> Option<(Vec<u8>, u32, u32)> {
+    let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok()
+        || std::env::var("XDG_SESSION_TYPE")
+            .map(|s| s.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false);
+
+    if is_wayland {
+        if let Some(res) = capture_window_wayland(rect) {
+            return Some(res);
+        }
+        capture_window_x11(hwnd, rect)
+    } else {
+        if let Some(res) = capture_window_x11(hwnd, rect) {
+            return Some(res);
+        }
+        capture_window_wayland(rect)
     }
 }
 
@@ -786,6 +919,9 @@ pub fn detect_visual_boxes_from_pixels(
         return Vec::new();
     }
 
+    let scale_x = if w > 0 { (window_rect[2] - window_rect[0]).max(1) as f32 / w as f32 } else { 1.0 };
+    let scale_y = if h > 0 { (window_rect[3] - window_rect[1]).max(1) as f32 / h as f32 } else { 1.0 };
+
     let mut grid = vec![false; grid_cols * grid_rows];
 
     // Échantillonnage bi-directionnel (horizontal + vertical) pour capturer tous les contours de texte
@@ -885,10 +1021,10 @@ pub fn detect_visual_boxes_from_pixels(
 
             // Conserver tous les textes (mots courts box_w >= 14, lignes complètes et paragraphes)
             if box_w >= 14 && box_h >= 7 && box_h <= 300 {
-                let screen_x0 = window_rect[0] + (min_gx as u32 * CELL_W) as i32;
-                let screen_y0 = window_rect[1] + (min_gy as u32 * CELL_H) as i32;
-                let screen_x1 = screen_x0 + box_w as i32;
-                let screen_y1 = screen_y0 + box_h as i32;
+                let screen_x0 = window_rect[0] + ((min_gx as u32 * CELL_W) as f32 * scale_x).round() as i32;
+                let screen_y0 = window_rect[1] + ((min_gy as u32 * CELL_H) as f32 * scale_y).round() as i32;
+                let screen_x1 = screen_x0 + (box_w as f32 * scale_x).round() as i32;
+                let screen_y1 = screen_y0 + (box_h as f32 * scale_y).round() as i32;
 
                 // Rejeter uniquement si un contrôle UIA terminal couvre plus de 35% de la surface
                 let overlaps_uia = existing_targets.iter().any(|t| {

@@ -11,7 +11,7 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::token::data_array::LlamaTokenDataArray;
 use crate::types::{AgentEvent, ChatMessage, TtsCommand};
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NarrationParseState {
     LookingForKey,
     LookingForColon,
@@ -25,6 +25,8 @@ pub struct StreamingJsonNarration {
     state: NarrationParseState,
     buffer: String,
     sentence_buffer: String,
+    unicode_hex: String,
+    in_unicode: bool,
 }
 
 impl StreamingJsonNarration {
@@ -33,6 +35,8 @@ impl StreamingJsonNarration {
             state: NarrationParseState::LookingForKey,
             buffer: String::new(),
             sentence_buffer: String::new(),
+            unicode_hex: String::new(),
+            in_unicode: false,
         }
     }
 
@@ -81,6 +85,19 @@ impl StreamingJsonNarration {
 
                     while let Some(c) = chars.next() {
                         consumed += c.len_utf8();
+                        if self.in_unicode {
+                            self.unicode_hex.push(c);
+                            if self.unicode_hex.len() == 4 {
+                                if let Ok(code) = u32::from_str_radix(&self.unicode_hex, 16) {
+                                    if let Some(ch) = char::from_u32(code) {
+                                        self.sentence_buffer.push(ch);
+                                    }
+                                }
+                                self.unicode_hex.clear();
+                                self.in_unicode = false;
+                            }
+                            continue;
+                        }
                         if escape {
                             match c {
                                 'n' => self.sentence_buffer.push('\n'),
@@ -88,6 +105,10 @@ impl StreamingJsonNarration {
                                 't' => self.sentence_buffer.push('\t'),
                                 '"' => self.sentence_buffer.push('"'),
                                 '\\' => self.sentence_buffer.push('\\'),
+                                'u' => {
+                                    self.unicode_hex.clear();
+                                    self.in_unicode = true;
+                                }
                                 other => self.sentence_buffer.push(other),
                             }
                             escape = false;
@@ -128,6 +149,8 @@ impl StreamingJsonNarration {
     pub fn finish(&mut self) -> Option<String> {
         let remaining = self.sentence_buffer.trim().to_string();
         self.sentence_buffer.clear();
+        self.unicode_hex.clear();
+        self.in_unicode = false;
         self.state = NarrationParseState::Finished;
         if !remaining.is_empty() {
             Some(remaining)
@@ -2872,4 +2895,60 @@ pub fn run_local_llama_completion(
     let effective_tts_tx = if is_json_update { None } else { tts_tx };
 
     engine.generate_completion(&formatted_prompt, max_tokens as usize, Some(event_tx), effective_tts_tx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clean_action_target_str() {
+        assert_eq!(clean_action_target_str(r#""bouton valider""#), "valider");
+        assert_eq!(clean_action_target_str("#42 [lien] Mon lien"), "Mon lien");
+        assert_eq!(clean_action_target_str("   'rechercher'   "), "rechercher");
+    }
+
+    #[test]
+    fn test_repair_actions_field_colon_syntax() {
+        let malformed = r#"{"narration": "test", "actions": ["click_button" : "Se connecter"]}"#;
+        let repaired = repair_actions_field(malformed);
+        assert!(repaired.contains(r#"{"action": "click_button", "button_name": "Se connecter"}"#));
+    }
+
+    #[test]
+    fn test_repair_actions_field_single_object() {
+        let malformed = r#"{"narration": "test", "actions": {"open_app": "notepad"}}"#;
+        let repaired = repair_actions_field(malformed);
+        assert!(repaired.contains(r#"[{"action":"open_app","name":"notepad"}]"#));
+    }
+
+    #[test]
+    fn test_sanitize_json_output_forces_zero_passes_on_empty_actions() {
+        let input = r#"```json
+{"narration": "C'est fait.", "next_passes": 5, "actions": []}
+```"#;
+        let sanitized = sanitize_json_output(input);
+        let parsed: serde_json::Value = serde_json::from_str(&sanitized).expect("JSON valide attendu");
+        assert_eq!(parsed.get("next_passes").and_then(|v| v.as_u64()), Some(0));
+    }
+
+    #[test]
+    fn test_streaming_json_narration() {
+        let mut parser = StreamingJsonNarration::new();
+        let chunk1 = r#"{"narration": "Bonjour. Tout est pr"#;
+        let s1 = parser.feed(chunk1);
+        assert_eq!(s1, vec!["Bonjour."]);
+
+        let chunk2 = r#"êt à l'écran.","actions":[]}"#;
+        let s2 = parser.feed(chunk2);
+        assert_eq!(s2, vec!["Tout est prêt à l'écran."]);
+    }
+
+    #[test]
+    fn test_streaming_json_narration_unicode_escape() {
+        let mut parser = StreamingJsonNarration::new();
+        let chunk = r#"{"narration": "Bienvenue \u00e0 Paris."}"#;
+        let res = parser.feed(chunk);
+        assert_eq!(res, vec!["Bienvenue à Paris."]);
+    }
 }
