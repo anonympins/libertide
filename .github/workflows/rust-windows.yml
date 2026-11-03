@@ -25,6 +25,12 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             arch: x64
+            msvc_arch: x64
+            lib_folder: Lib
+          - target: i686-pc-windows-msvc
+            arch: x86
+            msvc_arch: x86
+            lib_folder: Lib32
 
     steps:
       - name: Checkout repository
@@ -33,7 +39,7 @@ jobs:
       - name: Setup MSVC developer tools & Ninja
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64
+          arch: ${{ matrix.msvc_arch }}
 
       - name: Install Vulkan SDK via Chocolatey
         shell: pwsh
@@ -44,7 +50,10 @@ jobs:
           "VULKAN_SDK=$sdkPath" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VK_SDK_PATH=$sdkPath" | Out-File -FilePath $env:GITHUB_ENV -Append
           "$sdkPath\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-          "$sdkPath\Lib" | Out-File -FilePath $env:GITHUB_PATH -Append
+          if (Test-Path "$sdkPath\${{ matrix.lib_folder }}") {
+            "$sdkPath\${{ matrix.lib_folder }}" | Out-File -FilePath $env:GITHUB_PATH -Append
+            "LIB=$env:LIB;$sdkPath\${{ matrix.lib_folder }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+          }
           "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Install Rust stable
@@ -70,7 +79,7 @@ jobs:
 
       - name: Build optimized release executable
         env:
-          RUSTFLAGS: "-C link-arg=/SUBSYSTEM:WINDOWS -C link-arg=/ENTRY:mainCRTStartup"
+          RUSTFLAGS: "-C link-arg=/SUBSYSTEM:WINDOWS -C link-arg=/ENTRY:mainCRTStartup -C link-arg=/LARGEADDRESSAWARE"
         run: cargo build --release --target ${{ matrix.target }} --features vulkan
 
       - name: Prepare distribution package

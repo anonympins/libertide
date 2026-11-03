@@ -291,7 +291,7 @@ impl WhisperEngine {
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         let num_threads = std::thread::available_parallelism()
-            .map(|n| (n.get() as i32 / 3).clamp(1, 2))
+            .map(|n| (n.get() as i32 / 2).clamp(2, 4))
             .unwrap_or(2);
         params.set_n_threads(num_threads);
         // "auto" active la détection automatique de n'importe quelle langue parlée
@@ -871,6 +871,7 @@ fn run_live_subtitles_loop(
                         let trimmed = text.trim();
                         if !trimmed.is_empty()
                             && trimmed.chars().any(|c| c.is_alphanumeric())
+                            && !is_hallucination_or_noise(trimmed)
                         {
                             if let Ok(mut lock) = current_sub_text.lock() {
                                 *lock = trimmed.to_string();
@@ -878,7 +879,7 @@ fn run_live_subtitles_loop(
                         }
                     }
                     is_transcribing.store(false, Ordering::SeqCst);
-                    std::thread::sleep(Duration::from_millis(60));
+                    std::thread::sleep(Duration::from_millis(30));
                 }
             })
             .expect("Échec lancement worker live_subtitles_inference");
@@ -1013,6 +1014,7 @@ fn run_live_subtitles_loop(
         let mut speech_start = Instant::now();
         let mut last_spectrum_send = Instant::now();
         let mut last_transcribe_time = Instant::now();
+        let mut noise_floor: f32 = 0.005;
 
         while LIVE_SUBTITLES_RUNNING.load(Ordering::SeqCst) {
             while let Ok(chunk) = loopback_rx.try_recv() {
@@ -1047,7 +1049,12 @@ fn run_live_subtitles_loop(
                 let sum_sq: f32 = new_16k.iter().map(|&s| s * s).sum();
                 let rms = (sum_sq / new_16k.len() as f32).sqrt();
 
-                if rms > 0.007 {
+                if !speech_detected {
+                    noise_floor = noise_floor * 0.95 + rms * 0.05;
+                }
+                let voice_threshold = (noise_floor * 2.2).clamp(0.008, 0.032);
+
+                if rms > voice_threshold {
                     if !speech_detected {
                         speech_detected = true;
                         speech_start = Instant::now();
@@ -1063,13 +1070,13 @@ fn run_live_subtitles_loop(
                 let silence_dur = last_sound_time.elapsed();
                 let total_dur = speech_start.elapsed();
 
-                let has_natural_pause = silence_dur >= Duration::from_millis(650) && audio_16k_buffer.len() >= 14000;
-                let max_duration_reached = total_dur >= Duration::from_millis(4200) && audio_16k_buffer.len() >= 16000;
+                let has_natural_pause = silence_dur >= Duration::from_millis(450) && audio_16k_buffer.len() >= 16000;
+                let max_duration_reached = total_dur >= Duration::from_millis(3200) && audio_16k_buffer.len() >= 16000 * 2;
 
-                // Cooldown d'au moins 1,2 seconde pour laisser respirer le processeur
+                // Cooldown minimal de 800 ms entre deux requêtes d'inférence
                 if (has_natural_pause || max_duration_reached)
                     && !is_transcribing.load(Ordering::SeqCst)
-                    && last_transcribe_time.elapsed() >= Duration::from_millis(1200)
+                    && last_transcribe_time.elapsed() >= Duration::from_millis(800)
                 {
                     last_transcribe_time = Instant::now();
                     // Ne pas dépasser 4 secondes d'audio transmises d'un coup à Whisper
@@ -1082,8 +1089,10 @@ fn run_live_subtitles_loop(
                     if has_natural_pause {
                         speech_detected = false;
                         audio_16k_buffer.clear();
+                        noise_floor = 0.005;
                     } else {
-                        let keep = 5600.min(audio_16k_buffer.len());
+                        // Conserver 0.6s de recouvrement pour ne pas tronquer les mots
+                        let keep = 9600.min(audio_16k_buffer.len());
                         let drain_len = audio_16k_buffer.len() - keep;
                         audio_16k_buffer.drain(0..drain_len);
                         speech_start = Instant::now();
@@ -1091,11 +1100,10 @@ fn run_live_subtitles_loop(
 
                     is_transcribing.store(true, Ordering::SeqCst);
                     let _ = transcribe_tx.send(transcribe_buf);
-                } else if audio_16k_buffer.len() > 16000 * 6 {
-                    // Purge proactive pour éviter les longs décalages
+                } else if audio_16k_buffer.len() > 16000 * 5 {
+                    // Écrêter les données les plus anciennes SANS écraser speech_start
                     let overflow = audio_16k_buffer.len() - (16000 * 4);
                     audio_16k_buffer.drain(0..overflow);
-                    speech_start = Instant::now();
                 }
             }
 

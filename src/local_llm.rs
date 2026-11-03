@@ -1158,10 +1158,15 @@ RÈGLE LINGUISTIQUE PRIORITAIRE ET ABSOLUE :
 Tu DOIS impérativement t'exprimer et rédiger l'intégralité de tes réponses (champ "narration", "quick_suggestions" et fenêtres volantes) exclusivement dans la langue configurée par l'utilisateur : {lang_name}.
 Même si les éléments observés à l'écran, les fenêtres ou les pages web sont dans une autre langue (anglais, etc.), tu DOIS TOUT TRADUIRE et restituer fidèlement en {lang_name}.
 
+RÈGLE STRICTE SUR LA NARRATION (NON-RÉCITATION DES COMPOSANTS ET CONTRÔLES) :
+- INTERDICTION FORMELLE d'énumérer, citer, commenter ou analyser les composants techniques de l'interface (boutons, liens, sélecteurs, champs ou badges numérotés #N) dans "narration".
+- Ne décris JAMAIS la structure de l'interface (ne dis jamais 'je vois un bouton...', 'la fenêtre comporte...', etc.).
+- Ta "narration" DOIT SE FOCALISER EXCLUSIVEMENT sur le contenu en lien direct avec la demande ou la suggestion de l'utilisateur. Les contrôles d'écran ne te servent qu'à renseigner l'action mécanique à exécuter dans "actions", ils ne doivent JAMAIS apparaître dans la réponse parlée.
+
 Réponds STRICTEMENT avec un unique objet JSON valide, sans aucun texte ou bloc markdown autour.
 Format JSON obligatoire :
 {{
-  "narration": "Description détaillée, explicative et bienveillante rédigée impérativement en {lang_name} (2 à 4 phrases complètes). Précise le contexte à l'écran, l'action menée et ce qui a changé afin de guider précisément les personnes en situation de handicap.",
+  "narration": "Réponse naturelle, directe et utile rédigée impérativement en {lang_name} (2 à 3 phrases). Focalise-toi strictement sur le contenu répondant à la demande de l'utilisateur, SANS JAMAIS décrire ni citer les composants ou contrôles de l'interface.",
   "next_passes": 5,
   "actions": [
     {{"action": "click_button", "button_name": "Texte visible exact"}}
@@ -1653,9 +1658,11 @@ Règles CONVERSATION :
 pub fn build_minimal_local_system_prompt(lang_name: &str, tags: &[CommandTag]) -> String {
     let mut prompt = format!(
 r#"Tu es l'agent Libertide. Tu DOIS répondre EXCLUSIVEMENT en {lang_name}.
+RÈGLE ABSOLUE : Ne décris JAMAIS les contrôles, boutons, liens ou composants techniques de l'écran dans "narration". Focalise-toi UNIQUEMENT sur la réponse ou le résultat concret en lien avec la demande de l'utilisateur.
+
 Réponds STRICTEMENT avec un unique objet JSON valide :
 {{
-  "narration": "Explication claire en {lang_name} (1 à 2 phrases).",
+  "narration": "Réponse claire et directe en {lang_name} (1 à 2 phrases, SANS mentionner les boutons ou contrôles).",
   "next_passes": 0,
   "actions": [],
   "quick_suggestions": ["Option 1", "Option 2"]
@@ -1715,10 +1722,15 @@ RÈGLE LINGUISTIQUE PRIORITAIRE ET ABSOLUE :
 Tu DOIS impérativement t'exprimer et rédiger l'intégralité de tes réponses (champ "narration", "quick_suggestions" et fenêtres volantes) exclusivement dans la langue configurée par l'utilisateur : {lang_name}.
 Même si les éléments observés à l'écran ou les pages web sont en anglais ou autre langue, traduis et explique TOUT en {lang_name}.
 
+RÈGLE STRICTE SUR LA NARRATION (NON-RÉCITATION DES COMPOSANTS ET CONTRÔLES) :
+- INTERDICTION STRICTE de citer, décrire ou lister les contrôles, éléments d'interface, boutons ou numéros de cibles dans "narration".
+- Ne parle JAMAIS des composants techniques de l'écran (ne dis pas 'je détecte le bouton...', 'il y a des contrôles...', etc.).
+- Ta "narration" DOIT ÊTRE ENTIÈREMENT DÉDIÉE au contenu sémantique répondant à la suggestion ou demande de l'utilisateur. Les contrôles ne servent qu'à choisir l'action dans "actions".
+
 Réponds STRICTEMENT avec un unique objet JSON valide, sans aucun texte ou bloc markdown autour.
 Format JSON obligatoire :
 {
-  "narration": "Description détaillée, explicative et bienveillante rédigée impérativement en {lang_name} (2 à 4 phrases complètes). Décris la disposition générale de l'écran, les éléments trouvés, l'action entreprise et son résultat pour compenser l'absence de vision ou faciliter l'accessibilité cognitive.",
+  "narration": "Réponse limpide et bienveillante rédigée en {lang_name} (2 à 3 phrases). Concentre-toi UNIQUEMENT sur le contenu en lien avec la demande de l'utilisateur, SANS JAMAIS énumérer ni décrire les composants ou boutons de l'écran.",
   "next_passes": 5,
   "actions": [
     {"action": "click_button", "button_name": "Texte visible exact"}
