@@ -267,10 +267,10 @@ impl ModelTier {
     pub fn default_options(&self) -> LocalLlmOptions {
         match self {
             ModelTier::Local => LocalLlmOptions {
-                minimal_mode: false,
-                active_window_only: false,
+                minimal_mode: true,
+                active_window_only: true,
                 include_feedback: true,
-                include_history: true,
+                include_history: false,
             },
             ModelTier::Remote => LocalLlmOptions {
                 minimal_mode: false,
@@ -384,6 +384,7 @@ pub enum CommandTag {
     NeurodivergentAndSensoryCalm,
     AacSymbolCommunication,
     VitalCareAndCaregiverAlert,
+    KnowledgeAndQuestions,
 }
 
 impl CommandTag {
@@ -420,6 +421,7 @@ impl CommandTag {
         Self::NeurodivergentAndSensoryCalm,
         Self::AacSymbolCommunication,
         Self::VitalCareAndCaregiverAlert,
+        Self::KnowledgeAndQuestions,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -456,6 +458,7 @@ impl CommandTag {
             Self::NeurodivergentAndSensoryCalm => "NEURODIVERGENT_AND_SENSORY_CALM",
             Self::AacSymbolCommunication => "AAC_SYMBOL_COMMUNICATION",
             Self::VitalCareAndCaregiverAlert => "VITAL_CARE_AND_CAREGIVER_ALERT",
+            Self::KnowledgeAndQuestions => "KNOWLEDGE_AND_QUESTIONS",
         }
     }
 
@@ -493,6 +496,7 @@ impl CommandTag {
             Self::NeurodivergentAndSensoryCalm => "Sanctuaire sensoriel, autisme (TSA), surcharge cognitive, TDAH et épilepsie (mute_audio immédiat, micro-étapes, phrasé apaisant)",
             Self::AacSymbolCommunication => "Communication Alternative et Améliorée (CAA), aphasie, pictogrammes, langage non-verbal (show_floating_card caa_board, expansion syntaxique)",
             Self::VitalCareAndCaregiverAlert => "Soins vitaux, appel de l'auxiliaire de vie ou de l'aidant, posture, aspiration, détresse respiratoire (show_floating_card caregiver_alert, alerte multicanale)",
+            Self::KnowledgeAndQuestions => "Questions de connaissances générales, savoir, culture, explications conceptuelles, vérification interactive ou présence ('tu m'entends ?', 'es-tu là ?', 'test micro', 'pourquoi...', 'qu'est-ce que...', 'c'est quoi...', questions rhétoriques). Aucune action sur l'écran requise.",
         }
     }
 
@@ -563,6 +567,8 @@ impl CommandTag {
             Some(Self::AacSymbolCommunication)
         } else if upper.contains("VITAL") || upper.contains("CAREGIVER") || upper.contains("SOIGNANT") || upper.contains("AIDANT") || upper.contains("ASPIRAT") || upper.contains("POSTURE") {
             Some(Self::VitalCareAndCaregiverAlert)
+        } else if upper.contains("KNOWLEDGE") || upper.contains("QUESTION") || upper.contains("SAVOIR") || upper.contains("CONNAISSANCE") || upper.contains("RHETORIC") || upper.contains("RHÉTORIQUE") {
+            Some(Self::KnowledgeAndQuestions)
         } else {
             None
         }
@@ -581,6 +587,95 @@ pub fn all_command_tags_prompt_list() -> String {
 pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
     let lower = query.to_lowercase();
     let mut tags = Vec::new();
+
+    // Détection prioritaire : Vérification d'interactivité, de micro ou de présence
+    let norm_clean = lower
+        .replace(['’', '\'', '‘', 'ʼ', 'ʻ', '?', '!', ',', ';', '.', '-', '_'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let is_interactive_check = norm_clean == "tu m entends"
+        || norm_clean == "tu m entnds"
+        || norm_clean == "m entends tu"
+        || norm_clean == "m entnds tu"
+        || norm_clean == "est ce que tu m entends"
+        || norm_clean == "est ce que tu m entnds"
+        || norm_clean == "tu m ecoutes"
+        || norm_clean == "m ecoutes tu"
+        || norm_clean == "est ce que tu m ecoutes"
+        || norm_clean == "vous m entendez"
+        || norm_clean == "m entendez vous"
+        || norm_clean == "es tu la"
+        || norm_clean == "t es la"
+        || norm_clean == "tu es la"
+        || norm_clean == "etes vous la"
+        || norm_clean == "êtes vous là"
+        || norm_clean == "est ce que tu es la"
+        || norm_clean == "allô"
+        || norm_clean == "allo"
+        || norm_clean == "test micro"
+        || norm_clean == "test audio"
+        || norm_clean == "test son"
+        || norm_clean == "tu fonctionnes"
+        || norm_clean == "can you hear me"
+        || norm_clean == "are you there"
+        || norm_clean == "are you listening";
+
+    if is_interactive_check {
+        return vec![CommandTag::KnowledgeAndQuestions];
+    }
+
+    // Détection des questions de connaissances, d'explication ou rhétoriques
+    let is_explicit_system_action = lower.starts_with("ouvre ")
+        || lower.starts_with("ferme ")
+        || lower.starts_with("lance ")
+        || lower.starts_with("clique ")
+        || lower.starts_with("cherche sur google")
+        || lower.starts_with("recherche sur google")
+        || lower.starts_with("cherche sur le web")
+        || lower.starts_with("tape ")
+        || lower.starts_with("écris ")
+        || lower.starts_with("ecris ");
+
+    if !is_explicit_system_action {
+        let is_knowledge_query = norm_clean.starts_with("pourquoi ")
+            || norm_clean.starts_with("qu est ce que ")
+            || norm_clean.starts_with("qu est ce qu ")
+            || norm_clean.starts_with("c est quoi ")
+            || norm_clean.starts_with("quelle est la ")
+            || norm_clean.starts_with("quel est le ")
+            || norm_clean.starts_with("qui est ")
+            || norm_clean.starts_with("qui etait ")
+            || norm_clean.starts_with("qui était ")
+            || norm_clean.starts_with("qui a découvert ")
+            || norm_clean.starts_with("qui a cree ")
+            || norm_clean.starts_with("qui a créé ")
+            || norm_clean.starts_with("qui a invente ")
+            || norm_clean.starts_with("qui a inventé ")
+            || norm_clean.starts_with("qui a ecrit ")
+            || norm_clean.starts_with("qui a écrit ")
+            || norm_clean.starts_with("comment fonctionne ")
+            || norm_clean.starts_with("comment marche ")
+            || norm_clean.starts_with("comment se fait il ")
+            || norm_clean.starts_with("explique moi ")
+            || norm_clean.starts_with("peux tu m expliquer ")
+            || norm_clean.starts_with("raconte moi ")
+            || norm_clean.starts_with("dis moi une blague")
+            || norm_clean.starts_with("raconte une blague")
+            || norm_clean.starts_with("raconte une histoire")
+            || norm_clean.starts_with("que penses tu de ")
+            || norm_clean.starts_with("tu penses quoi de ")
+            || norm_clean.starts_with("what is ")
+            || norm_clean.starts_with("why is ")
+            || norm_clean.starts_with("how does ")
+            || norm_clean.starts_with("tell me about ")
+            || norm_clean.starts_with("explain to me ");
+
+        if is_knowledge_query {
+            tags.push(CommandTag::KnowledgeAndQuestions);
+        }
+    }
 
     // 0. Détection prioritaire : Radio, musique et streaming audio en direct
     if lower.contains("radio") || lower.contains("radio france") || lower.contains("france inter") || lower.contains("france info") || lower.contains("franceinfo")
@@ -861,7 +956,21 @@ pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
         tags.push(CommandTag::CognitiveAndClarity);
     }
 
-    if lower == "bonjour" || lower == "salut" || lower == "coucou" || lower == "merci" || lower == "qui es tu" || lower.starts_with("bonjour ") || lower.starts_with("salut ") {
+    let is_greeting = norm_clean == "bonjour"
+        || norm_clean == "salut"
+        || norm_clean == "coucou"
+        || norm_clean == "bonsoir"
+        || norm_clean == "merci"
+        || norm_clean == "merci beaucoup"
+        || norm_clean == "qui es tu"
+        || norm_clean == "comment tu t appelles"
+        || norm_clean == "comment vas tu"
+        || norm_clean == "ca va"
+        || norm_clean == "ça va"
+        || norm_clean.starts_with("bonjour ")
+        || norm_clean.starts_with("salut ")
+        || norm_clean.starts_with("bonsoir ");
+    if is_greeting {
         tags.push(CommandTag::GeneralChitChat);
     }
 
@@ -1372,6 +1481,19 @@ Règles ALERTE SOIGNANT & SOINS VITAUX DU QUOTIDIEN (ASPIRATION / POSTURE / DOUL
 - Règle 3 (Maintien de l'attention et consignes d'attente) : Dans "narration", rassure la personne en lui indiquant que l'alerte est affichée et transmise, et guide doucement sa respiration.
 "#);
             }
+            CommandTag::KnowledgeAndQuestions => {
+                prompt.push_str(r#"
+Règles QUESTIONS DE CONNAISSANCES, INTERACTIVITÉ & QUESTIONS RHÉTORIQUES (TAG KNOWLEDGE_AND_QUESTIONS) :
+- VÉRIFICATION D'ÉCOUTE MICRO OU DE PRÉSENCE ("tu m'entends ?", "es-tu là ?", "allô", "test micro", etc.) :
+  -> Réponds IMMÉDIATEMENT, poliment et chaleureusement pour confirmer que tu entends parfaitement (ex: "Oui, je vous entends très bien ! Comment puis-je vous aider aujourd'hui ?").
+  -> Renvoie STRICTEMENT "actions": [] et "next_passes": 0.
+  -> INTERDICTION ABSOLUE de commenter les vidéos, fenêtres ou pages web affichées en arrière-plan lorsqu'il s'agit d'une simple vérification de micro ou de présence !
+- QUESTIONS DE SAVOIR, CULTURE, EXPLICATION OU QUESTIONS RHÉTORIQUES ("pourquoi...", "qu'est-ce que...", "c'est quoi...", "comment...", "raconte...", etc.) :
+  -> Réponds de façon claire, pédagogique, vivante et bienveillante dans "narration" en {lang_name}.
+  -> Renvoie STRICTEMENT "actions": [] et "next_passes": 0 (sauf si l'utilisateur demande explicitement d'ouvrir un site web ou une vidéo pour illustrer).
+  -> INTERDICTION FORMELLE d'interagir ou de cliquer sur les fenêtres ouvertes à l'écran lorsqu'on te pose une question générale de connaissance ou de réflexion.
+"#);
+            }
             CommandTag::GeneralChitChat => {
                 prompt.push_str(r#"
 Règles CONVERSATION :
@@ -1520,9 +1642,65 @@ Règles CONVERSATION :
                 prompt.push_str("- {\"action\": \"mute_audio\"}\n");
             }
             CommandTag::GeneralChitChat => {}
+            CommandTag::KnowledgeAndQuestions => {}
         }
     }
 
+    prompt
+}
+
+/// Construit un prompt système ultra-concis (~200 tokens) adapté aux SLM locaux
+pub fn build_minimal_local_system_prompt(lang_name: &str, tags: &[CommandTag]) -> String {
+    let mut prompt = format!(
+r#"Tu es l'agent Libertide. Tu DOIS répondre EXCLUSIVEMENT en {lang_name}.
+Réponds STRICTEMENT avec un unique objet JSON valide :
+{{
+  "narration": "Explication claire en {lang_name} (1 à 2 phrases).",
+  "next_passes": 0,
+  "actions": [],
+  "quick_suggestions": ["Option 1", "Option 2"]
+}}
+
+RÈGLES D'ACTION :
+- Si l'objectif est atteint ou pour une salutation/question : "actions": [], "next_passes": 0.
+- Si une action est requise : 1 seule action dans "actions" avec "next_passes": 3.
+- Chaque action est un objet avec la clé "action".
+  Exemples :
+  {{"action": "click_button", "button_name": "Se connecter"}}
+  {{"action": "click_element", "target_name": "Rechercher"}}
+  {{"action": "click_numbered_target", "index": 1}}
+  {{"action": "navigate_to_url", "url": "https://www.google.com/search?q=...", "target": "new_tab"}}
+  {{"action": "write_text", "text": "...", "target": "nom_champ", "press_enter": true}}
+  {{"action": "set_volume", "command": "up|down|mute|unmute"}}
+  {{"action": "scroll", "direction": "down", "amount": 1}}
+  {{"action": "open_app", "name": "nom_app"}}
+"#
+    );
+
+    prompt.push_str("\nActions autorisées selon contexte :\n");
+    for tag in tags {
+        match tag {
+            CommandTag::WebNavigateOrSearch => {
+                prompt.push_str("- navigate_to_url (url, target: new_tab)\n- navigate_back\n");
+            }
+            CommandTag::ClickElementOrButton => {
+                prompt.push_str("- click_button (button_name)\n- click_element (target_name)\n- click_numbered_target (index: N)\n- scroll (direction: down|up)\n");
+            }
+            CommandTag::TextInputOrDictation => {
+                prompt.push_str("- write_text (text, target, press_enter: bool)\n- clear_text\n");
+            }
+            CommandTag::VolumeControl | CommandTag::AudioSettings | CommandTag::MuteAudio => {
+                prompt.push_str("- set_volume (command: up|down|mute|unmute)\n- mute_audio\n");
+            }
+            CommandTag::AppManagement => {
+                prompt.push_str("- open_app (name)\n- close_app (name)\n");
+            }
+            CommandTag::WindowManagementOrImmersion => {
+                prompt.push_str("- arrange_window (title, position: left|right|maximize)\n- focus_window (title)\n");
+            }
+            _ => {}
+        }
+    }
     prompt
 }
 
@@ -2355,16 +2533,28 @@ impl LocalLlamaEngine {
         event_tx: Option<&Sender<AgentEvent>>,
         tts_tx: Option<&Sender<TtsCommand>>,
     ) -> Result<String, String> {
-        let max_ctx = 4096;
-        let n_batch = if self.gpu_enabled { 2048 } else { 1024 };
-        let threads = std::thread::available_parallelism()
-            .map_or(4, |p| p.get())
-            .min(16) as i32;
+        // Réduction du contexte alloué à 2048 tokens pour diviser par deux l'empreinte mémoire du KV-cache
+        let max_ctx = 2048;
+        // Micro-batch standard à 512 tokens : évite le goulet d'étranglement quadratique O(N^2) de 2048 tokens
+        let n_batch = 512;
+        let num_cpus = std::thread::available_parallelism().map_or(4, |p| p.get());
+        let threads = if let Ok(t_str) = std::env::var("LLAMA_THREADS") {
+            t_str.trim().parse::<i32>().unwrap_or(4).clamp(1, 16)
+        } else if self.gpu_enabled {
+            (num_cpus / 2).clamp(2, 6) as i32
+        } else {
+            (num_cpus / 2).max(1).min(8) as i32
+        };
+        let threads_batch = if self.gpu_enabled {
+            threads.min(6)
+        } else {
+            threads.min(8)
+        };
         let ctx_params = LlamaContextParams::default()
             .with_n_ctx(std::num::NonZeroU32::new(max_ctx))
             .with_n_batch(n_batch)
             .with_n_threads(threads)
-            .with_n_threads_batch(threads);
+            .with_n_threads_batch(threads_batch);
 
         let mut ctx = self.model
             .new_context(&self.backend, ctx_params)
@@ -2390,7 +2580,7 @@ impl LocalLlamaEngine {
         }
 
         let total_tokens = tokens.len();
-        let chunk_size = 512.min(n_batch as usize);
+        let chunk_size = (n_batch as usize).min(total_tokens);
         let mut batch = LlamaBatch::new(chunk_size, 1);
 
         let mut current_pos = 0i32;
@@ -2664,6 +2854,9 @@ pub fn resolve_query_tags(query: &str) -> Vec<CommandTag> {
             return engine.classify_intent(clean);
         }
     }
+    if clean.ends_with('?') {
+        return vec![CommandTag::KnowledgeAndQuestions];
+    }
     vec![
         CommandTag::WebNavigateOrSearch,
         CommandTag::ClickElementOrButton,
@@ -2776,7 +2969,14 @@ pub fn run_local_llama_completion(
         || system_prompt.contains("expert d'ergonomie et d'accessibilité")
         || system_prompt.contains("assistant de dictée vocale");
 
-    let effective_system_prompt = if is_specialized_task || system_prompt.contains("Tu es l'agent d'exploration Libertide") {
+    let effective_system_prompt = if is_specialized_task {
+        system_prompt.trim().to_string()
+    } else if opts.minimal_mode {
+        let clean_goal = extract_clean_user_message(last_user_msg);
+        let tags = resolve_query_tags(clean_goal);
+        let (_, lang_name) = crate::get_system_locale_language();
+        build_minimal_local_system_prompt(&lang_name, &tags)
+    } else if system_prompt.contains("Tu es l'agent d'exploration Libertide") {
         system_prompt.trim().to_string()
     } else {
         let clean_goal = extract_clean_user_message(last_user_msg);
@@ -2795,16 +2995,17 @@ pub fn run_local_llama_completion(
         messages.iter().rev().find(|m| m.role == "user").into_iter().collect()
     };
 
-    // Conserver jusqu'à 8 messages (4 tours utilisateur + réponses assistant)
-    let start_idx = candidate_messages.len().saturating_sub(8);
+    // Limiter l'historique pour les modèles locaux légers
+    let max_history_msgs = if opts.minimal_mode { 2 } else { 4 };
+    let start_idx = candidate_messages.len().saturating_sub(max_history_msgs);
     let recent_messages = &candidate_messages[start_idx..];
     let last_user_in_recent = recent_messages
         .iter()
         .rposition(|m| m.role == "user");
 
     let mut formatted_prompt = String::new();
-    let user_token_budget = 10000;
-    let query_token_budget = 10000;
+    let user_token_budget = if opts.minimal_mode { 1200 } else { 3000 };
+    let query_token_budget = if opts.minimal_mode { 1200 } else { 3000 };
 
     match preset.family {
         ModelFamily::Llama3 => {

@@ -60,6 +60,33 @@ pub fn format_compact_window_elements(win_title: &str, targets: &[NumberedElemen
     out
 }
 
+/// Récupère le titre de la fenêtre active au premier plan (avec repli sur la dernière fenêtre externe)
+#[cfg(windows)]
+pub fn get_foreground_window_title() -> Option<String> {
+    let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+    let current_pid = std::process::id();
+    let (fg_pid, _) = get_window_process_info(fg);
+    let target = if !fg.0.is_null() && fg_pid != current_pid && !is_window_hung(fg) {
+        Some(fg)
+    } else {
+        LAST_EXTERNAL_HWND
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .map(|raw| windows::Win32::Foundation::HWND(raw as _))
+            .filter(|&h| !h.0.is_null() && !is_window_hung(h))
+    };
+
+    target.map(|h| {
+        let title = crate::get_window_title(h);
+        if title.trim().is_empty() {
+            "Fenêtre active".to_string()
+        } else {
+            title
+        }
+    })
+}
+
 /// Extrait les derniers messages de l'historique en conservant au maximum `max_user_msgs` messages utilisateur
 pub fn get_recent_history_capped_at_user_messages(history: &[ChatMessage], max_user_msgs: usize) -> Vec<ChatMessage> {
     let mut user_count = 0;
@@ -1003,23 +1030,9 @@ pub async fn call_llm_prompt(
                 }
                 #[cfg(windows)]
                 let sc = if local_opts.active_window_only {
-                    let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
-                    let current_pid = std::process::id();
-                    let (fg_pid, _) = get_window_process_info(fg);
-                    let target = if !fg.0.is_null() && fg_pid != current_pid && !is_window_hung(fg) {
-                        Some(fg)
-                    } else {
-                        LAST_EXTERNAL_HWND.lock().ok().and_then(|g| *g).map(|raw| windows::Win32::Foundation::HWND(raw as _)).filter(|&h| !h.0.is_null() && !is_window_hung(h))
-                    };
-                    if let Some(h) = target {
-                        if get_window_process_info(h).0 != current_pid {
-                            extract_window_text_only(h)
-                        } else {
-                            summarize_screen_state(None, true)
-                        }
-                    } else {
-                        summarize_screen_state(None, true)
-                    }
+                    let targets = collect_numbered_targets_for_active_window();
+                    let fg_title = get_foreground_window_title().unwrap_or_else(|| "Fenêtre active".to_string());
+                    format_compact_window_elements(&fg_title, &targets)
                 } else {
                     summarize_screen_state(None, true)
                 };
@@ -1275,31 +1288,25 @@ pub fn spawn_agent_backend(
                                 ).await;
                             } else {
                                 println!("[Backend Tokio] Collecte de l'état de l'écran et préparation de l'appel LLM...");
+                                let clean_prompt = local_llm::extract_clean_user_message(&prompt);
+                                let detected_tags = local_llm::fast_classify_intent(clean_prompt);
+                                let is_pure_conversational_or_question = !detected_tags.is_empty()
+                                    && detected_tags.iter().all(|t| matches!(t, local_llm::CommandTag::GeneralChitChat | local_llm::CommandTag::KnowledgeAndQuestions));
+
                                 let active_win_only = local_llm::get_local_llm_options().active_window_only;
                                 let (field_content, screen_state): (Option<String>, String) = tokio::task::spawn_blocking(move || {
+                                    if is_pure_conversational_or_question {
+                                        return (None, String::new());
+                                    }
                                     #[cfg(windows)]
                                     {
                                         if active_win_only {
-                                            let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
-                                            let current_pid = std::process::id();
-                                            let (fg_pid, _) = get_window_process_info(fg);
-                                            let target = if !fg.0.is_null() && fg_pid != current_pid && !is_window_hung(fg) {
-                                                Some(fg)
-                                            } else {
-                                                LAST_EXTERNAL_HWND.lock().ok().and_then(|g| *g).map(|raw| windows::Win32::Foundation::HWND(raw as _)).filter(|&h| !h.0.is_null() && !is_window_hung(h))
-                                            };
-                                            if let Some(h) = target {
-                                                if get_window_process_info(h).0 != current_pid {
-                                                    (get_active_field_content(), extract_window_text_only(h))
-                                                } else {
-                                                    (get_active_field_content(), summarize_screen_state(None, true))
-                                                }
-                                            } else {
-                                                (get_active_field_content(), summarize_screen_state(None, true))
-                                            }
-                                        } else {
-                                            (get_active_field_content(), summarize_screen_state(None, true))
+                                            let targets = collect_numbered_targets_for_active_window();
+                                            let fg_title = get_foreground_window_title().unwrap_or_else(|| "Fenêtre active".to_string());
+                                            let compact_ui = format_compact_window_elements(&fg_title, &targets);
+                                            return (get_active_field_content(), compact_ui);
                                         }
+                                        (get_active_field_content(), summarize_screen_state(None, true))
                                     }
                                     #[cfg(not(windows))]
                                     {
@@ -1315,7 +1322,7 @@ pub fn spawn_agent_backend(
                                 if is_request_cancelled(request_id) { return; }
                                 let mut prompt_sections = Vec::new();
 
-                                if !screen_state.trim().is_empty() {
+                                if !screen_state.trim().is_empty() && !is_pure_conversational_or_question {
                                     if let Ok(mut lock) = LAST_SCREEN_SUMMARY.lock() {
                                         *lock = Some(screen_state.clone());
                                     }
