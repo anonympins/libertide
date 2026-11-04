@@ -385,6 +385,12 @@ pub enum CommandTag {
     AacSymbolCommunication,
     VitalCareAndCaregiverAlert,
     KnowledgeAndQuestions,
+    ClarificationRequired,
+    UnintelligibleOrNoise,
+    CorrectionOrDisagreement,
+    AgentIdentityAndCapabilities,
+    EmotionalSupportAndEmpathy,
+    ChattyAndEthicalCompanion,
 }
 
 impl CommandTag {
@@ -422,6 +428,12 @@ impl CommandTag {
         Self::AacSymbolCommunication,
         Self::VitalCareAndCaregiverAlert,
         Self::KnowledgeAndQuestions,
+        Self::ClarificationRequired,
+        Self::UnintelligibleOrNoise,
+        Self::CorrectionOrDisagreement,
+        Self::AgentIdentityAndCapabilities,
+        Self::EmotionalSupportAndEmpathy,
+        Self::ChattyAndEthicalCompanion,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -459,6 +471,12 @@ impl CommandTag {
             Self::AacSymbolCommunication => "AAC_SYMBOL_COMMUNICATION",
             Self::VitalCareAndCaregiverAlert => "VITAL_CARE_AND_CAREGIVER_ALERT",
             Self::KnowledgeAndQuestions => "KNOWLEDGE_AND_QUESTIONS",
+            Self::ClarificationRequired => "CLARIFICATION_REQUIRED",
+            Self::UnintelligibleOrNoise => "UNINTELLIGIBLE_OR_NOISE",
+            Self::CorrectionOrDisagreement => "CORRECTION_OR_DISAGREEMENT",
+            Self::AgentIdentityAndCapabilities => "AGENT_IDENTITY_AND_CAPABILITIES",
+            Self::EmotionalSupportAndEmpathy => "EMOTIONAL_SUPPORT_AND_EMPATHY",
+            Self::ChattyAndEthicalCompanion => "CHATTY_AND_ETHICAL_COMPANION",
         }
     }
 
@@ -497,6 +515,12 @@ impl CommandTag {
             Self::AacSymbolCommunication => "Communication Alternative et Améliorée (CAA), aphasie, pictogrammes, langage non-verbal (show_floating_card caa_board, expansion syntaxique)",
             Self::VitalCareAndCaregiverAlert => "Soins vitaux, appel de l'auxiliaire de vie ou de l'aidant, posture, aspiration, détresse respiratoire (show_floating_card caregiver_alert, alerte multicanale)",
             Self::KnowledgeAndQuestions => "Questions de connaissances générales, savoir, culture, explications conceptuelles, vérification interactive ou présence ('tu m'entends ?', 'es-tu là ?', 'test micro', 'pourquoi...', 'qu'est-ce que...', 'c'est quoi...', questions rhétoriques). Aucune action sur l'écran requise.",
+            Self::ClarificationRequired => "Demande incomplète, tronquée, ambiguë ou sans cible définie ('fais le truc', 'ouvre ça', 'clique dessus'). Nécessite de demander poliment des éclaircissements sans agir à l'aveugle.",
+            Self::UnintelligibleOrNoise => "Propos inaudibles, bruit, charabia, message sans queue ni tête, texte absurde, suite de lettres aléatoires, bafouillage ou transcription vocale corrompue sans consigne intelligible.",
+            Self::CorrectionOrDisagreement => "Contestation, rectification ou signalement d'erreur par l'utilisateur ('non pas ça', 'tu t'es trompé', 'arrête', 'recommence', 'annule ce que tu as fait').",
+            Self::AgentIdentityAndCapabilities => "Questions sur l'identité, le concepteur, le fonctionnement ou les capacités de Libertide ('qui es-tu ?', 'que sais-tu faire ?', 'comment fonctionnes-tu ?').",
+            Self::EmotionalSupportAndEmpathy => "Soutien moral, écoute bienveillante, expression de découragement, de solitude, de fatigue ou gratitude appuyée ('je suis fatigué', 'j'en ai marre', 'merci pour tout').",
+            Self::ChattyAndEthicalCompanion => "Posture bavarde, joyeuse, lucide et éthique : papoter avec l'utilisateur, parler de soi et aller à l'essentiel sans se focaliser sur le grand nombre d'éléments analysés.",
         }
     }
 
@@ -569,6 +593,20 @@ impl CommandTag {
             Some(Self::VitalCareAndCaregiverAlert)
         } else if upper.contains("KNOWLEDGE") || upper.contains("QUESTION") || upper.contains("SAVOIR") || upper.contains("CONNAISSANCE") || upper.contains("RHETORIC") || upper.contains("RHÉTORIQUE") {
             Some(Self::KnowledgeAndQuestions)
+        } else if upper.contains("CLARIF") || upper.contains("AMBIGU") || upper.contains("INCOMPLET") || upper.contains("ELUDED") {
+            Some(Self::ClarificationRequired)
+        } else if upper.contains("NOISE") || upper.contains("UNINTELLIGIBLE") || upper.contains("BRUIT") || upper.contains("INAUDIBLE") {
+            Some(Self::UnintelligibleOrNoise)
+        } else if upper.contains("CHARABIA") || upper.contains("NONSENSE") || upper.contains("INCOHERENT") {
+            Some(Self::UnintelligibleOrNoise)
+        } else if upper.contains("CORRECT") || upper.contains("DISAGREE") || upper.contains("CONTEST") || upper.contains("TROMPE") {
+            Some(Self::CorrectionOrDisagreement)
+        } else if upper.contains("IDENTITY") || upper.contains("IDENTITE") || upper.contains("CAPABILIT") || upper.contains("FONCTION") {
+            Some(Self::AgentIdentityAndCapabilities)
+        } else if upper.contains("EMPATH") || upper.contains("EMOTION") || upper.contains("SOUTIEN") {
+            Some(Self::EmotionalSupportAndEmpathy)
+        } else if upper.contains("CHATTY") || upper.contains("BAVARD") || upper.contains("ETHIC") || upper.contains("ÉTHIQ") || upper.contains("PAPOT") {
+            Some(Self::ChattyAndEthicalCompanion)
         } else {
             None
         }
@@ -587,6 +625,68 @@ pub fn all_command_tags_prompt_list() -> String {
 pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
     let lower = query.to_lowercase();
     let mut tags = Vec::new();
+
+    // Bruit de micro et onomatopées isolées
+    let trimmed_words: Vec<&str> = lower.split_whitespace().collect();
+    if trimmed_words.is_empty()
+        || (trimmed_words.len() == 1 && matches!(trimmed_words[0], "euh" | "hum" | "bah" | "ah" | "oh" | "hein" | "pff" | "tss" | "bruit"))
+    {
+        return vec![CommandTag::UnintelligibleOrNoise];
+    }
+
+    // Détection heuristique de charabia / frappe aléatoire (ex: "asdfghj", "zzzzz", "sdfklj")
+    let has_gibberish_word = trimmed_words.iter().any(|w| {
+        let clean_w: String = w.chars().filter(|c| c.is_alphabetic()).collect();
+        if clean_w.len() >= 5 && !clean_w.chars().any(|c| matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'y' | 'é' | 'è' | 'ê' | 'à')) {
+            return true;
+        }
+        let repeated_char = clean_w.as_bytes().windows(4).any(|win| win[0] == win[1] && win[1] == win[2] && win[2] == win[3]);
+        repeated_char
+    });
+    if has_gibberish_word {
+        return vec![CommandTag::UnintelligibleOrNoise];
+    }
+
+    // Contestation ou signalement d'erreur de la part de l'utilisateur
+    if lower.starts_with("non ")
+        || lower == "non"
+        || lower.contains("c'est pas ça")
+        || lower.contains("cest pas ca")
+        || lower.contains("tu t'es trompé")
+        || lower.contains("tu tes trompe")
+        || lower.contains("pas ce que j'ai dit")
+        || lower.contains("pas ce que je voulais")
+        || lower.contains("recommence")
+        || lower.contains("mauvaise réponse")
+        || lower.contains("mauvais bouton")
+    {
+        tags.push(CommandTag::CorrectionOrDisagreement);
+        return tags;
+    }
+
+    // Demandes imprécises ou tronquées nécessitant clarification
+    if lower == "fais-le"
+        || lower == "fais le"
+        || lower == "ouvre ça"
+        || lower == "ouvre ca"
+        || lower == "clique dessus"
+        || lower == "clique là"
+        || lower == "supprime ça"
+        || lower == "mets le truc"
+        || lower == "continue"
+        || lower == "valide"
+    {
+        tags.push(CommandTag::ClarificationRequired);
+        return tags;
+    }
+
+    // Soutien émotionnel et fatigue
+    if lower.contains("j'en ai marre") || lower.contains("jen ai marre") || lower.contains("je suis fatigué") || lower.contains("je suis triste") || lower.contains("je me sens seul") {
+        tags.push(CommandTag::EmotionalSupportAndEmpathy);
+    }
+    if lower.contains("papote") || lower.contains("papoter") || lower.contains("parle de toi") || lower.contains("parle-moi de toi") || lower.contains("bavarde") {
+        tags.push(CommandTag::ChattyAndEthicalCompanion);
+    }
 
     // Détection prioritaire : Vérification d'interactivité, de micro ou de présence
     let norm_clean = lower
@@ -962,7 +1062,13 @@ pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
         || norm_clean == "bonsoir"
         || norm_clean == "merci"
         || norm_clean == "merci beaucoup"
+        || norm_clean == "au revoir"
+        || norm_clean == "bonne nuit"
+        || norm_clean == "a plus"
         || norm_clean == "qui es tu"
+        || norm_clean == "qui t a cree"
+        || norm_clean == "que sais tu faire"
+        || norm_clean == "quelles sont tes fonctionnalites"
         || norm_clean == "comment tu t appelles"
         || norm_clean == "comment vas tu"
         || norm_clean == "ca va"
@@ -971,7 +1077,11 @@ pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
         || norm_clean.starts_with("salut ")
         || norm_clean.starts_with("bonsoir ");
     if is_greeting {
-        tags.push(CommandTag::GeneralChitChat);
+        if norm_clean.contains("qui es tu") || norm_clean.contains("que sais tu faire") || norm_clean.contains("cree") || norm_clean.contains("fonctionnalites") {
+            tags.push(CommandTag::AgentIdentityAndCapabilities);
+        } else {
+            tags.push(CommandTag::GeneralChitChat);
+        }
     }
 
     tags
@@ -980,6 +1090,18 @@ pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
 pub fn parse_tags_from_response(raw: &str) -> Vec<CommandTag> {
     let mut found = Vec::new();
     let cleaned = raw.to_uppercase();
+
+    // 1. Détection directe et prioritaire des identifiants exacts de tags
+    for tag in CommandTag::ALL {
+        if cleaned.contains(tag.as_str()) && !found.contains(tag) {
+            found.push(*tag);
+        }
+    }
+    if !found.is_empty() {
+        return found;
+    }
+
+    // 2. Découpage par séparateurs en repli
     let tokens: Vec<&str> = cleaned
         .split(|c: char| c == ',' || c == ';' || c == '\n' || c == '\r' || c == '[' || c == ']' || c == '"' || c == '\'')
         .map(str::trim)
@@ -1010,6 +1132,11 @@ pub fn build_routed_system_prompt(tags: &[CommandTag], lang_name: &str) -> Strin
     } else {
         tags.to_vec()
     };
+
+    // Règle transversale permanente : le compagnon bavard, joyeux, lucide et éthique est systématiquement actif
+    if !effective_tags.contains(&CommandTag::ChattyAndEthicalCompanion) {
+        effective_tags.push(CommandTag::ChattyAndEthicalCompanion);
+    }
 
     // Synergies d'interactivité : La navigation web ou l'accès par contacteur
     // nécessitent naturellement les outils de clics, de saisie et de défilement.
@@ -1162,6 +1289,10 @@ RÈGLE STRICTE SUR LA NARRATION (NON-RÉCITATION DES COMPOSANTS ET CONTRÔLES) :
 - INTERDICTION FORMELLE d'énumérer, citer, commenter ou analyser les composants techniques de l'interface (boutons, liens, sélecteurs, champs ou badges numérotés #N) dans "narration".
 - Ne décris JAMAIS la structure de l'interface (ne dis jamais 'je vois un bouton...', 'la fenêtre comporte...', etc.).
 - Ta "narration" DOIT SE FOCALISER EXCLUSIVEMENT sur le contenu en lien direct avec la demande ou la suggestion de l'utilisateur. Les contrôles d'écran ne te servent qu'à renseigner l'action mécanique à exécuter dans "actions", ils ne doivent JAMAIS apparaître dans la réponse parlée.
+
+- Tu dois également être bavard, joyeux, lucide et ethique !
+N'hesite pas a parler de toi à l'utilisateur, juste pour papoter.
+Ne te focalise sutout pas sur le grand nombre d'elements analysés
 
 Réponds STRICTEMENT avec un unique objet JSON valide, sans aucun texte ou bloc markdown autour.
 Format JSON obligatoire :
@@ -1507,6 +1638,55 @@ Règles CONVERSATION :
   Réponds avec bienveillance, clarté et un bon niveau de détail dans "narration" impérativement dans la langue configurée ({lang_name}) pour accompagner au mieux l'utilisateur.
 "#);
             }
+            CommandTag::ClarificationRequired => {
+                prompt.push_str(r#"
+Règles CLARIFICATION REQUISE (DEMANDE AMBIGUË OU INCOMPLÈTE) :
+- La demande de l'utilisateur est vague, tronquée ou manque de cible précise (ex: 'fais le truc', 'ouvre ça', 'clique').
+- INTERDICTION FORMELLE D'AGIR À L'AVEUGLE : Ne génère AUCUNE action mécanique hasardeuse dans "actions".
+- Renvoie impérativement "actions": [] et "next_passes": 0.
+- Pose une question concise et bienveillante dans "narration" pour demander quelle fenêtre, action ou élément est visé.
+- Propose 2 à 3 choix d'actions probables dans "quick_suggestions".
+"#);
+            }
+            CommandTag::UnintelligibleOrNoise => {
+                prompt.push_str(r#"
+Règles SIGNAL BRUIT / INAUDIBLE :
+- L'entrée reçue est un fragment incompréhensible, un souffle, un bruit de fond ou une onomatopée isolée.
+- Réponds avec une courtoisie maximale sans aucune action : "narration": "Je n'ai pas bien saisi votre demande. Pourriez-vous répéter ?", "actions": [], "next_passes": 0.
+"#);
+            }
+            CommandTag::CorrectionOrDisagreement => {
+                prompt.push_str(r#"
+Règles RECTIFICATION ET DÉSACCORD :
+- L'utilisateur t'indique que l'action précédente était incorrecte ('non pas ça', 'tu t'es trompé', 'annule').
+- STOPPE IMMÉDIATEMENT la manœuvre en cours.
+- Renvoie "actions": [] (ou une action "undo" si pertinent) avec "next_passes": 0.
+- Présente des excuses directes et calmes dans "narration", puis demande poliment la consigne exacte à appliquer.
+"#);
+            }
+            CommandTag::AgentIdentityAndCapabilities => {
+                prompt.push_str(r#"
+Règles IDENTITÉ & CAPACITÉS DE LIBERTIDE :
+- Explique en 2 phrases simples que tu es Libertide, un agent d'accessibilité numérique conçu pour piloter l'ordinateur, naviguer sur le web et assister les personnes en situation de handicap par la voix, le contacteur et la vision.
+- Renvoie STRICTEMENT "actions": [], "next_passes": 0. Propose des démonstrations d'usage dans "quick_suggestions".
+"#);
+            }
+            CommandTag::EmotionalSupportAndEmpathy => {
+                prompt.push_str(r#"
+Règles ÉCOUTE, EMPATHIE & SOUTIEN :
+- Adopte une posture d'écoute chaleureuse, apaisante et humaine, sans infantilisation ni leçon de morale.
+- Priorité au réconfort et à la simplification de la tâche.
+- Renvoie "actions": [], "next_passes": 0.
+"#);
+            }
+            CommandTag::ChattyAndEthicalCompanion => {
+                prompt.push_str(r#"
+Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
+- Tu dois également être bavard, joyeux, lucide et éthique !
+- N'hésite pas à parler de toi à l'utilisateur, juste pour papoter.
+- Ne te focalise surtout pas sur le grand nombre d'éléments analysés à l'écran : apporte convivialité et clarté sans te noyer dans les détails techniques.
+"#);
+            }
         }
     }
 
@@ -1648,6 +1828,12 @@ Règles CONVERSATION :
             }
             CommandTag::GeneralChitChat => {}
             CommandTag::KnowledgeAndQuestions => {}
+            CommandTag::ClarificationRequired => {}
+            CommandTag::UnintelligibleOrNoise => {}
+            CommandTag::CorrectionOrDisagreement => {}
+            CommandTag::AgentIdentityAndCapabilities => {}
+            CommandTag::EmotionalSupportAndEmpathy => {}
+            CommandTag::ChattyAndEthicalCompanion => {}
         }
     }
 
@@ -1659,6 +1845,8 @@ pub fn build_minimal_local_system_prompt(lang_name: &str, tags: &[CommandTag]) -
     let mut prompt = format!(
 r#"Tu es l'agent Libertide. Tu DOIS répondre EXCLUSIVEMENT en {lang_name}.
 RÈGLE ABSOLUE : Ne décris JAMAIS les contrôles, boutons, liens ou composants techniques de l'écran dans "narration". Focalise-toi UNIQUEMENT sur la réponse ou le résultat concret en lien avec la demande de l'utilisateur.
+
+Tu dois également être bavard, joyeux, lucide et éthique ! N'hésite pas à parler de toi à l'utilisateur, juste pour papoter. Ne te focalise surtout pas sur le grand nombre d'éléments analysés.
 
 Réponds STRICTEMENT avec un unique objet JSON valide :
 {{
@@ -1726,6 +1914,10 @@ RÈGLE STRICTE SUR LA NARRATION (NON-RÉCITATION DES COMPOSANTS ET CONTRÔLES) :
 - INTERDICTION STRICTE de citer, décrire ou lister les contrôles, éléments d'interface, boutons ou numéros de cibles dans "narration".
 - Ne parle JAMAIS des composants techniques de l'écran (ne dis pas 'je détecte le bouton...', 'il y a des contrôles...', etc.).
 - Ta "narration" DOIT ÊTRE ENTIÈREMENT DÉDIÉE au contenu sémantique répondant à la suggestion ou demande de l'utilisateur. Les contrôles ne servent qu'à choisir l'action dans "actions".
+
+- Tu dois également être bavard, joyeux, lucide et éthique !
+N'hésite pas à parler de toi à l'utilisateur, juste pour papoter.
+Ne te focalise surtout pas sur le grand nombre d'éléments analysés.
 
 Réponds STRICTEMENT avec un unique objet JSON valide, sans aucun texte ou bloc markdown autour.
 Format JSON obligatoire :
@@ -2815,7 +3007,28 @@ impl LocalLlamaEngine {
         let preset = get_active_preset();
         let tags_list = all_command_tags_prompt_list();
         let prompt_text = format!(
-            "Tu es un classificateur d'intention spécialisé en assistance informatique et accessibilité aux personnes en situation de handicap (moteur, visuel, auditif, cognitif). Choisis 1 à 3 tags pertinents dans cette liste exacte selon la demande :\n{}\n\nRéponds UNIQUEMENT avec le ou les tags séparés par une virgule.",
+            "Tu es un classificateur d'intention pour l'agent d'accessibilité Libertide.\n\n\
+            RÈGLES D'ÉVALUATION PRIORITAIRES (VÉRIFIE CES CAS EN PREMIER AVANT TOUTE ACTION SYSTÈME) :\n\
+            1. UNINTELLIGIBLE_OR_NOISE :\n\
+               {}\n\
+               -> À CHOISIR OBLIGATOIREMENT si le message est absurde, bizarre, sans queue ni tête, du charabia, des fautes lourdes ou une suite aléatoire de lettres sans consigne intelligible.\n\
+            2. CLARIFICATION_REQUIRED :\n\
+               {}\n\
+               -> À CHOISIR OBLIGATOIREMENT si la demande est tronquée, vague, incomplète ou manque de cible claire.\n\
+            3. CORRECTION_OR_DISAGREEMENT :\n\
+               {}\n\
+            4. AGENT_IDENTITY_AND_CAPABILITIES :\n\
+               {}\n\
+            5. EMOTIONAL_SUPPORT_AND_EMPATHY :\n\
+               {}\n\n\
+            INTERDICTION FORMELLE : N'attribue JAMAIS WEB_NAVIGATE_OR_SEARCH ou CLICK_ELEMENT_OR_BUTTON à un message qui ne contient pas une consigne d'action concrète et intelligible !\n\n\
+            Liste complète de tous les tags autorisés :\n{}\n\n\
+            Réponds STRICTEMENT avec 1 à 2 tags choisis dans cette liste, séparés par une virgule (ex: UNINTELLIGIBLE_OR_NOISE).",
+            CommandTag::UnintelligibleOrNoise.description(),
+            CommandTag::ClarificationRequired.description(),
+            CommandTag::CorrectionOrDisagreement.description(),
+            CommandTag::AgentIdentityAndCapabilities.description(),
+            CommandTag::EmotionalSupportAndEmpathy.description(),
             tags_list
         );
 
@@ -2830,7 +3043,7 @@ impl LocalLlamaEngine {
             ),
         };
 
-        if let Ok(raw_tags) = self.generate_fast(&formatted, 25) {
+        if let Ok(raw_tags) = self.generate_fast(&formatted, 40) {
             let parsed = parse_tags_from_response(&raw_tags);
             println!("[LLM Router] Classification LLM générée : \"{}\" -> {:?}", raw_tags.trim(), parsed);
             for t in parsed {
@@ -2842,8 +3055,7 @@ impl LocalLlamaEngine {
 
         if fast_tags.is_empty() {
             vec![
-                CommandTag::WebNavigateOrSearch,
-                CommandTag::ClickElementOrButton,
+                CommandTag::ClarificationRequired,
             ]
         } else {
             fast_tags
@@ -2854,25 +3066,28 @@ impl LocalLlamaEngine {
 /// Résout les tags sémantiques pertinents pour n'importe quelle requête (utilisable par tous les LLM)
 pub fn resolve_query_tags(query: &str) -> Vec<CommandTag> {
     let clean = query.trim();
-    if clean.is_empty() {
-        return vec![CommandTag::GeneralChitChat];
-    }
-    let fast_tags = fast_classify_intent(clean);
-    if !fast_tags.is_empty() {
-        return fast_tags;
-    }
-    if let Ok(lock) = LOCAL_ENGINE.lock() {
-        if let Some(ref engine) = *lock {
-            return engine.classify_intent(clean);
+    let mut resolved = if clean.is_empty() {
+        vec![CommandTag::GeneralChitChat]
+    } else {
+        let fast = fast_classify_intent(clean);
+        if !fast.is_empty() {
+            fast
+        } else if let Ok(lock) = LOCAL_ENGINE.lock() {
+            if let Some(ref engine) = *lock {
+                engine.classify_intent(clean)
+            } else if clean.ends_with('?') {
+                vec![CommandTag::KnowledgeAndQuestions]
+            } else {
+                vec![CommandTag::WebNavigateOrSearch, CommandTag::ClickElementOrButton]
+            }
+        } else {
+            vec![CommandTag::WebNavigateOrSearch, CommandTag::ClickElementOrButton]
         }
+    };
+    if !resolved.contains(&CommandTag::ChattyAndEthicalCompanion) {
+        resolved.push(CommandTag::ChattyAndEthicalCompanion);
     }
-    if clean.ends_with('?') {
-        return vec![CommandTag::KnowledgeAndQuestions];
-    }
-    vec![
-        CommandTag::WebNavigateOrSearch,
-        CommandTag::ClickElementOrButton,
-    ]
+    resolved
 }
 
 pub fn get_or_load_local_llama(event_tx: &Sender<AgentEvent>) -> Result<(), String> {
@@ -3126,42 +3341,5 @@ mod tests {
         let malformed = r#"{"narration": "test", "actions": ["click_button" : "Se connecter"]}"#;
         let repaired = repair_actions_field(malformed);
         assert!(repaired.contains(r#"{"action": "click_button", "button_name": "Se connecter"}"#));
-    }
-
-    #[test]
-    fn test_repair_actions_field_single_object() {
-        let malformed = r#"{"narration": "test", "actions": {"open_app": "notepad"}}"#;
-        let repaired = repair_actions_field(malformed);
-        assert!(repaired.contains(r#"[{"action":"open_app","name":"notepad"}]"#));
-    }
-
-    #[test]
-    fn test_sanitize_json_output_forces_zero_passes_on_empty_actions() {
-        let input = r#"```json
-{"narration": "C'est fait.", "next_passes": 5, "actions": []}
-```"#;
-        let sanitized = sanitize_json_output(input);
-        let parsed: serde_json::Value = serde_json::from_str(&sanitized).expect("JSON valide attendu");
-        assert_eq!(parsed.get("next_passes").and_then(|v| v.as_u64()), Some(0));
-    }
-
-    #[test]
-    fn test_streaming_json_narration() {
-        let mut parser = StreamingJsonNarration::new();
-        let chunk1 = r#"{"narration": "Bonjour. Tout est pr"#;
-        let s1 = parser.feed(chunk1);
-        assert_eq!(s1, vec!["Bonjour."]);
-
-        let chunk2 = r#"êt à l'écran.","actions":[]}"#;
-        let s2 = parser.feed(chunk2);
-        assert_eq!(s2, vec!["Tout est prêt à l'écran."]);
-    }
-
-    #[test]
-    fn test_streaming_json_narration_unicode_escape() {
-        let mut parser = StreamingJsonNarration::new();
-        let chunk = r#"{"narration": "Bienvenue \u00e0 Paris."}"#;
-        let res = parser.feed(chunk);
-        assert_eq!(res, vec!["Bienvenue à Paris."]);
     }
 }

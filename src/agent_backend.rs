@@ -1133,6 +1133,7 @@ pub async fn call_llm_prompt(
                 "\n\n[Étape {next_pass}] Vérification d'avancement pour l'objectif : \"{}\".\n\
                 - RÈGLE LINGUISTIQUE STRICTE : Traduis et formule TOUT impérativement en {system_lang} dans \"narration\" et les suggestions.\n\
                 - RÈGLE NARRATION STRICTE : Ne décris et ne cite AUCUN contrôle technique ou composant de l'écran (boutons, liens, cibles #N). Rédige une réponse fluide focalisée UNIQUEMENT sur l'information et le contenu attendu par l'utilisateur.\n\
+                - POSTURE CONVIVIALE : Sois bavard, joyeux, lucide et éthique ! N'hésite pas à parler de toi pour papoter sans te focaliser sur le grand nombre d'éléments analysés.\n\
                 - TANT QUE L'OBJECTIF N'EST PAS SATISFAIT : continue les passes, choisis l'action suivante en JSON.\n\
                 - DÉTECTION DE BOUCLE : si l'action précédente a échoué ou que l'écran stagne, pivote (autre lien/bouton, scroll, navigate_back).\n\
                 - Dès que l'objectif initial est ATTEINT (application ouverte, information trouvée, action exécutée, média en cours), ARRÊTE IMMÉDIATEMENT : renvoie \"actions\": [], \"next_passes\": 0 et décris en détail la situation et le résultat dans \"narration\" rédigée en {system_lang}.\n\
@@ -1292,7 +1293,16 @@ pub fn spawn_agent_backend(
                                 let clean_prompt = local_llm::extract_clean_user_message(&prompt);
                                 let detected_tags = local_llm::fast_classify_intent(clean_prompt);
                                 let is_pure_conversational_or_question = !detected_tags.is_empty()
-                                    && detected_tags.iter().all(|t| matches!(t, local_llm::CommandTag::GeneralChitChat | local_llm::CommandTag::KnowledgeAndQuestions));
+                                    && detected_tags.iter().all(|t| matches!(
+                                        t,
+                                        local_llm::CommandTag::GeneralChitChat
+                                            | local_llm::CommandTag::KnowledgeAndQuestions
+                                            | local_llm::CommandTag::ClarificationRequired
+                                            | local_llm::CommandTag::UnintelligibleOrNoise
+                                            | local_llm::CommandTag::CorrectionOrDisagreement
+                                            | local_llm::CommandTag::AgentIdentityAndCapabilities
+                                            | local_llm::CommandTag::EmotionalSupportAndEmpathy
+                                    ));
 
                                 let active_win_only = local_llm::get_local_llm_options().active_window_only;
                                 let (field_content, screen_state): (Option<String>, String) = tokio::task::spawn_blocking(move || {
@@ -1373,7 +1383,8 @@ pub fn spawn_agent_backend(
                                 prompt_sections.push(format!(
                                     "[Demande utilisateur]\n{prompt}\n\n[Consignes impératives pour la réponse]\n\
                                     1. Formule impérativement ta \"narration\" et tes suggestions en {prompt_lang}.\n\
-                                    2. FOCALISATION EXCLUSIVE : Ne cite et ne décris JAMAIS les composants de l'interface ou les contrôles détectés (boutons, listes de cibles, champs). Ta \"narration\" doit s'adresser directement à l'utilisateur en ne traitant que du contenu pertinent pour sa demande."
+                                    2. FOCALISATION EXCLUSIVE : Ne cite et ne décris JAMAIS les composants de l'interface ou les contrôles détectés (boutons, listes de cibles, champs). Ta \"narration\" doit s'adresser directement à l'utilisateur en ne traitant que du contenu pertinent pour sa demande.\n\
+                                    3. COMPAGNON BAVARD ET ÉTHIQUE : Sois bavard, joyeux, lucide et éthique ! N'hésite pas à parler de toi à l'utilisateur pour papoter, sans te focaliser sur le grand nombre d'éléments analysés."
                                 ));
                                 let final_prompt = prompt_sections.join("\n\n");
 
