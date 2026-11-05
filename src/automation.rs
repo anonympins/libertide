@@ -1360,6 +1360,16 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         let is_alt = (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x12) as u16 & 0x8000) != 0;
         let is_switch_hook_on = SWITCH_HOOK_ENABLED.load(Ordering::Relaxed);
 
+        #[cfg(windows)]
+        {
+            let overlay = FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()));
+            if !overlay.0.is_null() && IsIconic(overlay).as_bool() && is_switch_hook_on {
+                // Si la fenêtre Libertide était minimisée (iconique), on la restaure discrètement
+                // afin que la boucle d'événements winit/eframe continue de dépiler les touches.
+                let _ = ShowWindow(overlay, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE);
+            }
+        }
+
         // Interception globale du pavé numérique (0x60..=0x69) et des touches chiffres (0x30..=0x39) en mode survol
         if is_switch_hook_on && !is_ctrl && !is_alt {
             let digit_char = match vk {

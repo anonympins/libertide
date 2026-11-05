@@ -683,6 +683,65 @@ pub static OVERLAY_STATE: std::sync::Mutex<OverlayDrawState> = std::sync::Mutex:
 });
 
 #[cfg(windows)]
+pub fn hex_to_gdi_bgr(hex: &str) -> u32 {
+    let hex = hex.trim().trim_start_matches('#');
+    if hex.len() == 6 {
+        let r = u32::from_str_radix(&hex[0..2], 16).unwrap_or(255);
+        let g = u32::from_str_radix(&hex[2..4], 16).unwrap_or(255);
+        let b = u32::from_str_radix(&hex[4..6], 16).unwrap_or(255);
+        // Format Windows COLORREF (0x00BBGGRR)
+        r | (g << 8) | (b << 16)
+    } else {
+        0x0014BEFA // Jaune chaud par défaut
+    }
+}
+
+#[cfg(windows)]
+pub fn target_color_bgr(target: &crate::types::NumberedElementTarget, zones: &[ZoneOverlayInfo]) -> u32 {
+    if !zones.is_empty() {
+        if zones.len() == 1 {
+            return hex_to_gdi_bgr(crate::ocr::visual_zone_color(zones[0].index));
+        }
+
+        let cx = target.click_x;
+        let cy = target.click_y;
+        let mid_x = (target.rect[0] + target.rect[2]) / 2;
+        let mid_y = (target.rect[1] + target.rect[3]) / 2;
+
+        let matched = zones
+            .iter()
+            .filter(|z| {
+                (cx >= z.rect[0] && cx <= z.rect[2] && cy >= z.rect[1] && cy <= z.rect[3])
+                    || (mid_x >= z.rect[0] && mid_x <= z.rect[2] && mid_y >= z.rect[1] && mid_y <= z.rect[3])
+            })
+            .min_by_key(|z| {
+                let w = (z.rect[2] - z.rect[0]).max(1) as i64;
+                let h = (z.rect[3] - z.rect[1]).max(1) as i64;
+                w * h
+            })
+            .or_else(|| {
+                zones.iter().min_by_key(|z| {
+                    let zx = (z.rect[0] + z.rect[2]) / 2;
+                    let zy = (z.rect[1] + z.rect[3]) / 2;
+                    let dx = (zx - cx) as i64;
+                    let dy = (zy - cy) as i64;
+                    dx * dx + dy * dy
+                })
+            });
+
+        if let Some(zone) = matched {
+            return hex_to_gdi_bgr(crate::ocr::visual_zone_color(zone.index));
+        }
+    }
+
+    if target.value.starts_with('#') {
+        hex_to_gdi_bgr(&target.value)
+    } else {
+        hex_to_gdi_bgr(crate::ocr::visual_zone_color(target.index))
+    }
+}
+
+#[cfg(windows)]
 const OVERLAY_COLOR_KEY: u32 = 0x001A0A2A; // Clé de couleur chromakey transparente (Dark Navy)
 
 #[cfg(windows)]
@@ -900,10 +959,10 @@ pub fn render_overlay_state(state: &OverlayDrawState) {
                     continue;
                 }
 
-                // Encadré bleu de la zone (BGR: 0x00FFBE00 pour bleu électrique focalisé, 0x00DC8200 pour repos)
-                let border_color = if zone.is_focused { 0x00FFBE00 } else { 0x00DC8200 };
-                let pen_w = if zone.is_focused { 3 } else { 2 };
-                let zone_pen = CreatePen(0, pen_w, border_color);
+                // Encadré de couleur distincte pour chaque zone visuelle
+                let zone_bgr = hex_to_gdi_bgr(crate::ocr::visual_zone_color(zone.index));
+                let pen_w = if zone.is_focused { 4 } else { 2 };
+                let zone_pen = CreatePen(0, pen_w, zone_bgr);
                 let old_pen = SelectObject(mem_dc, zone_pen);
                 RoundRect(mem_dc, zx0, zy0, zx1, zy1, 8, 8);
                 SelectObject(mem_dc, old_pen);
@@ -931,12 +990,17 @@ pub fn render_overlay_state(state: &OverlayDrawState) {
                 let bx1 = bx0 + badge_w;
                 let by1 = by0 + badge_h;
 
-                let badge_bg = if zone.is_focused { 0x00FF8C00 } else { 0x00B96900 }; // BGR bleu
-                let brush_badge = CreateSolidBrush(badge_bg);
+                let brush_badge = CreateSolidBrush(zone_bgr);
                 FillRect(mem_dc, &RECT { left: bx0, top: by0, right: bx1, bottom: by1 }, brush_badge);
                 DeleteObject(brush_badge);
 
-                SetTextColor(mem_dc, 0x00FFFFFF);
+                let r = zone_bgr & 0xFF;
+                let g = (zone_bgr >> 8) & 0xFF;
+                let b = (zone_bgr >> 16) & 0xFF;
+                let lum = (r * 299 + g * 587 + b * 114) / 1000;
+                let text_color = if lum > 140 { 0x00000000 } else { 0x00FFFFFF };
+                SetTextColor(mem_dc, text_color);
+
                 let mut text_rc = RECT { left: bx0, top: by0, right: bx1, bottom: by1 };
                 DrawTextW(mem_dc, title_utf16.as_ptr(), title_utf16.len() as i32, &mut text_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 SelectObject(mem_dc, old_font);
@@ -952,6 +1016,33 @@ pub fn render_overlay_state(state: &OverlayDrawState) {
             RoundRect(mem_dc, l - vx - 2, t - vy - 2, r - vx + 2, b - vy + 2, 6, 6);
             SelectObject(mem_dc, old_pen);
             DeleteObject(focus_pen);
+        }
+
+        // 2.5 Encadrés colorés pour toutes les zones visuelles / contrôles détectés
+        if !state.targets.is_empty() {
+            let null_brush = GetStockObject(5); // NULL_BRUSH
+            let old_brush = SelectObject(mem_dc, null_brush);
+
+            for (i, target) in state.targets.iter().enumerate() {
+                let is_focused = state.focused_index == Some(target.index) || state.focused_index == Some(i);
+                let color_bgr = target_color_bgr(target, &state.zones);
+                let pen_w = if is_focused { 3 } else { 2 };
+
+                let tx0 = target.rect[0] - vx;
+                let ty0 = target.rect[1] - vy;
+                let tx1 = target.rect[2] - vx;
+                let ty1 = target.rect[3] - vy;
+
+                if tx1 > tx0 + 2 && ty1 > ty0 + 2 {
+                    let pen = CreatePen(0, pen_w, color_bgr);
+                    let old_pen = SelectObject(mem_dc, pen);
+                    RoundRect(mem_dc, tx0, ty0, tx1, ty1, 6, 6);
+                    SelectObject(mem_dc, old_pen);
+                    DeleteObject(pen);
+                }
+            }
+
+            SelectObject(mem_dc, old_brush);
         }
 
         // 3. Badges numérotés haute visibilité
@@ -973,12 +1064,6 @@ pub fn render_overlay_state(state: &OverlayDrawState) {
             let old_font = SelectObject(mem_dc, hfont);
 
             SetBkMode(mem_dc, 1); // TRANSPARENT
-            SetTextColor(mem_dc, 0x00000000); // Noir
-
-            // Jaune chaud bien ressenti : BGR 0x0014BEFA (RGB: 250, 190, 20)
-            let brush_yellow = CreateSolidBrush(0x0014BEFA);
-            // Jaune or vif pour le badge focalisé : BGR 0x0000DCFF (RGB: 255, 220, 0)
-            let brush_focused = CreateSolidBrush(0x0000DCFF);
             let pen_black = CreatePen(0, pen_w, 0x00000000);
             let pen_focused = CreatePen(0, pen_w + 3, 0x00000000);
 
@@ -1013,17 +1098,29 @@ pub fn render_overlay_state(state: &OverlayDrawState) {
                 let bx = screen_bx - vx;
                 let by = screen_by - vy;
 
-                let brush = if is_focused { brush_focused } else { brush_yellow };
+                let color_bgr = target_color_bgr(target, &state.zones);
+                let brush = CreateSolidBrush(color_bgr);
                 SelectObject(mem_dc, brush);
+
                 let pen = if is_focused { pen_focused } else { pen_black };
                 SelectObject(mem_dc, pen);
 
                 RoundRect(mem_dc, bx, by, bx + badge_w, by + h_val, h_val, h_val);
 
+                let r = color_bgr & 0xFF;
+                let g = (color_bgr >> 8) & 0xFF;
+                let b = (color_bgr >> 16) & 0xFF;
+                let lum = (r * 299 + g * 587 + b * 114) / 1000;
+                let text_color = if lum > 140 { 0x00000000 } else { 0x00FFFFFF };
+                SetTextColor(mem_dc, text_color);
+
                 let label = if is_reader { "📖".to_string() } else { target.index.to_string() };
                 let label_utf16: Vec<u16> = label.encode_utf16().collect();
                 let mut text_rc = RECT { left: bx, top: by, right: bx + badge_w, bottom: by + h_val };
                 DrawTextW(mem_dc, label_utf16.as_ptr(), label_utf16.len() as i32, &mut text_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                SelectObject(mem_dc, null_brush);
+                DeleteObject(brush);
             }
 
             SelectObject(mem_dc, null_brush);
@@ -1031,8 +1128,6 @@ pub fn render_overlay_state(state: &OverlayDrawState) {
             DeleteObject(hfont);
             DeleteObject(pen_black);
             DeleteObject(pen_focused);
-            DeleteObject(brush_yellow);
-            DeleteObject(brush_focused);
         }
 
         SelectObject(mem_dc, old_brush);

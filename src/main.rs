@@ -913,6 +913,7 @@ impl OverlayApp {
         clear_screen_numbered_badges();
 
         if self.switch_access_mode {
+            self.is_hidden = true;
             self.switch_step = SwitchAccessStep::Windows;
             self.switch_windows = collect_switch_candidate_windows();
             self.switch_auto_scroll = false;
@@ -963,6 +964,7 @@ impl OverlayApp {
                 let _ = self.tts_sender.send(TtsCommand::Speak(msg));
             };
         } else {
+            self.is_hidden = false;
             self.numbered_targets.clear();
         self.numbered_chunk_offset = 0;
             self.switch_windows.clear();
@@ -1088,6 +1090,74 @@ impl OverlayApp {
 
         let _ = self.tts_sender.send(TtsCommand::Stop);
         let _ = self.tts_sender.send(TtsCommand::Speak(speech));
+    }
+
+    pub fn sync_switch_access_overlays(&self) {
+        if self.switch_access_mode {
+            match self.switch_step {
+                SwitchAccessStep::Windows => {
+                    if !self.switch_zones.is_empty() {
+                        let zone_infos: Vec<ZoneOverlayInfo> = self.switch_zones.iter().enumerate().map(|(i, z)| {
+                            ZoneOverlayInfo {
+                                index: i + 1,
+                                title: z.title.clone(),
+                                rect: z.rect,
+                                is_focused: i == 0,
+                            }
+                        }).collect();
+                        let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
+                        draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
+                    } else if !self.numbered_targets.is_empty() {
+                        let focused_idx = self.numbered_targets.first().map(|t| t.index);
+                        draw_screen_numbered_badges(&self.numbered_targets, self.zoom_factor, focused_idx);
+                    }
+                }
+                SwitchAccessStep::Zones => {
+                    if !self.switch_zones.is_empty() {
+                        let num_zones = self.switch_zones.len();
+                        let zone_infos: Vec<ZoneOverlayInfo> = self.switch_zones.iter().enumerate().map(|(i, z)| {
+                            ZoneOverlayInfo {
+                                index: i + 1,
+                                title: z.title.clone(),
+                                rect: z.rect,
+                                is_focused: (self.switch_focus_index % num_zones) == i,
+                            }
+                        }).collect();
+                        let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
+                        draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
+                    }
+                }
+                SwitchAccessStep::Elements => {
+                    let focused_target = self.numbered_targets.get(self.switch_focus_index % self.numbered_targets.len().max(1));
+                    let focused_idx = focused_target.map(|t| t.index);
+                    let active_zone_opt = self.switch_active_zone_index.and_then(|idx| self.switch_zones.get(idx));
+                    let chunk_start = self.numbered_chunk_offset.min(self.numbered_targets.len());
+                    let chunk_end = (chunk_start + 50).min(self.numbered_targets.len());
+                    let visible_targets = if self.numbered_targets.len() > 50 {
+                        &self.numbered_targets[chunk_start..chunk_end]
+                    } else {
+                        &self.numbered_targets[..]
+                    };
+
+                    if let Some(zone) = active_zone_opt {
+                        let zone_info = vec![ZoneOverlayInfo {
+                            index: self.switch_active_zone_index.unwrap_or(0) + 1,
+                            title: zone.title.clone(),
+                            rect: zone.rect,
+                            is_focused: true,
+                        }];
+                        draw_screen_zones_and_targets(&zone_info, visible_targets, self.zoom_factor, focused_idx);
+                    } else if !visible_targets.is_empty() {
+                        draw_screen_numbered_badges(visible_targets, self.zoom_factor, focused_idx);
+                    }
+
+                    #[cfg(windows)]
+                    if let Some(target) = focused_target {
+                        draw_screen_control_border(target.rect, target.role == "lecture textuelle");
+                    }
+                }
+            }
+        }
     }
 
     pub fn click_numbered_target_by_index(&mut self, idx: usize) {
@@ -1640,7 +1710,7 @@ impl eframe::App for OverlayApp {
                                 && self.whisper_ready
                                 && !self.show_api_key_modal
                                 && self.status != AgentStatus::EmergencyStopped
-                                && !self.is_hidden
+                                && (!self.is_hidden || self.switch_access_mode)
                                 && !AGENT_BUSY.load(Ordering::SeqCst)
                             {
                                 self.start_recording(&ctx, false);
@@ -1769,7 +1839,7 @@ impl eframe::App for OverlayApp {
                     if !is_status_msg && !text.trim().is_empty() && !self.switch_access_mode {
                         self.stop_speaking();
                     }
-                    if self.is_recording && !self.is_hidden {
+                    if self.is_recording && (!self.is_hidden || self.switch_access_mode) {
                         self.live_transcript = text;
                     }
                 }
@@ -2188,7 +2258,7 @@ impl eframe::App for OverlayApp {
                     }
 
                     // 4. Masquage / Réaffichage de l'overlay
-                    if self.is_hidden {
+                    if self.is_hidden && !self.switch_access_mode {
                         if is_show_command(&prompt) {
                             self.is_hidden = false;
                             self.status = AgentStatus::Idle;
@@ -3813,6 +3883,7 @@ impl eframe::App for OverlayApp {
         ctx.request_repaint_after(Duration::from_millis(16));
 
         if self.is_hidden {
+            self.sync_switch_access_overlays();
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
                 .show(ui, |_ui| {});
@@ -5148,71 +5219,7 @@ impl eframe::App for OverlayApp {
                 let painter = ui.painter();
 
                 // Tracé fluide et persistant des zones et badges sans clignotement ni effacement intempestif
-                if self.switch_access_mode {
-                    match self.switch_step {
-                        SwitchAccessStep::Windows => {
-                            if !self.switch_zones.is_empty() {
-                                let zone_infos: Vec<ZoneOverlayInfo> = self.switch_zones.iter().enumerate().map(|(i, z)| {
-                                    ZoneOverlayInfo {
-                                        index: i + 1,
-                                        title: z.title.clone(),
-                                        rect: z.rect,
-                                        is_focused: i == 0,
-                                    }
-                                }).collect();
-                                let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
-                                draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
-                            } else if !self.numbered_targets.is_empty() {
-                                let focused_idx = self.numbered_targets.first().map(|t| t.index);
-                                draw_screen_numbered_badges(&self.numbered_targets, self.zoom_factor, focused_idx);
-                            }
-                        }
-                        SwitchAccessStep::Zones => {
-                            if !self.switch_zones.is_empty() {
-                                let num_zones = self.switch_zones.len();
-                                let zone_infos: Vec<ZoneOverlayInfo> = self.switch_zones.iter().enumerate().map(|(i, z)| {
-                                    ZoneOverlayInfo {
-                                        index: i + 1,
-                                        title: z.title.clone(),
-                                        rect: z.rect,
-                                        is_focused: (self.switch_focus_index % num_zones) == i,
-                                    }
-                                }).collect();
-                                let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
-                                draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
-                            }
-                        }
-                        SwitchAccessStep::Elements => {
-                            let focused_target = self.numbered_targets.get(self.switch_focus_index % self.numbered_targets.len().max(1));
-                            let focused_idx = focused_target.map(|t| t.index);
-                            let active_zone_opt = self.switch_active_zone_index.and_then(|idx| self.switch_zones.get(idx));
-                            let chunk_start = self.numbered_chunk_offset.min(self.numbered_targets.len());
-                            let chunk_end = (chunk_start + 50).min(self.numbered_targets.len());
-                            let visible_targets = if self.numbered_targets.len() > 50 {
-                                &self.numbered_targets[chunk_start..chunk_end]
-                            } else {
-                                &self.numbered_targets[..]
-                            };
-
-                            if let Some(zone) = active_zone_opt {
-                                let zone_info = vec![ZoneOverlayInfo {
-                                    index: self.switch_active_zone_index.unwrap_or(0) + 1,
-                                    title: zone.title.clone(),
-                                    rect: zone.rect,
-                                    is_focused: true,
-                                }];
-                                draw_screen_zones_and_targets(&zone_info, visible_targets, self.zoom_factor, focused_idx);
-                            } else if !visible_targets.is_empty() {
-                                draw_screen_numbered_badges(visible_targets, self.zoom_factor, focused_idx);
-                            }
-
-                            #[cfg(windows)]
-                        if let Some(target) = focused_target {
-                            draw_screen_control_border(target.rect, target.role == "lecture textuelle");
-                        }
-                    }
-                    }
-                }
+                self.sync_switch_access_overlays();
 
 
                 // Halo visuel pulsé entourant la zone de navigation analysée par le LLM
