@@ -5523,15 +5523,20 @@ impl eframe::App for OverlayApp {
                                                 let radio_label = format!("{} ({})", preset.name, preset.size_desc);
                                                 let radio_resp = ui.radio(is_active, radio_label);
                                                 if radio_resp.clicked() && !is_active {
-                                                    local_llm::set_active_preset(preset.id);
                                                     self.llm_config.model = preset.name.to_string();
                                                     self.model_input = preset.name.to_string();
-                                                    let _ = write_env_var_to_file(".env", "LLM_MODEL", preset.filename);
-                                                    std::env::set_var("LLM_MODEL", preset.filename);
-                                                    let _ = write_env_var_to_file(".env", "LOCAL_LLAMA_MODEL", preset.filename);
-                                                    std::env::set_var("LOCAL_LLAMA_MODEL", preset.filename);
-
                                                     play_earcon(Earcon::Success);
+
+                                                    let preset_id = preset.id;
+                                                    let filename = preset.filename;
+                                                    std::thread::spawn(move || {
+                                                        local_llm::set_active_preset(preset_id);
+                                                        let _ = write_env_var_to_file(".env", "LLM_MODEL", filename);
+                                                        std::env::set_var("LLM_MODEL", filename);
+                                                        let _ = write_env_var_to_file(".env", "LOCAL_LLAMA_MODEL", filename);
+                                                        std::env::set_var("LOCAL_LLAMA_MODEL", filename);
+                                                        local_llm::init_local_llm();
+                                                    });
                                                 }
 
                                                 let family_badge = match preset.family {
@@ -5567,15 +5572,20 @@ impl eframe::App for OverlayApp {
                                         }
 
                                         if let Some(p) = model_to_delete {
-                                            match local_llm::delete_preset_model(p) {
-                                                Ok(()) => {
-                                                    play_earcon(Earcon::Success);
-                                                    self.api_key_error = None;
+                                            let event_tx = self.event_sender.clone();
+                                            self.api_key_error = None;
+                                            std::thread::spawn(move || {
+                                                match local_llm::delete_preset_model(p) {
+                                                    Ok(()) => {
+                                                        play_earcon(Earcon::Success);
+                                                        let _ = event_tx.send(AgentEvent::SilentNarration(format!("Fichier du modèle {} supprimé avec succès.", p.name)));
+                                                    }
+                                                    Err(e) => {
+                                                        play_earcon(Earcon::Error);
+                                                        let _ = event_tx.send(AgentEvent::SilentNarration(format!("Erreur lors de la suppression de {} : {}", p.name, e)));
+                                                    }
                                                 }
-                                                Err(e) => {
-                                                    self.api_key_error = Some(e);
-                                                }
-                                            }
+                                            });
                                         }
 
                                         ui.add_space(6.0);
@@ -5814,19 +5824,24 @@ impl eframe::App for OverlayApp {
                                     };
 
                                     if self.selected_provider_modal == LlmProvider::Local {
-                                        let _ = write_env_var_to_file(".env", "LLM_PROVIDER", self.selected_provider_modal.display_name());
-                                        std::env::set_var("LLM_PROVIDER", self.selected_provider_modal.display_name());
                                         let active_p = local_llm::get_active_preset();
-                                        local_llm::set_active_preset(active_p.id);
-                                        let _ = write_env_var_to_file(".env", "LLM_MODEL", active_p.filename);
-                                        std::env::set_var("LLM_MODEL", active_p.filename);
-                                        let _ = write_env_var_to_file(".env", "LOCAL_LLAMA_MODEL", active_p.filename);
-                                        std::env::set_var("LOCAL_LLAMA_MODEL", active_p.filename);
+                                        let active_id = active_p.id;
+                                        let active_filename = active_p.filename;
+                                        let provider_name = self.selected_provider_modal.display_name();
+
                                         self.llm_config = resolve_llm_config();
                                         self.llm_config.model = active_p.name.to_string();
                                         self.show_api_key_modal = false;
                                         self.api_key_error = None;
-                                        std::thread::spawn(|| {
+
+                                        std::thread::spawn(move || {
+                                            let _ = write_env_var_to_file(".env", "LLM_PROVIDER", provider_name);
+                                            std::env::set_var("LLM_PROVIDER", provider_name);
+                                            local_llm::set_active_preset(active_id);
+                                            let _ = write_env_var_to_file(".env", "LLM_MODEL", active_filename);
+                                            std::env::set_var("LLM_MODEL", active_filename);
+                                            let _ = write_env_var_to_file(".env", "LOCAL_LLAMA_MODEL", active_filename);
+                                            std::env::set_var("LOCAL_LLAMA_MODEL", active_filename);
                                             local_llm::init_local_llm();
                                         });
                                     } else if let Err(e) = write_env_var_to_file(".env", env_var_target, key) {
