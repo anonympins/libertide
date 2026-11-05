@@ -245,6 +245,23 @@ pub struct LlmConfig {
     pub enabled: bool,
 }
 
+pub fn estimate_token_count(text: &str) -> usize {
+    text.len().div_ceil(3)
+}
+
+impl LlmConfig {
+    pub fn max_context_tokens(&self) -> usize {
+        match self.provider {
+            LlmProvider::Local => 2048,
+            LlmProvider::Groq => 8192,
+            LlmProvider::Mistral => 32768,
+            LlmProvider::Glm => 32768,
+            LlmProvider::DeepSeek => 65536,
+            LlmProvider::OpenAI | LlmProvider::Anthropic => 128000,
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }

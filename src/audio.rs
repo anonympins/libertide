@@ -606,7 +606,7 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
             }
 
             let host = cpal::default_host();
-            let device = match host.default_input_device() {
+            let device = match crate::devices::get_audio_input_device(&host) {
                 Some(d) => d,
                 None => {
                     let _ = event_tx.send(AgentEvent::TranscriptionPartial(
@@ -981,7 +981,7 @@ fn run_live_subtitles_loop(
 
         // 3. Repli sur le microphone par défaut si aucune option de loopback n'a fonctionné
         if stream_opt.is_none() {
-            if let Some(in_dev) = host.default_input_device() {
+            if let Some(in_dev) = crate::devices::get_audio_input_device(&host) {
                 source_name = in_dev.to_string();
                 if let Ok(config) = in_dev.default_input_config() {
                     sample_rate = config.sample_rate();

@@ -7,6 +7,7 @@ pub enum SettingsTab {
     Theme,
     Language,
     Macros,
+    Devices,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

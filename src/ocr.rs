@@ -1,11 +1,11 @@
 use crate::automation::NumberedElementTarget;
 #[cfg(windows)]
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
 #[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
-    GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-    SRCCOPY,
+    GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    DIB_RGB_COLORS, HDC, SRCCOPY,
 };
 #[cfg(windows)]
 use windows::Win32::System::Com::{
@@ -14,7 +14,16 @@ use windows::Win32::System::Com::{
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
 #[cfg(windows)]
-use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextW, WindowFromPoint};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, WindowFromPoint,
+};
+
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn PrintWindow(hwnd: HWND, hdc: HDC, nflags: u32) -> BOOL;
+}
 
 #[cfg(not(windows))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +40,77 @@ impl HWND {
 
     pub fn is_invalid(&self) -> bool {
         self.0.is_null()
+    }
+}
+
+#[cfg(windows)]
+fn apply_window_occlusion_mask(target_hwnd: HWND, rect: [i32; 4], buffer: &mut [u8], w: u32, h: u32) {
+    let current_pid = std::process::id();
+
+    struct OcclusionContext {
+        target_hwnd: HWND,
+        current_pid: u32,
+        capture_rect: [i32; 4],
+        passed_target: bool,
+        occluding_rects: Vec<[i32; 4]>,
+    }
+
+    unsafe extern "system" fn enum_occluding_windows(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = &mut *(lparam.0 as *mut OcclusionContext);
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return BOOL(1);
+        }
+
+        let mut pid = 0u32;
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let is_libertide = pid == ctx.current_pid;
+
+        if hwnd == ctx.target_hwnd {
+            ctx.passed_target = true;
+            return BOOL(1);
+        }
+
+        let should_mask = is_libertide || !ctx.passed_target;
+        if should_mask {
+            let mut r = RECT::default();
+            if GetWindowRect(hwnd, &mut r).is_ok() {
+                let ox0 = r.left.max(ctx.capture_rect[0]);
+                let oy0 = r.top.max(ctx.capture_rect[1]);
+                let ox1 = r.right.min(ctx.capture_rect[2]);
+                let oy1 = r.bottom.min(ctx.capture_rect[3]);
+                if ox1 > ox0 && oy1 > oy0 {
+                    ctx.occluding_rects.push([ox0, oy0, ox1, oy1]);
+                }
+            }
+        }
+        BOOL(1)
+    }
+
+    let mut ctx = OcclusionContext {
+        target_hwnd,
+        current_pid,
+        capture_rect: rect,
+        passed_target: false,
+        occluding_rects: Vec::new(),
+    };
+
+    unsafe {
+        let _ = EnumWindows(Some(enum_occluding_windows), LPARAM(&mut ctx as *mut _ as isize));
+    }
+
+    for o_rect in ctx.occluding_rects {
+        let x0 = (o_rect[0] - rect[0]).clamp(0, w as i32) as usize;
+        let y0 = (o_rect[1] - rect[1]).clamp(0, h as i32) as usize;
+        let x1 = (o_rect[2] - rect[0]).clamp(0, w as i32) as usize;
+        let y1 = (o_rect[3] - rect[1]).clamp(0, h as i32) as usize;
+
+        for y in y0..y1 {
+            let row_offset = y * (w as usize) * 4;
+            for x in x0..x1 {
+                let idx = row_offset + x * 4;
+                buffer[idx..idx + 4].copy_from_slice(&[32, 32, 32, 255]);
+            }
+        }
     }
 }
 
@@ -56,10 +136,21 @@ pub fn capture_window_rgba(hwnd: HWND, rect: [i32; 4]) -> Option<(Vec<u8>, u32, 
         let hbm = CreateCompatibleBitmap(hdc_screen, w as i32, h as i32);
         let old_bm = SelectObject(hdc_mem, hbm);
 
-        let _ = BitBlt(
-            hdc_mem, 0, 0, w as i32, h as i32,
-            hdc_screen, rect[0], rect[1], SRCCOPY,
-        );
+        // 1. Essai de capture isolée via PrintWindow (PW_RENDERFULLCONTENT = 2)
+        let mut isolated_success = false;
+        if !hwnd.is_invalid() && !crate::window_util::is_window_hung(hwnd) {
+            const PW_RENDERFULLCONTENT: u32 = 2;
+            isolated_success = PrintWindow(hwnd, hdc_mem, PW_RENDERFULLCONTENT).as_bool();
+        }
+
+        // 2. Repli sur BitBlt de l'écran avec application du masque d'occlusion
+        let used_screen_fallback = !isolated_success;
+        if used_screen_fallback {
+            let _ = BitBlt(
+                hdc_mem, 0, 0, w as i32, h as i32,
+                hdc_screen, rect[0], rect[1], SRCCOPY,
+            );
+        }
 
         let mut bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -91,6 +182,9 @@ pub fn capture_window_rgba(hwnd: HWND, rect: [i32; 4]) -> Option<(Vec<u8>, u32, 
         ReleaseDC(HWND(std::ptr::null_mut()), hdc_screen);
 
         if lines > 0 {
+            if used_screen_fallback {
+                apply_window_occlusion_mask(hwnd, rect, &mut buffer, w, h);
+            }
             Some((buffer, w, h))
         } else {
             None
@@ -288,6 +382,12 @@ pub fn recognize_texts_vision(rect: [i32; 4]) -> Vec<(String, [i32; 4])> {
                 std::mem::transmute(objc_msgSend as *const ());
             set_level_fn(req, sel_set_level, 0);
 
+            // Hauteur minimale ramenée à 0.0 pour détecter les plus petits caractères et indices
+            let sel_set_min_height = sel_registerName(b"setMinimumTextHeight:\0".as_ptr() as *const _);
+            let set_min_height_fn: unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, f32) =
+                std::mem::transmute(objc_msgSend as *const ());
+            set_min_height_fn(req, sel_set_min_height, 0.0);
+
             let sel_init_with_cg = sel_registerName(b"initWithCGImage:options:\0".as_ptr() as *const _);
             let init_cg_fn: unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void) -> *mut std::ffi::c_void =
                 std::mem::transmute(objc_msgSend as *const ());
@@ -320,7 +420,7 @@ pub fn recognize_texts_vision(rect: [i32; 4]) -> Vec<(String, [i32; 4])> {
                     let utf8_fn: unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> *const std::ffi::c_char =
                         std::mem::transmute(objc_msgSend as *const ());
 
-                    let count = count_fn(obs_array, sel_count).min(150);
+                    let count = count_fn(obs_array, sel_count).min(350);
                     for i in 0..count {
                         let obs = obj_at_fn(obs_array, sel_obj_at, i);
                         let cands = obj_at_fn(obs, sel_top, 1);
@@ -479,7 +579,7 @@ pub fn recognize_texts_ocrs(
     for (line, text_opt) in line_rects.iter().zip(texts.into_iter()) {
         if let Some(txt) = text_opt {
             let s = txt.to_string().trim().to_string();
-            if s.len() > 1 {
+            if !s.is_empty() {
                 let mut min_x = i32::MAX;
                 let mut min_y = i32::MAX;
                 let mut max_x = i32::MIN;
@@ -794,6 +894,7 @@ fn resolve_visual_zone_content(
     click_x: i32,
     click_y: i32,
 ) -> Option<String> {
+    let current_pid = std::process::id();
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         if let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
@@ -810,6 +911,11 @@ fn resolve_visual_zone_content(
 
             for pt in sample_points {
                 if let Ok(elem) = uia.ElementFromPoint(pt) {
+                    if let Ok(elem_pid) = elem.CurrentProcessId() {
+                        if elem_pid as u32 == current_pid {
+                            continue;
+                        }
+                    }
                     if let Ok(name) = elem.CurrentName() {
                         let s = name.to_string();
                         let trimmed = s.trim();
@@ -846,7 +952,9 @@ fn resolve_visual_zone_content(
 
         let pt = POINT { x: click_x, y: click_y };
         let child = WindowFromPoint(pt);
-        if !child.is_invalid() && child != hwnd {
+        let mut child_pid = 0u32;
+        let _ = GetWindowThreadProcessId(child, Some(&mut child_pid));
+        if !child.is_invalid() && child != hwnd && child_pid != current_pid {
             let mut buf = [0u16; 512];
             let len = GetWindowTextW(child, &mut buf);
             if len > 0 {
@@ -900,18 +1008,18 @@ pub fn detect_visual_boxes_from_pixels(
     window_rect: [i32; 4],
     existing_targets: &[NumberedElementTarget],
 ) -> Vec<[i32; 4]> {
-    if w < 20 || h < 20 {
+    if w < 10 || h < 10 {
         return Vec::new();
     }
 
     let required_len = (w as usize) * (h as usize) * 4;
-    if pixels.len() < required_len || w < 12 || h < 8 {
+    if pixels.len() < required_len || w < 8 || h < 6 {
         return Vec::new();
     }
 
-    // Découpage en cellules affinées pour une capture complète de tous les mots et caractères
-    const CELL_W: u32 = 12;
-    const CELL_H: u32 = 8;
+    // Découpage en micro-cellules (6x5) pour détecter les plus petits caractères (lettres fines, exposants, ponctuation)
+    const CELL_W: u32 = 6;
+    const CELL_H: u32 = 5;
 
     let grid_cols = (w / CELL_W) as usize;
     let grid_rows = (h / CELL_H) as usize;
@@ -924,7 +1032,7 @@ pub fn detect_visual_boxes_from_pixels(
 
     let mut grid = vec![false; grid_cols * grid_rows];
 
-    // Échantillonnage bi-directionnel (horizontal + vertical) pour capturer tous les contours de texte
+    // Échantillonnage bi-directionnel complet pixel par pixel pour ne pas rater les traits de 1 pixel
     for gy in 0..grid_rows {
         for gx in 0..grid_cols {
             let x_start = (gx as u32) * CELL_W;
@@ -932,13 +1040,13 @@ pub fn detect_visual_boxes_from_pixels(
             let mut edge_count = 0;
             let mut samples = 0;
 
-            for dy in (0..CELL_H).step_by(2) {
+            for dy in 0..CELL_H {
                 let py = y_start + dy;
                 if py + 1 >= h { break; }
                 let row_offset = (py * w * 4) as usize;
                 let next_row_offset = ((py + 1) * w * 4) as usize;
 
-                for dx in (0..CELL_W).step_by(2) {
+                for dx in 0..CELL_W {
                     let px = x_start + dx;
                     if px + 1 >= w { break; }
                     let idx1 = row_offset + (px as usize) * 4;
@@ -960,8 +1068,8 @@ pub fn detect_visual_boxes_from_pixels(
                     let r_b = pixels[idx_b + 2] as i32;
                     let lum_b = (r_b * 299 + g_b * 587 + b_b * 114) >> 10;
 
-                    // Seuil à 18 pour capter aussi le texte lissé et les polices fines
-                    if (lum1 - lum_r).abs() > 18 || (lum1 - lum_b).abs() > 18 {
+                    // Seuil abaissé à 14 pour capter l'anti-aliasing subpixel et les polices très fines
+                    if (lum1 - lum_r).abs() > 14 || (lum1 - lum_b).abs() > 14 {
                         edge_count += 1;
                     }
                     samples += 1;
@@ -1000,11 +1108,11 @@ pub fn detect_visual_boxes_from_pixels(
                 min_gy = min_gy.min(cy);
                 max_gy = max_gy.max(cy);
 
-                // Exploration des voisins immédiats et pontage horizontal (+/- 3 cellules pour lier les mots)
+                // Exploration des voisins immédiats et pontage horizontal (+/- 4 micro-cellules pour lier les caractères d'un même mot)
                 for dy in [-1isize, 0, 1] {
                     let ny = cy as isize + dy;
                     if ny < 0 || ny >= grid_rows as isize { continue; }
-                    for dx in [-3isize, -2, -1, 0, 1, 2, 3] {
+                    for dx in [-4isize, -3, -2, -1, 0, 1, 2, 3, 4] {
                         let nx = cx as isize + dx;
                         if nx < 0 || nx >= grid_cols as isize { continue; }
                         let n_idx = (ny as usize) * grid_cols + (nx as usize);
@@ -1019,8 +1127,8 @@ pub fn detect_visual_boxes_from_pixels(
             let box_w = (max_gx - min_gx + 1) as u32 * CELL_W;
             let box_h = (max_gy - min_gy + 1) as u32 * CELL_H;
 
-            // Conserver tous les textes (mots courts box_w >= 14, lignes complètes et paragraphes)
-            if box_w >= 14 && box_h >= 7 && box_h <= 300 {
+            // Conserver tous les textes, y compris les caractères individuels isolés (dès 6x5 pixels)
+            if box_w >= 6 && box_h >= 5 && box_h <= 400 {
                 let screen_x0 = window_rect[0] + ((min_gx as u32 * CELL_W) as f32 * scale_x).round() as i32;
                 let screen_y0 = window_rect[1] + ((min_gy as u32 * CELL_H) as f32 * scale_y).round() as i32;
                 let screen_x1 = screen_x0 + (box_w as f32 * scale_x).round() as i32;
@@ -1066,9 +1174,28 @@ pub fn detect_visual_boxes_from_pixels(
 
     // Trier les cibles par ordre visuel de lecture (haut-vers-bas, gauche-vers-droite)
     candidate_boxes.sort_by_key(|b| (b[1] / 16) * 10000 + b[0]);
-    candidate_boxes.truncate(250);
+    candidate_boxes.truncate(400);
 
     candidate_boxes
+}
+
+/// Palette de couleurs vives et contrastées pour différencier chaque zone visuelle détectée
+pub fn visual_zone_color(index: usize) -> &'static str {
+    const PALETTE: [&str; 12] = [
+        "#FF3366", // Rose néon
+        "#FF9900", // Orange vif
+        "#FFD600", // Jaune ambré
+        "#00E676", // Vert menthe
+        "#00E5FF", // Cyan électrique
+        "#2979FF", // Bleu azur
+        "#7C4DFF", // Violet indigo
+        "#E040FB", // Violet magenta
+        "#FF1744", // Rouge corail
+        "#76FF03", // Vert lime
+        "#FF6D00", // Orange brûlé
+        "#1DE9B6", // Sarcelle vif
+    ];
+    PALETTE[(index.saturating_sub(1)) % PALETTE.len()]
 }
 
 /// Enrichit les contrôles existants avec les textes et boutons détectés visuellement
@@ -1120,7 +1247,7 @@ pub fn enrich_targets_with_ocr(
                         name: text,
                         role: "texte (Apple Vision)".to_string(),
                         shortcut: "Entrée".to_string(),
-                        value: String::new(),
+                        value: visual_zone_color(next_index).to_string(),
                         window_id: Some(hwnd.0 as isize),
                     });
                 }
@@ -1173,7 +1300,7 @@ pub fn enrich_targets_with_ocr(
                             name: text,
                             role: "texte (ocrs)".to_string(),
                             shortcut: "Entrée".to_string(),
-                            value: String::new(),
+                            value: visual_zone_color(next_index).to_string(),
                             window_id: Some(hwnd.0 as isize),
                         });
                     }
@@ -1209,7 +1336,7 @@ pub fn enrich_targets_with_ocr(
             name: display_name,
             role: "visuel (OCR)".to_string(),
             shortcut: "Entrée".to_string(),
-            value: String::new(),
+            value: visual_zone_color(next_index).to_string(),
             window_id: Some(hwnd.0 as isize),
         });
     }

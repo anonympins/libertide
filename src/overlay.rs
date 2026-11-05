@@ -1323,8 +1323,9 @@ pub fn build_fallback_navigation_zones(window_title: &str, targets: &[NumberedEl
     }
 
     let mut fallback_zones = Vec::new();
+    let mut next_target_idx = 1usize;
 
-    let mut add_feature_zone = |zones: &mut Vec<NavigationZone>, title: &str, desc: &str, mut group: Vec<NumberedElementTarget>| {
+    let mut add_feature_zone = |zones: &mut Vec<NavigationZone>, title: &str, desc: &str, mut group: Vec<NumberedElementTarget>, next_idx: &mut usize| {
         if group.is_empty() {
             return;
         }
@@ -1336,8 +1337,9 @@ pub fn build_fallback_navigation_zones(window_title: &str, targets: &[NumberedEl
         let z_max_x = group.iter().map(|t| t.rect[2]).max().unwrap_or(0);
         let z_max_y = group.iter().map(|t| t.rect[3]).max().unwrap_or(0);
         let pad = 8;
-        for (i, elem) in group.iter_mut().enumerate() {
-            elem.index = i + 1;
+        for elem in group.iter_mut() {
+            elem.index = *next_idx;
+            *next_idx += 1;
         }
         zones.push(NavigationZone {
             title: title.to_string(),
@@ -1349,14 +1351,14 @@ pub fn build_fallback_navigation_zones(window_title: &str, targets: &[NumberedEl
         });
     };
 
-    add_feature_zone(&mut fallback_zones, "Recherche & Formulaire de saisie", &format!("Champs de texte et saisie pour {window_title}"), search_input_targets);
-    add_feature_zone(&mut fallback_zones, "Navigation & Rubriques", "Onglets et liens de navigation", nav_tab_targets);
-    add_feature_zone(&mut fallback_zones, "Contenu & Informations clés", "Données textuelles et visualisations", content_reader_targets);
-    add_feature_zone(&mut fallback_zones, "Actions & Commandes", "Boutons d'exécution et de validation", action_button_targets);
+    add_feature_zone(&mut fallback_zones, "Recherche & Formulaire de saisie", &format!("Champs de texte et saisie pour {window_title}"), search_input_targets, &mut next_target_idx);
+    add_feature_zone(&mut fallback_zones, "Navigation & Rubriques", "Onglets et liens de navigation", nav_tab_targets, &mut next_target_idx);
+    add_feature_zone(&mut fallback_zones, "Contenu & Informations clés", "Données textuelles et visualisations", content_reader_targets, &mut next_target_idx);
+    add_feature_zone(&mut fallback_zones, "Actions & Commandes", "Boutons d'exécution et de validation", action_button_targets, &mut next_target_idx);
 
     if !other_targets.is_empty() {
         if fallback_zones.is_empty() {
-            add_feature_zone(&mut fallback_zones, "Panneau d'interaction", &format!("Contrôles principaux de {window_title}"), other_targets);
+            add_feature_zone(&mut fallback_zones, "Panneau d'interaction", &format!("Contrôles principaux de {window_title}"), other_targets, &mut next_target_idx);
         } else {
             // Rattaché à la zone d'action ou de contenu
             fallback_zones.last_mut().unwrap().targets.extend(other_targets);
@@ -1366,16 +1368,17 @@ pub fn build_fallback_navigation_zones(window_title: &str, targets: &[NumberedEl
     // Si aucune feature séparée n'a pu émerger (ex. uniquement des boutons d'une même liste)
     if fallback_zones.len() <= 1 {
         fallback_zones.clear();
+        next_target_idx = 1;
         let mut all_sorted = targets.to_vec();
         all_sorted.sort_by_key(|t| (t.rect[1] / 30) * 10000 + t.rect[0]);
         if all_sorted.len() > 12 {
             let half = all_sorted.len() / 2;
             let first_half = all_sorted[..half].to_vec();
             let second_half = all_sorted[half..].to_vec();
-            add_feature_zone(&mut fallback_zones, "Options principales", &format!("Première série d'options de {window_title}"), first_half);
-            add_feature_zone(&mut fallback_zones, "Options complémentaires", &format!("Seconde série d'options de {window_title}"), second_half);
+            add_feature_zone(&mut fallback_zones, "Options principales", &format!("Première série d'options de {window_title}"), first_half, &mut next_target_idx);
+            add_feature_zone(&mut fallback_zones, "Options complémentaires", &format!("Seconde série d'options de {window_title}"), second_half, &mut next_target_idx);
         } else {
-            add_feature_zone(&mut fallback_zones, "Panneau principal", &format!("Fonctionnalités de {window_title}"), all_sorted);
+            add_feature_zone(&mut fallback_zones, "Panneau principal", &format!("Fonctionnalités de {window_title}"), all_sorted, &mut next_target_idx);
         }
     }
 
@@ -1865,8 +1868,8 @@ pub fn handle_overlay_drag(
         egui::pos2(layout.control_rect.min.x + 8.0, layout.control_rect.min.y + 4.0),
         egui::pos2(layout.control_rect.max.x - 48.0, layout.control_rect.min.y + 24.0),
     );
-    let resp_top = ui.interact(drag_rect_top, egui::Id::new("capsule_drag_top"), egui::Sense::drag());
-    let resp_bot = ui.interact(drag_rect_bot, egui::Id::new("capsule_drag_bot"), egui::Sense::drag());
+    let resp_top = ui.interact(drag_rect_top, ui.id().with("capsule_drag_top"), egui::Sense::drag());
+    let resp_bot = ui.interact(drag_rect_bot, ui.id().with("capsule_drag_bot"), egui::Sense::drag());
 
     let is_hovered = resp_top.hovered() || resp_bot.hovered();
     let is_dragged = resp_top.dragged() || resp_bot.dragged();
@@ -1937,7 +1940,7 @@ pub fn handle_overlay_resize_zones(
     ];
 
     for (rect, direction, cursor_icon) in resize_zones {
-        let resp = ui.interact(rect, egui::Id::new(format!("resize_{:?}", direction)), egui::Sense::drag());
+        let resp = ui.interact(rect, ui.id().with(format!("resize_{:?}", direction)), egui::Sense::drag());
         if resp.hovered() {
             ui.ctx().set_cursor_icon(cursor_icon);
         }
