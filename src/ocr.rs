@@ -1,11 +1,11 @@
 use crate::automation::NumberedElementTarget;
 #[cfg(windows)]
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
 #[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
-    GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-    SRCCOPY,
+    GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    DIB_RGB_COLORS, HDC, SRCCOPY,
 };
 #[cfg(windows)]
 use windows::Win32::System::Com::{
@@ -14,7 +14,16 @@ use windows::Win32::System::Com::{
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
 #[cfg(windows)]
-use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextW, WindowFromPoint};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, WindowFromPoint,
+};
+
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn PrintWindow(hwnd: HWND, hdc: HDC, nflags: u32) -> BOOL;
+}
 
 #[cfg(not(windows))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +40,77 @@ impl HWND {
 
     pub fn is_invalid(&self) -> bool {
         self.0.is_null()
+    }
+}
+
+#[cfg(windows)]
+fn apply_window_occlusion_mask(target_hwnd: HWND, rect: [i32; 4], buffer: &mut [u8], w: u32, h: u32) {
+    let current_pid = std::process::id();
+
+    struct OcclusionContext {
+        target_hwnd: HWND,
+        current_pid: u32,
+        capture_rect: [i32; 4],
+        passed_target: bool,
+        occluding_rects: Vec<[i32; 4]>,
+    }
+
+    unsafe extern "system" fn enum_occluding_windows(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = &mut *(lparam.0 as *mut OcclusionContext);
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return BOOL(1);
+        }
+
+        let mut pid = 0u32;
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let is_libertide = pid == ctx.current_pid;
+
+        if hwnd == ctx.target_hwnd {
+            ctx.passed_target = true;
+            return BOOL(1);
+        }
+
+        let should_mask = is_libertide || !ctx.passed_target;
+        if should_mask {
+            let mut r = RECT::default();
+            if GetWindowRect(hwnd, &mut r).is_ok() {
+                let ox0 = r.left.max(ctx.capture_rect[0]);
+                let oy0 = r.top.max(ctx.capture_rect[1]);
+                let ox1 = r.right.min(ctx.capture_rect[2]);
+                let oy1 = r.bottom.min(ctx.capture_rect[3]);
+                if ox1 > ox0 && oy1 > oy0 {
+                    ctx.occluding_rects.push([ox0, oy0, ox1, oy1]);
+                }
+            }
+        }
+        BOOL(1)
+    }
+
+    let mut ctx = OcclusionContext {
+        target_hwnd,
+        current_pid,
+        capture_rect: rect,
+        passed_target: false,
+        occluding_rects: Vec::new(),
+    };
+
+    unsafe {
+        let _ = EnumWindows(Some(enum_occluding_windows), LPARAM(&mut ctx as *mut _ as isize));
+    }
+
+    for o_rect in ctx.occluding_rects {
+        let x0 = (o_rect[0] - rect[0]).clamp(0, w as i32) as usize;
+        let y0 = (o_rect[1] - rect[1]).clamp(0, h as i32) as usize;
+        let x1 = (o_rect[2] - rect[0]).clamp(0, w as i32) as usize;
+        let y1 = (o_rect[3] - rect[1]).clamp(0, h as i32) as usize;
+
+        for y in y0..y1 {
+            let row_offset = y * (w as usize) * 4;
+            for x in x0..x1 {
+                let idx = row_offset + x * 4;
+                buffer[idx..idx + 4].copy_from_slice(&[32, 32, 32, 255]);
+            }
+        }
     }
 }
 
@@ -56,10 +136,21 @@ pub fn capture_window_rgba(hwnd: HWND, rect: [i32; 4]) -> Option<(Vec<u8>, u32, 
         let hbm = CreateCompatibleBitmap(hdc_screen, w as i32, h as i32);
         let old_bm = SelectObject(hdc_mem, hbm);
 
-        let _ = BitBlt(
-            hdc_mem, 0, 0, w as i32, h as i32,
-            hdc_screen, rect[0], rect[1], SRCCOPY,
-        );
+        // 1. Essai de capture isolée via PrintWindow (PW_RENDERFULLCONTENT = 2)
+        let mut isolated_success = false;
+        if !hwnd.is_invalid() && !crate::window_util::is_window_hung(hwnd) {
+            const PW_RENDERFULLCONTENT: u32 = 2;
+            isolated_success = PrintWindow(hwnd, hdc_mem, PW_RENDERFULLCONTENT).as_bool();
+        }
+
+        // 2. Repli sur BitBlt de l'écran avec application du masque d'occlusion
+        let used_screen_fallback = !isolated_success;
+        if used_screen_fallback {
+            let _ = BitBlt(
+                hdc_mem, 0, 0, w as i32, h as i32,
+                hdc_screen, rect[0], rect[1], SRCCOPY,
+            );
+        }
 
         let mut bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -91,6 +182,9 @@ pub fn capture_window_rgba(hwnd: HWND, rect: [i32; 4]) -> Option<(Vec<u8>, u32, 
         ReleaseDC(HWND(std::ptr::null_mut()), hdc_screen);
 
         if lines > 0 {
+            if used_screen_fallback {
+                apply_window_occlusion_mask(hwnd, rect, &mut buffer, w, h);
+            }
             Some((buffer, w, h))
         } else {
             None
@@ -800,6 +894,7 @@ fn resolve_visual_zone_content(
     click_x: i32,
     click_y: i32,
 ) -> Option<String> {
+    let current_pid = std::process::id();
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         if let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
@@ -816,6 +911,11 @@ fn resolve_visual_zone_content(
 
             for pt in sample_points {
                 if let Ok(elem) = uia.ElementFromPoint(pt) {
+                    if let Ok(elem_pid) = elem.CurrentProcessId() {
+                        if elem_pid as u32 == current_pid {
+                            continue;
+                        }
+                    }
                     if let Ok(name) = elem.CurrentName() {
                         let s = name.to_string();
                         let trimmed = s.trim();
@@ -852,7 +952,9 @@ fn resolve_visual_zone_content(
 
         let pt = POINT { x: click_x, y: click_y };
         let child = WindowFromPoint(pt);
-        if !child.is_invalid() && child != hwnd {
+        let mut child_pid = 0u32;
+        let _ = GetWindowThreadProcessId(child, Some(&mut child_pid));
+        if !child.is_invalid() && child != hwnd && child_pid != current_pid {
             let mut buf = [0u16; 512];
             let len = GetWindowTextW(child, &mut buf);
             if len > 0 {
