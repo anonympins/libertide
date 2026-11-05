@@ -496,7 +496,15 @@ pub async fn call_llm_prompt(
             return;
         }
 
-        let hist_snapshot = if !local_opts.include_history {
+        let (temperature, max_tokens) = if is_dictation {
+            (0.3, 300)
+        } else if llm_config.provider == LlmProvider::Local {
+            (0.2, 1000)
+        } else {
+            (0.5, 1800)
+        };
+
+        let mut hist_snapshot = if !local_opts.include_history {
             vec![ChatMessage {
                 role: "user".to_string(),
                 content: safe_full_prompt.clone(),
@@ -506,13 +514,41 @@ pub async fn call_llm_prompt(
             get_recent_history_capped_at_user_messages(&guard, 4)
         };
 
-        let (temperature, max_tokens) = if is_dictation {
-            (0.3, 300)
-        } else if llm_config.provider == LlmProvider::Local {
-            (0.2, 1000)
-        } else {
-            (0.5, 1800)
-        };
+        // Régulation préventive du quota de contexte selon le modèle choisi
+        let max_quota = llm_config.max_context_tokens();
+        let max_input_budget = max_quota.saturating_sub(max_tokens as usize + 256);
+        let sys_tokens = estimate_token_count(&system_instructions);
+        let mut total_tokens = sys_tokens;
+        for msg in &hist_snapshot {
+            total_tokens += estimate_token_count(&msg.content) + 4;
+        }
+
+        if total_tokens > max_input_budget {
+            println!(
+                "[LLM Contexte] Quota dépassé pour {:?} ({} tokens estimés > budget {}). Régulation du contexte.",
+                llm_config.provider, total_tokens, max_input_budget
+            );
+
+            // Élagage des messages d'historique les plus anciens
+            while hist_snapshot.len() > 1 && total_tokens > max_input_budget {
+                let removed = hist_snapshot.remove(0);
+                total_tokens = total_tokens.saturating_sub(estimate_token_count(&removed.content) + 4);
+            }
+
+            // Si même le dernier message dépasse le budget, réinitialisation complète de l'historique
+            if total_tokens > max_input_budget {
+                println!("[LLM Contexte] Réinitialisation complète de l'historique pour ne pas saturer la logique du modèle.");
+                history.lock().await.clear();
+                let _ = event_tx.send(AgentEvent::SilentNarration(
+                    "Quota de mémoire du modèle dépassé : historique réinitialisé pour préserver la précision de raisonnement.".into(),
+                ));
+                let clean_short_user = format!("[Demande utilisateur]\n{}", safe_user_instruction);
+                hist_snapshot = vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: clean_short_user,
+                }];
+            }
+        }
 
         let mut attempts = 0;
         const MAX_RETRIES: usize = 3;
@@ -582,6 +618,30 @@ pub async fn call_llm_prompt(
                         break;
                     }
                     history.lock().await.pop();
+                    if !is_request_cancelled(request_id) {
+                        let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                            text: "Format de réponse inattendu.".into(),
+                            quick_suggestions: Vec::new(),
+                        });
+                    }
+                    break;
+                }
+                Ok(res) if res.status() == reqwest::StatusCode::BAD_REQUEST && attempts <= MAX_RETRIES => {
+                    let err_body = res.text().await.unwrap_or_default();
+                    println!("[LLM 400 Bad Request] Réponse API : {}", err_body);
+                    let err_low = err_body.to_lowercase();
+                    if err_low.contains("context") || err_low.contains("token") || err_low.contains("length") || err_low.contains("too large") || err_low.contains("maximum") {
+                        println!("[LLM Contexte] Dépassement de quota signalé par l'API. Effacement de la mémoire de l'historique et nouvel essai immédiat.");
+                        history.lock().await.clear();
+                        let _ = event_tx.send(AgentEvent::SilentNarration(
+                            "Quota de contexte dépassé : mémoire réinitialisée et nouvel essai.".into(),
+                        ));
+                        hist_snapshot = vec![ChatMessage {
+                            role: "user".to_string(),
+                            content: format!("[Demande utilisateur]\n{}", safe_user_instruction),
+                        }];
+                        continue;
+                    }
                     if !is_request_cancelled(request_id) {
                         let _ = event_tx.send(AgentEvent::ReplaceNarration {
                             text: "Format de réponse inattendu.".into(),

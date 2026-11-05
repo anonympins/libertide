@@ -10,7 +10,7 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::token::data_array::LlamaTokenDataArray;
-use crate::types::{AgentEvent, ChatMessage, TtsCommand};
+use crate::types::{estimate_token_count, AgentEvent, ChatMessage, TtsCommand};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NarrationParseState {
     LookingForKey,
@@ -2120,14 +2120,14 @@ impl LocalLlamaEngine {
             return Ok(String::new());
         }
 
-        // Tronquage de sécurité : conserver l'en-tête système (200 tokens) et la fin de l'instruction
+        // Tronquage de sécurité : si les tokens dépassent la capacité, tronquer sans découpe centrale corruptrice
         let max_prompt_tokens = (max_ctx as usize).saturating_sub(400);
         if tokens.len() > max_prompt_tokens {
-            let head_len = 800.min(tokens.len());
-            let tail_len = max_prompt_tokens - head_len;
-            let mut truncated = tokens[..head_len].to_vec();
-            truncated.extend_from_slice(&tokens[tokens.len() - tail_len..]);
-            tokens = truncated;
+            println!(
+                "[Local Llama] Avertissement: prompt ({} tokens) dépasse la capacité ({}) : tronquage sécurisé.",
+                tokens.len(), max_prompt_tokens
+            );
+            tokens.truncate(max_prompt_tokens);
         }
 
         let total_tokens = tokens.len();
@@ -2563,7 +2563,23 @@ pub fn run_local_llama_completion(
     // Fenêtre de contexte standard
     let max_history_msgs = 6;
     let start_idx = candidate_messages.len().saturating_sub(max_history_msgs);
-    let recent_messages = &candidate_messages[start_idx..];
+    let mut recent_messages: Vec<ChatMessage> = candidate_messages[start_idx..].iter().map(|&m| m.clone()).collect();
+
+    // Régulation basée sur le nombre de tokens pour le modèle local (budget de 1400 tokens pour l'entrée)
+    let local_budget = 1400usize;
+    let sys_tokens = estimate_token_count(&effective_system_prompt);
+    let mut current_tokens = sys_tokens;
+    for m in &recent_messages {
+        current_tokens += estimate_token_count(&m.content) + 4;
+    }
+    while recent_messages.len() > 1 && current_tokens > local_budget {
+        let removed = recent_messages.remove(0);
+        current_tokens = current_tokens.saturating_sub(estimate_token_count(&removed.content) + 4);
+    }
+    if current_tokens > local_budget {
+        println!("[Local Llama] Contexte trop volumineux : historique vidé pour repartir sur une base saine.");
+        recent_messages.clear();
+    }
     let last_user_in_recent = recent_messages
         .iter()
         .rposition(|m| m.role == "user");
