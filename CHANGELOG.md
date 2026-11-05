@@ -2,8 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-11-06
+
+### 🎙️🖱️ Devices & Hardware Detection (`devices.rs`, `main.rs`)
+- **Input Device & Microphone Management**:
+  - Enumeration and selection of audio input microphones with automatic detection of the system default microphone (`list_microphones`, `get_default_microphone`, `set_active_microphone`).
+  - Cross-platform detection of hardware pointing devices (optical mice, ergonomic trackballs, touchpads, digitizers/styluses, and touchscreens).
+  - Added a dedicated **🎙️ Devices** tab in settings with a live refresh button (`refresh_devices`).
+  - Built-in guide for trackball and ergonomic mouse hardware shortcuts (Button 4: voice dictation, Button 5: hover/numbered badges, Middle click: immediate TTS cutoff).
+
+### 🌐 Exhaustive Internationalization & i18n Keys (`locales/*.json`, `main.rs`)
+- **Full Translation of Advanced Settings**:
+  - Complete localization of the **LLM Providers** tab: enable toggles, primary active badge, API endpoint, local GGUF model management (download, status, deletion).
+  - Localization of **Single Switch (Switch Access)** settings: long-press threshold (Back / Exit), debounce filtering (spasticity).
+  - Localization of hover dwell gauge timing (**Dwell**): progress bar appearance delay, immediate mode.
+  - Localization of the **Macros** tab: creation, labels, tooltips, error messages, and active list management.
+  - Harmonized translations across all 9 languages (`fr`, `en`, `de`, `es`, `it`, `pt`, `ru`, `ja`, `zh`) and fixed JSON syntax (`es.json`).
+
+### 🎯 Hover Mode, Colored Markers & Window Rendering (`window_util.rs`, `ocr.rs`, `main.rs`)
+- **Colored Visual Markers & Hover Ergonomics**:
+  - Assignment of a palette of bright, high-contrast colors (`visual_zone_color`) to differentiate each visual zone and its target elements on screen.
+  - Automatic hiding of the main overlay when hover mode is activated (`is_hidden = true`) with mouse passthrough toggling so as not to obstruct the work view.
+  - Fixed rendering of OCR bounding boxes within the active window marker (`enrich_targets_with_ocr`).
+
+### 🧠 Local Model Resilience & UI Thread Smoothness (`local_llm.rs`, `agent_backend.rs`, `main.rs`)
+- **Asynchronous Decoupling of LLM Configuration**:
+  - Offloading of local model loading/initialization (`init_local_llm`, `set_active_preset`) off the `egui` rendering thread, eliminating UI freezes and stutters when changing settings.
+- **Context and Max Tokens Safeguarding**:
+  - Adjusted generation quotas and input token budgets to prevent context overflows on local GGUF models.
+  - Improved resilience of the streaming JSON parser against truncated or atypical responses.
+  
+---
 ## [0.7.0] - 2026-11-12
 
 ### 🐧 Wayland Screen Capture & Native Linux OCR (`ocr.rs`)
