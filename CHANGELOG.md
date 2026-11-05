@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-12
+
+### 🐧 Wayland Screen Capture & Native Linux OCR (`ocr.rs`)
+- **Native Wayland Capture Pipeline (`grim`)**:
+  - Implemented `capture_window_wayland` utilizing `grim` to capture window and desktop geometries directly into memory as binary PPM streams (`-t ppm -`).
+  - Developed high-performance pure-Rust binary PPM P6 stream parser (`parse_ppm_p6`) converting RGB payloads directly into 32-bit BGRA buffers in < 2 ms, complete with comment skipping, arbitrary whitespace handling, and 16-bit to 8-bit dynamic channel normalization.
+  - Dynamic runtime display server detection: seamless automatic switching between Wayland (`WAYLAND_DISPLAY` / `XDG_SESSION_TYPE`) and X11 (`XGetImage`), ensuring visual OCR availability across all modern Linux compositors (GNOME, KDE Wayland, Sway, Hyprland).
+
+### 🧠 Local LLM Performance & Inference Optimizations (`local_llm.rs`)
+- **Context & Micro-Batching Tuning**:
+  - Optimized KV-cache memory footprint and prompt evaluation speed: standard context capacity adjusted to 2048 tokens and micro-batch size locked to 512 tokens, eliminating quadratic $O(N^2)$ prefill latency bottlenecks on both GPU (Vulkan) and multi-threaded CPU.
+  - **Deprecation of 32-bit Legacy Targets**:
+    - Streamlined internal pointer offsets, allocations, and data alignments exclusively for 64-bit architectures (`x86_64`, `aarch64`), removing legacy 32-bit overheads.
+
+### 🗣️ Transparent Navigation & Polite Ethical Companion (`local_llm.rs`, `agent_backend.rs`)
+- **Transparent Screen Narration (Zero UI Clutter)**:
+  - Implemented strict non-recitation prompt constraints: the agent is explicitly prohibited from describing technical interface components, reciting button names, listing dropdowns, or enumerating `#N` badge numbers in `"narration"`.
+  - Screen controls are now used strictly for mechanical execution in `"actions"`, keeping spoken dialogue natural, fluid, and focused exclusively on the user's intent.
+- **Polite, Ethical & Empathetic Companion Persona (`ChattyAndEthicalCompanion`)**:
+  - Integrated warmth, lucidity, and conversational politeness into system prompts: the assistant acknowledges greetings cheerfully, converses naturally without dissecting the screen unprompted, and maintains ethical companionship while prioritizing actionable system tasks.
+  - Expanded universal intent taxonomy to **38 CommandTags** (`resolve_query_tags`), standardizing prompt structures between local SLMs and remote cloud providers.
+
+### 💻 Console Flags & Process Management Consolidation (`commands.rs`, `autostart.rs`, `fs_util.rs`)
+- **Unified Process Creation Flags (`CREATE_NO_WINDOW` vs `CREATE_NEW_CONSOLE`)**:
+  - Standardized Win32 process creation flags across command execution modules, preventing transient terminal windows and console flicker when executing background automation tasks, queries, or registry calls.
+  - Cleaned up parameter header bounds and argument formatting when launching interactive shells (`cmd.exe`, `powershell`, `wt.exe`).
+
+### 🧪 Audio Pipeline Unit Testing & Regression Guards (`audio.rs`)
+- **Unit Test Suite Integration (`#[cfg(test)]`)**:
+  - Added tests for `ContinuousResampler` verification (`test_continuous_resampler_downsample`), validating anti-aliasing lowpass filtering and cubic Catmull-Rom interpolation down to mono 16 kHz.
+  - Added tests for Whisper silence hallucination and background noise suppression heuristics (`test_is_hallucination_or_noise`).
+
+---
 ## [0.6.8] - 2026-11-08
 
 ### 🧠 Local LLM Lineup Overhaul & 1B Specificities Deprecation (`local_llm.rs`, `types.rs`, `main.rs`)
