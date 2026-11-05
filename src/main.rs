@@ -19,6 +19,7 @@ mod commands;
 mod overlay;
 mod ui;
 mod ocr;
+mod devices;
 mod local_llm;
 mod agent_backend;
 pub use agent_backend::*;
@@ -143,6 +144,11 @@ pub struct OverlayApp {
     macro_shortcut_input: String,
     macro_text_input: String,
     macro_error: Option<String>,
+
+    // Périphériques matériels (Pointage et Microphones)
+    detected_microphones: Vec<String>,
+    selected_microphone: String,
+    detected_pointing_devices: Vec<crate::devices::PointingDevice>,
 }
 
 fn extract_badge_number(text: &str) -> Option<usize> {
@@ -535,6 +541,10 @@ impl OverlayApp {
             .unwrap_or(180);
         SWITCH_DEBOUNCE_MS.store(debounce_ms, Ordering::Relaxed);
 
+        let detected_microphones = crate::devices::list_microphones();
+        let selected_microphone = crate::devices::get_active_microphone();
+        let detected_pointing_devices = crate::devices::list_pointing_devices();
+
         let mut app = Self {
             status: AgentStatus::Idle,
             chat_history: vec![ChatEntry {
@@ -629,6 +639,10 @@ impl OverlayApp {
             macro_shortcut_input: String::new(),
             macro_text_input: String::new(),
             macro_error: None,
+
+            detected_microphones,
+            selected_microphone,
+            detected_pointing_devices,
         };
         app.sync_modal_inputs_for_provider(llm_config.provider);
         update_open_floating_cards(&app.floating_cards);
@@ -665,6 +679,12 @@ impl OverlayApp {
         }
 
         self.api_key_error = None;
+    }
+
+    pub fn refresh_devices(&mut self) {
+        self.detected_microphones = crate::devices::list_microphones();
+        self.selected_microphone = crate::devices::get_active_microphone();
+        self.detected_pointing_devices = crate::devices::list_pointing_devices();
     }
 
     pub fn set_theme(&mut self, theme: AppTheme) {
@@ -1846,7 +1866,7 @@ impl eframe::App for OverlayApp {
                 AgentEvent::VoicePromptReady(prompt) => {
                     self.is_recording = false;
                     self.live_transcript.clear();
-                    let is_user_typing = ctx.memory(|m| m.has_focus(egui::Id::new("prompt_input_text")))
+                    let is_user_typing = ctx.memory(|m| m.has_focus(egui::Id::NULL.with("prompt_input_text")))
                         && !self.input_text.trim().is_empty();
                     if is_user_typing {
                         // L'utilisateur est activement en train de taper au clavier : on préserve son texte
@@ -2347,9 +2367,9 @@ impl eframe::App for OverlayApp {
                     println!("[Whisper] Notification WhisperReady reçue.");
                     self.whisper_ready = true;
                     let is_user_typing = ctx.memory(|m| {
-                        m.has_focus(egui::Id::new("prompt_input_text"))
-                            || m.has_focus(egui::Id::new("api_key_input_field"))
-                            || m.has_focus(egui::Id::new("model_input_field"))
+                        m.has_focus(egui::Id::NULL.with("prompt_input_text"))
+                            || m.has_focus(egui::Id::NULL.with("api_key_input_field"))
+                            || m.has_focus(egui::Id::NULL.with("model_input_field"))
                     });
                     if self.continuous_mode
                         && self.status != AgentStatus::EmergencyStopped
@@ -2531,11 +2551,11 @@ impl eframe::App for OverlayApp {
         let is_typing = ctx.egui_wants_keyboard_input()
             || ctx.memory(|m| {
                 m.focused().is_some()
-                    || m.has_focus(egui::Id::new("prompt_input_text"))
-                    || m.has_focus(egui::Id::new("api_key_input_field"))
-                    || m.has_focus(egui::Id::new("model_input_field"))
-                    || m.has_focus(egui::Id::new("macro_shortcut_input"))
-                    || m.has_focus(egui::Id::new("macro_text_input"))
+                    || m.has_focus(egui::Id::NULL.with("prompt_input_text"))
+                    || m.has_focus(egui::Id::NULL.with("api_key_input_field"))
+                    || m.has_focus(egui::Id::NULL.with("model_input_field"))
+                    || m.has_focus(egui::Id::NULL.with("macro_shortcut_input"))
+                    || m.has_focus(egui::Id::NULL.with("macro_text_input"))
             });
         crate::automation::IS_USER_TYPING.store(is_typing, Ordering::Relaxed);
 
@@ -4008,7 +4028,7 @@ impl eframe::App for OverlayApp {
                             self.draw_avatar(ui, avatar_pos, 14.0, time);
 
                             let avatar_rect = egui::Rect::from_center_size(avatar_pos, egui::vec2(32.0, 32.0));
-                            let avatar_resp = ui.interact(avatar_rect, egui::Id::new("avatar_interact"), egui::Sense::click());
+                            let avatar_resp = ui.interact(avatar_rect, ui.id().with("avatar_interact"), egui::Sense::click());
                             if self.status == AgentStatus::Speaking {
                                 if avatar_resp.hovered() {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -4166,12 +4186,12 @@ impl eframe::App for OverlayApp {
                                     let mut enter_hit = false;
                                     ui.horizontal(|ui| {
                                         let edit_width = ui.available_width().max(60.0);
-                                        let input_id = egui::Id::new("prompt_input_text");
+                                        let input_id = egui::Id::NULL.with("prompt_input_text");
                                         let is_input_focused = ctx.memory(|m| m.has_focus(input_id));
                                         let is_modal_open = self.show_api_key_modal;
                                         let is_other_typing = ctx.memory(|m| {
-                                            m.has_focus(egui::Id::new("api_key_input_field"))
-                                                || m.has_focus(egui::Id::new("model_input_field"))
+                                            m.has_focus(egui::Id::NULL.with("api_key_input_field"))
+                                                || m.has_focus(egui::Id::NULL.with("model_input_field"))
                                         });
 
                                         // Autocomplétion de la première suggestion via la touche Tab
@@ -5319,91 +5339,7 @@ impl eframe::App for OverlayApp {
                         .show(&ctx, |ui| {
                             // En-tête avec onglets de configuration
                             ui.horizontal(|ui| {
-                                let is_llm_active = self.settings_tab == SettingsTab::LlmProvider;
-                                let tab_llm = ui.selectable_label(
-                                    is_llm_active,
-                                    egui::RichText::new(t!("ui.settings_tab_llm"))
-                                        .size(12.0)
-                                        .color(if is_llm_active {
-                                            theme.accent
-                                        } else {
-                                            theme.text_secondary
-                                        })
-                                        .strong(),
-                                );
-                                let tab_llm_id = ui.make_persistent_id("dwell_tab_llm_provider");
-                                let llm_activated = if !is_llm_active {
-                                    apply_dwell_to_response(ui, &mut self.dwell_state, tab_llm_id, &tab_llm)
-                                } else {
-                                    tab_llm.clicked()
-                                };
-                                if llm_activated {
-                                    self.settings_tab = SettingsTab::LlmProvider;
-                                }
-                                let is_theme_active = self.settings_tab == SettingsTab::Theme;
-                                let tab_theme = ui.selectable_label(
-                                    is_theme_active,
-                                    egui::RichText::new(t!("ui.settings_tab_theme"))
-                                        .size(12.0)
-                                        .color(if is_theme_active {
-                                            theme.accent
-                                        } else {
-                                            theme.text_secondary
-                                        })
-                                        .strong(),
-                                );
-                                let tab_theme_id = ui.make_persistent_id("dwell_tab_theme");
-                                let theme_activated = if !is_theme_active {
-                                    apply_dwell_to_response(ui, &mut self.dwell_state, tab_theme_id, &tab_theme)
-                                } else {
-                                    tab_theme.clicked()
-                                };
-                                if theme_activated {
-                                    self.settings_tab = SettingsTab::Theme;
-                                }
-                                let is_lang_active = self.settings_tab == SettingsTab::Language;
-                                let tab_lang = ui.selectable_label(
-                                    is_lang_active,
-                                    egui::RichText::new(t!("ui.settings_tab_language"))
-                                        .size(12.0)
-                                        .color(if is_lang_active {
-                                            theme.accent
-                                        } else {
-                                            theme.text_secondary
-                                        })
-                                        .strong(),
-                                );
-                                let tab_lang_id = ui.make_persistent_id("dwell_tab_language");
-                                let lang_activated = if !is_lang_active {
-                                    apply_dwell_to_response(ui, &mut self.dwell_state, tab_lang_id, &tab_lang)
-                                } else {
-                                    tab_lang.clicked()
-                                };
-                                if lang_activated {
-                                    self.settings_tab = SettingsTab::Language;
-                                }
-                                let is_macro_active = self.settings_tab == SettingsTab::Macros;
-                                let tab_macro = ui.selectable_label(
-                                    is_macro_active,
-                                    egui::RichText::new("⚡ Macros")
-                                        .size(12.0)
-                                        .color(if is_macro_active {
-                                            theme.accent
-                                        } else {
-                                            theme.text_secondary
-                                        })
-                                        .strong(),
-                                );
-                                let tab_macro_id = ui.make_persistent_id("dwell_tab_macros");
-                                let macro_activated = if !is_macro_active {
-                                    apply_dwell_to_response(ui, &mut self.dwell_state, tab_macro_id, &tab_macro)
-                                } else {
-                                    tab_macro.clicked()
-                                };
-                                if macro_activated {
-                                    self.settings_tab = SettingsTab::Macros;
-                                }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     if ui.add(
                                         egui::Button::new(
                                             egui::RichText::new("✕")
@@ -5416,6 +5352,123 @@ impl eframe::App for OverlayApp {
                                         self.show_api_key_modal = false;
                                         self.api_key_error = None;
                                     }
+
+                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+
+                                            let is_llm_active = self.settings_tab == SettingsTab::LlmProvider;
+                                            let tab_llm = ui.selectable_label(
+                                                is_llm_active,
+                                                egui::RichText::new(t!("ui.settings_tab_llm"))
+                                                    .size(12.0)
+                                                    .color(if is_llm_active {
+                                                        theme.accent
+                                                    } else {
+                                                        theme.text_secondary
+                                                    })
+                                                    .strong(),
+                                            );
+                                            let tab_llm_id = ui.make_persistent_id("dwell_tab_llm_provider");
+                                            let llm_activated = if !is_llm_active {
+                                                apply_dwell_to_response(ui, &mut self.dwell_state, tab_llm_id, &tab_llm)
+                                            } else {
+                                                tab_llm.clicked()
+                                            };
+                                            if llm_activated {
+                                                self.settings_tab = SettingsTab::LlmProvider;
+                                            }
+
+                                            let is_theme_active = self.settings_tab == SettingsTab::Theme;
+                                            let tab_theme = ui.selectable_label(
+                                                is_theme_active,
+                                                egui::RichText::new(t!("ui.settings_tab_theme"))
+                                                    .size(12.0)
+                                                    .color(if is_theme_active {
+                                                        theme.accent
+                                                    } else {
+                                                        theme.text_secondary
+                                                    })
+                                                    .strong(),
+                                            );
+                                            let tab_theme_id = ui.make_persistent_id("dwell_tab_theme");
+                                            let theme_activated = if !is_theme_active {
+                                                apply_dwell_to_response(ui, &mut self.dwell_state, tab_theme_id, &tab_theme)
+                                            } else {
+                                                tab_theme.clicked()
+                                            };
+                                            if theme_activated {
+                                                self.settings_tab = SettingsTab::Theme;
+                                            }
+
+                                            let is_lang_active = self.settings_tab == SettingsTab::Language;
+                                            let tab_lang = ui.selectable_label(
+                                                is_lang_active,
+                                                egui::RichText::new(t!("ui.settings_tab_language"))
+                                                    .size(12.0)
+                                                    .color(if is_lang_active {
+                                                        theme.accent
+                                                    } else {
+                                                        theme.text_secondary
+                                                    })
+                                                    .strong(),
+                                            );
+                                            let tab_lang_id = ui.make_persistent_id("dwell_tab_language");
+                                            let lang_activated = if !is_lang_active {
+                                                apply_dwell_to_response(ui, &mut self.dwell_state, tab_lang_id, &tab_lang)
+                                            } else {
+                                                tab_lang.clicked()
+                                            };
+                                            if lang_activated {
+                                                self.settings_tab = SettingsTab::Language;
+                                            }
+
+                                            let is_macro_active = self.settings_tab == SettingsTab::Macros;
+                                            let tab_macro = ui.selectable_label(
+                                                is_macro_active,
+                                                egui::RichText::new(t!("ui.settings_tab_macros"))
+                                                    .size(12.0)
+                                                    .color(if is_macro_active {
+                                                        theme.accent
+                                                    } else {
+                                                        theme.text_secondary
+                                                    })
+                                                    .strong(),
+                                            );
+                                            let tab_macro_id = ui.make_persistent_id("dwell_tab_macros");
+                                            let macro_activated = if !is_macro_active {
+                                                apply_dwell_to_response(ui, &mut self.dwell_state, tab_macro_id, &tab_macro)
+                                            } else {
+                                                tab_macro.clicked()
+                                            };
+                                            if macro_activated {
+                                                self.settings_tab = SettingsTab::Macros;
+                                            }
+
+                                            let is_devices_active = self.settings_tab == SettingsTab::Devices;
+                                            let tab_devices = ui.selectable_label(
+                                                is_devices_active,
+                                                egui::RichText::new(t!("ui.settings_tab_devices"))
+                                                    .size(12.0)
+                                                    .color(if is_devices_active {
+                                                        theme.accent
+                                                    } else {
+                                                        theme.text_secondary
+                                                    })
+                                                    .strong(),
+                                            );
+                                            let tab_devices_id = ui.make_persistent_id("dwell_tab_devices");
+                                            let devices_activated = if !is_devices_active {
+                                                apply_dwell_to_response(ui, &mut self.dwell_state, tab_devices_id, &tab_devices)
+                                            } else {
+                                                tab_devices.clicked()
+                                            };
+                                            if devices_activated {
+                                                self.settings_tab = SettingsTab::Devices;
+                                                self.refresh_devices();
+                                            }
+                                        });
+                                    });
                                 });
                             });
                             ui.add_space(4.0);
@@ -5472,13 +5525,13 @@ impl eframe::App for OverlayApp {
                             // Activation / Désactivation et sélection active
                             ui.horizontal(|ui| {
                                 let mut is_enabled = self.selected_provider_modal.is_enabled();
-                                if ui.checkbox(&mut is_enabled, "Fournisseur activé").changed() {
+                                if ui.checkbox(&mut is_enabled, t!("ui.provider_enabled_checkbox")).changed() {
                                     let _ = self.selected_provider_modal.set_enabled(is_enabled);
                                     self.llm_config = resolve_llm_config();
                                 }
 
                                 if self.selected_provider_modal != self.llm_config.provider {
-                                    if ui.button("★ Définir comme actif principal").clicked() {
+                                    if ui.button(t!("ui.btn_set_primary_provider")).clicked() {
                                         let _ = self.selected_provider_modal.set_enabled(true);
                                         let _ = write_env_var_to_file(".env", "LLM_PROVIDER", self.selected_provider_modal.display_name());
                                         std::env::set_var("LLM_PROVIDER", self.selected_provider_modal.display_name());
@@ -5494,7 +5547,7 @@ impl eframe::App for OverlayApp {
                                     }
                                 } else {
                                     ui.label(
-                                        egui::RichText::new("(Actif principal)")
+                                        egui::RichText::new(t!("ui.primary_provider_badge"))
                                             .size(11.0)
                                             .color(theme.accent),
                                     );
@@ -5512,7 +5565,7 @@ impl eframe::App for OverlayApp {
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
                                             ui.label(
-                                                egui::RichText::new("Modèles locaux intégrés (GGUF / Vulkan & CPU) :")
+                                                egui::RichText::new(t!("ui.local_models_header"))
                                                     .size(11.0)
                                                     .color(theme.accent)
                                                     .strong(),
@@ -5558,19 +5611,19 @@ impl eframe::App for OverlayApp {
 
                                                 if is_installed {
                                                     ui.label(
-                                                        egui::RichText::new("✅ Prêt")
+                                                        egui::RichText::new(t!("ui.local_model_ready"))
                                                             .size(10.5)
                                                         .color(egui::Color32::from_rgb(100, 225, 130))
                                                         .strong(),
                                                     );
                                                     if ui.small_button("🗑")
-                                                        .on_hover_text("Supprimer ce fichier pour libérer l'espace disque")
+                                                        .on_hover_text(t!("ui.local_model_delete_tooltip"))
                                                         .clicked() {
                                                         model_to_delete = Some(preset);
                                                     }
                                                 } else {
                                                 ui.label(
-                                                        egui::RichText::new("⚠️ Non téléchargé")
+                                                        egui::RichText::new(t!("ui.local_model_not_downloaded"))
                                                             .size(10.5)
                                                         .color(egui::Color32::from_rgb(255, 180, 80)),
                                                     );
@@ -5585,11 +5638,11 @@ impl eframe::App for OverlayApp {
                                                 match local_llm::delete_preset_model(p) {
                                                     Ok(()) => {
                                                         play_earcon(Earcon::Success);
-                                                        let _ = event_tx.send(AgentEvent::SilentNarration(format!("Fichier du modèle {} supprimé avec succès.", p.name)));
+                                                        let _ = event_tx.send(AgentEvent::SilentNarration(t!("ui.local_model_delete_success", name = p.name).to_string()));
                                                     }
                                                     Err(e) => {
                                                         play_earcon(Earcon::Error);
-                                                        let _ = event_tx.send(AgentEvent::SilentNarration(format!("Erreur lors de la suppression de {} : {}", p.name, e)));
+                                                        let _ = event_tx.send(AgentEvent::SilentNarration(t!("ui.local_model_delete_error", name = p.name, err = e).to_string()));
                                                     }
                                                 }
                                             });
@@ -5607,7 +5660,7 @@ impl eframe::App for OverlayApp {
                                         } else if !active_installed {
                                             let event_tx_clone = self.event_sender.clone();
                                             let p = *active_preset;
-                                            let btn_text = format!("⬇ Télécharger {} ({})", p.name, p.size_desc);
+                                            let btn_text = t!("ui.local_model_download_btn", name = p.name, size = p.size_desc).to_string();
                                             if ui.button(egui::RichText::new(btn_text).strong().color(theme.accent)).clicked() {
                                                 std::thread::spawn(move || {
                                                     if local_llm::ensure_llama_model_downloaded_for_preset(&p, &event_tx_clone).is_ok() {
@@ -5617,10 +5670,7 @@ impl eframe::App for OverlayApp {
                                             }
                                         } else {
                                             ui.label(
-                                                egui::RichText::new(format!(
-                                                    "Le modèle {} s'exécutera localement avec accélération GPU (Vulkan) ou CPU sans dépendance cloud.",
-                                                    active_preset.name
-                                                ))
+                                                egui::RichText::new(t!("ui.local_model_footer_info", name = active_preset.name).to_string())
                                                     .size(10.5)
                                                     .color(theme.text_secondary),
                                             );
@@ -5640,7 +5690,7 @@ impl eframe::App for OverlayApp {
                             ui.add_space(2.0);
 
                             ui.horizontal(|ui| {
-                                let key_input_id = egui::Id::new("api_key_input_field");
+                                let key_input_id = egui::Id::NULL.with("api_key_input_field");
                                 let is_key_focused = ctx.memory(|m| m.has_focus(key_input_id));
                                 let paste_key_hit = ctx.input(|i| {
                                     i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
@@ -5661,7 +5711,7 @@ impl eframe::App for OverlayApp {
                                 let edit = egui::TextEdit::singleline(&mut self.api_key_input)
                                     .id(key_input_id)
                                     .password(!self.show_api_key_plain)
-                                    .hint_text("sk-... (ou laisser vide pour serveurs locaux)")
+                                    .hint_text(t!("ui.api_key_hint"))
                                     .desired_width(230.0);
                                 let edit_resp = ui.add(edit);
 
@@ -5727,7 +5777,7 @@ impl eframe::App for OverlayApp {
                             ui.add_space(2.0);
 
                             ui.horizontal(|ui| {
-                                let model_input_id = egui::Id::new("model_input_field");
+                                let model_input_id = egui::Id::NULL.with("model_input_field");
                                 let is_model_focused = ctx.memory(|m| m.has_focus(model_input_id));
                                 let paste_model_hit = ctx.input(|i| {
                                     i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
@@ -5779,14 +5829,14 @@ impl eframe::App for OverlayApp {
                             // --- Section Point d'accès (Endpoint) ---
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    egui::RichText::new("Point d'accès API (Endpoint) :")
+                                    egui::RichText::new(t!("ui.endpoint_label"))
                                         .size(11.0)
                                         .color(egui::Color32::WHITE)
                                         .strong(),
                                 );
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.small_button("Défaut")
-                                        .on_hover_text(format!("Réinitialiser vers : {}", default_endpoint_url))
+                                    if ui.small_button(t!("ui.btn_endpoint_default"))
+                                        .on_hover_text(t!("ui.btn_endpoint_default_tooltip", url = default_endpoint_url).to_string())
                                         .clicked()
                                     {
                                         self.endpoint_input = default_endpoint_url.to_string();
@@ -5800,7 +5850,7 @@ impl eframe::App for OverlayApp {
                                     .hint_text(default_endpoint_url)
                                     .desired_width(320.0);
                                 ui.add(endpoint_edit)
-                                    .on_hover_text("URL HTTP/HTTPS complète pour Ollama, LM Studio, vLLM, LocalAI ou proxies compatibles");
+                                    .on_hover_text(t!("ui.endpoint_hint_tooltip"));
                             });
                             }
 
@@ -5811,7 +5861,7 @@ impl eframe::App for OverlayApp {
 
                             if self.selected_provider_modal == LlmProvider::Local {
                                 ui.add_space(4.0);
-                                ui.label(egui::RichText::new("Aucune clé API requise pour le moteur local.").size(10.5).color(egui::Color32::from_rgb(140, 200, 255)));
+                                ui.label(egui::RichText::new(t!("ui.local_engine_no_key_needed")).size(10.5).color(egui::Color32::from_rgb(140, 200, 255)));
                                 ui.add_space(2.0);
                             }
 
@@ -5856,7 +5906,7 @@ impl eframe::App for OverlayApp {
                                     } else if let Err(e) = write_env_var_to_file(".env", env_model_target, model) {
                                         self.api_key_error = Some(t!("ui.model_write_err", err = e).to_string());
                                     } else if let Err(e) = write_env_var_to_file(".env", env_endpoint_target, endpoint) {
-                                        self.api_key_error = Some(format!("Erreur sauvegarde endpoint: {e}"));
+                                        self.api_key_error = Some(t!("ui.endpoint_write_err", err = e).to_string());
                                     } else {
                                         let _ = write_env_var_to_file(".env", "LLM_PROVIDER", self.selected_provider_modal.display_name());
                                         std::env::set_var("LLM_PROVIDER", self.selected_provider_modal.display_name());
@@ -6044,31 +6094,30 @@ impl eframe::App for OverlayApp {
                                 let mut current_act_delay_ms = self.dwell_state.activation_delay.as_millis() as u64;
                                 let prev_act_delay_ms = current_act_delay_ms;
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("Délai avant affichage de la jauge :").size(12.0).strong().color(egui::Color32::WHITE));
+                                    ui.label(egui::RichText::new(t!("ui.dwell_gauge_delay_label")).size(12.0).strong().color(egui::Color32::WHITE));
                                     let act_slider = egui::Slider::new(&mut current_act_delay_ms, 0..=600)
                                         .step_by(25.0)
                                         .custom_formatter(|val, _| {
                                             if val <= 0.0 {
-                                                "Immédiat (0 ms)".to_string()
+                                                t!("ui.dwell_gauge_delay_immediate").to_string()
                                             } else {
                                                 format!("{:.0} ms", val)
                                             }
                                         });
-                                    ui.add(act_slider)
-                                        .on_hover_text("Délai d'attente avant que la jauge verte ne commence à s'afficher et se remplir, évitant de perturber l'utilisateur lors du simple survol.");
+                                    ui.add(act_slider).on_hover_text(t!("ui.dwell_gauge_delay_tooltip"));
                                 });
                                 if current_act_delay_ms != prev_act_delay_ms {
                                     self.dwell_state.activation_delay = Duration::from_millis(current_act_delay_ms);
                                     let _ = write_env_var_to_file(".env", "DWELL_ACTIVATION_DELAY_MS", &current_act_delay_ms.to_string());
                                     std::env::set_var("DWELL_ACTIVATION_DELAY_MS", current_act_delay_ms.to_string());
                                 }
-                            }
+                        }
 
                             ui.add_space(8.0);
                             ui.separator();
                             ui.add_space(4.0);
                             ui.label(
-                                egui::RichText::new("Paramètres Contacteur Unique (Switch Access) :")
+                                egui::RichText::new(t!("ui.switch_settings_label"))
                                     .size(11.5)
                                     .color(theme.text_secondary),
                             );
@@ -6077,11 +6126,11 @@ impl eframe::App for OverlayApp {
                             let mut cur_long_press = SWITCH_LONG_PRESS_MS.load(Ordering::Relaxed);
                             let prev_long_press = cur_long_press;
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Seuil appui long (Retour / Sortie) :").size(12.0).strong().color(egui::Color32::WHITE));
+                                ui.label(egui::RichText::new(t!("ui.switch_long_press_label")).size(12.0).strong().color(egui::Color32::WHITE));
                                 let slider = egui::Slider::new(&mut cur_long_press, 400..=2500)
                                     .step_by(50.0)
                                     .suffix(" ms");
-                                ui.add(slider).on_hover_text("Durée d'appui continu sur le contacteur de validation pour déclencher l'action Retour / Sortie.");
+                                ui.add(slider).on_hover_text(t!("ui.switch_long_press_tooltip"));
                             });
                             if cur_long_press != prev_long_press {
                                 SWITCH_LONG_PRESS_MS.store(cur_long_press, Ordering::Relaxed);
@@ -6092,11 +6141,11 @@ impl eframe::App for OverlayApp {
                             let mut cur_debounce = SWITCH_DEBOUNCE_MS.load(Ordering::Relaxed);
                             let prev_debounce = cur_debounce;
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Anti-rebond contacteur (spasticité) :").size(12.0).strong().color(egui::Color32::WHITE));
+                                ui.label(egui::RichText::new(t!("ui.switch_debounce_label")).size(12.0).strong().color(egui::Color32::WHITE));
                                 let slider = egui::Slider::new(&mut cur_debounce, 50..=800)
                                     .step_by(25.0)
                                     .suffix(" ms");
-                                ui.add(slider).on_hover_text("Délai de filtrage entre deux activations pour éviter les déclenchements involontaires lors de spasmes.");
+                                ui.add(slider).on_hover_text(t!("ui.switch_debounce_tooltip"));
                             });
                             if cur_debounce != prev_debounce {
                                 SWITCH_DEBOUNCE_MS.store(cur_debounce, Ordering::Relaxed);
@@ -6174,7 +6223,7 @@ impl eframe::App for OverlayApp {
                                 SettingsTab::Macros => {
                                     // --- Onglet Raccourcis & Macros ---
                                     ui.label(
-                                        egui::RichText::new("Configurez vos raccourcis vocaux et textuels ('raccourci' => texte complet).")
+                                        egui::RichText::new(t!("ui.macros_description"))
                                             .size(11.5)
                                             .color(theme.text_secondary),
                                     );
@@ -6187,7 +6236,7 @@ impl eframe::App for OverlayApp {
                                         .inner_margin(egui::Margin::symmetric(10, 8))
                                         .show(ui, |ui| {
                                             ui.label(
-                                                egui::RichText::new("Nouveau raccourci macro :")
+                                                egui::RichText::new(t!("ui.macros_new_header"))
                                                     .size(11.0)
                                                     .color(theme.accent)
                                                     .strong(),
@@ -6195,20 +6244,22 @@ impl eframe::App for OverlayApp {
                                             ui.add_space(3.0);
 
                                             ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("Raccourci :").size(11.0).color(egui::Color32::WHITE));
+                                                ui.label(egui::RichText::new(t!("ui.macros_shortcut_label")).size(11.0).color(egui::Color32::WHITE));
                                                 ui.add(
                                                     egui::TextEdit::singleline(&mut self.macro_shortcut_input)
-                                                        .hint_text("ex: actu, colis, aide")
+                                                        .id(egui::Id::NULL.with("macro_shortcut_input"))
+                                                        .hint_text(t!("ui.macros_shortcut_hint"))
                                                         .desired_width(120.0),
                                                 );
                                             });
                                             ui.add_space(3.0);
 
                                             ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("Texte complet :").size(11.0).color(egui::Color32::WHITE));
+                                                ui.label(egui::RichText::new(t!("ui.macros_text_label")).size(11.0).color(egui::Color32::WHITE));
                                                 ui.add(
                                                     egui::TextEdit::singleline(&mut self.macro_text_input)
-                                                        .hint_text("ex: Donne le résumé des actualités du jour")
+                                                        .id(egui::Id::NULL.with("macro_text_input"))
+                                                        .hint_text(t!("ui.macros_text_hint"))
                                                         .desired_width(260.0),
                                                 );
                                             });
@@ -6220,13 +6271,13 @@ impl eframe::App for OverlayApp {
                                             }
 
                                             ui.horizontal(|ui| {
-                                                if ui.button(egui::RichText::new("➕ Ajouter la macro").strong().color(theme.accent)).clicked() {
+                                                if ui.button(egui::RichText::new(t!("ui.macros_add_btn")).strong().color(theme.accent)).clicked() {
                                                     let sc = self.macro_shortcut_input.trim().to_string();
                                                     let tx = self.macro_text_input.trim().to_string();
                                                     if sc.is_empty() {
-                                                        self.macro_error = Some("Le raccourci ne peut pas être vide.".to_string());
+                                                        self.macro_error = Some(t!("ui.macros_error_empty_shortcut").to_string());
                                                     } else if tx.is_empty() {
-                                                        self.macro_error = Some("Le texte complet ne peut pas être vide.".to_string());
+                                                        self.macro_error = Some(t!("ui.macros_error_empty_text").to_string());
                                                     } else {
                                                         self.macros.retain(|(k, _)| !k.eq_ignore_ascii_case(&sc));
                                                         self.macros.push((sc, tx));
@@ -6245,7 +6296,7 @@ impl eframe::App for OverlayApp {
                                     ui.add_space(6.0);
 
                                     ui.label(
-                                        egui::RichText::new(format!("Macros actives ({}) :", self.macros.len()))
+                                        egui::RichText::new(t!("ui.macros_active_title", count = self.macros.len()).to_string())
                                             .size(11.5)
                                             .strong()
                                             .color(egui::Color32::WHITE),
@@ -6259,7 +6310,7 @@ impl eframe::App for OverlayApp {
                                         .show(ui, |ui| {
                                             if self.macros.is_empty() {
                                                 ui.label(
-                                                    egui::RichText::new("Aucune macro configurée.")
+                                                    egui::RichText::new(t!("ui.macros_none"))
                                                         .size(11.0)
                                                         .italics()
                                                         .color(theme.text_secondary),
@@ -6283,7 +6334,7 @@ impl eframe::App for OverlayApp {
                                                             .on_hover_text(tx);
 
                                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                            if ui.small_button("🗑").on_hover_text("Supprimer").clicked() {
+                                                            if ui.small_button("🗑").on_hover_text(t!("ui.macros_delete_tooltip")).clicked() {
                                                                 to_remove = Some(idx);
                                                             }
                                                         });
@@ -6298,6 +6349,187 @@ impl eframe::App for OverlayApp {
                                         let _ = save_macros(&self.macros);
                                         play_earcon(Earcon::Success);
                                     }
+                                }
+                                SettingsTab::Devices => {
+                                    // --- Onglet Périphériques : Pointage & Audio ---
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(t!("ui.devices_tab_desc"))
+                                                .size(11.5)
+                                                .color(theme.text_secondary),
+                                        );
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if ui.button(t!("ui.devices_refresh_btn")).on_hover_text(t!("ui.devices_refresh_btn")).clicked() {
+                                                self.refresh_devices();
+                                                play_earcon(Earcon::Success);
+                                            }
+                                        });
+                                    });
+                                    ui.add_space(6.0);
+
+                                    // Section 1: Microphones
+                                    ui.label(
+                                        egui::RichText::new(t!("ui.devices_mic_header"))
+                                            .size(12.0)
+                                            .color(egui::Color32::WHITE)
+                                            .strong(),
+                                    );
+                                    ui.add_space(2.0);
+
+                                    egui::Frame::new()
+                                        .fill(theme.control_bg)
+                                        .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                        .corner_radius(egui::CornerRadius::same(8))
+                                        .inner_margin(egui::Margin::symmetric(10, 8))
+                                        .show(ui, |ui| {
+                                            let default_mic_name = crate::devices::get_default_microphone()
+                                                .unwrap_or_else(|| t!("ui.devices_default_mic").to_string());
+
+                                            let is_auto = self.selected_microphone == "auto" || self.selected_microphone.is_empty();
+                                            let auto_label = t!("ui.devices_mic_auto_prefix", name = default_mic_name).to_string();
+
+                                            let mut current_selection = if is_auto {
+                                                "auto".to_string()
+                                            } else {
+                                                self.selected_microphone.clone()
+                                            };
+
+                                            let mut changed = false;
+
+                                            egui::ComboBox::from_id_salt("mic_select_combobox")
+                                                .selected_text(if is_auto { &auto_label } else { &self.selected_microphone })
+                                                .width(ui.available_width().max(240.0))
+                                                .show_ui(ui, |ui| {
+                                                    if ui.selectable_value(&mut current_selection, "auto".to_string(), &auto_label).clicked() {
+                                                        changed = true;
+                                                    }
+                                                    ui.separator();
+                                                    for mic in &self.detected_microphones {
+                                                        let is_system_default = Some(mic) == crate::devices::get_default_microphone().as_ref();
+                                                        let display_text = if is_system_default {
+                                                            format!("🎙️ {mic} ★")
+                                                        } else {
+                                                            format!("🎙️ {mic}")
+                                                        };
+                                                        if ui.selectable_value(&mut current_selection, mic.clone(), display_text).clicked() {
+                                                            changed = true;
+                                                        }
+                                                    }
+                                                });
+
+                                            if changed {
+                                                self.selected_microphone = current_selection.clone();
+                                                let _ = crate::devices::set_active_microphone(&current_selection);
+                                                play_earcon(Earcon::Success);
+                                            }
+
+                                            ui.add_space(4.0);
+                                            if self.detected_microphones.is_empty() {
+                                                ui.label(
+                                                    egui::RichText::new(t!("ui.devices_mic_none"))
+                                                        .size(10.5)
+                                                        .color(egui::Color32::from_rgb(255, 140, 0)),
+                                                );
+                                            } else {
+                                                ui.label(
+                                                    egui::RichText::new(t!("ui.devices_mic_detected_count", count = self.detected_microphones.len()).to_string())
+                                                        .size(10.5)
+                                                        .color(theme.text_secondary),
+                                                );
+                                            }
+                                        });
+
+                                    ui.add_space(10.0);
+
+                                    // Section 2: Dispositifs de pointage
+                                    ui.label(
+                                        egui::RichText::new(t!("ui.devices_pointing_header"))
+                                            .size(12.0)
+                                            .color(egui::Color32::WHITE)
+                                            .strong(),
+                                    );
+                                    ui.add_space(2.0);
+
+                                    egui::Frame::new()
+                                        .fill(theme.control_bg)
+                                        .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                        .corner_radius(egui::CornerRadius::same(8))
+                                        .inner_margin(egui::Margin::symmetric(10, 8))
+                                        .show(ui, |ui| {
+                                            if self.detected_pointing_devices.is_empty() {
+                                                ui.label(
+                                                    egui::RichText::new(t!("ui.devices_pointing_none"))
+                                                        .size(11.0)
+                                                        .color(theme.text_secondary)
+                                                        .italics(),
+                                                );
+                                            } else {
+                                                for (idx, dev) in self.detected_pointing_devices.iter().enumerate() {
+                                                    let icon = if dev.kind.contains("Trackball") {
+                                                        "🔴"
+                                                    } else if dev.kind.contains("Tactile") || dev.kind.contains("Touchpad") {
+                                                        "👆"
+                                                    } else if dev.kind.contains("Stylet") || dev.kind.contains("Tablette") {
+                                                        "🖊️"
+                                                    } else {
+                                                        "🖱️"
+                                                    };
+
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(egui::RichText::new(icon).size(13.0));
+                                                        ui.vertical(|ui| {
+                                                            ui.label(
+                                                                egui::RichText::new(&dev.name)
+                                                                    .size(11.5)
+                                                                    .color(theme.accent)
+                                                                    .strong(),
+                                                            );
+                                                            ui.label(
+                                                                egui::RichText::new(format!("{} — {}", dev.kind, dev.details))
+                                                                    .size(10.0)
+                                                                    .color(theme.text_secondary),
+                                                            );
+                                                        });
+                                                    });
+
+                                                    if idx + 1 < self.detected_pointing_devices.len() {
+                                                        ui.add_space(2.0);
+                                                        ui.separator();
+                                                        ui.add_space(2.0);
+                                                    }
+                                                }
+                                            }
+                                        });
+
+                                    ui.add_space(8.0);
+
+                                    // Section 3: Astuce accessibilité Trackball / Boutons de souris
+                                    egui::Frame::new()
+                                        .fill(theme.tab_active_bg)
+                                        .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                        .corner_radius(egui::CornerRadius::same(6))
+                                        .inner_margin(egui::Margin::symmetric(10, 8))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(t!("ui.devices_trackball_tip_title"))
+                                                    .size(11.0)
+                                                    .color(theme.text_user)
+                                                    .strong(),
+                                            );
+                                            ui.add_space(2.0);
+                                            ui.label(
+                                                egui::RichText::new(t!("ui.devices_trackball_tip_content"))
+                                                    .size(10.5)
+                                                    .color(theme.text_primary),
+                                            );
+                                        });
+
+                                    ui.add_space(8.0);
+                                    ui.horizontal(|ui| {
+                                        if ui.button(t!("ui.btn_close")).clicked() {
+                                            self.show_api_key_modal = false;
+                                        }
+                                    });
                                 }
                             }
                                 });

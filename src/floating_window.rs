@@ -1168,7 +1168,7 @@ impl FloatingCard {
                         ];
 
                         for (rect, direction, cursor_icon) in resize_zones {
-                            let resp = ui.interact(rect, egui::Id::new(format!("card_resize_{:?}_{card_id}", direction)), egui::Sense::drag());
+                            let resp = ui.interact(rect, ui.id().with(format!("card_resize_{:?}_{card_id}", direction)), egui::Sense::drag());
                             if resp.hovered() {
                                 ui.ctx().set_cursor_icon(cursor_icon);
                             }

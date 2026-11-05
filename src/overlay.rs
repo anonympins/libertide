@@ -1868,8 +1868,8 @@ pub fn handle_overlay_drag(
         egui::pos2(layout.control_rect.min.x + 8.0, layout.control_rect.min.y + 4.0),
         egui::pos2(layout.control_rect.max.x - 48.0, layout.control_rect.min.y + 24.0),
     );
-    let resp_top = ui.interact(drag_rect_top, egui::Id::new("capsule_drag_top"), egui::Sense::drag());
-    let resp_bot = ui.interact(drag_rect_bot, egui::Id::new("capsule_drag_bot"), egui::Sense::drag());
+    let resp_top = ui.interact(drag_rect_top, ui.id().with("capsule_drag_top"), egui::Sense::drag());
+    let resp_bot = ui.interact(drag_rect_bot, ui.id().with("capsule_drag_bot"), egui::Sense::drag());
 
     let is_hovered = resp_top.hovered() || resp_bot.hovered();
     let is_dragged = resp_top.dragged() || resp_bot.dragged();
@@ -1940,7 +1940,7 @@ pub fn handle_overlay_resize_zones(
     ];
 
     for (rect, direction, cursor_icon) in resize_zones {
-        let resp = ui.interact(rect, egui::Id::new(format!("resize_{:?}", direction)), egui::Sense::drag());
+        let resp = ui.interact(rect, ui.id().with(format!("resize_{:?}", direction)), egui::Sense::drag());
         if resp.hovered() {
             ui.ctx().set_cursor_icon(cursor_icon);
         }
