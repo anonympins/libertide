@@ -99,17 +99,6 @@ pub fn expand_macro_text(input: &str, macros: &[(String, String)]) -> String {
         {
             return expansion.clone();
         }
-        let prefix = format!("{} ", sc.to_lowercase());
-        if trimmed.to_lowercase().starts_with(&prefix) {
-            let remainder = trimmed[prefix.len()..].trim();
-            return format!("{expansion} {remainder}");
-        }
-        if (trimmed.starts_with('!') || trimmed.starts_with('/') || trimmed.starts_with('#'))
-            && trimmed[1..].to_lowercase().starts_with(&prefix)
-        {
-            let remainder = trimmed[1..][prefix.len()..].trim();
-            return format!("{expansion} {remainder}");
-        }
     }
     input.to_string()
 }
@@ -132,6 +121,24 @@ pub fn read_env_var_from_file(file_path: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_expand_macro_only_when_exact() {
+        let macros = vec![("actu".to_string(), "Donne les actualités.".to_string())];
+        assert_eq!(expand_macro_text("actu", &macros), "Donne les actualités.");
+        assert_eq!(expand_macro_text("!actu", &macros), "Donne les actualités.");
+        assert_eq!(expand_macro_text("/actu", &macros), "Donne les actualités.");
+        assert_eq!(expand_macro_text("#actu", &macros), "Donne les actualités.");
+
+        // Pas d'expansion si du texte supplémentaire est présent
+        assert_eq!(expand_macro_text("actu du jour", &macros), "actu du jour");
+        assert_eq!(expand_macro_text("!actu de demain", &macros), "!actu de demain");
+    }
 }
 
 /// Collecte et met en cache l'ensemble des exécutables disponibles dans le PATH et le système

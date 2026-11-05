@@ -16,13 +16,41 @@ use crate::types::{AgentEvent, AgentStatus, AudioCommand};
 
 /// Détecte les bruits parasites, didascalies ou hallucinations fréquentes de Whisper sur le silence
 fn is_hallucination_or_noise(text: &str) -> bool {
-    let lower = text.trim().to_lowercase();
-    let clean: String = lower.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
-    let clean_str = clean.trim();
-    let words: Vec<&str> = clean_str.split_whitespace().collect();
-    if words.is_empty() {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
         return true;
     }
+    if (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        || (trimmed.starts_with('(') && trimmed.ends_with(')'))
+        || (trimmed.starts_with('*') && trimmed.ends_with('*'))
+        || (trimmed.starts_with('♪') || trimmed.ends_with('♪'))
+        || (trimmed.starts_with('♫') || trimmed.ends_with('♫'))
+        || trimmed.chars().all(|c| !c.is_alphanumeric())
+    {
+        return true;
+    }
+
+    let normalized: String = trimmed
+        .to_lowercase()
+        .replace(['’', '‘', 'ʼ', 'ʻ', '\'', '-', '_', '.'], " ")
+        .chars()
+        .map(|c| match c {
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'à' | 'â' | 'ä' => 'a',
+            'î' | 'ï' => 'i',
+            'ô' | 'ö' => 'o',
+            'ù' | 'û' | 'ü' => 'u',
+            'ç' => 'c',
+            _ => c,
+        })
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect();
+
+    let clean_str = normalized.split_whitespace().collect::<Vec<&str>>().join(" ");
+    if clean_str.is_empty() {
+        return true;
+    }
+
     const EXACT_NOISE_PHRASES: &[&str] = &[
         "merci",
         "merci beaucoup",
@@ -53,33 +81,89 @@ fn is_hallucination_or_noise(text: &str) -> bool {
         "au revoir",
         "bye",
     ];
-    let trimmed = text.trim();
+
     EXACT_NOISE_PHRASES.iter().any(|&p| clean_str == p)
-        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
-        || (trimmed.starts_with('(') && trimmed.ends_with(')'))
-        || (trimmed.starts_with('*') && trimmed.ends_with('*'))
-        || (trimmed.starts_with('♪') || trimmed.ends_with('♪'))
-        || (trimmed.starts_with('♫') || trimmed.ends_with('♫'))
-        || trimmed.chars().all(|c| !c.is_alphanumeric())
 }
 
-/// Rééchantillonneur linéaire continu vers mono 16 kHz sans dépendance externe
+/// Filtre biquad Butterworth passe-bas pour éliminer l'aliasing avant décimation
+pub struct BiquadFilter {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    s1: f32,
+    s2: f32,
+    enabled: bool,
+}
+
+impl BiquadFilter {
+    pub fn lowpass(sample_rate: f64, cutoff_hz: f64) -> Self {
+        if sample_rate <= cutoff_hz * 2.0 {
+            return Self {
+                b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0,
+                s1: 0.0, s2: 0.0, enabled: false,
+            };
+        }
+        let omega = 2.0 * std::f64::consts::PI * cutoff_hz / sample_rate;
+        let sin_omega = omega.sin();
+        let cos_omega = omega.cos();
+        let q = std::f64::consts::FRAC_1_SQRT_2; // 0.7071 (Butterworth)
+        let alpha = sin_omega / (2.0 * q);
+
+        let b0 = (1.0 - cos_omega) / 2.0;
+        let b1 = 1.0 - cos_omega;
+        let b2 = (1.0 - cos_omega) / 2.0;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_omega;
+        let a2 = 1.0 - alpha;
+
+        Self {
+            b0: (b0 / a0) as f32,
+            b1: (b1 / a0) as f32,
+            b2: (b2 / a0) as f32,
+            a1: (a1 / a0) as f32,
+            a2: (a2 / a0) as f32,
+            s1: 0.0,
+            s2: 0.0,
+            enabled: true,
+        }
+    }
+
+    #[inline(always)]
+    pub fn process(&mut self, input: f32) -> f32 {
+        if !self.enabled {
+            return input;
+        }
+        // Forme directe II transposée
+        let out = self.b0 * input + self.s1;
+        self.s1 = self.b1 * input - self.a1 * out + self.s2;
+        self.s2 = self.b2 * input - self.a2 * out;
+        out
+    }
+}
+
+/// Rééchantillonneur anti-repliement avec filtre biquad et interpolation cubique Catmull-Rom
 pub struct ContinuousResampler {
     in_rate: f64,
     out_rate: f64,
     channels: usize,
     buffer: Vec<f32>,
     phase: f64,
+    filter: BiquadFilter,
 }
 
 impl ContinuousResampler {
     pub fn new(in_rate: u32, channels: u16, out_rate: u32) -> Self {
+        let cutoff = (out_rate as f64 * 0.45).min(7200.0);
+        let filter = BiquadFilter::lowpass(in_rate as f64, cutoff);
         Self {
             in_rate: in_rate as f64,
             out_rate: out_rate as f64,
             channels: (channels as usize).max(1),
             buffer: Vec::with_capacity(4096),
             phase: 0.0,
+            filter,
         }
     }
 
@@ -87,22 +171,38 @@ impl ContinuousResampler {
         let ch = self.channels;
         for frame in data.chunks(ch) {
             let mono: f32 = frame.iter().sum::<f32>() / ch as f32;
-            self.buffer.push(mono);
+            let filtered = self.filter.process(mono);
+            self.buffer.push(filtered);
         }
     }
 
     pub fn drain_resampled(&mut self, out: &mut Vec<f32>) {
-        if self.buffer.len() < 2 {
+        if self.buffer.len() < 4 {
             return;
         }
         let step = self.in_rate / self.out_rate;
         let max_idx = self.buffer.len() - 1;
-        while self.phase < max_idx as f64 {
+        while self.phase < (max_idx.saturating_sub(1)) as f64 {
             let idx = self.phase.floor() as usize;
             let frac = (self.phase - idx as f64) as f32;
-            let s0 = self.buffer[idx];
-            let s1 = self.buffer[idx + 1];
-            out.push(s0 + frac * (s1 - s0));
+
+            // Interpolation cubique Catmull-Rom (continuité C1)
+            let p0 = if idx > 0 { self.buffer[idx - 1] } else { self.buffer[idx] };
+            let p1 = self.buffer[idx];
+            let p2 = self.buffer[(idx + 1).min(max_idx)];
+            let p3 = self.buffer[(idx + 2).min(max_idx)];
+
+            let t = frac;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            let val = 0.5 * (
+                (2.0 * p1) +
+                (-p0 + p2) * t +
+                (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+                (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+            );
+
+            out.push(val);
             self.phase += step;
         }
         let consumed = self.phase.floor() as usize;
@@ -191,7 +291,7 @@ impl WhisperEngine {
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         let num_threads = std::thread::available_parallelism()
-            .map(|n| (n.get() as i32 / 3).clamp(1, 2))
+            .map(|n| (n.get() as i32 / 2).clamp(2, 4))
             .unwrap_or(2);
         params.set_n_threads(num_threads);
         // "auto" active la détection automatique de n'importe quelle langue parlée
@@ -556,8 +656,7 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
             let mut speech_detected = false;
             let mut last_speech_time = Instant::now();
             let mut start_recording_time = Instant::now();
-            // Seuil d'énergie calibré pour filtrer les souffles et le bruit de fond
-            const SPEECH_ENERGY_THRESHOLD: f32 = 0.012;
+            let mut noise_floor: f32 = 0.004;
             const PRE_ROLL_SAMPLES: usize = 8000; // 500 ms à 16 kHz pour sécuriser l'attaque
             const MAX_RECORDING_DURATION: Duration = Duration::from_secs(40);
 
@@ -580,14 +679,20 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                     let sum_sq: f32 = new_16k.iter().map(|&s| s * s).sum();
                     let rms = (sum_sq / new_16k.len() as f32).sqrt();
 
-                    let mic_level = if rms > 0.004 {
-                        ((rms - 0.004) * 16.0).clamp(0.0, 1.0)
+                    if !speech_detected {
+                        // Moyenne glissante adaptative du bruit de fond hors parole
+                        noise_floor = noise_floor * 0.95 + rms * 0.05;
+                    }
+                    let dynamic_threshold = (noise_floor * 2.6).clamp(0.010, 0.038);
+
+                    let mic_level = if rms > noise_floor {
+                        ((rms - noise_floor) * 16.0).clamp(0.0, 1.0)
                     } else {
                         0.0
                     };
                     crate::set_mic_audio_level(mic_level);
 
-                    if rms > SPEECH_ENERGY_THRESHOLD {
+                    if rms > dynamic_threshold {
                         if !speech_detected {
                             speech_detected = true;
                             start_recording_time = Instant::now();
@@ -647,12 +752,14 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                             }
                             Ok(_) => {
                                 speech_detected = false;
+                                noise_floor = 0.004;
                                 audio_16k_buffer.clear();
                                 let _ = event_tx.send(AgentEvent::TranscriptionPartial(String::new()));
                             }
                             Err(err) => {
                                 eprintln!("[Whisper] Erreur de transcription : {err}");
                                 speech_detected = false;
+                                noise_floor = 0.004;
                                 audio_16k_buffer.clear();
                             }
                         }
@@ -764,6 +871,7 @@ fn run_live_subtitles_loop(
                         let trimmed = text.trim();
                         if !trimmed.is_empty()
                             && trimmed.chars().any(|c| c.is_alphanumeric())
+                            && !is_hallucination_or_noise(trimmed)
                         {
                             if let Ok(mut lock) = current_sub_text.lock() {
                                 *lock = trimmed.to_string();
@@ -771,7 +879,7 @@ fn run_live_subtitles_loop(
                         }
                     }
                     is_transcribing.store(false, Ordering::SeqCst);
-                    std::thread::sleep(Duration::from_millis(60));
+                    std::thread::sleep(Duration::from_millis(30));
                 }
             })
             .expect("Échec lancement worker live_subtitles_inference");
@@ -906,6 +1014,7 @@ fn run_live_subtitles_loop(
         let mut speech_start = Instant::now();
         let mut last_spectrum_send = Instant::now();
         let mut last_transcribe_time = Instant::now();
+        let mut noise_floor: f32 = 0.005;
 
         while LIVE_SUBTITLES_RUNNING.load(Ordering::SeqCst) {
             while let Ok(chunk) = loopback_rx.try_recv() {
@@ -940,7 +1049,12 @@ fn run_live_subtitles_loop(
                 let sum_sq: f32 = new_16k.iter().map(|&s| s * s).sum();
                 let rms = (sum_sq / new_16k.len() as f32).sqrt();
 
-                if rms > 0.007 {
+                if !speech_detected {
+                    noise_floor = noise_floor * 0.95 + rms * 0.05;
+                }
+                let voice_threshold = (noise_floor * 2.2).clamp(0.008, 0.032);
+
+                if rms > voice_threshold {
                     if !speech_detected {
                         speech_detected = true;
                         speech_start = Instant::now();
@@ -956,13 +1070,13 @@ fn run_live_subtitles_loop(
                 let silence_dur = last_sound_time.elapsed();
                 let total_dur = speech_start.elapsed();
 
-                let has_natural_pause = silence_dur >= Duration::from_millis(650) && audio_16k_buffer.len() >= 14000;
-                let max_duration_reached = total_dur >= Duration::from_millis(4200) && audio_16k_buffer.len() >= 16000;
+                let has_natural_pause = silence_dur >= Duration::from_millis(450) && audio_16k_buffer.len() >= 16000;
+                let max_duration_reached = total_dur >= Duration::from_millis(3200) && audio_16k_buffer.len() >= 16000 * 2;
 
-                // Cooldown d'au moins 1,2 seconde pour laisser respirer le processeur
+                // Cooldown minimal de 800 ms entre deux requêtes d'inférence
                 if (has_natural_pause || max_duration_reached)
                     && !is_transcribing.load(Ordering::SeqCst)
-                    && last_transcribe_time.elapsed() >= Duration::from_millis(1200)
+                    && last_transcribe_time.elapsed() >= Duration::from_millis(800)
                 {
                     last_transcribe_time = Instant::now();
                     // Ne pas dépasser 4 secondes d'audio transmises d'un coup à Whisper
@@ -975,8 +1089,10 @@ fn run_live_subtitles_loop(
                     if has_natural_pause {
                         speech_detected = false;
                         audio_16k_buffer.clear();
+                        noise_floor = 0.005;
                     } else {
-                        let keep = 5600.min(audio_16k_buffer.len());
+                        // Conserver 0.6s de recouvrement pour ne pas tronquer les mots
+                        let keep = 9600.min(audio_16k_buffer.len());
                         let drain_len = audio_16k_buffer.len() - keep;
                         audio_16k_buffer.drain(0..drain_len);
                         speech_start = Instant::now();
@@ -984,11 +1100,10 @@ fn run_live_subtitles_loop(
 
                     is_transcribing.store(true, Ordering::SeqCst);
                     let _ = transcribe_tx.send(transcribe_buf);
-                } else if audio_16k_buffer.len() > 16000 * 6 {
-                    // Purge proactive pour éviter les longs décalages
+                } else if audio_16k_buffer.len() > 16000 * 5 {
+                    // Écrêter les données les plus anciennes SANS écraser speech_start
                     let overflow = audio_16k_buffer.len() - (16000 * 4);
                     audio_16k_buffer.drain(0..overflow);
-                    speech_start = Instant::now();
                 }
             }
 
@@ -1004,5 +1119,32 @@ fn run_live_subtitles_loop(
             spectrum: [0.0; 16],
         });
         println!("[Live Subtitles] Flux de capture loopback arrêté.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_continuous_resampler_downsample() {
+        let mut resampler = ContinuousResampler::new(48000, 2, 16000);
+        // Simule 480 frames stéréo (960 échantillons = 10 ms à 48 kHz)
+        let input: Vec<f32> = (0..960).map(|i| ((i as f32) * 0.05).sin()).collect();
+        resampler.push_interleaved_f32(&input);
+
+        let mut output = Vec::new();
+        resampler.drain_resampled(&mut output);
+
+        assert!(!output.is_empty());
+        assert!(output.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn test_is_hallucination_or_noise() {
+        assert!(is_hallucination_or_noise("merci d'avoir regardé"));
+        assert!(is_hallucination_or_noise("[Musique]"));
+        assert!(is_hallucination_or_noise("  ...  "));
+        assert!(!is_hallucination_or_noise("Ouvre Google Chrome"));
     }
 }

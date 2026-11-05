@@ -867,3 +867,42 @@ pub fn sanitize_html_to_markdown(html: &str) -> String {
         result
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decode_html_entities() {
+        assert_eq!(decode_html_entities("&amp; &quot; &lt; &gt; &apos;"), "& \" < > '");
+        assert_eq!(decode_html_entities("10&euro;"), "10€");
+        assert_eq!(decode_html_entities("&#65;&#x42;"), "AB");
+    }
+
+    #[test]
+    fn test_extract_attribute() {
+        let tag = r#"a href="https://example.com" target='_blank' class=btn"#;
+        assert_eq!(extract_attribute(tag, "href"), Some("https://example.com"));
+        assert_eq!(extract_attribute(tag, "target"), Some("_blank"));
+        assert_eq!(extract_attribute(tag, "class"), Some("btn"));
+        assert_eq!(extract_attribute(tag, "nonexistent"), None);
+    }
+
+    #[test]
+    fn test_sanitize_html_to_markdown_basic() {
+        let html = "<h1>Titre</h1><p>Un paragraphe avec du <strong>gras</strong> et du <em>texte italique</em>.</p>";
+        let md = sanitize_html_to_markdown(html);
+        assert!(md.contains("# Titre"));
+        assert!(md.contains("**gras**"));
+        assert!(md.contains("*texte italique*"));
+    }
+
+    #[test]
+    fn test_sanitize_html_to_markdown_ignores_scripts() {
+        let html = "<p>Contenu visible</p><script>alert('malware');</script><style>body { color: red; }</style>";
+        let md = sanitize_html_to_markdown(html);
+        assert!(md.contains("Contenu visible"));
+        assert!(!md.contains("alert"));
+        assert!(!md.contains("color: red"));
+    }
+}

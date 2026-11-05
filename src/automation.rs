@@ -38,9 +38,8 @@ use windows::Win32::UI::Accessibility::{
 };
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    SetFocus,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    keybd_event, SetFocus,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VIRTUAL_KEY,
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -1263,11 +1262,14 @@ pub static LAST_SCREEN_SUMMARY: Mutex<Option<String>> = Mutex::new(None);
 pub static IS_IMMERSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static IS_DICTATION_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static IMMERSION_SCREEN_HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+pub const LIBERTIDE_EXTRA_INFO: usize = 0x4C494254; // 'LIBT'
 pub static IS_USER_TYPING: AtomicBool = AtomicBool::new(false);
 
 pub static SWITCH_HOOK_ENABLED: AtomicBool = AtomicBool::new(false);
 pub static SWITCH_KEY_QUEUE: Mutex<Vec<crate::types::SwitchKeyEvent>> = Mutex::new(Vec::new());
 pub static NUMBER_KEY_QUEUE: Mutex<Vec<char>> = Mutex::new(Vec::new());
+pub static SWITCH_LONG_PRESS_MS: AtomicU64 = AtomicU64::new(1100);
+pub static SWITCH_DEBOUNCE_MS: AtomicU64 = AtomicU64::new(180);
 
 #[cfg(windows)]
 pub mod accessibility_keys {
@@ -1283,6 +1285,9 @@ pub mod accessibility_keys {
     pub const VK_XBUTTON1: VIRTUAL_KEY = VIRTUAL_KEY(0x05);         // Trackball bouton 4 (Souris 4)
     pub const VK_XBUTTON2: VIRTUAL_KEY = VIRTUAL_KEY(0x06);         // Trackball bouton 5 (Souris 5)
     pub const VK_MBUTTON: VIRTUAL_KEY = VIRTUAL_KEY(0x04);          // Trackball bouton molette
+    pub const VK_VOLUME_MUTE: VIRTUAL_KEY = VIRTUAL_KEY(0xAD);      // Sourdine
+    pub const VK_VOLUME_DOWN: VIRTUAL_KEY = VIRTUAL_KEY(0xAE);      // Diminuer volume
+    pub const VK_VOLUME_UP: VIRTUAL_KEY = VIRTUAL_KEY(0xAF);        // Augmenter volume
 }
 
 #[cfg(windows)]
@@ -1327,18 +1332,23 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         let is_libertide_fg = fg_pid == std::process::id();
         let kbd = *(lparam.0 as *const KBDLLHOOKSTRUCT);
 
-        // Si l'événement a été injecté par un logiciel tiers (ex: PowerToys, AutoHotkey),
-        // ne pas le bloquer pour lui permettre d'atteindre la fenêtre cible.
-        const LLKHF_INJECTED: u32 = 0x00000010;
-        let is_injected = (kbd.flags.0 & LLKHF_INJECTED) != 0;
-        if is_injected {
+        // Seules les frappes simulées par Libertide lui-même (marquées avec LIBERTIDE_EXTRA_INFO)
+        // sont ignorées pour ne pas boucler sur ses propres simulations de touches (hotkeys, frappe Unicode).
+        if kbd.dwExtraInfo == LIBERTIDE_EXTRA_INFO {
             return CallNextHookEx(None, code, wparam, lparam);
         }
 
+        // Si la fenêtre active est Libertide, laisser systématiquement la priorité aux événements
+        // système, à PowerToys (Keyboard Manager) et aux saisies de l'utilisateur dans l'interface (chat, etc.).
+        if is_libertide_fg {
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
+
+        // Si l'utilisateur est en cours de saisie ou si l'événement provient d'un outil système/accessibilité
+        // externe comme PowerToys Keyboard Manager (LLKHF_INJECTED), ne jamais bloquer la touche.
         let is_user_typing = IS_USER_TYPING.load(Ordering::Relaxed);
-        // Si l'utilisateur est activement en train de taper dans un champ de saisie de l'overlay,
-        // laisser passer les frappes clavier normalement.
-        if is_libertide_fg && is_user_typing {
+        let is_injected = (kbd.flags.0 & 1) != 0; // LLKHF_INJECTED
+        if is_user_typing || is_injected {
             return CallNextHookEx(None, code, wparam, lparam);
         }
         let vk = kbd.vkCode;
@@ -1360,13 +1370,23 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
 
             if let Some(digit) = digit_char {
                 let vk_idx = (vk as usize) & 0xFF;
+                let now = Instant::now();
                 if is_down {
-                    let mut already_down = false;
+                    let mut allow_digit = true;
+                    if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+                        if let Some(t) = times[vk_idx] {
+                            if now.duration_since(t) < Duration::from_millis(40) {
+                                allow_digit = false;
+                            }
+                        }
+                        if allow_digit {
+                            times[vk_idx] = Some(now);
+                        }
+                    }
                     if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
-                        already_down = keys[vk_idx];
                         keys[vk_idx] = true;
                     }
-                    if !already_down {
+                    if allow_digit {
                         if let Ok(mut nq) = NUMBER_KEY_QUEUE.lock() {
                             nq.push(digit);
                         }
@@ -1374,6 +1394,9 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                 } else if is_up {
                     if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
                         keys[vk_idx] = false;
+                    }
+                    if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+                        times[vk_idx] = None;
                     }
                 }
                 if is_down || is_up {
@@ -1402,15 +1425,29 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
 
         if let Some(event) = switch_event {
                 let vk_idx = (vk as usize) & 0xFF;
+            let now = Instant::now();
             if is_down {
                     let mut already_down = false;
                     if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
                         already_down = keys[vk_idx];
+                    // Permissivité : réinitialisation automatique si la touche est restée marquée
+                    // enfoncée sans keyup depuis plus de 800 ms (ex: injecteur n'émettant pas de keyup).
+                    if already_down {
+                        if let Ok(times) = HOOK_KEYS_DOWN_TIME.lock() {
+                            if let Some(t) = times[vk_idx] {
+                                if now.duration_since(t) > Duration::from_millis(800) {
+                                    already_down = false;
+                                }
+                            } else {
+                                already_down = false;
+                            }
+                        }
+                    }
                         keys[vk_idx] = true;
                     }
                     if !already_down {
                         if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
-                            times[vk_idx] = Some(Instant::now());
+                        times[vk_idx] = Some(now);
                         }
                         // Pour les touches directes (Next, Prev, Back, Escape, Fonctions)
                         if event != SwitchKeyEvent::Select {
@@ -1431,7 +1468,8 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
 
                     // Détection appui court vs appui long sur le contacteur de validation
                     if event == SwitchKeyEvent::Select {
-                        let is_long_press = press_duration.map_or(false, |d| d >= Duration::from_millis(1100));
+                    let long_press_threshold = Duration::from_millis(SWITCH_LONG_PRESS_MS.load(Ordering::Relaxed));
+                    let is_long_press = press_duration.map_or(false, |d| d >= long_press_threshold);
                         if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
                             if is_long_press {
                                 // Appui long = Retour / Sortie (indispensable pour 1 contacteur unique !)
@@ -2415,20 +2453,21 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
 
 #[cfg(windows)]
 fn send_key_event(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) {
-    let input = [INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: vk,
-                wScan: 0,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    }];
+    let mut flags = flags;
+    let is_extended = matches!(
+        vk.0,
+        0xAD..=0xB3 // VK_VOLUME_MUTE, VK_VOLUME_DOWN, VK_VOLUME_UP, VK_MEDIA_*
+        | 0xB4..=0xB7 // VK_LAUNCH_MAIL, VK_LAUNCH_MEDIA_SELECT, etc.
+        | 0x21..=0x28 // VK_PRIOR, VK_NEXT, VK_END, VK_HOME, VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN
+        | 0x2D | 0x2E // VK_INSERT, VK_DELETE
+        | 0x5B..=0x5D // VK_LWIN, VK_RWIN, VK_APPS
+        | 0x6F        // VK_DIVIDE
+    );
+    if is_extended {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
     unsafe {
-        SendInput(&input, std::mem::size_of::<INPUT>() as i32);
+        keybd_event(vk.0 as u8, 0, flags, LIBERTIDE_EXTRA_INFO);
     }
 }
 
@@ -2727,6 +2766,13 @@ pub fn try_send_key_combination(combo: &str) -> bool {
             "up" | "haut" => key = Some(VIRTUAL_KEY(0x26)),
             "right" | "droite" => key = Some(VIRTUAL_KEY(0x27)),
             "down" | "bas" => key = Some(VIRTUAL_KEY(0x28)),
+            "volume_mute" | "volumemute" | "mute" => key = Some(VIRTUAL_KEY(0xAD)),
+            "volume_down" | "volumedown" | "voldown" => key = Some(VIRTUAL_KEY(0xAE)),
+            "volume_up" | "volumeup" | "volup" => key = Some(VIRTUAL_KEY(0xAF)),
+            "media_next" | "medianext" => key = Some(VIRTUAL_KEY(0xB0)),
+            "media_prev" | "mediaprev" => key = Some(VIRTUAL_KEY(0xB1)),
+            "media_stop" | "mediastop" => key = Some(VIRTUAL_KEY(0xB2)),
+            "media_play_pause" | "playpause" => key = Some(VIRTUAL_KEY(0xB3)),
             single if single.len() == 1 => {
                 let c = single.chars().next().unwrap();
                 if c.is_ascii_alphabetic() {
@@ -2924,394 +2970,6 @@ pub fn focus_browser_address_bar(hwnd: HWND) {
     if let Some(elem) = address_elem {
         unsafe { let _ = elem.element.SetFocus(); }
     }
-}
-
-#[cfg(windows)]
-fn parse_aria_property_value(aria_properties: &str, target_key: &str) -> Option<String> {
-    let target_clean = target_key.strip_prefix("aria-").unwrap_or(target_key).to_ascii_lowercase();
-    for part in aria_properties.split(';') {
-        let part = part.trim();
-        if let Some((key, val)) = part.split_once('=') {
-            let k = key.trim().to_ascii_lowercase();
-            let k_clean = k.strip_prefix("aria-").unwrap_or(&k);
-            if k_clean == target_clean {
-                let v = val.trim().trim_matches('\'').trim_matches('"').trim();
-                if !v.is_empty() {
-                    return Some(v.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
-#[cfg(windows)]
-fn extract_aria_details(aria_properties: &str) -> (Option<String>, Option<String>, Vec<String>) {
-    let label = parse_aria_property_value(aria_properties, "label")
-        .or_else(|| parse_aria_property_value(aria_properties, "labelledby"));
-    let desc = parse_aria_property_value(aria_properties, "description")
-        .or_else(|| parse_aria_property_value(aria_properties, "describedby"))
-        .or_else(|| parse_aria_property_value(aria_properties, "details"));
-
-    let mut indications = Vec::new();
-    if let Some(roledesc) = parse_aria_property_value(aria_properties, "roledescription") {
-        indications.push(format!("rôle: {roledesc}"));
-    }
-    if let Some(ph) = parse_aria_property_value(aria_properties, "placeholder") {
-        indications.push(format!("placeholder: \"{ph}\""));
-    }
-    if let Some(exp) = parse_aria_property_value(aria_properties, "expanded") {
-        if exp == "true" { indications.push("déroulé".to_string()); }
-        else if exp == "false" { indications.push("replié".to_string()); }
-    }
-    if let Some(chk) = parse_aria_property_value(aria_properties, "checked") {
-        if chk == "true" { indications.push("coché".to_string()); }
-        else if chk == "false" { indications.push("décoché".to_string()); }
-    }
-    if let Some(sel) = parse_aria_property_value(aria_properties, "selected") {
-        if sel == "true" { indications.push("sélectionné".to_string()); }
-    }
-    if let Some(dis) = parse_aria_property_value(aria_properties, "disabled") {
-        if dis == "true" { indications.push("désactivé".to_string()); }
-    }
-    if let Some(req) = parse_aria_property_value(aria_properties, "required") {
-        if req == "true" { indications.push("requis".to_string()); }
-    }
-    if let Some(inv) = parse_aria_property_value(aria_properties, "invalid") {
-        if inv == "true" { indications.push("invalide".to_string()); }
-    }
-    if let Some(ks) = parse_aria_property_value(aria_properties, "keyshortcuts") {
-        indications.push(format!("raccourci: {ks}"));
-    }
-
-    (label, desc, indications)
-}
-
-#[cfg(windows)]
-fn parse_data_attributes_and_json(
-    aria_properties: &str,
-    item_status: &str,
-    help_text: &str,
-) -> (Vec<(String, String)>, Option<serde_json::Value>) {
-    let mut data_attrs = Vec::new();
-    let mut json_val: Option<serde_json::Value> = None;
-
-    // 1. Détection et extraction de blocs JSON dans item_status, help_text ou aria_properties
-    for candidate in [item_status, help_text, aria_properties] {
-        let trimmed = candidate.trim();
-        if (trimmed.starts_with('{') && trimmed.ends_with('}'))
-            || (trimmed.starts_with('[') && trimmed.ends_with(']'))
-        {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                json_val = Some(v);
-                break;
-            }
-        }
-    }
-
-    // Aplatir le JSON en paires clé-valeur dans data_attrs
-    if let Some(serde_json::Value::Object(ref map)) = json_val {
-        for (k, v) in map {
-            let str_val = match v {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::Bool(b) => b.to_string(),
-                _ => v.to_string(),
-            };
-            data_attrs.push((k.to_lowercase(), str_val));
-        }
-    }
-
-    // 2. Extraction des attributs data-*, testid, target, action, etc.
-    for source in [aria_properties, item_status] {
-        for part in source.split(';') {
-            let part = part.trim();
-            if let Some((key, val)) = part.split_once('=') {
-                let k = key.trim().to_ascii_lowercase();
-                let v = val.trim().trim_matches('\'').trim_matches('"').trim();
-                if !v.is_empty() {
-                    let is_target_attr = k.starts_with("data-")
-                        || k.starts_with("data_")
-                        || k == "testid"
-                        || k == "test-id"
-                        || k == "target"
-                        || k == "action"
-                        || k == "tag"
-                        || k == "describedby";
-                    if is_target_attr && !data_attrs.iter().any(|(dk, _)| dk == &k) {
-                        data_attrs.push((k, v.to_string()));
-                    }
-                }
-            }
-        }
-    }
-
-    (data_attrs, json_val)
-}
-
-#[cfg(windows)]
-fn extract_inner_text(uia: &IUIAutomation, element: &IUIAutomationElement, max_chars: usize) -> Option<String> {
-    unsafe {
-        // 1. TextPattern DocumentRange
-        if let Ok(pattern_unk) = element.GetCurrentPattern(UIA_TextPatternId) {
-            if let Ok(text_pattern) = pattern_unk.cast::<IUIAutomationTextPattern>() {
-                if let Ok(range) = text_pattern.DocumentRange() {
-                    if let Ok(bstr) = range.GetText(max_chars as i32) {
-                        let s = bstr.to_string();
-                        let trimmed = s.trim();
-                        if !trimmed.is_empty() {
-                            return Some(trimmed.chars().take(max_chars).collect());
-                        }
-                    }
-                }
-            }
-        }
-
-        // 2. Direct Name
-        if let Ok(name_bstr) = element.CurrentName() {
-            let s = name_bstr.to_string();
-            let trimmed = s.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.chars().take(max_chars).collect());
-            }
-        }
-
-        // 3. ValuePattern
-        if let Ok(pattern_unk) = element.GetCurrentPattern(UIA_ValuePatternId) {
-            if let Ok(val_pattern) = pattern_unk.cast::<IUIAutomationValuePattern>() {
-                if let Ok(bstr) = val_pattern.CurrentValue() {
-                    let s = bstr.to_string();
-                    let trimmed = s.trim();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed.chars().take(max_chars).collect());
-                    }
-                }
-            }
-        }
-
-        // 4. Parcourir les descendants pour extraire le texte innerText des sous-nœuds (spans, labels, etc.)
-        if let Ok(cond) = uia.ControlViewCondition() {
-            if let Ok(children) = element.FindAll(TreeScope_Descendants, &cond) {
-                let child_count = children.Length().unwrap_or(0).min(8);
-                let mut collected = String::new();
-                for ci in 0..child_count {
-                    if let Ok(child) = children.GetElement(ci) {
-                        if let Ok(cname) = child.CurrentName() {
-                            let cstr = cname.to_string();
-                            let ctrim = cstr.trim();
-                            if !ctrim.is_empty() && !collected.contains(ctrim) {
-                                if !collected.is_empty() {
-                                    collected.push(' ');
-                                }
-                                collected.push_str(ctrim);
-                                if collected.chars().count() >= max_chars {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                if !collected.is_empty() {
-                    return Some(collected.chars().take(max_chars).collect());
-                }
-            }
-        }
-    }
-    None
-}
-
-#[cfg(windows)]
-fn extract_web_document_text(element: &IUIAutomationElement, max_chars: usize) -> Option<String> {
-    unsafe {
-        if let Ok(pattern_unk) = element.GetCurrentPattern(UIA_TextPatternId) {
-            if let Ok(text_pattern) = pattern_unk.cast::<IUIAutomationTextPattern>() {
-                if let Ok(range) = text_pattern.DocumentRange() {
-                    if let Ok(bstr) = range.GetText(max_chars as i32) {
-                        let s = bstr.to_string();
-                        let trimmed = s.trim();
-                        if !trimmed.is_empty() {
-                            return Some(trimmed.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        if let Ok(pattern_unk) = element.GetCurrentPattern(UIA_ValuePatternId) {
-            if let Ok(val_pattern) = pattern_unk.cast::<IUIAutomationValuePattern>() {
-                if let Ok(bstr) = val_pattern.CurrentValue() {
-                    let s = bstr.to_string();
-                    let trimmed = s.trim();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed.to_string());
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-#[cfg(windows)]
-fn extract_scrollable_viewports_content(uia: &IUIAutomation, hwnd: HWND) -> String {
-    let mut output = String::new();
-    unsafe {
-        let Ok(window_element) = uia.ElementFromHandle(hwnd) else {
-            return output;
-        };
-        let Ok(cond) = uia.ControlViewCondition() else {
-            return output;
-        };
-        let Ok(elements) = window_element.FindAll(TreeScope_Descendants, &cond) else {
-            return output;
-        };
-
-        let count = elements.Length().unwrap_or(0).clamp(0, 100);
-        for i in 0..count {
-            if let Ok(item) = elements.GetElement(i) {
-                if let Ok(p_unk) = item.GetCurrentPattern(UIA_ScrollPatternId) {
-                    if let Ok(scroll_pattern) = p_unk.cast::<IUIAutomationScrollPattern>() {
-                        let is_v_scrollable = scroll_pattern.CurrentVerticallyScrollable().map(|b| b.as_bool()).unwrap_or(false);
-                        if is_v_scrollable {
-                            let v_percent = scroll_pattern.CurrentVerticalScrollPercent().unwrap_or(0.0);
-                            let is_at_max = v_percent >= 99.0 || v_percent == 100.0;
-                            let name = item.CurrentName().map(|b| b.to_string()).unwrap_or_default();
-                            let loc_type = item.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default();
-                            let label = if !name.trim().is_empty() { name.trim().to_string() } else { loc_type };
-
-                            if let Some(content) = extract_inner_text(uia, &item, 1800) {
-                                let clean_md = if content.contains('<') && content.contains('>') {
-                                    crate::html_util::sanitize_html_to_markdown(&content)
-                                } else {
-                                    content
-                                };
-                                let status = if is_at_max { "Scrollbar au MAXIMUM (100% - fin de liste/chat)" } else { "Viewport défilable actif" };
-                                output.push_str(&format!("\n> ### Viewport : {} [{}]\n> Défilement : {:.0}%\n```\n{}\n```\n", label, status, v_percent, clean_md.trim()));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    output
-}
-
-#[cfg(windows)]
-fn has_focused_textarea(_hwnd: HWND) -> bool {
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let Ok(uia): Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else {
-            return false;
-        };
-        let Ok(focused) = uia.GetFocusedElement() else {
-            return false;
-        };
-
-        let overlay_hwnd = FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()));
-        if let Ok(native_handle) = focused.CurrentNativeWindowHandle() {
-            let h = HWND(native_handle.0 as _);
-            if !h.0.is_null() && h == overlay_hwnd {
-                return false;
-            }
-        }
-
-        let ctype = focused.CurrentControlType().unwrap_or_default();
-        let is_edit = ctype == UIA_EditControlTypeId || ctype == UIA_DocumentControlTypeId;
-        let class_name = focused.CurrentClassName().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
-        let loc_type = focused.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
-        let automation_id = focused.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
-        let height = focused.CurrentBoundingRectangle().map(|r| r.bottom - r.top).unwrap_or(0);
-
-        let is_root_web_area = class_name.contains("rootwebarea")
-            || loc_type.contains("rootwebarea")
-            || automation_id.contains("rootwebarea");
-        if is_root_web_area {
-            return false;
-        }
-
-        class_name.contains("textarea")
-            || loc_type.contains("textarea")
-            || loc_type.contains("zone de texte")
-            || (is_edit && height >= 35)
-    }
-}
-
-#[cfg(windows)]
-fn refocus_largest_textarea_or_fallback(hwnd: HWND) -> bool {
-    let mut elements = list_interactive_elements(hwnd);
-    if elements.is_empty() {
-        return false;
-    }
-
-    let has_web = elements.iter().any(|e| e.is_web_content);
-    let mut textareas: Vec<&UiaElementInfo> = elements
-        .iter()
-        .filter(|e| (!has_web || !e.is_browser_chrome) && e.is_explicit_textarea)
-        .collect();
-    textareas.sort_by(|a, b| b.area.cmp(&a.area));
-
-    if let Some(target) = textareas.first() {
-        unsafe { let _ = target.element.SetFocus(); }
-        click_element(target.click_x, target.click_y, Some(&target.element), target.pattern.as_ref());
-        return true;
-    }
-
-    let mut inputs: Vec<&UiaElementInfo> = elements
-        .iter()
-        .filter(|e| (!has_web || !e.is_browser_chrome) && (e.is_input || e.is_edit_or_textarea))
-        .collect();
-    inputs.sort_by(|a, b| b.area.cmp(&a.area));
-
-    if let Some(target) = inputs.first() {
-        unsafe { let _ = target.element.SetFocus(); }
-        click_element(target.click_x, target.click_y, Some(&target.element), target.pattern.as_ref());
-        return true;
-    }
-
-    let mut focusables: Vec<&UiaElementInfo> = elements
-        .iter()
-        .filter(|e| e.is_focusable || (e.rect.right > e.rect.left && e.rect.bottom > e.rect.top))
-        .collect();
-    focusables.sort_by(|a, b| b.area.cmp(&a.area));
-
-    if let Some(target) = focusables.first() {
-        unsafe { let _ = target.element.SetFocus(); }
-        click_element(target.click_x, target.click_y, Some(&target.element), target.pattern.as_ref());
-        return true;
-    }
-
-    false
-}
-
-#[cfg(windows)]
-fn find_largest_textarea(hwnd: HWND) -> Option<UiaElementInfo> {
-    let mut elements = list_interactive_elements(hwnd);
-    if elements.is_empty() {
-        return None;
-    }
-
-    let has_web = elements.iter().any(|e| e.is_web_content && (e.is_explicit_textarea || e.is_edit_or_textarea || e.is_input));
-    let mut textareas: Vec<UiaElementInfo> = elements
-        .into_iter()
-        .filter(|e| {
-            if has_web && e.is_browser_chrome {
-                return false;
-            }
-            e.is_explicit_textarea || e.is_edit_or_textarea || e.is_input
-        })
-        .collect();
-
-    textareas.sort_by(|a, b| {
-        if a.is_web_content != b.is_web_content {
-            return b.is_web_content.cmp(&a.is_web_content);
-        }
-        if a.is_explicit_textarea != b.is_explicit_textarea {
-            return b.is_explicit_textarea.cmp(&a.is_explicit_textarea);
-        }
-        b.area.cmp(&a.area)
-    });
-
-    textareas.into_iter().next()
 }
 
 #[cfg(windows)]
