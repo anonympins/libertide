@@ -844,8 +844,14 @@ pub async fn call_llm_prompt(
                 || lower_user.starts_with("fais")
                 || lower_user.contains("cherche")
                 || lower_user.contains("recherche")
+                || lower_user.contains("choisis")
+                || lower_user.contains("choisi")
                 || lower_user.contains("radio")
                 || lower_user.contains("musique")
+                || lower_user.contains("youtube")
+                || lower_user.contains("arte")
+                || lower_user.contains("twitch")
+                || lower_user.contains("netflix")
                 || lower_user.contains("film")
                 || lower_user.contains("streaming")
                 || lower_user.contains("vidéo")
@@ -867,6 +873,25 @@ pub async fn call_llm_prompt(
                 println!("[Agent Résilience] L'IA s'est défaussée sans action pour \"{}\". Forçage d'une action de recherche / média...", safe_user_instruction);
                 let target_query = if lower_user.contains("radio") {
                     "https://www.radiofrance.fr".to_string()
+                } else if lower_user.contains("arte") {
+                    let topic = if lower_user.contains("choisis") || lower_user.contains("choisi") {
+                        "documentaire".to_string()
+                    } else {
+                        url_encode(&safe_user_instruction)
+                    };
+                    format!("https://www.arte.tv/fr/search/?q={topic}")
+                } else if lower_user.contains("twitch") {
+                    let topic = url_encode(&safe_user_instruction);
+                    format!("https://www.twitch.tv/search?term={topic}")
+                } else if lower_user.contains("netflix") {
+                    "https://www.netflix.com".to_string()
+                } else if lower_user.contains("vidéo") || lower_user.contains("video") || lower_user.contains("film") || lower_user.contains("youtube") {
+                    let topic = if lower_user.contains("choisis") || lower_user.contains("choisi") || lower_user.trim() == "mets une vidéo" || lower_user.trim() == "lance une vidéo" {
+                        "documentaire+nature+4k"
+                    } else {
+                        &url_encode(&safe_user_instruction)
+                    };
+                    format!("https://www.youtube.com/results?search_query={topic}")
                 } else {
                     format!("https://www.google.com/search?q={}", url_encode(&safe_user_instruction))
                 };
@@ -885,21 +910,27 @@ pub async fn call_llm_prompt(
                     LAST_SCREEN_SUMMARY.lock().ok().and_then(|s| s.clone()).unwrap_or_default().to_lowercase()
                 };
                 let on_search_engine = screen_now.contains("google") || screen_now.contains("bing") || screen_now.contains("recherche");
+                let on_youtube_results = screen_now.contains("youtube.com/results") || screen_now.contains("résultats");
+                let on_arte_results = screen_now.contains("arte.tv") && (screen_now.contains("/search/") || screen_now.contains("recherche"));
                 let cookie_banner_present = screen_now.contains("cookie") || screen_now.contains("consentement") || screen_now.contains("tout accepter");
                 let on_media_player = screen_now.contains("direct") || screen_now.contains("écouter") || screen_now.contains("lecture") || screen_now.contains("play");
 
                 let objective_clearly_done = if lower_user.contains("radio") || lower_user.contains("musique") {
                     !on_search_engine && (screen_now.contains("[@audio:") || screen_now.contains("en direct") || screen_now.contains("pause"))
+                } else if lower_user.contains("vidéo") || lower_user.contains("video") || lower_user.contains("film") || lower_user.contains("youtube") || lower_user.contains("arte") || lower_user.contains("twitch") {
+                    !on_search_engine && (screen_now.contains("watch?v=") || screen_now.contains("[@video:") || screen_now.contains("pause") || screen_now.contains("plein écran"))
                 } else {
                     false
                 };
 
-                if !objective_clearly_done && (on_search_engine || cookie_banner_present || on_media_player) {
-                    println!("[Agent Vérification Objectif] L'IA s'est arrêtée mais l'écran montre une étape intermédiaire (recherche/cookies/lecteur). Prolongation des passes...");
+                if !objective_clearly_done && (on_search_engine || on_youtube_results || on_arte_results || cookie_banner_present || on_media_player) {
+                    println!("[Agent Vérification Objectif] L'IA s'est arrêtée mais l'écran montre une étape intermédiaire (recherche/youtube/cookies/lecteur). Prolongation des passes...");
                     let continuation_action = if cookie_banner_present {
                         AgentAction::ClickButton { window: None, button_name: "Tout accepter".to_string() }
                     } else if on_search_engine && (lower_user.contains("radio") || lower_user.contains("france inter")) {
                         AgentAction::ClickElement { window: None, target_name: "Écouter en direct".to_string() }
+                    } else if on_youtube_results || on_arte_results {
+                        AgentAction::ClickElement { window: None, target_name: "video".to_string() }
                     } else {
                         AgentAction::Scroll { direction: "down".to_string(), amount: Some(1), window: None }
                     };
@@ -960,7 +991,12 @@ pub async fn call_llm_prompt(
             || lower_user_cmd.contains("france inter")
             || lower_user_cmd.contains("franceinfo")
             || lower_user_cmd.contains("écouter")
-            || lower_user_cmd.contains("stream");
+            || lower_user_cmd.contains("stream")
+            || lower_user_cmd.contains("vidéo")
+            || lower_user_cmd.contains("video")
+            || lower_user_cmd.contains("youtube")
+            || lower_user_cmd.contains("arte")
+            || lower_user_cmd.contains("film");
         if pass == 1 && is_media_request && actions_to_run.iter().any(|a| matches!(a, AgentAction::NavigateToUrl { .. } | AgentAction::OpenBrowser { .. })) {
             stop_requested = false;
             if max_agent_passes < 6 {
@@ -1146,7 +1182,11 @@ pub async fn call_llm_prompt(
                 next_pass = pass + 1
             );
             if is_media_request {
-                step_prompt.push_str("\n\n- [NAVIGATION MÉDIA EN COURS] : Valide/ferme les cookies si présents, et clique DIRECTEMENT sur 'Écouter', 'Direct', 'Play' ou la station pour lancer la lecture audio.");
+                if lower_user_cmd.contains("vidéo") || lower_user_cmd.contains("video") || lower_user_cmd.contains("youtube") || lower_user_cmd.contains("arte") || lower_user_cmd.contains("film") {
+                    step_prompt.push_str("\n\n- [NAVIGATION VIDÉO EN COURS] : Valide/ferme les cookies si présents ('Tout accepter'), et clique DIRECTEMENT sur le premier résultat vidéo pour lancer la lecture immédiatement.");
+                } else {
+                    step_prompt.push_str("\n\n- [NAVIGATION MÉDIA EN COURS] : Valide/ferme les cookies si présents, et clique DIRECTEMENT sur 'Écouter', 'Direct', 'Play' ou la station pour lancer la lecture audio.");
+                }
             }
             step_feedback.push_str(&step_prompt);
 
@@ -1291,7 +1331,7 @@ pub fn spawn_agent_backend(
                             } else {
                                 println!("[Backend Tokio] Collecte de l'état de l'écran et préparation de l'appel LLM...");
                                 let clean_prompt = local_llm::extract_clean_user_message(&prompt);
-                                let detected_tags = local_llm::fast_classify_intent(clean_prompt);
+                                let detected_tags = local_llm::resolve_query_tags(clean_prompt);
                                 let is_pure_conversational_or_question = !detected_tags.is_empty()
                                     && detected_tags.iter().all(|t| matches!(
                                         t,
@@ -1302,6 +1342,7 @@ pub fn spawn_agent_backend(
                                             | local_llm::CommandTag::CorrectionOrDisagreement
                                             | local_llm::CommandTag::AgentIdentityAndCapabilities
                                             | local_llm::CommandTag::EmotionalSupportAndEmpathy
+                                            | local_llm::CommandTag::ChattyAndEthicalCompanion
                                     ));
 
                                 let active_win_only = local_llm::get_local_llm_options().active_window_only;
@@ -1362,7 +1403,7 @@ pub fn spawn_agent_backend(
                                     }
                                 }
 
-                                if !active_win_only {
+                                if !active_win_only && !is_pure_conversational_or_question {
                                     if let Ok(guard) = OPEN_FLOATING_CARDS.lock() {
                                         if !guard.is_empty() {
                                             let mut card_section = String::from("[Fenêtres volantes actuellement ouvertes à l'écran] :\n");
@@ -1384,7 +1425,7 @@ pub fn spawn_agent_backend(
                                     "[Demande utilisateur]\n{prompt}\n\n[Consignes impératives pour la réponse]\n\
                                     1. Formule impérativement ta \"narration\" et tes suggestions en {prompt_lang}.\n\
                                     2. FOCALISATION EXCLUSIVE : Ne cite et ne décris JAMAIS les composants de l'interface ou les contrôles détectés (boutons, listes de cibles, champs). Ta \"narration\" doit s'adresser directement à l'utilisateur en ne traitant que du contenu pertinent pour sa demande.\n\
-                                    3. COMPAGNON BAVARD ET ÉTHIQUE : Sois bavard, joyeux, lucide et éthique ! N'hésite pas à parler de toi à l'utilisateur pour papoter, sans te focaliser sur le grand nombre d'éléments analysés."
+                                    3. COMPAGNON BAVARD ET ÉTHIQUE : Sois bavard, joyeux, lucide et éthique ! N'hésite pas à parler de toi à l'utilisateur pour papoter, sans te focaliser sur le grand nombre d'éléments analysés. Si l'utilisateur te salue simplement ou engage la conversation, réponds à sa salutation avec sympathie sans analyser ni commenter l'écran."
                                 ));
                                 let final_prompt = prompt_sections.join("\n\n");
 

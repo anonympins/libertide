@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Productivity & dev: `CodeAndDevelopment`, `CommunicationAndMessaging`, `FileManagementAndExplorer`, `ScheduleTask`, `TextInputOrDictation`.
   - **Fast Deterministic Intent Classifier (`fast_classify_intent`)**:
     - Zero-latency heuristic pre-classification catching domain-specific keywords and regular patterns prior to LLM evaluation.
-    - Automatic synergistic domain expansion (e.g., `RadioAndMusicStream` automatically mounts `NavigateInWebpage`, `ClickElementOrButton`, and `VolumeControl`).
+    - Automatic synergistic domain expansion (e.g., `RadioAndMusicStream` automatically mounts `NavigateInWebpage`, `ClickElementOrButton`, and `SetVolumeOrMuteUnMute`).
   - **Strict Multi-Lingual Enforcement (`lang_name`)**:
     - System prompts dynamically enforce the user's active locale across all outputs, preventing English leaks when parsing foreign web pages.
 

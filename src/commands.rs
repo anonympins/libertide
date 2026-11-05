@@ -2308,6 +2308,15 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     Err(err) => feedback.push(format!("Erreur configuration démarrage auto : {err}")),
                 }
             }
+            AgentAction::SetProactiveCompanion { enabled, interval_minutes } => {
+                crate::scheduler::set_proactive_companion_config(*enabled, *interval_minutes);
+                let msg = if *enabled {
+                    format!("Pensées et présence régulière du compagnon activées (intervalle : {} min).", interval_minutes.unwrap_or(22))
+                } else {
+                    "Pensées régulières du compagnon mises en veille.".to_string()
+                };
+                feedback.push(msg);
+            }
             AgentAction::SetReasoningPasses { passes, reason } => {
                 let clamped = (*passes).clamp(1, 15);
                 TARGET_REASONING_PASSES.store(clamped, Ordering::SeqCst);
@@ -2818,6 +2827,14 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
             }
             AgentAction::SetAutostart { enabled } => {
                 feedback.push(set_autostart(*enabled).unwrap_or_else(|e| e));
+            }
+            AgentAction::SetProactiveCompanion { enabled, interval_minutes } => {
+                crate::scheduler::set_proactive_companion_config(*enabled, *interval_minutes);
+                if *enabled {
+                    feedback.push(format!("Pensées régulières activées ({} min).", interval_minutes.unwrap_or(22)));
+                } else {
+                    feedback.push("Pensées régulières désactivées.".to_string());
+                }
             }
             AgentAction::Dictate { text, press_enter, .. } => {
                 let _ = std::process::Command::new("xdotool").args(["type", "--delay", "12", text]).status();

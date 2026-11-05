@@ -673,6 +673,13 @@ pub enum AgentAction {
         #[serde(default)]
         enabled: bool,
     },
+    #[serde(alias = "proactive_companion", alias = "compagnon_proactif", alias = "pensees_regulieres")]
+    SetProactiveCompanion {
+        #[serde(default)]
+        enabled: bool,
+        #[serde(default)]
+        interval_minutes: Option<u64>,
+    },
     SetReasoningPasses {
         passes: usize,
         #[serde(default)]
@@ -800,6 +807,13 @@ impl QuickSuggestionItem {
                         Some("Désactiver le démarrage automatique".to_string())
                     }
                 }
+            AgentAction::SetProactiveCompanion { enabled, .. } => {
+                if *enabled {
+                    Some("Activer les pensées du compagnon".to_string())
+                } else {
+                    Some("Désactiver les pensées du compagnon".to_string())
+                }
+            }
                 AgentAction::SetReasoningPasses { passes, .. } => {
                     Some(format!("Ajuster à {passes} passes"))
                 }

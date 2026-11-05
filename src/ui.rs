@@ -1343,7 +1343,7 @@ pub fn send_char_unicode(c: char) {
                     wScan: u,
                     dwFlags: KEYEVENTF_UNICODE,
                     time: 0,
-                    dwExtraInfo: 0,
+                    dwExtraInfo: crate::automation::LIBERTIDE_EXTRA_INFO,
                 },
             },
         };
@@ -1355,7 +1355,7 @@ pub fn send_char_unicode(c: char) {
                     wScan: u,
                     dwFlags: KEYBD_EVENT_FLAGS(KEYEVENTF_UNICODE.0 | KEYEVENTF_KEYUP.0),
                     time: 0,
-                    dwExtraInfo: 0,
+                    dwExtraInfo: crate::automation::LIBERTIDE_EXTRA_INFO,
                 },
             },
         };

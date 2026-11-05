@@ -38,9 +38,8 @@ use windows::Win32::UI::Accessibility::{
 };
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    SetFocus,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    keybd_event, SetFocus,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VIRTUAL_KEY,
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -1263,6 +1262,7 @@ pub static LAST_SCREEN_SUMMARY: Mutex<Option<String>> = Mutex::new(None);
 pub static IS_IMMERSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static IS_DICTATION_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static IMMERSION_SCREEN_HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+pub const LIBERTIDE_EXTRA_INFO: usize = 0x4C494254; // 'LIBT'
 pub static IS_USER_TYPING: AtomicBool = AtomicBool::new(false);
 
 pub static SWITCH_HOOK_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -1285,6 +1285,9 @@ pub mod accessibility_keys {
     pub const VK_XBUTTON1: VIRTUAL_KEY = VIRTUAL_KEY(0x05);         // Trackball bouton 4 (Souris 4)
     pub const VK_XBUTTON2: VIRTUAL_KEY = VIRTUAL_KEY(0x06);         // Trackball bouton 5 (Souris 5)
     pub const VK_MBUTTON: VIRTUAL_KEY = VIRTUAL_KEY(0x04);          // Trackball bouton molette
+    pub const VK_VOLUME_MUTE: VIRTUAL_KEY = VIRTUAL_KEY(0xAD);      // Sourdine
+    pub const VK_VOLUME_DOWN: VIRTUAL_KEY = VIRTUAL_KEY(0xAE);      // Diminuer volume
+    pub const VK_VOLUME_UP: VIRTUAL_KEY = VIRTUAL_KEY(0xAF);        // Augmenter volume
 }
 
 #[cfg(windows)]
@@ -1329,18 +1332,23 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         let is_libertide_fg = fg_pid == std::process::id();
         let kbd = *(lparam.0 as *const KBDLLHOOKSTRUCT);
 
-        // Si l'événement a été injecté par un logiciel tiers (ex: PowerToys, AutoHotkey),
-        // ne pas le bloquer pour lui permettre d'atteindre la fenêtre cible.
-        const LLKHF_INJECTED: u32 = 0x00000010;
-        let is_injected = (kbd.flags.0 & LLKHF_INJECTED) != 0;
-        if is_injected {
+        // Seules les frappes simulées par Libertide lui-même (marquées avec LIBERTIDE_EXTRA_INFO)
+        // sont ignorées pour ne pas boucler sur ses propres simulations de touches (hotkeys, frappe Unicode).
+        if kbd.dwExtraInfo == LIBERTIDE_EXTRA_INFO {
             return CallNextHookEx(None, code, wparam, lparam);
         }
 
+        // Si la fenêtre active est Libertide, laisser systématiquement la priorité aux événements
+        // système, à PowerToys (Keyboard Manager) et aux saisies de l'utilisateur dans l'interface (chat, etc.).
+        if is_libertide_fg {
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
+
+        // Si l'utilisateur est en cours de saisie ou si l'événement provient d'un outil système/accessibilité
+        // externe comme PowerToys Keyboard Manager (LLKHF_INJECTED), ne jamais bloquer la touche.
         let is_user_typing = IS_USER_TYPING.load(Ordering::Relaxed);
-        // Si l'utilisateur est activement en train de taper dans un champ de saisie de l'overlay,
-        // laisser passer les frappes clavier normalement.
-        if is_libertide_fg && is_user_typing {
+        let is_injected = (kbd.flags.0 & 1) != 0; // LLKHF_INJECTED
+        if is_user_typing || is_injected {
             return CallNextHookEx(None, code, wparam, lparam);
         }
         let vk = kbd.vkCode;
@@ -1362,13 +1370,23 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
 
             if let Some(digit) = digit_char {
                 let vk_idx = (vk as usize) & 0xFF;
+                let now = Instant::now();
                 if is_down {
-                    let mut already_down = false;
+                    let mut allow_digit = true;
+                    if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+                        if let Some(t) = times[vk_idx] {
+                            if now.duration_since(t) < Duration::from_millis(40) {
+                                allow_digit = false;
+                            }
+                        }
+                        if allow_digit {
+                            times[vk_idx] = Some(now);
+                        }
+                    }
                     if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
-                        already_down = keys[vk_idx];
                         keys[vk_idx] = true;
                     }
-                    if !already_down {
+                    if allow_digit {
                         if let Ok(mut nq) = NUMBER_KEY_QUEUE.lock() {
                             nq.push(digit);
                         }
@@ -1376,6 +1394,9 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                 } else if is_up {
                     if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
                         keys[vk_idx] = false;
+                    }
+                    if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+                        times[vk_idx] = None;
                     }
                 }
                 if is_down || is_up {
@@ -1404,15 +1425,29 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
 
         if let Some(event) = switch_event {
                 let vk_idx = (vk as usize) & 0xFF;
+            let now = Instant::now();
             if is_down {
                     let mut already_down = false;
                     if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
                         already_down = keys[vk_idx];
+                    // Permissivité : réinitialisation automatique si la touche est restée marquée
+                    // enfoncée sans keyup depuis plus de 800 ms (ex: injecteur n'émettant pas de keyup).
+                    if already_down {
+                        if let Ok(times) = HOOK_KEYS_DOWN_TIME.lock() {
+                            if let Some(t) = times[vk_idx] {
+                                if now.duration_since(t) > Duration::from_millis(800) {
+                                    already_down = false;
+                                }
+                            } else {
+                                already_down = false;
+                            }
+                        }
+                    }
                         keys[vk_idx] = true;
                     }
                     if !already_down {
                         if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
-                            times[vk_idx] = Some(Instant::now());
+                        times[vk_idx] = Some(now);
                         }
                         // Pour les touches directes (Next, Prev, Back, Escape, Fonctions)
                         if event != SwitchKeyEvent::Select {
@@ -2418,20 +2453,21 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
 
 #[cfg(windows)]
 fn send_key_event(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) {
-    let input = [INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: vk,
-                wScan: 0,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    }];
+    let mut flags = flags;
+    let is_extended = matches!(
+        vk.0,
+        0xAD..=0xB3 // VK_VOLUME_MUTE, VK_VOLUME_DOWN, VK_VOLUME_UP, VK_MEDIA_*
+        | 0xB4..=0xB7 // VK_LAUNCH_MAIL, VK_LAUNCH_MEDIA_SELECT, etc.
+        | 0x21..=0x28 // VK_PRIOR, VK_NEXT, VK_END, VK_HOME, VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN
+        | 0x2D | 0x2E // VK_INSERT, VK_DELETE
+        | 0x5B..=0x5D // VK_LWIN, VK_RWIN, VK_APPS
+        | 0x6F        // VK_DIVIDE
+    );
+    if is_extended {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
     unsafe {
-        SendInput(&input, std::mem::size_of::<INPUT>() as i32);
+        keybd_event(vk.0 as u8, 0, flags, LIBERTIDE_EXTRA_INFO);
     }
 }
 
@@ -2730,6 +2766,13 @@ pub fn try_send_key_combination(combo: &str) -> bool {
             "up" | "haut" => key = Some(VIRTUAL_KEY(0x26)),
             "right" | "droite" => key = Some(VIRTUAL_KEY(0x27)),
             "down" | "bas" => key = Some(VIRTUAL_KEY(0x28)),
+            "volume_mute" | "volumemute" | "mute" => key = Some(VIRTUAL_KEY(0xAD)),
+            "volume_down" | "volumedown" | "voldown" => key = Some(VIRTUAL_KEY(0xAE)),
+            "volume_up" | "volumeup" | "volup" => key = Some(VIRTUAL_KEY(0xAF)),
+            "media_next" | "medianext" => key = Some(VIRTUAL_KEY(0xB0)),
+            "media_prev" | "mediaprev" => key = Some(VIRTUAL_KEY(0xB1)),
+            "media_stop" | "mediastop" => key = Some(VIRTUAL_KEY(0xB2)),
+            "media_play_pause" | "playpause" => key = Some(VIRTUAL_KEY(0xB3)),
             single if single.len() == 1 => {
                 let c = single.chars().next().unwrap();
                 if c.is_ascii_alphabetic() {

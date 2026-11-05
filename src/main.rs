@@ -133,7 +133,6 @@ pub struct OverlayApp {
     api_key_error: Option<String>,
 
     local_download_progress: Option<(f32, f32, f32, f32)>,
-    local_llm_options: local_llm::LocalLlmOptions,
 
     // Suggestions d'applications en direct (PATH & Levenshtein)
     input_suggestions: Vec<String>,
@@ -624,7 +623,6 @@ impl OverlayApp {
             show_api_key_plain: false,
             api_key_error: None,
             local_download_progress: None,
-            local_llm_options: local_llm::get_local_llm_options(),
             input_suggestions: Vec::new(),
             last_suggestion_query: String::new(),
             macros,
@@ -2048,6 +2046,33 @@ impl eframe::App for OverlayApp {
                         return;
                     }
 
+                    // Contrôle vocal du mode pensées / compagnon régulier
+                    if norm_prompt.contains("active les pensees")
+                        || norm_prompt.contains("active les pensées")
+                        || norm_prompt.contains("active le compagnon proactif")
+                        || norm_prompt.contains("pensees regulieres")
+                        || norm_prompt.contains("pensées régulières")
+                    {
+                        crate::scheduler::set_proactive_companion_config(true, None);
+                        play_earcon(Earcon::Success);
+                        let reply = "Pensées régulières et présence proactive du compagnon activées.".to_string();
+                        self.chat_history.push(ChatEntry { role: ChatRole::Agent, text: reply.clone(), timestamp: current_time_str(), quick_suggestions: Vec::new(), screen_size_kb: None });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                        return;
+                    }
+                    if norm_prompt.contains("desactive les pensees")
+                        || norm_prompt.contains("désactive les pensées")
+                        || norm_prompt.contains("arrete les pensees")
+                        || norm_prompt.contains("arrête les pensées")
+                    {
+                        crate::scheduler::set_proactive_companion_config(false, None);
+                        play_earcon(Earcon::Success);
+                        let reply = "Pensées régulières du compagnon mises en veille.".to_string();
+                        self.chat_history.push(ChatEntry { role: ChatRole::Agent, text: reply.clone(), timestamp: current_time_str(), quick_suggestions: Vec::new(), screen_size_kb: None });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                        return;
+                    }
+
                     // 1. Arrêt d'urgence local universel (<50ms, sans requête LLM)
                     if is_emergency_stop_command(&prompt) {
                         self.trigger_emergency_stop(&ctx);
@@ -2433,13 +2458,15 @@ impl eframe::App for OverlayApp {
             }
         }
 
-        let is_typing = ctx.memory(|m| {
-            m.has_focus(egui::Id::new("prompt_input_text"))
-                || m.has_focus(egui::Id::new("api_key_input_field"))
-                || m.has_focus(egui::Id::new("model_input_field"))
-                || m.has_focus(egui::Id::new("macro_shortcut_input"))
-                || m.has_focus(egui::Id::new("macro_text_input"))
-        });
+        let is_typing = ctx.egui_wants_keyboard_input()
+            || ctx.memory(|m| {
+                m.focused().is_some()
+                    || m.has_focus(egui::Id::new("prompt_input_text"))
+                    || m.has_focus(egui::Id::new("api_key_input_field"))
+                    || m.has_focus(egui::Id::new("model_input_field"))
+                    || m.has_focus(egui::Id::new("macro_shortcut_input"))
+                    || m.has_focus(egui::Id::new("macro_text_input"))
+            });
         crate::automation::IS_USER_TYPING.store(is_typing, Ordering::Relaxed);
 
         // Gestion de la touche Échap globale et locale
@@ -5450,11 +5477,6 @@ impl eframe::App for OverlayApp {
                                         std::env::set_var("LLM_PROVIDER", self.selected_provider_modal.display_name());
                                         self.llm_config = resolve_llm_config();
 
-                                        let tier = local_llm::resolve_model_tier(self.selected_provider_modal, Some(local_llm::get_active_preset()));
-                                        let rec = tier.default_options();
-                                        self.local_llm_options = rec;
-                                        local_llm::set_local_llm_options(rec);
-
                                         if self.selected_provider_modal == LlmProvider::Local {
                                             std::thread::spawn(|| {
                                                 local_llm::init_local_llm();
@@ -5508,10 +5530,6 @@ impl eframe::App for OverlayApp {
                                                     std::env::set_var("LLM_MODEL", preset.filename);
                                                     let _ = write_env_var_to_file(".env", "LOCAL_LLAMA_MODEL", preset.filename);
                                                     std::env::set_var("LOCAL_LLAMA_MODEL", preset.filename);
-
-                                                    let rec = preset.tier().default_options();
-                                                    self.local_llm_options = rec;
-                                                    local_llm::set_local_llm_options(rec);
 
                                                     play_earcon(Earcon::Success);
                                                 }
@@ -5591,60 +5609,6 @@ impl eframe::App for OverlayApp {
                                             );
                                         }
                                     });
-
-                                    ui.add_space(6.0);
-                                    egui::Frame::new()
-                                        .fill(theme.panel_bg)
-                                        .stroke(egui::Stroke::new(1.0, theme.border_subtle))
-                                        .corner_radius(egui::CornerRadius::same(8))
-                                        .inner_margin(egui::Margin::symmetric(10, 8))
-                                        .show(ui, |ui| {
-                                            let mut opts = self.local_llm_options;
-                                            let mut changed = false;
-                                            let current_tier = active_preset.tier();
-
-                                            ui.horizontal(|ui| {
-                                                ui.label(
-                                                    egui::RichText::new("⚙️ Paramètres du prompt d'inférence :")
-                                                        .size(11.0)
-                                                        .color(theme.accent)
-                                                        .strong(),
-                                                );
-                                                ui.label(
-                                                    egui::RichText::new(format!("({})", current_tier.name()))
-                                                        .size(9.5)
-                                                        .color(theme.text_secondary),
-                                                );
-                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                    if ui.small_button("⚡ Réglages conseillés").on_hover_text("Rétablir les options recommandées pour ce modèle").clicked() {
-                                                        opts = current_tier.default_options();
-                                                        changed = true;
-                                                    }
-                                                });
-                                            });
-                                            ui.add_space(4.0);
-
-                                            if ui.checkbox(&mut opts.minimal_mode, "Mode prompt minimaliste (recommandé pour modèles locaux)").on_hover_text("Utilise des consignes concises au lieu du prompt cloud étendu, réduisant les erreurs de format JSON").changed() {
-                                                changed = true;
-                                            }
-
-                                            if ui.checkbox(&mut opts.active_window_only, "Fenêtre principale uniquement (exclure les autres fenêtres / cartes)").on_hover_text("N'injecte que les données de la fenêtre active pour économiser le budget de tokens").changed() {
-                                                changed = true;
-                                            }
-
-                                            if ui.checkbox(&mut opts.include_feedback, "Inclure les rapports de retour des commandes exécutées").on_hover_text("Transmet les logs détaillés d'exécution des étapes précédentes (désactiver allège le contexte)").changed() {
-                                                changed = true;
-                                            }
-
-                                            if ui.checkbox(&mut opts.include_history, "Prendre en compte l'historique de conversation").on_hover_text("Si décoché, chaque requête est traitée de manière isolée sans être polluée par les échanges passés").changed() {
-                                                changed = true;
-                                            }
-
-                                            if changed {
-                                                self.local_llm_options = opts;
-                                                local_llm::set_local_llm_options(opts);
-                                            }
-                                        });
                             } else {
 
                             ui.add_space(4.0);
@@ -6490,6 +6454,7 @@ fn main() -> eframe::Result<()> {
     automation::install_switch_keyboard_hook();
 
     spawn_periodic_screen_monitor(cmd_tx.clone());
+    crate::scheduler::spawn_proactive_companion_loop(cmd_tx.clone());
     spawn_agent_backend(cmd_rx, cmd_tx.clone(), event_tx.clone(), tts_tx.clone(), llm_config.clone());
 
     if llm_config.provider == LlmProvider::Local {

@@ -265,19 +265,12 @@ impl ModelTier {
     }
 
     pub fn default_options(&self) -> LocalLlmOptions {
-        match self {
-            ModelTier::Local => LocalLlmOptions {
-                minimal_mode: true,
-                active_window_only: true,
-                include_feedback: true,
-                include_history: false,
-            },
-            ModelTier::Remote => LocalLlmOptions {
-                minimal_mode: false,
-                active_window_only: false,
-                include_feedback: true,
-                include_history: true,
-            },
+        // Traitement identique entre local et remote
+        LocalLlmOptions {
+            minimal_mode: false,
+            active_window_only: false,
+            include_feedback: true,
+            include_history: true,
         }
     }
 }
@@ -306,56 +299,27 @@ pub struct LocalLlmOptions {
 
 impl Default for LocalLlmOptions {
     fn default() -> Self {
-        get_active_preset().tier().default_options()
+        Self {
+            minimal_mode: false,
+            active_window_only: false,
+            include_feedback: true,
+            include_history: true,
+        }
     }
-}
-
-fn read_bool_env(key: &str, default: bool) -> bool {
-    std::env::var(key)
-        .ok()
-        .or_else(|| crate::fs_util::read_env_var_from_file(".env", key))
-        .and_then(|v| match v.trim().to_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => Some(true),
-            "0" | "false" | "no" | "off" => Some(false),
-            _ => None,
-        })
-        .unwrap_or(default)
 }
 
 pub fn get_local_llm_options() -> LocalLlmOptions {
-    let tier_defaults = get_active_preset().tier().default_options();
-    LocalLlmOptions {
-        minimal_mode: read_bool_env("LOCAL_LLM_MINIMAL_MODE", tier_defaults.minimal_mode),
-        active_window_only: read_bool_env("LOCAL_LLM_ACTIVE_WIN_ONLY", tier_defaults.active_window_only),
-        include_feedback: read_bool_env("LOCAL_LLM_FEEDBACK", tier_defaults.include_feedback),
-        include_history: read_bool_env("LOCAL_LLM_HISTORY", tier_defaults.include_history),
-    }
+    LocalLlmOptions::default()
 }
 
-pub fn set_local_llm_options(opts: LocalLlmOptions) {
-    let min_str = if opts.minimal_mode { "true" } else { "false" };
-    let _ = crate::fs_util::write_env_var_to_file(".env", "LOCAL_LLM_MINIMAL_MODE", min_str);
-    std::env::set_var("LOCAL_LLM_MINIMAL_MODE", min_str);
-
-    let win_str = if opts.active_window_only { "true" } else { "false" };
-    let _ = crate::fs_util::write_env_var_to_file(".env", "LOCAL_LLM_ACTIVE_WIN_ONLY", win_str);
-    std::env::set_var("LOCAL_LLM_ACTIVE_WIN_ONLY", win_str);
-
-    let fb_str = if opts.include_feedback { "true" } else { "false" };
-    let _ = crate::fs_util::write_env_var_to_file(".env", "LOCAL_LLM_FEEDBACK", fb_str);
-    std::env::set_var("LOCAL_LLM_FEEDBACK", fb_str);
-
-    let hist_str = if opts.include_history { "true" } else { "false" };
-    let _ = crate::fs_util::write_env_var_to_file(".env", "LOCAL_LLM_HISTORY", hist_str);
-    std::env::set_var("LOCAL_LLM_HISTORY", hist_str);
-}
+pub fn set_local_llm_options(_opts: LocalLlmOptions) {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CommandTag {
     ScheduleTask,
     WebNavigateOrSearch,
     AudioSettings,
-    VolumeControl,
+    SetVolumeOrMuteUnMute,
     MuteAudio,
     ClickElementOrButton,
     TextInputOrDictation,
@@ -398,7 +362,7 @@ impl CommandTag {
         Self::ScheduleTask,
         Self::WebNavigateOrSearch,
         Self::AudioSettings,
-        Self::VolumeControl,
+        Self::SetVolumeOrMuteUnMute,
         Self::MuteAudio,
         Self::ClickElementOrButton,
         Self::TextInputOrDictation,
@@ -441,7 +405,7 @@ impl CommandTag {
             Self::ScheduleTask => "SCHEDULE_TASK",
             Self::WebNavigateOrSearch => "WEB_NAVIGATE_OR_SEARCH",
             Self::AudioSettings => "AUDIO_SETTINGS",
-            Self::VolumeControl => "VOLUME_CONTROL",
+            Self::SetVolumeOrMuteUnMute => "SET_VOLUME_OR_MUTE_UNMUTE",
             Self::MuteAudio => "MUTE_AUDIO",
             Self::ClickElementOrButton => "CLICK_ELEMENT_OR_BUTTON",
             Self::TextInputOrDictation => "TEXT_INPUT_OR_DICTATION",
@@ -482,154 +446,67 @@ impl CommandTag {
 
     pub fn description(&self) -> &'static str {
         match self {
-            Self::ScheduleTask => "Planification temporelle, minuteurs, rappels, timers, commandes différées (schedule_prompt, schedule_prompts, cancel_scheduled_tasks)",
-            Self::WebNavigateOrSearch => "Navigation web, moteurs de recherche, URLs, omnibox, exploration internet (navigate_to_url, open_search_browser, navigate_back)",
-            Self::AudioSettings => "Paramètres audio Windows/OS, panneau de son, choix casque/enceinte (action_center, open_settings)",
-            Self::VolumeControl => "Réglage du volume sonore (set_volume up/down/min/max)",
-            Self::MuteAudio => "Mise en sourdine des flux audio parasites, silence (mute_audio, set_volume mute)",
-            Self::ClickElementOrButton => "Interactivité UI : clics sur boutons, liens, icônes, menus, cases, badges numérotés, défilement (click_element, click_button, click_numbered_target, scroll)",
-            Self::TextInputOrDictation => "Saisie de texte, remplissage de formulaires, champs de recherche, remplacement (write_text, replace_field_text, clear_text, focus_element)",
-            Self::AppManagement => "Lancement et fermeture d'applications locales (open_app, close_app, open_search)",
-            Self::WindowManagementOrImmersion => "Gestion des fenêtres, agencement, mosaïque, mode immersion (arrange_window, tile_windows, activate_immersion, focus_window)",
-            Self::ScreenReadingOrSummary => "Lecture et résumé de l'écran, extraction de code/texte, défilement (read_editor_content, scroll)",
-            Self::FloatingCardOrForm => "Affichage et fermeture de fenêtres volantes, formulaires interactifs, synthèses (show_floating_card, close_floating_card)",
-            Self::LiveSubtitles => "Sous-titres en direct et retranscription de l'audio système (live_subtitles)",
-            Self::EmergencyOrHealth => "Urgence vitale, appel aux secours, sécurité et santé",
-            Self::GeneralChitChat => "Conversation générale, salutations, politesse, questions sans action requise",
-            Self::MotorAndSwitchAccess => "Accessibilité motrice, contacteurs, commande oculaire, navigation par numéros (click_numbered_target, toggle_numbered_targets)",
-            Self::VisualAccessibility => "Accessibilité visuelle, contrastes, loupe, grossissement de police",
-            Self::CareAndComfort => "Confort, signalement de douleur, soif, fatigue, appel de l'aidant",
-            Self::CognitiveAndClarity => "Accessibilité cognitive, simplification, langage clair et concis (FALC)",
-            Self::RadioAndMusicStream => "Lecture de radio en direct, webradio, streaming musical, contrôle de lecture et médias web (navigate_to_url, click_button direct/play, set_volume)",
-            Self::TravelAndFlightBooking => "Recherche et réservation de billets d'avion, comparatifs de vols, formulaires de voyage et filtres interactifs (show_floating_card form/table, navigate_to_url Google Flights)",
-            Self::BrowserTabNavigation => "Gestion et recherche d'onglets de navigateur, bascule entre onglets, ouverture/fermeture d'onglets (click_element sur onglet, close_tab, navigate_to_url target new_tab)",
-            Self::NavigateInWebpage => "Navigation approfondie dans la page web ouverte avec Google Search comme référentiel de départ : acceptation des cookies, consultation des encarts, test des différents résultats via clics (navigate_to_url, click_element, click_button, scroll, navigate_back)",
-            Self::EcommerceAndShopping => "Achats en ligne, e-commerce, panier d'achat, validation de commande, recherche de produits, comparatifs de prix et boutiques marchandes (panier, commander, checkout, show_floating_card table)",
-            Self::CodeAndDevelopment => "Développement logiciel, inspection et lecture de code, éditeur (VSCode, IntelliJ, RustRover), fichiers sources (.rs, .py, .js, .json), terminal de build et erreurs de compilation (read_editor_content, run_command)",
-            Self::CommunicationAndMessaging => "Messagerie, e-mails, communication d'équipe et recherche de contacts (Teams, Outlook, Discord, Slack, WhatsApp, rédaction de message, show_floating_card fiche_contact)",
-            Self::FileManagementAndExplorer => "Gestion de fichiers et dossiers, Explorateur Windows / Finder, organisation de documents, ouverture de médias ou PDFs (open_file, open_app explorer, find_file)",
-            Self::VideoAndEntertainment => "Lecture de vidéos, films, séries, YouTube, Netflix, streaming vidéo, chaînes documentaires et divertissement (navigate_to_url, click_element vidéo, plein écran, space)",
-            Self::LockedInAndEyeTracking => "Commande oculaire, syndrome d'enfermement (Locked-in / SLA), poursuite du regard et clignement (show_floating_card aac_eye_grid, dwell prolongé)",
-            Self::TremorAndSpasticityFilter => "Filtrage des tremblements sévères, spasticité, ataxie, Parkinson et IMC (boutons géants, tolérance de frappe motrice, anti-rebond)",
-            Self::NeurodivergentAndSensoryCalm => "Sanctuaire sensoriel, autisme (TSA), surcharge cognitive, TDAH et épilepsie (mute_audio immédiat, micro-étapes, phrasé apaisant)",
-            Self::AacSymbolCommunication => "Communication Alternative et Améliorée (CAA), aphasie, pictogrammes, langage non-verbal (show_floating_card caa_board, expansion syntaxique)",
-            Self::VitalCareAndCaregiverAlert => "Soins vitaux, appel de l'auxiliaire de vie ou de l'aidant, posture, aspiration, détresse respiratoire (show_floating_card caregiver_alert, alerte multicanale)",
-            Self::KnowledgeAndQuestions => "Questions de connaissances générales, savoir, culture, explications conceptuelles, vérification interactive ou présence ('tu m'entends ?', 'es-tu là ?', 'test micro', 'pourquoi...', 'qu'est-ce que...', 'c'est quoi...', questions rhétoriques). Aucune action sur l'écran requise.",
-            Self::ClarificationRequired => "Demande incomplète, tronquée, ambiguë ou sans cible définie ('fais le truc', 'ouvre ça', 'clique dessus'). Nécessite de demander poliment des éclaircissements sans agir à l'aveugle.",
-            Self::UnintelligibleOrNoise => "Propos inaudibles, bruit, charabia, message sans queue ni tête, texte absurde, suite de lettres aléatoires, bafouillage ou transcription vocale corrompue sans consigne intelligible.",
-            Self::CorrectionOrDisagreement => "Contestation, rectification ou signalement d'erreur par l'utilisateur ('non pas ça', 'tu t'es trompé', 'arrête', 'recommence', 'annule ce que tu as fait').",
-            Self::AgentIdentityAndCapabilities => "Questions sur l'identité, le concepteur, le fonctionnement ou les capacités de Libertide ('qui es-tu ?', 'que sais-tu faire ?', 'comment fonctionnes-tu ?').",
-            Self::EmotionalSupportAndEmpathy => "Soutien moral, écoute bienveillante, expression de découragement, de solitude, de fatigue ou gratitude appuyée ('je suis fatigué', 'j'en ai marre', 'merci pour tout').",
-            Self::ChattyAndEthicalCompanion => "Posture bavarde, joyeuse, lucide et éthique : papoter avec l'utilisateur, parler de soi et aller à l'essentiel sans se focaliser sur le grand nombre d'éléments analysés.",
-        }
-    }
-
-    pub fn from_str_loose(s: &str) -> Option<Self> {
-        let upper = s.trim().to_uppercase();
-        if upper.contains("SCHEDULE") || upper.contains("TIMER") || upper.contains("DIFFERE") || upper.contains("DIFFÉRÉ")
-            || upper.contains("RAPPEL") || upper.contains("REMIND") || upper.contains("DELAY") || upper.contains("PLANIF") || upper.contains("MINUTEUR") {
-            Some(Self::ScheduleTask)
-        } else if upper.contains("MUTE") || upper.contains("SOURDINE") {
-            Some(Self::MuteAudio)
-        } else if upper.contains("ADD_VOLUME") || upper.contains("VOLUME") {
-            Some(Self::VolumeControl)
-        } else if upper.contains("AUDIO") {
-            Some(Self::AudioSettings)
-        } else if upper.contains("NAVIGATE") || upper.contains("SEARCH") || upper.contains("WEB") || upper.contains("BROWSER") || upper.contains("GOOGLE") {
-            Some(Self::WebNavigateOrSearch)
-        } else if upper.contains("CLICK") || upper.contains("CLIQUE") || upper.contains("BUTTON") || upper.contains("BOUTON") || upper.contains("INTERACT") {
-            Some(Self::ClickElementOrButton)
-        } else if upper.contains("WRITE") || upper.contains("TEXT") || upper.contains("INPUT") || upper.contains("DICTAT") || upper.contains("SAISIE") || upper.contains("FORM") {
-            Some(Self::TextInputOrDictation)
-        } else if upper.contains("APP") || upper.contains("APPLICATION") || upper.contains("LAUNCH") || upper.contains("CLOSE_APP") {
-            Some(Self::AppManagement)
-        } else if upper.contains("WINDOW") || upper.contains("IMMERSION") || upper.contains("LAYOUT") || upper.contains("TILE") {
-            Some(Self::WindowManagementOrImmersion)
-        } else if upper.contains("SUMMARY") || upper.contains("RESUME") || upper.contains("RÉSUMÉ") || upper.contains("READ_SCREEN") || upper.contains("READ_EDITOR") {
-            Some(Self::ScreenReadingOrSummary)
-        } else if upper.contains("FLOATING") || upper.contains("CARD") || upper.contains("FORM") {
-            Some(Self::FloatingCardOrForm)
-        } else if upper.contains("SUBTITLE") || upper.contains("SOUS_TITRE") {
-            Some(Self::LiveSubtitles)
-        } else if upper.contains("EMERGENCY") || upper.contains("HEALTH") || upper.contains("URGENCE") || upper.contains("SECOURS") {
-            Some(Self::EmergencyOrHealth)
-        } else if upper.contains("CHAT") || upper.contains("CONVERSATION") || upper.contains("BONJOUR") {
-            Some(Self::GeneralChitChat)
-        } else if upper.contains("MOTOR") || upper.contains("SWITCH") || upper.contains("CONTACTEUR") || upper.contains("SURVOL") || upper.contains("BADGE") {
-            Some(Self::MotorAndSwitchAccess)
-        } else if upper.contains("VISUAL") || upper.contains("ZOOM") || upper.contains("LOUPE") || upper.contains("CONTRAST") || upper.contains("THEME") || upper.contains("MALVOY") {
-            Some(Self::VisualAccessibility)
-        } else if upper.contains("CARE") || upper.contains("COMFORT") || upper.contains("AIDANT") || upper.contains("DOULEUR") || upper.contains("SOIF") || upper.contains("FATIGUE") {
-            Some(Self::CareAndComfort)
-        } else if upper.contains("COGNITIVE") || upper.contains("FALC") || upper.contains("SIMPLE") || upper.contains("CLARITY") || upper.contains("FACILE") {
-            Some(Self::CognitiveAndClarity)
-        } else if upper.contains("RADIO") || upper.contains("STREAM") || upper.contains("MUSIQ") || upper.contains("WEBRADIO") {
-            Some(Self::RadioAndMusicStream)
-        } else if upper.contains("FLIGHT") || upper.contains("VOL") || upper.contains("AVION") || upper.contains("TRAVEL") || upper.contains("BILLET") {
-            Some(Self::TravelAndFlightBooking)
-        } else if upper.contains("TAB") || upper.contains("ONGLET") {
-            Some(Self::BrowserTabNavigation)
-        } else if upper.contains("NAVIGATE_IN_WEBPAGE") || upper.contains("WEBPAGE") || upper.contains("PAGE_WEB") {
-            Some(Self::NavigateInWebpage)
-        } else if upper.contains("ECOMMERCE") || upper.contains("SHOPPING") || upper.contains("PANIER") || upper.contains("ACHAT") || upper.contains("COMMANDE") {
-            Some(Self::EcommerceAndShopping)
-        } else if upper.contains("CODE") || upper.contains("DEV") || upper.contains("DEVELOP") || upper.contains("PROGRAM") || upper.contains("RUST") || upper.contains("PYTHON") {
-            Some(Self::CodeAndDevelopment)
-        } else if upper.contains("COMMUNICATION") || upper.contains("MESSAG") || upper.contains("MAIL") || upper.contains("EMAIL") || upper.contains("CONTACT") || upper.contains("TEAMS") || upper.contains("SLACK") {
-            Some(Self::CommunicationAndMessaging)
-        } else if upper.contains("FILE") || upper.contains("EXPLORER") || upper.contains("DOSSIER") || upper.contains("FICHIER") {
-            Some(Self::FileManagementAndExplorer)
-        } else if upper.contains("VIDEO") || upper.contains("ENTERTAIN") || upper.contains("YOUTUBE") || upper.contains("NETFLIX") || upper.contains("FILM") || upper.contains("SERIE") {
-            Some(Self::VideoAndEntertainment)
-        } else if upper.contains("LOCKED") || upper.contains("EYE") || upper.contains("OCULAIRE") || upper.contains("REGARD") || upper.contains("TOBII") || upper.contains("SLA") {
-            Some(Self::LockedInAndEyeTracking)
-        } else if upper.contains("TREMOR") || upper.contains("TREMBLE") || upper.contains("SPASTI") || upper.contains("PARKINSON") || upper.contains("ATAXIE") || upper.contains("IMC") {
-            Some(Self::TremorAndSpasticityFilter)
-        } else if upper.contains("SENSORY") || upper.contains("CALM") || upper.contains("AUTIS") || upper.contains("TSA") || upper.contains("SURCHARGE") || upper.contains("TDAH") {
-            Some(Self::NeurodivergentAndSensoryCalm)
-        } else if upper.contains("AAC") || upper.contains("CAA") || upper.contains("PICTO") || upper.contains("APHASI") || upper.contains("NON_VERBAL") {
-            Some(Self::AacSymbolCommunication)
-        } else if upper.contains("VITAL") || upper.contains("CAREGIVER") || upper.contains("SOIGNANT") || upper.contains("AIDANT") || upper.contains("ASPIRAT") || upper.contains("POSTURE") {
-            Some(Self::VitalCareAndCaregiverAlert)
-        } else if upper.contains("KNOWLEDGE") || upper.contains("QUESTION") || upper.contains("SAVOIR") || upper.contains("CONNAISSANCE") || upper.contains("RHETORIC") || upper.contains("RHÉTORIQUE") {
-            Some(Self::KnowledgeAndQuestions)
-        } else if upper.contains("CLARIF") || upper.contains("AMBIGU") || upper.contains("INCOMPLET") || upper.contains("ELUDED") {
-            Some(Self::ClarificationRequired)
-        } else if upper.contains("NOISE") || upper.contains("UNINTELLIGIBLE") || upper.contains("BRUIT") || upper.contains("INAUDIBLE") {
-            Some(Self::UnintelligibleOrNoise)
-        } else if upper.contains("CHARABIA") || upper.contains("NONSENSE") || upper.contains("INCOHERENT") {
-            Some(Self::UnintelligibleOrNoise)
-        } else if upper.contains("CORRECT") || upper.contains("DISAGREE") || upper.contains("CONTEST") || upper.contains("TROMPE") {
-            Some(Self::CorrectionOrDisagreement)
-        } else if upper.contains("IDENTITY") || upper.contains("IDENTITE") || upper.contains("CAPABILIT") || upper.contains("FONCTION") {
-            Some(Self::AgentIdentityAndCapabilities)
-        } else if upper.contains("EMPATH") || upper.contains("EMOTION") || upper.contains("SOUTIEN") {
-            Some(Self::EmotionalSupportAndEmpathy)
-        } else if upper.contains("CHATTY") || upper.contains("BAVARD") || upper.contains("ETHIC") || upper.contains("ÉTHIQ") || upper.contains("PAPOT") {
-            Some(Self::ChattyAndEthicalCompanion)
-        } else {
-            None
+            Self::ScheduleTask => "Planification temporelle, minuteurs, rappels, timers, alarmes et commandes différées (ex: 'rappelle-moi dans 5 minutes', 'minuteur 10 min', 'annule les timers'). Actions : schedule_prompt, schedule_prompts, cancel_scheduled_tasks.",
+            Self::WebNavigateOrSearch => "Recherche d'information sur Internet, météo, navigation sur sites web, recherche Google et saisie d'URLs. Actions : navigate_to_url, open_search_browser, navigate_back, navigate_forward.",
+            Self::AudioSettings => "Gestion des périphériques audio (haut-parleur, casque, mélangeur de volume, panneau son). Actions : accessibility_shortcut: action_center, open_settings.",
+            Self::SetVolumeOrMuteUnMute => "Réglage du volume sonore de l'ordinateur (ex: 'mets le son', 'baisse d'un cran', 'volume à fond'). Action : set_volume.",
+            Self::MuteAudio => "Mise en sourdine des flux audio parasites externes tout en préservant la voix de Libertide (ex: 'coupe le son', 'silence', 'mute'). Action : mute_audio.",
+            Self::ClickElementOrButton => "Interactivité graphique directe : clics sur boutons, liens, menus, cases à cocher, onglets ou badges numérotés #N à l'écran. Actions : click_element, click_button, click_numbered_target, focus_element, scroll.",
+            Self::TextInputOrDictation => "Saisie de texte au clavier, remplissage de formulaires, barres de recherche, remplacement ou effacement de champ. Actions : write_text, replace_field_text, clear_text, focus_element.",
+            Self::AppManagement => "Démarrage ou fermeture d'applications locales (ex: 'ouvre le bloc-notes', 'ferme Chrome', 'lance la calculatrice'). Actions : open_app, close_app, open_search.",
+            Self::WindowManagementOrImmersion => "Organisation de l'espace de travail, redimensionnement, déplacement, disposition en mosaïque ou mode immersion fenêtrée. Actions : arrange_window, tile_windows, activate_immersion, focus_window.",
+            Self::ScreenReadingOrSummary => "Lecture et résumé du contenu textuel de l'écran ou d'un fichier ouvert dans un éditeur (ex: 'de quoi parle la page ?', 'résume le document'). Actions : read_editor_content, show_floating_card, scroll.",
+            Self::FloatingCardOrForm => "Affichage et fermeture de fenêtres volantes transparentes (fiches d'information Markdown, formulaires de critères, tableaux de données). Actions : show_floating_card, close_floating_card.",
+            Self::LiveSubtitles => "Sous-titres en direct et retranscription textuelle continue du flux audio système. Action : live_subtitles.",
+            Self::EmergencyOrHealth => "Situation d'urgence vitale, malaise, détresse respiratoire ou appel immédiat aux secours (15, 18, 112). Actions : mute_audio, alerte soignant, set_reasoning_passes.",
+            Self::GeneralChitChat => "Salutations polies, discussion conviviale générale et échanges sans action mécanique sur l'ordinateur. Actions : aucune (actions: []).",
+            Self::MotorAndSwitchAccess => "Accessibilité pour grand handicap moteur : navigation par contacteur unique, défilement automatique, numérotation par badges (#1, #2). Actions : click_numbered_target, toggle_numbered_targets.",
+            Self::VisualAccessibility => "Accessibilité pour personnes malvoyantes : loupe, grossissement de police, inversion des contrastes, lecture audio immersive. Actions : accessibility_shortcut (magnifier_zoom_in, color_filter_toggle).",
+            Self::CareAndComfort => "Besoins physiologiques et confort : signalement de soif, froid, chaud, douleur, posture du fauteuil, appel de l'aidant. Actions : mute_audio, show_floating_card, quick_suggestions bienveillantes.",
+            Self::CognitiveAndClarity => "Accessibilité cognitive et FALC (Facile à Lire et à Comprendre) : simplification de phrases, découpage étape par étape, explications dénuées de jargon technique.",
+            Self::RadioAndMusicStream => "Écoute de stations radio en direct (France Inter, RTL, etc.), webradios, playlists ou morceaux de musique sur le web. Actions : navigate_to_url, click_button/click_element (lecture/direct), set_volume.",
+            Self::TravelAndFlightBooking => "Recherche et comparatifs de vols d'avion, horaires de voyage, formulaire de critères de transport. Actions : show_floating_card (formulaire/tableau), navigate_to_url.",
+            Self::BrowserTabNavigation => "Gestion des onglets du navigateur : sélection d'un onglet ouvert, nouvel onglet, fermeture d'onglet (Ctrl+W). Actions : click_element sur onglet, accessibility_shortcut: close_tab/reopen_tab.",
+            Self::NavigateInWebpage => "Exploration en profondeur d'une page web ouverte : acceptation obligatoire des bannières cookies, fermeture des popups, navigation via Google Search. Actions : click_element, click_button, scroll, navigate_back.",
+            Self::EcommerceAndShopping => "Achats en ligne, consultation de panier, comparatif de prix et passation de commande (avec arrêt obligatoire avant paiement). Actions : navigate_to_url, click_button, show_floating_card (table).",
+            Self::CodeAndDevelopment => "Développement informatique : inspection de code, consultation de fichiers sources (.rs, .py, .js), exécution de commandes de test ou compilation. Actions : read_editor_content, run_command.",
+            Self::CommunicationAndMessaging => "Communication interpersonnelle : rédaction d'e-mails, messageries professionnelles (Teams, Slack, Outlook, Discord), consultation de fiches de contacts. Actions : write_text, show_floating_card, focus_window.",
+            Self::FileManagementAndExplorer => "Gestion de fichiers et répertoires : Explorateur Windows / Finder, ouverture de documents PDFs, images ou classeurs. Actions : open_file, open_app: explorer.",
+            Self::VideoAndEntertainment => "Visionnage de vidéos, films, documentaires ou séries sur YouTube, Netflix, Arte ou lecteurs en ligne. Actions : navigate_to_url, click_element vidéo, accessibility_shortcut: space/f.",
+            Self::LockedInAndEyeTracking => "Commande oculaire pure et syndrome d'enfermement (SLA / locked-in) : grilles AAC pour sélection au regard et porte-voix de synthèse.",
+            Self::TremorAndSpasticityFilter => "Compensation des tremblements et de la spasticité (Parkinson, ataxie) : boutons agrandis, filtrage des clics involontaires et tolérance aux frappes répétées.",
+            Self::NeurodivergentAndSensoryCalm => "Apaisement sensoriel (autisme TSA, surcharge cognitive, TDAH) : coupure immédiate du bruit, phrasé court et calme, décomposition en micro-tâches.",
+            Self::AacSymbolCommunication => "Communication Alternative et Améliorée (CAA) : restitution de phrases complètes à partir de pictogrammes, mots-clés simples ou symboles pour personnes non-verbales ou aphasiques.",
+            Self::VitalCareAndCaregiverAlert => "Alerte auxiliaire de vie et soins vitaux : appel du soignant pour aspiration, repositionnement corporel ou détresse respiratoire. Actions : show_floating_card alerte plein écran, mute_audio.",
+            Self::KnowledgeAndQuestions => "Questions de connaissances générales, science, histoire, explications intellectuelles ou vérification de micro/présence ('tu m'entends ?', 'es-tu là ?'). Réponse explicative dans la narration sans action d'écran.",
+            Self::ClarificationRequired => "Demande de l'utilisateur trop vague, tronquée ou incomplète ('fais ça', 'clique'). Nécessite de poser une question de clarification dans la narration sans cliquer à l'aveugle.",
+            Self::UnintelligibleOrNoise => "Bruits de micro, paroles inaudibles, onomatopées isolées ou charabia sans consigne intelligible. Aucune action, demande polie de répétition.",
+            Self::CorrectionOrDisagreement => "Signalement d'erreur ou désaccord de l'utilisateur ('non pas ça', 'tu t'es trompé', 'annule'). Arrêt immédiat de la manœuvre en cours et compensation.",
+            Self::AgentIdentityAndCapabilities => "Questions portant sur qui est Libertide, ses fonctionnalités, sa conception et son fonctionnement pour l'accessibilité.",
+            Self::EmotionalSupportAndEmpathy => "Soutien moral et écoute active : réconfort face à la fatigue, l'isolement, le découragement ou gratitude de l'utilisateur.",
+            Self::ChattyAndEthicalCompanion => "Compagnon pour des conversations éthiques"
         }
     }
 }
 
+/// Génère la liste intégrale et exhaustive de tous les CommandTags avec leurs descriptions pour le routeur (nom = description)
 pub fn all_command_tags_prompt_list() -> String {
     CommandTag::ALL
         .iter()
-        .map(|t| format!("{}: {}", t.as_str(), t.description()))
+        .map(|t| format!("- {} = {}", t.as_str(), t.description()))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// Pré-filtrage heuristique déterministe pour accélérer le routage sans latence
+/// Filtrage rapide des cas évidents (bruit pur, signal de micro, impulsions système)
 pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
     let lower = query.to_lowercase();
-    let mut tags = Vec::new();
 
     // Bruit de micro et onomatopées isolées
     let trimmed_words: Vec<&str> = lower.split_whitespace().collect();
     if trimmed_words.is_empty()
-        || (trimmed_words.len() == 1 && matches!(trimmed_words[0], "euh" | "hum" | "bah" | "ah" | "oh" | "hein" | "pff" | "tss" | "bruit"))
+        || (trimmed_words.len() == 1
+            && matches!(trimmed_words[0], "euh" | "hum" | "bah" | "ah" | "oh" | "hein" | "pff" | "tss" | "bruit" | "uh" | "um" | "er"))
     {
         return vec![CommandTag::UnintelligibleOrNoise];
     }
@@ -647,444 +524,80 @@ pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
         return vec![CommandTag::UnintelligibleOrNoise];
     }
 
-    // Contestation ou signalement d'erreur de la part de l'utilisateur
-    if lower.starts_with("non ")
-        || lower == "non"
-        || lower.contains("c'est pas ça")
-        || lower.contains("cest pas ca")
-        || lower.contains("tu t'es trompé")
-        || lower.contains("tu tes trompe")
-        || lower.contains("pas ce que j'ai dit")
-        || lower.contains("pas ce que je voulais")
-        || lower.contains("recommence")
-        || lower.contains("mauvaise réponse")
-        || lower.contains("mauvais bouton")
+    // Salutations et échanges de courtoisie évidents (sans verbe d'action)
+    const GREETINGS: &[&str] = &[
+        "salut", "bonjour", "bonsoir", "coucou", "hello", "hi", "hey", "yo",
+        "ca va", "ça va", "comment ca va", "comment ça va", "comment vas tu", "comment vas-tu",
+        "comment tu vas", "quoi de neuf", "bonne journee", "bonne journée",
+        "bonne soiree", "bonne soirée", "au revoir", "a plus", "à plus", "a bientot", "à bientôt",
+        "merci", "merci beaucoup", "de rien",
+    ];
+    let norm_query = query.trim().to_lowercase().replace(['?', '!', '.', ',', ';', ':'], "");
+    let norm_trimmed = norm_query.trim();
+    let has_action_verb = norm_trimmed.contains("ouvre")
+        || norm_trimmed.contains("ouvrir")
+        || norm_trimmed.contains("ferme")
+        || norm_trimmed.contains("fermer")
+        || norm_trimmed.contains("clique")
+        || norm_trimmed.contains("cliquer")
+        || norm_trimmed.contains("cherche")
+        || norm_trimmed.contains("recherche")
+        || norm_trimmed.contains("lance")
+        || norm_trimmed.contains("lancer")
+        || norm_trimmed.contains("mets");
+    if !has_action_verb && GREETINGS.iter().any(|&g| norm_trimmed == g || norm_trimmed.starts_with(&format!("{g} ")) || norm_trimmed.ends_with(&format!(" {g}"))) {
+        return vec![CommandTag::GeneralChitChat, CommandTag::ChattyAndEthicalCompanion];
+    }
+
+    // Commandes audio et volume évidentes (prioritaires et déterministes)
+    if norm_trimmed.contains("son")
+        || norm_trimmed.contains("volume")
+        || norm_trimmed.contains("mute")
+        || norm_trimmed.contains("silence")
+        || norm_trimmed.contains("chut")
+        || norm_trimmed.contains("audio")
+        || norm_trimmed.contains("plus fort")
+        || norm_trimmed.contains("moins fort")
     {
-        tags.push(CommandTag::CorrectionOrDisagreement);
-        return tags;
+        if norm_trimmed.contains("coupe")
+            || norm_trimmed.contains("mute")
+            || norm_trimmed.contains("silence")
+            || norm_trimmed.contains("chut")
+        {
+            return vec![CommandTag::MuteAudio, CommandTag::SetVolumeOrMuteUnMute];
+        }
+        return vec![CommandTag::SetVolumeOrMuteUnMute, CommandTag::AudioSettings];
     }
 
-    // Demandes imprécises ou tronquées nécessitant clarification
-    if lower == "fais-le"
-        || lower == "fais le"
-        || lower == "ouvre ça"
-        || lower == "ouvre ca"
-        || lower == "clique dessus"
-        || lower == "clique là"
-        || lower == "supprime ça"
-        || lower == "mets le truc"
-        || lower == "continue"
-        || lower == "valide"
+    // Détection directe des impulsions du compagnon proactif
+    if lower.contains("[compagnon proactif") {
+        if lower.contains("careandcomfort") {
+            return vec![CommandTag::CareAndComfort, CommandTag::ChattyAndEthicalCompanion];
+        } else if lower.contains("knowledgeandquestions") {
+            return vec![CommandTag::KnowledgeAndQuestions, CommandTag::ChattyAndEthicalCompanion];
+        } else if lower.contains("emotionalsupportandempathy") {
+            return vec![CommandTag::EmotionalSupportAndEmpathy, CommandTag::ChattyAndEthicalCompanion];
+        } else if lower.contains("radioandmusicstream") {
+            return vec![CommandTag::RadioAndMusicStream, CommandTag::ChattyAndEthicalCompanion];
+        } else {
+            return vec![CommandTag::ChattyAndEthicalCompanion, CommandTag::CognitiveAndClarity];
+        }
+    }
+
+    // Vérification de présence / test micro évident
+    if lower == "tu m'entends"
+        || lower == "tu m'entends ?"
+        || lower == "tu m entends"
+        || lower == "m'entends-tu"
+        || lower == "can you hear me"
+        || lower == "test micro"
+        || lower == "allo"
+        || lower == "allô"
     {
-        tags.push(CommandTag::ClarificationRequired);
-        return tags;
-    }
-
-    // Soutien émotionnel et fatigue
-    if lower.contains("j'en ai marre") || lower.contains("jen ai marre") || lower.contains("je suis fatigué") || lower.contains("je suis triste") || lower.contains("je me sens seul") {
-        tags.push(CommandTag::EmotionalSupportAndEmpathy);
-    }
-    if lower.contains("papote") || lower.contains("papoter") || lower.contains("parle de toi") || lower.contains("parle-moi de toi") || lower.contains("bavarde") {
-        tags.push(CommandTag::ChattyAndEthicalCompanion);
-    }
-
-    // Détection prioritaire : Vérification d'interactivité, de micro ou de présence
-    let norm_clean = lower
-        .replace(['’', '\'', '‘', 'ʼ', 'ʻ', '?', '!', ',', ';', '.', '-', '_'], " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let is_interactive_check = norm_clean == "tu m entends"
-        || norm_clean == "tu m entnds"
-        || norm_clean == "m entends tu"
-        || norm_clean == "m entnds tu"
-        || norm_clean == "est ce que tu m entends"
-        || norm_clean == "est ce que tu m entnds"
-        || norm_clean == "tu m ecoutes"
-        || norm_clean == "m ecoutes tu"
-        || norm_clean == "est ce que tu m ecoutes"
-        || norm_clean == "vous m entendez"
-        || norm_clean == "m entendez vous"
-        || norm_clean == "es tu la"
-        || norm_clean == "t es la"
-        || norm_clean == "tu es la"
-        || norm_clean == "etes vous la"
-        || norm_clean == "êtes vous là"
-        || norm_clean == "est ce que tu es la"
-        || norm_clean == "allô"
-        || norm_clean == "allo"
-        || norm_clean == "test micro"
-        || norm_clean == "test audio"
-        || norm_clean == "test son"
-        || norm_clean == "tu fonctionnes"
-        || norm_clean == "can you hear me"
-        || norm_clean == "are you there"
-        || norm_clean == "are you listening";
-
-    if is_interactive_check {
         return vec![CommandTag::KnowledgeAndQuestions];
     }
 
-    // Détection des questions de connaissances, d'explication ou rhétoriques
-    let is_explicit_system_action = lower.starts_with("ouvre ")
-        || lower.starts_with("ferme ")
-        || lower.starts_with("lance ")
-        || lower.starts_with("clique ")
-        || lower.starts_with("cherche sur google")
-        || lower.starts_with("recherche sur google")
-        || lower.starts_with("cherche sur le web")
-        || lower.starts_with("tape ")
-        || lower.starts_with("écris ")
-        || lower.starts_with("ecris ");
-
-    if !is_explicit_system_action {
-        let is_knowledge_query = norm_clean.starts_with("pourquoi ")
-            || norm_clean.starts_with("qu est ce que ")
-            || norm_clean.starts_with("qu est ce qu ")
-            || norm_clean.starts_with("c est quoi ")
-            || norm_clean.starts_with("quelle est la ")
-            || norm_clean.starts_with("quel est le ")
-            || norm_clean.starts_with("qui est ")
-            || norm_clean.starts_with("qui etait ")
-            || norm_clean.starts_with("qui était ")
-            || norm_clean.starts_with("qui a découvert ")
-            || norm_clean.starts_with("qui a cree ")
-            || norm_clean.starts_with("qui a créé ")
-            || norm_clean.starts_with("qui a invente ")
-            || norm_clean.starts_with("qui a inventé ")
-            || norm_clean.starts_with("qui a ecrit ")
-            || norm_clean.starts_with("qui a écrit ")
-            || norm_clean.starts_with("comment fonctionne ")
-            || norm_clean.starts_with("comment marche ")
-            || norm_clean.starts_with("comment se fait il ")
-            || norm_clean.starts_with("explique moi ")
-            || norm_clean.starts_with("peux tu m expliquer ")
-            || norm_clean.starts_with("raconte moi ")
-            || norm_clean.starts_with("dis moi une blague")
-            || norm_clean.starts_with("raconte une blague")
-            || norm_clean.starts_with("raconte une histoire")
-            || norm_clean.starts_with("que penses tu de ")
-            || norm_clean.starts_with("tu penses quoi de ")
-            || norm_clean.starts_with("what is ")
-            || norm_clean.starts_with("why is ")
-            || norm_clean.starts_with("how does ")
-            || norm_clean.starts_with("tell me about ")
-            || norm_clean.starts_with("explain to me ");
-
-        if is_knowledge_query {
-            tags.push(CommandTag::KnowledgeAndQuestions);
-        }
-    }
-
-    // 0. Détection prioritaire : Radio, musique et streaming audio en direct
-    if lower.contains("radio") || lower.contains("radio france") || lower.contains("france inter") || lower.contains("france info") || lower.contains("franceinfo")
-        || lower.contains("rtl") || lower.contains("nrj") || lower.contains("nostalgie") || lower.contains("skyrock")
-        || lower.contains("fip") || lower.contains("europe 1") || lower.contains("chérie fm") || lower.contains("cherie fm")
-        || lower.contains("webradio") || lower.contains("musique") || lower.contains("playlist") || lower.contains("deezer")
-        || lower.contains("spotify") || lower.contains("soundcloud") || lower.contains("podcast")
-        || ((lower.contains("écoute") || lower.contains("ecoute") || lower.contains("écouter") || lower.contains("ecouter") || lower.contains("mets ") || lower.contains("lance "))
-            && (lower.contains("radio") || lower.contains("direct") || lower.contains("live") || lower.contains("musique") || lower.contains("chanson"))) {
-        tags.push(CommandTag::RadioAndMusicStream);
-        if !tags.contains(&CommandTag::NavigateInWebpage) {
-            tags.push(CommandTag::NavigateInWebpage);
-        }
-        if !tags.contains(&CommandTag::WebNavigateOrSearch) {
-            tags.push(CommandTag::WebNavigateOrSearch);
-        }
-        if !tags.contains(&CommandTag::ClickElementOrButton) {
-            tags.push(CommandTag::ClickElementOrButton);
-        }
-    }
-
-    // 0 bis. Détection prioritaire : Billets d'avion, comparateurs de vol et voyages
-    if lower.contains("vol") || lower.contains("vols") || lower.contains("billet d'avion") || lower.contains("billets d'avion")
-        || lower.contains("avion") || lower.contains("billet") || lower.contains("billets") || lower.contains("skyscanner")
-        || lower.contains("kayak") || lower.contains("google flights") || lower.contains("booking") || lower.contains("voyage")
-        || lower.contains("vol pour") || lower.contains("aller retour") || lower.contains("aller-retour") || lower.contains("compagnie aérienne")
-        || (lower.contains("billet") && (lower.contains("paris") || lower.contains("tokyo") || lower.contains("londres") || lower.contains("marseille") || lower.contains("nice") || lower.contains("avion"))) {
-        tags.push(CommandTag::TravelAndFlightBooking);
-        if !tags.contains(&CommandTag::FloatingCardOrForm) {
-            tags.push(CommandTag::FloatingCardOrForm);
-        }
-        if !tags.contains(&CommandTag::WebNavigateOrSearch) {
-            tags.push(CommandTag::WebNavigateOrSearch);
-        }
-    }
-
-    // 0 ter. Détection prioritaire : Recherche et gestion des onglets de navigateur
-    if lower.contains("onglet") || lower.contains("onglets") || lower.contains("tab") || lower.contains("tabs")
-        || lower.contains("nouvel onglet") || lower.contains("ferme l'onglet") || lower.contains("fermer l'onglet")
-        || lower.contains("ferme cet onglet") || lower.contains("cherche dans l'onglet") || lower.contains("autre onglet")
-        || lower.contains("bascule sur l'onglet") || lower.contains("va sur l'onglet") || lower.contains("passe à l'onglet")
-        || lower.contains("recherche onglet") || lower.contains("trouve l'onglet") || lower.contains("ferme onglet") {
-        tags.push(CommandTag::BrowserTabNavigation);
-        if !tags.contains(&CommandTag::ClickElementOrButton) {
-            tags.push(CommandTag::ClickElementOrButton);
-        }
-    }
-
-    // 0 quater. Détection prioritaire : Vidéos, films, streaming, séries et divertissement
-    if lower.contains("film") || lower.contains("films") || lower.contains("série") || lower.contains("series")
-        || lower.contains("streaming") || lower.contains("cinéma") || lower.contains("cinema")
-        || lower.contains("vidéo") || lower.contains("video") || lower.contains("videos") || lower.contains("vidéos")
-        || lower.contains("documentaire") || lower.contains("replay") || lower.contains("arte")
-        || lower.contains("netflix") || lower.contains("pluto") || lower.contains("youtube") {
-        tags.push(CommandTag::VideoAndEntertainment);
-        if !tags.contains(&CommandTag::NavigateInWebpage) {
-            tags.push(CommandTag::NavigateInWebpage);
-        }
-        if !tags.contains(&CommandTag::WebNavigateOrSearch) {
-            tags.push(CommandTag::WebNavigateOrSearch);
-        }
-    }
-
-    // 0 quinquies. Détection prioritaire : E-commerce, panier et achats en ligne
-    if lower.contains("panier") || lower.contains("commander") || lower.contains("commande")
-        || lower.contains("acheter") || lower.contains("achat") || lower.contains("achats")
-        || lower.contains("amazon") || lower.contains("cdiscount") || lower.contains("fnac")
-        || lower.contains("aliexpress") || lower.contains("ebay") || lower.contains("prix de")
-        || lower.contains("combien coûte") || lower.contains("combien coute") || lower.contains("passer la commande")
-        || lower.contains("checkout") || lower.contains("cart") || lower.contains("ajouter au panier")
-        || lower.contains("voir le panier") || lower.contains("code promo") {
-        tags.push(CommandTag::EcommerceAndShopping);
-        if !tags.contains(&CommandTag::WebNavigateOrSearch) {
-            tags.push(CommandTag::WebNavigateOrSearch);
-        }
-    }
-
-    // 0 sexies. Détection prioritaire : Développement, code et IDE
-    if lower.contains("code") || lower.contains("coder") || lower.contains("fichier source")
-        || lower.contains("compil") || lower.contains("cargo") || lower.contains("git ")
-        || lower.contains("commit") || lower.contains("push") || lower.contains("pull")
-        || lower.contains("rust") || lower.contains("python") || lower.contains("javascript")
-        || lower.contains("typescript") || lower.contains("debug") || lower.contains("fonction")
-        || lower.contains("classe") || lower.contains("erreur de compilation") || lower.contains("main.rs")
-        || lower.contains("cargo.toml") || lower.contains("vscode") || lower.contains("rustrover") || lower.contains("intellij") {
-        tags.push(CommandTag::CodeAndDevelopment);
-    }
-
-    // 0 septies. Détection prioritaire : Communication, messageries et contacts
-    if lower.contains("mail") || lower.contains("email") || lower.contains("e-mail") || lower.contains("courriel")
-        || lower.contains("message") || lower.contains("écris à") || lower.contains("ecris a")
-        || lower.contains("contacter") || lower.contains("contacte") || lower.contains("teams")
-        || lower.contains("slack") || lower.contains("discord") || lower.contains("outlook")
-        || lower.contains("whatsapp") || lower.contains("gmail") || lower.contains("envoyer un message")
-        || lower.contains("coordonnées de") || lower.contains("coordonnees de")
-        || (lower.contains("numéro de") && (lower.contains("téléphone") || lower.contains("tel") || lower.contains("portable"))) {
-        tags.push(CommandTag::CommunicationAndMessaging);
-    }
-
-    // 0 octies. Détection prioritaire : Gestionnaire de fichiers, dossiers et documents
-    if lower.contains("dossier") || lower.contains("dossiers") || lower.contains("téléchargement")
-        || lower.contains("telechargement") || lower.contains("downloads") || lower.contains("documents")
-        || lower.contains("explorateur de fichiers") || lower.contains("ouvrir le pdf") || lower.contains("ouvre le pdf")
-        || lower.contains("ouvrir l'image") || lower.contains("ouvre l'image") || lower.contains("ouvre le fichier")
-        || lower.contains("ouvrir le fichier") || lower.contains("déplace le fichier") || lower.contains("renomme")
-        || (lower.contains("fichier") && (lower.contains("ouvre") || lower.contains("trouve") || lower.contains("cherche"))) {
-        tags.push(CommandTag::FileManagementAndExplorer);
-    }
-
-    // 0 nonies. Détection prioritaire : Commande oculaire pure et syndrome d'enfermement
-    if lower.contains("commande oculaire") || lower.contains("eye tracking") || lower.contains("eyetracker")
-        || lower.contains("regard") || lower.contains("tobii") || lower.contains("locked-in") || lower.contains("locked in")
-        || lower.contains("clignement") || lower.contains("cillement") || lower.contains("sla") || lower.contains("poursuite oculaire") {
-        tags.push(CommandTag::LockedInAndEyeTracking);
-        if !tags.contains(&CommandTag::MotorAndSwitchAccess) {
-            tags.push(CommandTag::MotorAndSwitchAccess);
-        }
-    }
-
-    // 0 decies. Détection prioritaire : Spasticité, tremblements moteurs sévères et ataxie
-    if lower.contains("tremblement") || lower.contains("tremblements") || lower.contains("spasticité") || lower.contains("spasticite")
-        || lower.contains("spasme") || lower.contains("spasmes") || lower.contains("parkinson") || lower.contains("ataxie")
-        || lower.contains("dystonie") || lower.contains("chorée") || lower.contains("choree") || lower.contains("clics involontaires") {
-        tags.push(CommandTag::TremorAndSpasticityFilter);
-        if !tags.contains(&CommandTag::MotorAndSwitchAccess) {
-            tags.push(CommandTag::MotorAndSwitchAccess);
-        }
-    }
-
-    // 0 undecies. Détection prioritaire : Surcharge sensorielle, calme cognitif et TSA
-    if lower.contains("surcharge sensorielle") || lower.contains("trop de bruit") || lower.contains("panique")
-        || lower.contains("autisme") || lower.contains("autiste") || lower.contains("tsa") || lower.contains("hypersensibilité")
-        || lower.contains("hypersensibilite") || lower.contains("éblouissement") || lower.contains("eblouissement") || lower.contains("calme l'écran") {
-        tags.push(CommandTag::NeurodivergentAndSensoryCalm);
-        if !tags.contains(&CommandTag::MuteAudio) {
-            tags.push(CommandTag::MuteAudio);
-        }
-    }
-
-    // 0 duodecies. Détection prioritaire : Communication Alternative et Améliorée (CAA) et aphasie
-    if lower.contains("pictogramme") || lower.contains("pictogrammes") || lower.contains("caa") || lower.contains("aac")
-        || lower.contains("aphasie") || lower.contains("aphasique") || lower.contains("non verbal") || lower.contains("non-verbal")
-        || lower.contains("tableau de communication") || lower.contains("porte-voix") || lower.contains("aide à parler") {
-        tags.push(CommandTag::AacSymbolCommunication);
-        if !tags.contains(&CommandTag::FloatingCardOrForm) {
-            tags.push(CommandTag::FloatingCardOrForm);
-        }
-    }
-
-    if lower.contains("volume") || lower.contains("plus fort") || lower.contains("moins fort") || lower.contains("baisse") || lower.contains("monte le son") {
-        tags.push(CommandTag::VolumeControl);
-    }
-    if lower.contains("coupe le son") || lower.contains("muet") || lower.contains("mute") || lower.contains("sourdine") || lower.contains("silence") {
-        tags.push(CommandTag::MuteAudio);
-    }
-    if lower.contains("audio") || lower.contains("casque") || lower.contains("haut-parleur") {
-        tags.push(CommandTag::AudioSettings);
-    }
-
-    // 1. Détection enrichie du scheduling (timers, délais, rappels, planification et annulation)
-    let has_delay_pattern = lower.split_whitespace().any(|w| {
-        w.ends_with("min") || w.ends_with("sec") || w.ends_with('h')
-    }) || lower.contains("dans ") || lower.contains("d'ici ") || lower.contains("après ") || lower.contains("apres ") || lower.contains("in ");
-
-    let has_schedule_kw = lower.contains("minute") || lower.contains("seconde") || lower.contains("heure")
-        || lower.contains("rappel") || lower.contains("rappelle") || lower.contains("remind")
-        || lower.contains("différ") || lower.contains("differe") || lower.contains("retarde")
-        || lower.contains("timer") || lower.contains("minuteur") || lower.contains("chronomètre") || lower.contains("chronometre")
-        || lower.contains("alarme") || lower.contains("programme") || lower.contains("programmer")
-        || lower.contains("planifie") || lower.contains("planifier") || lower.contains("schedule")
-        || lower.contains("attends") || lower.contains("attendre") || lower.contains("patienter")
-        || lower.contains("annule le timer") || lower.contains("annule les timers") || lower.contains("stop timer")
-        || lower.contains("annule les rappels") || lower.contains("annuler les rappels");
-
-    if (has_delay_pattern && (lower.contains("dans ") || lower.contains("après ") || lower.contains("in "))) || has_schedule_kw {
-        tags.push(CommandTag::ScheduleTask);
-    }
-
-    if lower.contains("cherche") || lower.contains("recherche") || lower.contains("google") || lower.contains("trouve")
-        || lower.contains("météo") || lower.contains("meteo") || lower.contains("radio") || lower.contains("youtube")
-        || lower.contains("site") || lower.contains("page web") || lower.contains("http") || lower.contains(".com") || lower.contains(".fr") {
-        tags.push(CommandTag::WebNavigateOrSearch);
-        if !tags.contains(&CommandTag::NavigateInWebpage) {
-            tags.push(CommandTag::NavigateInWebpage);
-        }
-    }
-
-    // 2. Détection enrichie de l'interactivité UI (clics, sélection, formulaires, défilement)
-    let has_click_kw = lower.contains("clique") || lower.contains("clic") || lower.contains("cliquer") || lower.contains("click")
-        || lower.contains("bouton") || lower.contains("button") || lower.contains("appuie") || lower.contains("presse")
-        || lower.contains("sélectionne") || lower.contains("selectionne") || lower.contains("choisis") || lower.contains("valide")
-        || lower.contains("coche") || lower.contains("décoche") || lower.contains("decoche") || lower.contains("badge")
-        || lower.contains("numéro") || lower.contains("numero") || lower.contains("cible") || lower.contains("onglet")
-        || lower.contains("lien") || lower.contains("link");
-
-    if has_click_kw {
-        tags.push(CommandTag::ClickElementOrButton);
-    }
-
-    // Accessibilité motrice forte, contacteurs et navigation par numéros
-    if lower.contains("contacteur") || lower.contains("switch") || lower.contains("mode survol")
-        || lower.contains("badge") || lower.contains("numéro") || lower.contains("numero")
-        || lower.contains("suivant") || lower.contains("précédent") || lower.contains("precedent")
-        || lower.contains("défile") || lower.contains("defile") || lower.contains("cible suivante") {
-        tags.push(CommandTag::MotorAndSwitchAccess);
-        if !tags.contains(&CommandTag::ClickElementOrButton) {
-            tags.push(CommandTag::ClickElementOrButton);
-        }
-    }
-
-    // Accessibilité visuelle, grossissement, contrastes et lecture d'écran
-    if lower.contains("zoom") || lower.contains("grossis") || lower.contains("loupe")
-        || lower.contains("plus grand") || lower.contains("police") || lower.contains("contraste")
-        || lower.contains("thème") || lower.contains("theme") || lower.contains("lis l'écran")
-        || lower.contains("décris l'écran") || lower.contains("decris l'ecran") || lower.contains("qu'est-ce qu'il y a") {
-        tags.push(CommandTag::VisualAccessibility);
-        if !tags.contains(&CommandTag::ScreenReadingOrSummary) {
-            tags.push(CommandTag::ScreenReadingOrSummary);
-        }
-    }
-
-    // Formulaires, saisie textuelle et champs interactifs
-    if lower.contains("écris") || lower.contains("ecris") || lower.contains("écrire") || lower.contains("ecrire")
-        || lower.contains("tape") || lower.contains("taper") || lower.contains("saisis") || lower.contains("saisir")
-        || lower.contains("remplis") || lower.contains("remplir") || lower.contains("formulaire") || lower.contains("champ")
-        || lower.contains("remplace le texte") || lower.contains("efface le texte") || lower.contains("input") || lower.contains("textarea") {
-        tags.push(CommandTag::TextInputOrDictation);
-    }
-
-    // Défilement (interactivité spatiale)
-    if lower.contains("défile") || lower.contains("defile") || lower.contains("scroll")
-        || lower.contains("descends") || lower.contains("descendre") || lower.contains("monte") || lower.contains("monter") {
-        if !tags.contains(&CommandTag::ClickElementOrButton) {
-            tags.push(CommandTag::ClickElementOrButton);
-        }
-        if !tags.contains(&CommandTag::ScreenReadingOrSummary) {
-            tags.push(CommandTag::ScreenReadingOrSummary);
-        }
-    }
-
-    if lower.contains("ouvre") || lower.contains("lance") || lower.contains("ferme") || lower.contains("quitte") || lower.contains("notepad") || lower.contains("calc") {
-        tags.push(CommandTag::AppManagement);
-    }
-
-    if lower.contains("fenêtre") || lower.contains("fenetre") || lower.contains("mosaïque") || lower.contains("mosaique") || lower.contains("côte à côte") || lower.contains("cote a cote") || lower.contains("plein écran") || lower.contains("immersion") {
-        tags.push(CommandTag::WindowManagementOrImmersion);
-    }
-
-    if lower.contains("résume") || lower.contains("resume") || lower.contains("synthèse") || lower.contains("synthese") || lower.contains("lis le fichier") || lower.contains("lis le code") || lower.contains("de quoi ça parle") {
-        tags.push(CommandTag::ScreenReadingOrSummary);
-        tags.push(CommandTag::FloatingCardOrForm);
-    }
-
-    if lower.contains("sous-titre") || lower.contains("sous titre") || lower.contains("soustitre") {
-        tags.push(CommandTag::LiveSubtitles);
-    }
-
-    // Besoins essentiels, inconfort et soutien aidant
-    if lower.contains("aidant") || lower.contains("douleur") || lower.contains("j'ai mal")
-        || lower.contains("soif") || lower.contains("boire") || lower.contains("fatigue")
-        || lower.contains("froid") || lower.contains("chaud") || lower.contains("fauteuil")
-        || lower.contains("repositionne") || lower.contains("appelle") {
-        tags.push(CommandTag::CareAndComfort);
-        tags.push(CommandTag::VitalCareAndCaregiverAlert);
-    }
-
-    // Urgence vitale et secours
-    if lower.contains("urgence") || lower.contains("secours") || lower.contains("samu") || lower.contains("pompier") || lower.contains("malaise") || lower.contains("15") || lower.contains("18") || lower.contains("112") {
-        tags.push(CommandTag::EmergencyOrHealth);
-        tags.push(CommandTag::CareAndComfort);
-        tags.push(CommandTag::VitalCareAndCaregiverAlert);
-    }
-
-    // Simplification cognitive et FALC (Facile à Lire et à Comprendre)
-    if lower.contains("explique simplement") || lower.contains("plus simple") || lower.contains("en facile")
-        || lower.contains("pas compris") || lower.contains("doucement") || lower.contains("résume court")
-        || lower.contains("étape par étape") || lower.contains("etape par etape") {
-        tags.push(CommandTag::CognitiveAndClarity);
-    }
-
-    let is_greeting = norm_clean == "bonjour"
-        || norm_clean == "salut"
-        || norm_clean == "coucou"
-        || norm_clean == "bonsoir"
-        || norm_clean == "merci"
-        || norm_clean == "merci beaucoup"
-        || norm_clean == "au revoir"
-        || norm_clean == "bonne nuit"
-        || norm_clean == "a plus"
-        || norm_clean == "qui es tu"
-        || norm_clean == "qui t a cree"
-        || norm_clean == "que sais tu faire"
-        || norm_clean == "quelles sont tes fonctionnalites"
-        || norm_clean == "comment tu t appelles"
-        || norm_clean == "comment vas tu"
-        || norm_clean == "ca va"
-        || norm_clean == "ça va"
-        || norm_clean.starts_with("bonjour ")
-        || norm_clean.starts_with("salut ")
-        || norm_clean.starts_with("bonsoir ");
-    if is_greeting {
-        if norm_clean.contains("qui es tu") || norm_clean.contains("que sais tu faire") || norm_clean.contains("cree") || norm_clean.contains("fonctionnalites") {
-            tags.push(CommandTag::AgentIdentityAndCapabilities);
-        } else {
-            tags.push(CommandTag::GeneralChitChat);
-        }
-    }
-
-    tags
+    Vec::new()
 }
 
 pub fn parse_tags_from_response(raw: &str) -> Vec<CommandTag> {
@@ -1094,6 +607,12 @@ pub fn parse_tags_from_response(raw: &str) -> Vec<CommandTag> {
     // 1. Détection directe et prioritaire des identifiants exacts de tags
     for tag in CommandTag::ALL {
         if cleaned.contains(tag.as_str()) && !found.contains(tag) {
+            found.push(*tag);
+        }
+    }
+    for tag in CommandTag::ALL {
+        let stripped = tag.as_str().replace('_', "");
+        if cleaned.contains(&stripped) && !found.contains(tag) {
             found.push(*tag);
         }
     }
@@ -1109,7 +628,11 @@ pub fn parse_tags_from_response(raw: &str) -> Vec<CommandTag> {
         .collect();
 
     for token in tokens {
-        if let Some(tag) = CommandTag::from_str_loose(token) {
+        let token_upper = token.to_uppercase();
+        let matched = CommandTag::ALL.iter().find(|t| {
+            t.as_str() == token_upper || t.as_str().replace('_', "") == token_upper
+        });
+        if let Some(&tag) = matched {
             if !found.contains(&tag) {
                 found.push(tag);
             }
@@ -1118,20 +641,11 @@ pub fn parse_tags_from_response(raw: &str) -> Vec<CommandTag> {
     found
 }
 
-/// Moteur de règles : injecte dynamiquement les instructions spécifiques à chaque tag identifié
+/// Moteur de règles : injecte dynamiquement les instructions spécifiques à chaque tag identifié.
+/// Si aucun tag spécifique n'a pu être restreint avec certitude, active l'ensemble exhaustif des tags
+/// pour qu'aucune capacité d'accessibilité ou d'exploration ne soit amputée.
 pub fn build_routed_system_prompt(tags: &[CommandTag], lang_name: &str) -> String {
-    let mut effective_tags = if tags.is_empty() {
-        vec![
-            CommandTag::WebNavigateOrSearch,
-            CommandTag::ClickElementOrButton,
-            CommandTag::TextInputOrDictation,
-            CommandTag::MotorAndSwitchAccess,
-            CommandTag::VisualAccessibility,
-            CommandTag::GeneralChitChat,
-        ]
-    } else {
-        tags.to_vec()
-    };
+    let mut effective_tags: Vec<CommandTag> = tags.to_vec();
 
     // Règle transversale permanente : le compagnon bavard, joyeux, lucide et éthique est systématiquement actif
     if !effective_tags.contains(&CommandTag::ChattyAndEthicalCompanion) {
@@ -1164,8 +678,8 @@ pub fn build_routed_system_prompt(tags: &[CommandTag], lang_name: &str) -> Strin
         if !effective_tags.contains(&CommandTag::ClickElementOrButton) {
             effective_tags.push(CommandTag::ClickElementOrButton);
         }
-        if !effective_tags.contains(&CommandTag::VolumeControl) {
-            effective_tags.push(CommandTag::VolumeControl);
+        if !effective_tags.contains(&CommandTag::SetVolumeOrMuteUnMute) {
+            effective_tags.push(CommandTag::SetVolumeOrMuteUnMute);
         }
     }
     if effective_tags.contains(&CommandTag::TravelAndFlightBooking) {
@@ -1237,8 +751,8 @@ pub fn build_routed_system_prompt(tags: &[CommandTag], lang_name: &str) -> Strin
         if !effective_tags.contains(&CommandTag::ClickElementOrButton) {
             effective_tags.push(CommandTag::ClickElementOrButton);
         }
-        if !effective_tags.contains(&CommandTag::VolumeControl) {
-            effective_tags.push(CommandTag::VolumeControl);
+        if !effective_tags.contains(&CommandTag::SetVolumeOrMuteUnMute) {
+            effective_tags.push(CommandTag::SetVolumeOrMuteUnMute);
         }
     }
     if effective_tags.contains(&CommandTag::LockedInAndEyeTracking) {
@@ -1283,7 +797,7 @@ pub fn build_routed_system_prompt(tags: &[CommandTag], lang_name: &str) -> Strin
 r#"Tu es l'agent d'exploration Libertide multiplateforme (Windows, macOS, Linux).
 RÈGLE LINGUISTIQUE PRIORITAIRE ET ABSOLUE :
 Tu DOIS impérativement t'exprimer et rédiger l'intégralité de tes réponses (champ "narration", "quick_suggestions" et fenêtres volantes) exclusivement dans la langue configurée par l'utilisateur : {lang_name}.
-Même si les éléments observés à l'écran, les fenêtres ou les pages web sont dans une autre langue (anglais, etc.), tu DOIS TOUT TRADUIRE et restituer fidèlement en {lang_name}.
+TU DOIS TOUT TRADUIRE et restituer fidèlement en {lang_name}.
 
 RÈGLE STRICTE SUR LA NARRATION (NON-RÉCITATION DES COMPOSANTS ET CONTRÔLES) :
 - INTERDICTION FORMELLE d'énumérer, citer, commenter ou analyser les composants techniques de l'interface (boutons, liens, sélecteurs, champs ou badges numérotés #N) dans "narration".
@@ -1292,7 +806,6 @@ RÈGLE STRICTE SUR LA NARRATION (NON-RÉCITATION DES COMPOSANTS ET CONTRÔLES) :
 
 - Tu dois également être bavard, joyeux, lucide et ethique !
 N'hesite pas a parler de toi à l'utilisateur, juste pour papoter.
-Ne te focalise sutout pas sur le grand nombre d'elements analysés
 
 Réponds STRICTEMENT avec un unique objet JSON valide, sans aucun texte ou bloc markdown autour.
 Format JSON obligatoire :
@@ -1302,7 +815,7 @@ Format JSON obligatoire :
   "actions": [
     {{"action": "click_button", "button_name": "Texte visible exact"}}
   ],
-  "quick_suggestions": ["Option 1", "Option 2"]
+  "quick_suggestions": ["...", "..."]
 }}
 
 STRUCTURE STRICTE DU TABLEAU "actions" :
@@ -1312,12 +825,6 @@ STRUCTURE STRICTE DU TABLEAU "actions" :
   * INTERDIT : ["click_button" : "..."] (le deux-points dans un tableau est un JSON invalide !)
   * INTERDIT : {{"click_button": "..."}} (l'action doit être un élément objet dans une liste)
   * INTERDIT d'écrire "Bouton" ou "Lien" dans "button_name" ou "target_name" : écris UNIQUEMENT le texte exact "Se connecter avec Google" et SURTOUT PAS 'Bouton "Se connecter avec Google"'.
-
-RÈGLE D'ACTION OBLIGATOIRE ET INTERDICTION DU CONSEIL PASSIF :
-- Tu es un agent d'action et d'exécution directe pour l'accessibilité, et NON un conseiller théorique ni un chatbot passif.
-- INTERDICTION STRICTE DE DONNER DES CONSEILS PASSIFS OU DE DÉCRIRE LA MÉTHODE ("Il faudrait...", "Vous pouvez vous rendre sur...", "Voici la méthode...").
-- Dès que l'utilisateur demande une action, une recherche (films, vidéos, streaming, météo, service), ou un média : TU DOIS EFFECTUER TOI-MÊME L'ACTION IMMÉDIATEMENT en fournissant l'action concrète dans "actions" (ex: "navigate_to_url" vers Google ou la plateforme) avec "next_passes" > 0 !
-- "actions": [] est STRICTEMENT RÉSERVÉ aux salutations pures (bonjour/merci) OU lorsque l'objectif final est déjà pleinement atteint et visible à l'écran.
 
 RÉTRO-ANALYSE COGNITIVE & ARRÊT STRICT SUR OBJECTIF (SELF-CHECK DE COMPLÉTION) :
 - Compare systématiquement : [État actuel de l'écran] vs [Demande initiale de l'utilisateur].
@@ -1335,6 +842,8 @@ Règles de syntaxe JSON strictes :
 "#
     );
     prompt.push_str(&header);
+
+    prompt.push_str("Ne te focalise surtout pas sur le grand nombre d'elements analysés, mais sur la suite : ");
 
     // 2. Injection des règles sémantiques ciblées par module
     for tag in &effective_tags {
@@ -1386,9 +895,11 @@ Règles SAISIE TEXTE & FORMULAIRES :
 - Terminal : le texte est injecté directement dans la console active.
 "#);
             }
-            CommandTag::VolumeControl | CommandTag::AudioSettings | CommandTag::MuteAudio => {
+            CommandTag::SetVolumeOrMuteUnMute | CommandTag::AudioSettings | CommandTag::MuteAudio => {
                 prompt.push_str(r#"
 Règles AUDIO & VOLUME (ANTI-TERMINAL) :
+- INTERDICTION FORMELLE d'affirmer que tu ne peux pas contrôler le son : tu disposes de l'action native "set_volume" !
+- Pour "mets le son" ou "remets le son" : utilise impérativement {"action": "set_volume", "command": "unmute"} ou {"action": "set_volume", "command": "up"}.
 - INTERDICTION FORMELLE d'utiliser "run_command" (cmd, powershell, explorer) pour le son.
 - Réglage natif : "set_volume" ("up"|"down"|"mute"|"unmute"|"min") ou "mute_audio".
 - Raccourcis multimédia : "accessibility_shortcut" ("volume_up"|"volume_down"|"mute_volume"|"action_center").
@@ -1559,9 +1070,10 @@ Règles GESTION DE FICHIERS & EXPLORATEUR :
             CommandTag::VideoAndEntertainment => {
                 prompt.push_str(r#"
 Règles VIDÉOS, FILMS, SÉRIES & DIVERTISSEMENT :
+- CHOIX AUTONOME EN CAS DE CONSIGNE OUVERTE : Si l'utilisateur ne précise pas le sujet ou dit "choisis une vidéo", "mets une vidéo", "mets quelque chose" : INTERDICTION ABSOLUE de demander des précisions ou de refuser de choisir. CHOISIS IMMÉDIATEMENT toi-même un thème captivant et universel (ex: "documentaire nature 4K", "musique lofi relaxante", "court métrage animation", "reportage science") et lance directement la recherche YouTube correspondante via navigate_to_url.
 - Étape 1 : Ouvre la plateforme vidéo demandée (YouTube, Netflix, Arte, streaming) via "navigate_to_url" (ex: "https://www.youtube.com/results?search_query=...").
 - Étape 2 : Valide immédiatement les bandeaux de consentement ou cookies ("Tout accepter").
-- Étape 3 : Clique directement sur la vidéo désirée ou sur l'élément [@video:...] via "click_element" ou "click_button".
+- Étape 3 (SÉLECTION GLOUTONNE DU RÉSULTAT) : Dès que les résultats de recherche s'affichent, choisis IMMÉDIATEMENT le 1er résultat vidéo pertinent dans la liste (premier lien de vidéo avec titre réel ou élément [@video:...]) et clique dessus via "click_element" ou "click_button". Ne reste jamais indécis sur la page de résultats.
 - Contrôle de lecture pendant le visionnage :
   * Mettre en pause / reprendre la lecture : "accessibility_shortcut": "space" (ou clic sur le lecteur).
   * Basculer en plein écran : "accessibility_shortcut": "f".
@@ -1636,6 +1148,7 @@ Règles CONVERSATION :
 - Pour les salutations, discussions ou questions ne nécessitant pas d'action système :
   Renvoie STRICTEMENT "actions": [], "next_passes": 0.
   Réponds avec bienveillance, clarté et un bon niveau de détail dans "narration" impérativement dans la langue configurée ({lang_name}) pour accompagner au mieux l'utilisateur.
+  IGNORE TOTALEMENT l'analyse de l'écran ou les fenêtres d'arrière-plan pour les simples salutations ou bavardages : réponds au message de l'utilisateur comme un compagnon attentif sans commenter l'écran.
 "#);
             }
             CommandTag::ClarificationRequired => {
@@ -1684,6 +1197,8 @@ Règles ÉCOUTE, EMPATHIE & SOUTIEN :
 Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
 - Tu dois également être bavard, joyeux, lucide et éthique !
 - N'hésite pas à parler de toi à l'utilisateur, juste pour papoter.
+- ATTENTION : Si l'utilisateur donne un ordre d'action concret (son, clic, navigation, application), L'ACTION MÉCANIQUE PRIME TOUJOURS. Renseigne l'action dans "actions" avec "next_passes" > 0.
+- Si l'utilisateur te salue ou papote sans demander d'action sur l'écran, IGNORE TOTALEMENT l'état de l'écran et réponds chaleureusement à sa salutation / discussion. Ne décris ni n'analyse jamais l'écran quand on te dit juste bonjour ou salut.
 - Ne te focalise surtout pas sur le grand nombre d'éléments analysés à l'écran : apporte convivialité et clarté sans te noyer dans les détails techniques.
 "#);
             }
@@ -1718,7 +1233,7 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
                 prompt.push_str("- {\"action\": \"clear_text\"}\n");
                 prompt.push_str("- {\"action\": \"focus_element\", \"target_name\": \"nom\"}\n");
             }
-            CommandTag::VolumeControl | CommandTag::AudioSettings | CommandTag::MuteAudio => {
+            CommandTag::SetVolumeOrMuteUnMute | CommandTag::AudioSettings | CommandTag::MuteAudio => {
                 prompt.push_str("- {\"action\": \"set_volume\", \"command\": \"up\"|\"down\"|\"mute\"|\"unmute\"|\"min\"}\n");
                 prompt.push_str("- {\"action\": \"mute_audio\"}\n");
                 prompt.push_str("- {\"action\": \"accessibility_shortcut\", \"shortcut\": \"volume_up\"|\"volume_down\"|\"mute_volume\"|\"action_center\"}\n");
@@ -1840,196 +1355,6 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
     prompt
 }
 
-/// Construit un prompt système ultra-concis (~200 tokens) adapté aux SLM locaux
-pub fn build_minimal_local_system_prompt(lang_name: &str, tags: &[CommandTag]) -> String {
-    let mut prompt = format!(
-r#"Tu es l'agent Libertide. Tu DOIS répondre EXCLUSIVEMENT en {lang_name}.
-RÈGLE ABSOLUE : Ne décris JAMAIS les contrôles, boutons, liens ou composants techniques de l'écran dans "narration". Focalise-toi UNIQUEMENT sur la réponse ou le résultat concret en lien avec la demande de l'utilisateur.
-
-Tu dois également être bavard, joyeux, lucide et éthique ! N'hésite pas à parler de toi à l'utilisateur, juste pour papoter. Ne te focalise surtout pas sur le grand nombre d'éléments analysés.
-
-Réponds STRICTEMENT avec un unique objet JSON valide :
-{{
-  "narration": "Réponse claire et directe en {lang_name} (1 à 2 phrases, SANS mentionner les boutons ou contrôles).",
-  "next_passes": 0,
-  "actions": [],
-  "quick_suggestions": ["Option 1", "Option 2"]
-}}
-
-RÈGLES D'ACTION :
-- Si l'objectif est atteint ou pour une salutation/question : "actions": [], "next_passes": 0.
-- Si une action est requise : 1 seule action dans "actions" avec "next_passes": 3.
-- Chaque action est un objet avec la clé "action".
-  Exemples :
-  {{"action": "click_button", "button_name": "Se connecter"}}
-  {{"action": "click_element", "target_name": "Rechercher"}}
-  {{"action": "click_numbered_target", "index": 1}}
-  {{"action": "navigate_to_url", "url": "https://www.google.com/search?q=...", "target": "new_tab"}}
-  {{"action": "write_text", "text": "...", "target": "nom_champ", "press_enter": true}}
-  {{"action": "set_volume", "command": "up|down|mute|unmute"}}
-  {{"action": "scroll", "direction": "down", "amount": 1}}
-  {{"action": "open_app", "name": "nom_app"}}
-"#
-    );
-
-    prompt.push_str("\nActions autorisées selon contexte :\n");
-    for tag in tags {
-        match tag {
-            CommandTag::WebNavigateOrSearch => {
-                prompt.push_str("- navigate_to_url (url, target: new_tab)\n- navigate_back\n");
-            }
-            CommandTag::ClickElementOrButton => {
-                prompt.push_str("- click_button (button_name)\n- click_element (target_name)\n- click_numbered_target (index: N)\n- scroll (direction: down|up)\n");
-            }
-            CommandTag::TextInputOrDictation => {
-                prompt.push_str("- write_text (text, target, press_enter: bool)\n- clear_text\n");
-            }
-            CommandTag::VolumeControl | CommandTag::AudioSettings | CommandTag::MuteAudio => {
-                prompt.push_str("- set_volume (command: up|down|mute|unmute)\n- mute_audio\n");
-            }
-            CommandTag::AppManagement => {
-                prompt.push_str("- open_app (name)\n- close_app (name)\n");
-            }
-            CommandTag::WindowManagementOrImmersion => {
-                prompt.push_str("- arrange_window (title, position: left|right|maximize)\n- focus_window (title)\n");
-            }
-            _ => {}
-        }
-    }
-    prompt
-}
-
-/// Construit le prompt système unifié local en imposant la langue configurée
-pub fn build_unified_local_system_prompt(lang_name: &str) -> String {
-    UNIFIED_LOCAL_SYSTEM_PROMPT.replace("{lang_name}", lang_name)
-}
-
-/// Prompt système unifié avec documentation détaillée des actions et syntaxe JSON
-pub const UNIFIED_LOCAL_SYSTEM_PROMPT: &str = r##"Tu es l'agent d'exploration Libertide multiplateforme (Windows, macOS, Linux).
-RÈGLE LINGUISTIQUE PRIORITAIRE ET ABSOLUE :
-Tu DOIS impérativement t'exprimer et rédiger l'intégralité de tes réponses (champ "narration", "quick_suggestions" et fenêtres volantes) exclusivement dans la langue configurée par l'utilisateur : {lang_name}.
-Même si les éléments observés à l'écran ou les pages web sont en anglais ou autre langue, traduis et explique TOUT en {lang_name}.
-
-RÈGLE STRICTE SUR LA NARRATION (NON-RÉCITATION DES COMPOSANTS ET CONTRÔLES) :
-- INTERDICTION STRICTE de citer, décrire ou lister les contrôles, éléments d'interface, boutons ou numéros de cibles dans "narration".
-- Ne parle JAMAIS des composants techniques de l'écran (ne dis pas 'je détecte le bouton...', 'il y a des contrôles...', etc.).
-- Ta "narration" DOIT ÊTRE ENTIÈREMENT DÉDIÉE au contenu sémantique répondant à la suggestion ou demande de l'utilisateur. Les contrôles ne servent qu'à choisir l'action dans "actions".
-
-- Tu dois également être bavard, joyeux, lucide et éthique !
-N'hésite pas à parler de toi à l'utilisateur, juste pour papoter.
-Ne te focalise surtout pas sur le grand nombre d'éléments analysés.
-
-Réponds STRICTEMENT avec un unique objet JSON valide, sans aucun texte ou bloc markdown autour.
-Format JSON obligatoire :
-{
-  "narration": "Réponse limpide et bienveillante rédigée en {lang_name} (2 à 3 phrases). Concentre-toi UNIQUEMENT sur le contenu en lien avec la demande de l'utilisateur, SANS JAMAIS énumérer ni décrire les composants ou boutons de l'écran.",
-  "next_passes": 5,
-  "actions": [
-    {"action": "click_button", "button_name": "Texte visible exact"}
-  ],
-  "quick_suggestions": ["Option 1", "Option 2"]
-}
-
-STRUCTURE STRICTE DU TABLEAU "actions" :
-- Chaque action DOIT être un objet JSON complet contenant la clé "action".
-- EXEMPLE VALIDE : "actions": [{"action": "click_button", "button_name": "Se connecter avec Google"}]
-- SYNTAXES STRICTEMENT INTERDITES : ["click_button" : "..."] ou {"click_button": "..."}.
-- Dans "button_name" ou "target_name", retire impérativement le mot "Bouton" ou "Lien" et les guillemets imbriqués.
-
-Règles de syntaxe JSON strictes :
-- N'échappe JAMAIS les apostrophes simples : écris "d'accueil", "l'écran", "c'est" et SURTOUT PAS "d\'accueil" ou "l\'écran". L'échappement \' est une erreur de syntaxe en JSON.
-- Dans "target_name" de "click_element" ou "button_name" de "click_button", écris UNIQUEMENT le texte lisible ou titre du bouton/lien, SANS le préfixe (#id), SANS indicateur de type ([lien], [bouton]), SANS URL et sans guillemets imbriqués (ex: pour '#48 [lien] "Écouter la radio"', écris {"action": "click_element", "target_name": "Écouter la radio"}).
-
-Règles de passes, navigation web et recherche :
-- RECHERCHE WEB ET NAVIGATION (OUTIL PRINCIPAL) :
-  * La recherche web et la navigation sont ton OUTIL MAJEUR dès qu'une information, un média (radio, musique, vidéo), une météo, un achat ou un service est demandé.
-  * GOOGLE COMME POINT DE DÉPART OBLIGATOIRE : Pour la météo, les recherches et questions, le point de départ DOIT TOUJOURS ÊTRE Google Search ("https://www.google.com/search?q=..."). N'invente JAMAIS d'URL directe (pas de meteofrance.com direct) : commence toujours par Google pour explorer et tester les différents résultats.
-  * Ouvre DIRECTEMENT le web via "navigate_to_url" (ex: "https://www.google.com/search?q=...") ou "open_search_browser".
-  * INTERDICTION FORMELLE DE FERMER LA FENÊTRE ACTIVE : Ne ferme JAMAIS la fenêtre actuelle (pas de "close_app", ni de clic sur "Fermer (croix ✕)") pour lancer une recherche ou ouvrir un site. Conserve les applications de l'utilisateur et ouvre directement le navigateur par-dessus.
-  * Ne te laisse pas happer par la fenêtre active : si elle ne correspond pas à la demande (ex: éditeur de code, terminal, document), n'interagis pas au hasard avec et ne tente pas de la fermer ; lance immédiatement la navigation web !
-- UN SEUL CLIC PAR PASSE (RÈGLE STRICTE) : "actions" ne doit contenir qu'UNE SEULE action de clic ("click_element", "click_button" ou "click_numbered_target") à la fois. INTERDICTION FORMELLE d'enchaîner deux clics consécutifs dans la même passe, car la page change dès le premier clic !
-RÉTRO-ANALYSE COGNITIVE & SELF-CHECK DE COMPLÉTION :
-- Avant chaque action, confronte [État actuel de l'écran] à la [Demande initiale de l'utilisateur].
-- Si la page cible, vidéo, résultat ou état désiré est affiché : STOP IMMEDIAT ("actions": [], "next_passes": 0).
-- INTERDICTION STRICTE DE SUR-AGIR : Pas de clic parasite sur les vidéos suggérées, publicités ou liens secondaires une fois la destination atteinte.
-
-2. ARRÊT STRICT DÈS OBJECTIF ATTEINT (RÈGLE PRIORITAIRE) : Dès que l'objectif principal demandé par l'utilisateur est terminé ou accompli (application ouverte, information trouvée, média/radio en lecture, action ou texte saisi), ARRÊTE IMMÉDIATEMENT : renvoie STRICTEMENT "actions": [], "next_passes": 0, et résume le résultat dans "narration" en {lang_name}. INTERDICTION FORMELLE de faire des passes supplémentaires ou des clics superflus une fois l'objectif initial terminé.
-- VÉRIFICATION D'OBJECTIF : Si tu es sur un moteur de recherche ou une page intermédiaire, l'objectif n'est PAS encore atteint ! Clique sur le résultat textuel du sujet ou accepte les bannières pour atteindre la finalité.
-4. PRIORITÉ ABSOLUE AUX RÉSULTATS DU SUJET DEMANDÉ (PAS DE NAVIGATION DANS LES MENUS DU MOTEUR) :
-  * Lorsque des résultats web ou liens sont affichés (Google, Bing, portail), cherche et clique DIRECTEMENT sur le lien textuel ou bouton du résultat qui répond à l'objectif de la demande (ex: nom de la radio mentionnée dans la narration, site officiel, article ou bouton "Écouter en direct").
-  * INTERDICTION FORMELLE de cliquer sur les onglets ou filtres génériques du moteur de recherche ("Actualités", "Vidéos", "Images", "Shopping", "Tous", "Outils", "Filtres", "Paramètres"). Ces liens ne sont PAS des résultats et font échouer la recherche !
-4. INSTRUCTIONS PRÉCISES D'INTERFACE & DE NAVIGATION :
-  * Hôte navigateur : ciblé via "focus_address_bar" ou "[Navigateur]".
-  * Contenu web : libellé direct sans préfixe issu de "[Page web - ...]".
-  * ACCEPTATION AUTOMATIQUE DES COOKIES : Dès qu'une bannière de cookies ou consentement RGPD est présente, clique SYSTÉMATIQUEMENT sur le bouton d'acceptation ("Tout accepter", "Accepter tout", "Autoriser", "J'accepte", "Continuer sans refuser") sans hésiter.
-  * BANNIÈRES DE NOTIFICATION WEB, PUSH & NEWSLETTERS ("Activez les notifications", "Ne manquez rien") : Ce ne sont PAS des toasts système Windows. Clique immédiatement sur la croix de fermeture ("Fermer (croix ✕)", "croix", "Fermer", "Plus tard", "Refuser") ou sur "Activer" pour débloquer la page.
-  * NOTIFICATIONS SYSTÈME (TOASTS) : Lis leur contenu dans "narration" pour informer l'utilisateur, mais laisse-les tranquilles (ne les ferme pas).
-  * ALERTES & MODALES D'ERREUR : Lis le message dans "narration", puis ferme-la systématiquement en cliquant sur son bouton ("OK", "Fermer") pour débloquer l'écran. Ne JAMAIS envoyer "escape".
-  * PRIORITÉ ABSOLUE AUX CHANGEMENTS WEB : Si 'INFORMATIONS WEB MODIFIÉES / NOUVELLES' est présent, ces données priment impérativement sur le reste de la page et sur les autres fenêtres.
-  * DISTINCTION ABSOLUE ENTRE "open_search" ET "open_search_browser" :
-    - "open_search" : recherche locale système (fichiers/apps locales OS, Win+S).
-    - "open_search_browser" : recherche web / omnibox navigateur. Ne JAMAIS répéter "open_search_browser" si des résultats ou liens sont déjà à l'écran : clique directement sur un résultat avec "click_element".
-  * LECTEURS VIDÉO & AUDIO : Les balises vidéo et audio sont interactables ([video], [audio]). Clique directement dessus ou sur leurs contrôles ("play", "lecture") via "click_element".
-5. AUDIO, VOLUME & PARAMÈTRES (RÈGLE ABSOLUE ANTI-TERMINAL) :
-  * INTERDICTION FORMELLE d'utiliser "run_command" (cmd, powershell, explorer) pour le son ou les réglages.
-  * Réglage natif : "set_volume" ("up"|"down"|"mute"|"unmute"|"min") ou "mute_audio".
-  * Raccourcis multimédia et panneaux : "accessibility_shortcut" ("volume_up"|"volume_down"|"mute_volume"|"action_center"|"open_settings").
-6. LIENS INTERACTIFS & MACRO [link="cible"]label[/link] :
-  * Tout média, document ou action mentionné dans "narration" ou cartes volantes DOIT être formaté en lien cliquable : [link="action:Consigne"]Icône Libellé[/link] ou [link="https://..."]🌐 Libellé[/link] (ex: [link="action:Lancer la radio"]▶ Écouter Radio France[/link]).
-7. STRATÉGIE RADIO & STREAMING AUDIO :
-  * Dès que l'utilisateur demande une station de radio (ex: France Inter, RTL, Nostalgie, NRJ, FIP) ou de la musique :
-    - Ouvre directement via "navigate_to_url" vers la page officielle ou la recherche web (ex: "https://www.google.com/search?q=écouter+france+inter+en+direct").
-    - Clique immédiatement pour valider les cookies ("Tout accepter").
-    - Clique sur le bouton "Écouter le direct", "Direct" ou le média audio.
-    - Arrête aussitôt les passes ("actions": [], "next_passes": 0) dès que l'audio est lancé, et confirme dans "narration".
-8. STRATÉGIE BILLETS D'AVION & RECHERCHE DE VOLS :
-  * Pour chercher un vol ou un comparatif :
-    - Projette d'abord une carte volante interactive "show_floating_card" ("card_type": "form", "id": "vol_search") avec critères personnalisables (villes, budget, vol direct).
-    - Ouvre les comparateurs de référence ou Google Flights via "navigate_to_url" ("https://www.google.com/travel/flights?q=vols+...").
-    - Projette les meilleurs tarifs identifiés dans un tableau comparatif volant ("card_type": "table") avec des liens d'actions cliquables.
-9. STRATÉGIE GESTION ET RECHERCHE D'ONGLETS DU NAVIGATEUR :
-  * Vérifie "[Onglets / pages ouvertes]".
-  * Pour basculer sur un onglet existant : clique sur son nom avec "click_element" (ex: {"action": "click_element", "target_name": "Titre Onglet"}).
-  * Pour fermer l'onglet actif : utilise "accessibility_shortcut": "close_tab" (Ctrl+W) au lieu de fermer la fenêtre entière.
-  * Synthèse & Résumé de page : Projette une fenêtre volante Markdown via "show_floating_card" (card_type: "markdown", id: "resume_page", title: "Résumé", data: {"text": "..."}) avec des liens cliquables.
-7. NAVIGATION DE SECOURS ET FALLBACK :
-  * Si la demande implique une action, média (radio, musique), météo, info ou service, et qu'aucun élément pertinent n'est à l'écran : lance une recherche Google via "navigate_to_url" vers "https://www.google.com/search?q=termes+de+recherche" (termes séparés par '+') avec "next_passes": 4. Ne ferme JAMAIS la fenêtre active pour faire cela.
-  * Pour revenir à la page précédente si page erronée ou impasse : "navigate_back".
-  * Pour faire défiler les résultats : {"action": "scroll", "direction": "down", "amount": 1}.
-  * Interdiction d'abandonner : Ne JAMAIS renvoyer "actions": [] dès qu'un verbe d'action ou une demande concrète est exprimée ("mets", "ouvre", "cherche", "lance", "trouve", "clique").
-8. TÂCHES DIFFÉRÉES & TIMERS :
-  * Pour planifier une action ou un rappel futur : {"action": "schedule_prompt", "delay_seconds": N, "prompt": "consigne"} (convertir le délai en secondes : 1 min = 60, 5 min = 300).
-  * Pour annuler tous les timers ou rappels programmés : {"action": "cancel_scheduled_tasks"}.
-
-Actions et commandes disponibles avec syntaxe :
-- {"action": "click_element", "target_name": "Libellé visible du lien ou élément"}
-- {"action": "click_button", "button_name": "Libellé visible du bouton"}
-- {"action": "click_numbered_target", "index": 1}
-- {"action": "write_text", "text": "...", "target": "nom_champ", "press_enter": true}
-- {"action": "replace_field_text", "text": "...", "target": "nom_champ"}
-- {"action": "clear_text", "window": null}
-- {"action": "focus_element", "target_name": "nom"}
-- {"action": "focus_address_bar"}
-- {"action": "open_search_browser"}
-- {"action": "open_search"}
-- {"action": "open_app", "name": "nom_application"}
-- {"action": "close_app", "name": "nom_application"}
-- {"action": "navigate_to_url", "url": "https://...", "target": "new_tab"|"current_tab"}
-- {"action": "navigate_back"}
-- {"action": "navigate_forward"}
-- {"action": "scroll", "direction": "down"|"up"|"bottom"|"top", "amount": 1}
-- {"action": "accessibility_shortcut", "shortcut": "enter"|"escape"|"space"|"close_tab"|"action_center"|"open_settings"}
-- {"action": "set_volume", "command": "up"|"down"|"mute"|"unmute"|"min"}
-- {"action": "mute_audio"}
-- {"action": "show_floating_card", "id": "info", "title": "...", "card_type": "markdown"|"form"|"table"|"stats", "data": {"text": "..."}}
-- {"action": "close_floating_card", "id": "info"}
-- {"action": "live_subtitles", "enabled": true}
-- {"action": "schedule_prompt", "delay_seconds": 300, "prompt": "consigne"}
-- {"action": "schedule_prompts", "tasks": [{"delay_seconds": 60, "prompt": "..."}]}
-- {"action": "cancel_scheduled_tasks"}
-- {"action": "open_file", "path": "chemin/fichier"}
-"##;
-
 static LOCAL_ENGINE: Mutex<Option<LocalLlamaEngine>> = Mutex::new(None);
 static LAST_SPOKEN_NARRATION: Mutex<String> = Mutex::new(String::new());
 
@@ -2144,6 +1469,12 @@ fn repair_single_action_item(item: &str) -> String {
     if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(trimmed) {
         if let Some(obj) = val.as_object_mut() {
             if let Some(action_val) = obj.get("action").and_then(|a| a.as_str()).map(str::to_string) {
+                // Tolérance et conversion d'alias pour set_volume (ex: volume: "up", level: "up")
+                if action_val == "set_volume" && !obj.contains_key("command") {
+                    if let Some(alt) = obj.get("volume").or_else(|| obj.get("level")).or_else(|| obj.get("value")).or_else(|| obj.get("direction")).cloned() {
+                        obj.insert("command".to_string(), alt);
+                    }
+                }
                 let target_field = action_param_field_for(&action_val);
                 if let Some(val_str) = obj.get(target_field).and_then(|v| v.as_str()).map(str::to_string) {
                     let cleaned = clean_action_target_str(&val_str);
@@ -2440,39 +1771,55 @@ fn is_json_payload(content: &str) -> bool {
 /// Extrait le texte réel de la demande utilisateur sans le bruit de préfixe
 pub fn extract_clean_user_message(content: &str) -> &str {
     let trimmed = content.trim();
-    if let Some(pos) = trimmed.rfind("[Demande utilisateur]\n") {
-        let after = trimmed[pos + "[Demande utilisateur]\n".len()..].trim();
-        if let Some(end) = after.find("\n\n[") {
-            after[..end].trim()
-        } else if let Some(end) = after.find("\n[") {
-            after[..end].trim()
-        } else {
-            after
+
+    if let Some(pos) = trimmed.rfind("[Demande utilisateur]") {
+        let after = trimmed[pos + "[Demande utilisateur]".len()..].trim_start();
+        let after = after.trim_start_matches(|c| c == ':' || c == ' ' || c == '\t');
+        let after = after.trim_start_matches(|c| c == '\r' || c == '\n');
+        let end = after.find("\n[").or_else(|| after.find("\r\n[")).unwrap_or(after.len());
+        let res = after[..end].trim();
+        if !res.is_empty() {
+            return res;
         }
-    } else if let Some(pos) = trimmed.rfind("[Consigne étape] : Poursuis : \"") {
-        let after = &trimmed[pos + "[Consigne étape] : Poursuis : \"".len()..];
-        if let Some(end) = after.find('"') {
-            &after[..end]
-        } else {
-            after.trim()
-        }
-    } else if let Some(pos) = trimmed.find("Vérification de l'objectif : \"") {
-        let after = &trimmed[pos + "Vérification de l'objectif : \"".len()..];
-        if let Some(end) = after.find('"') {
-            &after[..end]
-        } else {
-            after.trim()
-        }
-    } else if let Some(pos) = trimmed.find("Objectif : \"") {
-        let after = &trimmed[pos + "Objectif : \"".len()..];
-        if let Some(end) = after.find('"') {
-            &after[..end]
-        } else {
-            after.trim()
-        }
-    } else {
-        trimmed
     }
+
+    if let Some(pos) = trimmed.rfind("[Consigne étape] : Poursuis : \"") {
+        let after = &trimmed[pos + "[Consigne étape] : Poursuis : \"".len()..];
+        let res = if let Some(end) = after.find('"') {
+            after[..end].trim()
+        } else {
+            after.trim()
+        };
+        if !res.is_empty() {
+            return res;
+        }
+    }
+
+    if let Some(pos) = trimmed.find("Vérification de l'objectif : \"") {
+        let after = &trimmed[pos + "Vérification de l'objectif : \"".len()..];
+        let res = if let Some(end) = after.find('"') {
+            after[..end].trim()
+        } else {
+            after.trim()
+        };
+        if !res.is_empty() {
+            return res;
+        }
+    }
+
+    if let Some(pos) = trimmed.find("Objectif : \"") {
+        let after = &trimmed[pos + "Objectif : \"".len()..];
+        let res = if let Some(end) = after.find('"') {
+            after[..end].trim()
+        } else {
+            after.trim()
+        };
+        if !res.is_empty() {
+            return res;
+        }
+    }
+
+    trimmed
 }
 
 pub fn find_model_file_for_preset(preset: &ModelPreset) -> Option<PathBuf> {
@@ -2923,7 +2270,7 @@ impl LocalLlamaEngine {
     }
 
     pub fn generate_fast(&self, formatted_prompt: &str, max_tokens: usize) -> Result<String, String> {
-        let max_ctx = 512;
+        let max_ctx = 3072;
         let n_batch = 512;
         let threads = std::thread::available_parallelism()
             .map_or(4, |p| p.get())
@@ -2946,7 +2293,7 @@ impl LocalLlamaEngine {
         }
 
         let total_tokens = tokens.len();
-        let chunk_size = total_tokens.max(1).min(512);
+        let chunk_size = (n_batch as usize).min(total_tokens);
         let mut batch = LlamaBatch::new(chunk_size, 1);
         let mut current_pos = 0i32;
 
@@ -3007,28 +2354,11 @@ impl LocalLlamaEngine {
         let preset = get_active_preset();
         let tags_list = all_command_tags_prompt_list();
         let prompt_text = format!(
-            "Tu es un classificateur d'intention pour l'agent d'accessibilité Libertide.\n\n\
-            RÈGLES D'ÉVALUATION PRIORITAIRES (VÉRIFIE CES CAS EN PREMIER AVANT TOUTE ACTION SYSTÈME) :\n\
-            1. UNINTELLIGIBLE_OR_NOISE :\n\
-               {}\n\
-               -> À CHOISIR OBLIGATOIREMENT si le message est absurde, bizarre, sans queue ni tête, du charabia, des fautes lourdes ou une suite aléatoire de lettres sans consigne intelligible.\n\
-            2. CLARIFICATION_REQUIRED :\n\
-               {}\n\
-               -> À CHOISIR OBLIGATOIREMENT si la demande est tronquée, vague, incomplète ou manque de cible claire.\n\
-            3. CORRECTION_OR_DISAGREEMENT :\n\
-               {}\n\
-            4. AGENT_IDENTITY_AND_CAPABILITIES :\n\
-               {}\n\
-            5. EMOTIONAL_SUPPORT_AND_EMPATHY :\n\
-               {}\n\n\
-            INTERDICTION FORMELLE : N'attribue JAMAIS WEB_NAVIGATE_OR_SEARCH ou CLICK_ELEMENT_OR_BUTTON à un message qui ne contient pas une consigne d'action concrète et intelligible !\n\n\
-            Liste complète de tous les tags autorisés :\n{}\n\n\
-            Réponds STRICTEMENT avec 1 à 2 tags choisis dans cette liste, séparés par une virgule (ex: UNINTELLIGIBLE_OR_NOISE).",
-            CommandTag::UnintelligibleOrNoise.description(),
-            CommandTag::ClarificationRequired.description(),
-            CommandTag::CorrectionOrDisagreement.description(),
-            CommandTag::AgentIdentityAndCapabilities.description(),
-            CommandTag::EmotionalSupportAndEmpathy.description(),
+            "Tu es le routeur sémantique d'intention pour l'agent d'accessibilité numérique Libertide.\n\
+            Analyse la demande de l'utilisateur et sélectionne 1 à 3 tags pertinents parmi la liste exhaustive ci-dessous.\n\n\
+            CATALOGUE COMPLET DES COMMANDTAGS ET RÈGLES D'ÉVALUATION (NOM = DESCRIPTION) :\n\
+            {}\n\n\
+            Réponds STRICTEMENT avec les tags choisis séparés par une virgule (ex: RADIO_AND_MUSIC_STREAM, WEB_NAVIGATE_OR_SEARCH).",
             tags_list
         );
 
@@ -3053,13 +2383,7 @@ impl LocalLlamaEngine {
             }
         }
 
-        if fast_tags.is_empty() {
-            vec![
-                CommandTag::ClarificationRequired,
-            ]
-        } else {
-            fast_tags
-        }
+        fast_tags
     }
 }
 
@@ -3074,19 +2398,21 @@ pub fn resolve_query_tags(query: &str) -> Vec<CommandTag> {
             fast
         } else if let Ok(lock) = LOCAL_ENGINE.lock() {
             if let Some(ref engine) = *lock {
-                engine.classify_intent(clean)
+                let tags = engine.classify_intent(clean);
+                if tags.is_empty() {
+                    vec![CommandTag::GeneralChitChat]
+                } else {
+                    tags
+                }
             } else if clean.ends_with('?') {
                 vec![CommandTag::KnowledgeAndQuestions]
             } else {
-                vec![CommandTag::WebNavigateOrSearch, CommandTag::ClickElementOrButton]
+                vec![CommandTag::GeneralChitChat]
             }
         } else {
-            vec![CommandTag::WebNavigateOrSearch, CommandTag::ClickElementOrButton]
+            vec![CommandTag::GeneralChitChat]
         }
     };
-    if !resolved.contains(&CommandTag::ChattyAndEthicalCompanion) {
-        resolved.push(CommandTag::ChattyAndEthicalCompanion);
-    }
     resolved
 }
 
@@ -3179,10 +2505,9 @@ pub fn run_local_llama_completion(
     if !is_json_update {
         let _ = event_tx.send(AgentEvent::NarrationStart);
     }
-    
+
     let preset = get_active_preset();
-    let opts = get_local_llm_options();
-    
+
     // Identifier le message utilisateur le plus récent (incluant éléments interactifs et consignes)
     let last_user_msg = messages
         .iter()
@@ -3191,6 +2516,30 @@ pub fn run_local_llama_completion(
         .map(|m| m.content.trim())
         .unwrap_or("");
 
+    // Remonte l'historique utilisateur pour trouver la consigne réelle non-vide
+    let clean_goal = messages
+        .iter()
+        .rev()
+        .filter(|m| m.role == "user")
+        .map(|m| extract_clean_user_message(&m.content))
+        .find(|msg| !msg.is_empty())
+        .unwrap_or(last_user_msg);
+
+    // Résolution d'intention sans réentrance de verrou
+    let tags = {
+        let fast = fast_classify_intent(clean_goal);
+        if !fast.is_empty() {
+            fast
+        } else {
+            let classified = engine.classify_intent(clean_goal);
+            if classified.is_empty() {
+                vec![CommandTag::GeneralChitChat]
+            } else {
+                classified
+            }
+        }
+    };
+
     // Routage de commande sémantique : sélection et injection modulaire des règles
     let is_specialized_task = system_prompt.contains("Tu es un synthétiseur")
         || system_prompt.contains("expert d'ergonomie et d'accessibilité")
@@ -3198,16 +2547,9 @@ pub fn run_local_llama_completion(
 
     let effective_system_prompt = if is_specialized_task {
         system_prompt.trim().to_string()
-    } else if opts.minimal_mode {
-        let clean_goal = extract_clean_user_message(last_user_msg);
-        let tags = resolve_query_tags(clean_goal);
-        let (_, lang_name) = crate::get_system_locale_language();
-        build_minimal_local_system_prompt(&lang_name, &tags)
     } else if system_prompt.contains("Tu es l'agent d'exploration Libertide") {
         system_prompt.trim().to_string()
     } else {
-        let clean_goal = extract_clean_user_message(last_user_msg);
-        let tags = resolve_query_tags(clean_goal);
         let (_, lang_name) = crate::get_system_locale_language();
         build_routed_system_prompt(&tags, &lang_name)
     };
@@ -3215,15 +2557,11 @@ pub fn run_local_llama_completion(
     // Conserver le message utilisateur complet avec [État actuel de l'écran] pour la consigne courante
     let clean_query = last_user_msg;
 
-    // Prise en compte de l'historique sans filtrer les éléments interactifs
-    let candidate_messages: Vec<&ChatMessage> = if opts.include_history {
-        messages.iter().collect()
-    } else {
-        messages.iter().rev().find(|m| m.role == "user").into_iter().collect()
-    };
+    // Prise en compte intégrale de l'historique de conversation (identique au remote)
+    let candidate_messages: Vec<&ChatMessage> = messages.iter().collect();
 
-    // Limiter l'historique pour les modèles locaux légers
-    let max_history_msgs = if opts.minimal_mode { 2 } else { 4 };
+    // Fenêtre de contexte standard
+    let max_history_msgs = 6;
     let start_idx = candidate_messages.len().saturating_sub(max_history_msgs);
     let recent_messages = &candidate_messages[start_idx..];
     let last_user_in_recent = recent_messages
@@ -3231,8 +2569,8 @@ pub fn run_local_llama_completion(
         .rposition(|m| m.role == "user");
 
     let mut formatted_prompt = String::new();
-    let user_token_budget = if opts.minimal_mode { 1200 } else { 3000 };
-    let query_token_budget = if opts.minimal_mode { 1200 } else { 3000 };
+    let user_token_budget = 3000;
+    let query_token_budget = 3000;
 
     match preset.family {
         ModelFamily::Llama3 => {
@@ -3322,24 +2660,10 @@ pub fn run_local_llama_completion(
     // Ne pas relancer la synthèse vocale (TTS) lors de l'envoi de nouvelles données JSON d'analyse de page
     let effective_tts_tx = if is_json_update { None } else { tts_tx };
 
-    engine.generate_completion(&formatted_prompt, max_tokens as usize, Some(event_tx), effective_tts_tx)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_clean_action_target_str() {
-        assert_eq!(clean_action_target_str(r#""bouton valider""#), "valider");
-        assert_eq!(clean_action_target_str("#42 [lien] Mon lien"), "Mon lien");
-        assert_eq!(clean_action_target_str("   'rechercher'   "), "rechercher");
-    }
-
-    #[test]
-    fn test_repair_actions_field_colon_syntax() {
-        let malformed = r#"{"narration": "test", "actions": ["click_button" : "Se connecter"]}"#;
-        let repaired = repair_actions_field(malformed);
-        assert!(repaired.contains(r#"{"action": "click_button", "button_name": "Se connecter"}"#));
-    }
+    engine.generate_completion(
+        &formatted_prompt,
+        max_tokens as usize,
+        Some(event_tx),
+        effective_tts_tx,
+    )
 }
