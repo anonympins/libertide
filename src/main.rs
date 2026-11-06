@@ -1624,7 +1624,8 @@ impl eframe::App for OverlayApp {
 
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = egui::Color32::TRANSPARENT;
-        visuals.window_fill = egui::Color32::TRANSPARENT;
+        visuals.window_fill = theme.control_bg;
+        visuals.window_stroke = egui::Stroke::new(1.0, theme.border);
         visuals.extreme_bg_color = theme.control_bg;
         visuals.selection.bg_fill = theme.tab_active_bg;
         visuals.selection.stroke = egui::Stroke::new(1.0, theme.accent);
@@ -5337,6 +5338,12 @@ impl eframe::App for OverlayApp {
                                 .inner_margin(egui::Margin::symmetric(12, 10)),
                         )
                         .show(&ctx, |ui| {
+                            // Fond 100% opaque pour les select box, boutons et menus déroulants dans les paramètres
+                            ui.style_mut().visuals.window_fill = theme.control_bg;
+                            ui.style_mut().visuals.window_stroke = egui::Stroke::new(1.0, theme.border);
+                            ui.style_mut().visuals.widgets.inactive.bg_fill = theme.control_bg;
+                            ui.style_mut().visuals.widgets.inactive.weak_bg_fill = theme.control_bg;
+
                             // En-tête avec onglets de configuration
                             ui.horizontal(|ui| {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {

@@ -252,7 +252,10 @@ pub fn estimate_token_count(text: &str) -> usize {
 impl LlmConfig {
     pub fn max_context_tokens(&self) -> usize {
         match self.provider {
-            LlmProvider::Local => 2048,
+            LlmProvider::Local => std::env::var("LLAMA_CTX_SIZE")
+                .ok()
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .unwrap_or(16384),
             LlmProvider::Groq => 8192,
             LlmProvider::Mistral => 32768,
             LlmProvider::Glm => 32768,

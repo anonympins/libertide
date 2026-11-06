@@ -2084,8 +2084,11 @@ impl LocalLlamaEngine {
         event_tx: Option<&Sender<AgentEvent>>,
         tts_tx: Option<&Sender<TtsCommand>>,
     ) -> Result<String, String> {
-        // Réduction du contexte alloué à 2048 tokens pour diviser par deux l'empreinte mémoire du KV-cache
-        let max_ctx = 2048;
+        // Contexte étendu à 8192 tokens par défaut (ou valeur personnalisée via LLAMA_CTX_SIZE)
+        let max_ctx = std::env::var("LLAMA_CTX_SIZE")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(8192);
         // Micro-batch standard à 512 tokens : évite le goulet d'étranglement quadratique O(N^2) de 2048 tokens
         let n_batch = 512;
         let num_cpus = std::thread::available_parallelism().map_or(4, |p| p.get());
@@ -2120,8 +2123,8 @@ impl LocalLlamaEngine {
             return Ok(String::new());
         }
 
-        // Tronquage de sécurité : si les tokens dépassent la capacité, tronquer sans découpe centrale corruptrice
-        let max_prompt_tokens = (max_ctx as usize).saturating_sub(400);
+        // Tronquage de sécurité basé sur la capacité maximale étendue
+        let max_prompt_tokens = (max_ctx as usize).saturating_sub(max_tokens.max(512));
         if tokens.len() > max_prompt_tokens {
             println!(
                 "[Local Llama] Avertissement: prompt ({} tokens) dépasse la capacité ({}) : tronquage sécurisé.",
@@ -2270,7 +2273,10 @@ impl LocalLlamaEngine {
     }
 
     pub fn generate_fast(&self, formatted_prompt: &str, max_tokens: usize) -> Result<String, String> {
-        let max_ctx = 3072;
+        let max_ctx = std::env::var("LLAMA_CTX_SIZE")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(4096);
         let n_batch = 512;
         let threads = std::thread::available_parallelism()
             .map_or(4, |p| p.get())
@@ -2565,8 +2571,11 @@ pub fn run_local_llama_completion(
     let start_idx = candidate_messages.len().saturating_sub(max_history_msgs);
     let mut recent_messages: Vec<ChatMessage> = candidate_messages[start_idx..].iter().map(|&m| m.clone()).collect();
 
-    // Régulation basée sur le nombre de tokens pour le modèle local (budget de 1400 tokens pour l'entrée)
-    let local_budget = 1400usize;
+    // Budget d'entrée étendu pour le modèle local
+    let local_budget = std::env::var("LLAMA_CTX_SIZE")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(8192).saturating_sub(max_tokens as usize + 256);
     let sys_tokens = estimate_token_count(&effective_system_prompt);
     let mut current_tokens = sys_tokens;
     for m in &recent_messages {
@@ -2585,8 +2594,8 @@ pub fn run_local_llama_completion(
         .rposition(|m| m.role == "user");
 
     let mut formatted_prompt = String::new();
-    let user_token_budget = 3000;
-    let query_token_budget = 3000;
+    let user_token_budget = 6000;
+    let query_token_budget = 6000;
 
     match preset.family {
         ModelFamily::Llama3 => {

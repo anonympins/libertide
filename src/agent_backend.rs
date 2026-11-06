@@ -114,7 +114,13 @@ pub fn get_recent_history_capped_at_user_messages(history: &[ChatMessage], max_u
                 let content = &recent[idx].content;
                 if let Some(pos) = content.rfind("[Demande utilisateur]\n") {
                     recent[idx].content = content[pos + "[Demande utilisateur]\n".len()..].trim().to_string();
+                } else if let Some(pos) = content.rfind("[Étape ") {
+                    recent[idx].content = content[pos..].trim().to_string();
                 } else if let Some(pos) = content.find("[État actuel de l'écran]") {
+                    if let Some(end_pos) = content[pos..].find("\n\n") {
+                        recent[idx].content = content[pos + end_pos + 2..].trim().to_string();
+                    }
+                } else if let Some(pos) = content.find("[État de l'écran suite aux actions]") {
                     if let Some(end_pos) = content[pos..].find("\n\n") {
                         recent[idx].content = content[pos + end_pos + 2..].trim().to_string();
                     }
@@ -535,18 +541,16 @@ pub async fn call_llm_prompt(
                 total_tokens = total_tokens.saturating_sub(estimate_token_count(&removed.content) + 4);
             }
 
-            // Si même le dernier message dépasse le budget, réinitialisation complète de l'historique
+            // Si même le dernier message dépasse le budget, tronquer proportionnellement l'écran plutôt que de tout vider
             if total_tokens > max_input_budget {
-                println!("[LLM Contexte] Réinitialisation complète de l'historique pour ne pas saturer la logique du modèle.");
-                history.lock().await.clear();
-                let _ = event_tx.send(AgentEvent::SilentNarration(
-                    "Quota de mémoire du modèle dépassé : historique réinitialisé pour préserver la précision de raisonnement.".into(),
-                ));
-                let clean_short_user = format!("[Demande utilisateur]\n{}", safe_user_instruction);
-                hist_snapshot = vec![ChatMessage {
-                    role: "user".to_string(),
-                    content: clean_short_user,
-                }];
+                println!("[LLM Contexte] Tronquage proportionnel de l'état d'écran pour respecter le budget.");
+                let available_for_msg = max_input_budget.saturating_sub(sys_tokens + 32);
+                let max_chars = available_for_msg * 3;
+                if let Some(last_msg) = hist_snapshot.last_mut() {
+                    if last_msg.content.len() > max_chars {
+                        last_msg.content = truncate_with_notice(&last_msg.content, max_chars);
+                    }
+                }
             }
         }
 
