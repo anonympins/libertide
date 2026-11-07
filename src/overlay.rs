@@ -1747,7 +1747,10 @@ pub fn compute_and_sync_overlay_geometry(
     ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(min_win_w, min_win_h)));
 
     let inner_rect_opt = ctx.input(|i| i.viewport().inner_rect);
-    let raw_win_w = if *position_initialized {
+    let is_minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false))
+        || inner_rect_opt.map_or(false, |r| r.min.x < -1000.0 || r.min.y < -1000.0);
+
+    let raw_win_w = if *position_initialized && !is_minimized {
         inner_rect_opt.map_or(*current_win_w, |r| r.width())
     } else {
         *current_win_w
@@ -1774,14 +1777,14 @@ pub fn compute_and_sync_overlay_geometry(
             .min(work_area.h)
             .round()
     };
-    let active_win_h = if *position_initialized {
+    let active_win_h = if *position_initialized && !is_minimized {
         inner_rect_opt.map_or(*current_win_h, |r| r.height().max(min_win_h))
     } else {
         target_win_h
     };
 
     // Ancrage initial ferré à la barre des tâches
-    if !*position_initialized {
+    if !*position_initialized && !is_minimized {
         let margin_x = 16.0;
         let init_h = target_win_h;
         let bot_y = work_area.taskbar_top;
@@ -1798,7 +1801,7 @@ pub fn compute_and_sync_overlay_geometry(
     }
 
     // Redimensionnement dynamique avec hystérésis (seuil >= 3.0 px)
-    if *position_initialized && !is_maximized && (target_win_h - *current_win_h).abs() >= 3.0 {
+    if *position_initialized && !is_maximized && !is_minimized && (target_win_h - *current_win_h).abs() >= 3.0 {
         *current_win_h = target_win_h;
         let max_x = (work_area.x + work_area.w - win_w).max(work_area.x);
         let was_anchored_right = window_pos.map_or(true, |p| {

@@ -651,6 +651,45 @@ impl OverlayApp {
         }
     }
 
+    pub fn restore_window_if_minimized(&mut self, ctx: &egui::Context) {
+        let mut is_min = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        #[cfg(windows)]
+        {
+            unsafe {
+                use windows::core::w;
+                use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, IsIconic};
+                let overlay = FindWindowW(None, w!("Libertide overlay")).unwrap_or(windows::Win32::Foundation::HWND(std::ptr::null_mut()));
+                if !overlay.0.is_null() && IsIconic(overlay).as_bool() {
+                    is_min = true;
+                }
+            }
+        }
+
+        if is_min {
+            if !self.switch_access_mode {
+                self.is_hidden = false;
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            if let Some(pos) = self.window_pos {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+            }
+            #[cfg(windows)]
+            {
+                unsafe {
+                    use windows::core::w;
+                    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE};
+                    let overlay = FindWindowW(None, w!("Libertide overlay")).unwrap_or(windows::Win32::Foundation::HWND(std::ptr::null_mut()));
+                    if !overlay.0.is_null() {
+                        let _ = ShowWindow(overlay, SW_RESTORE);
+                        let _ = SetForegroundWindow(overlay);
+                    }
+                }
+            }
+            ctx.request_repaint();
+        }
+    }
+
     fn start_recording(&mut self, _ctx: &egui::Context, play_sound: bool) {
         if self.status == AgentStatus::EmergencyStopped {
             return;
@@ -848,6 +887,7 @@ impl eframe::App for OverlayApp {
                     }
                 }
                 AgentEvent::NarrationStart => {
+                    self.restore_window_if_minimized(&ctx);
                     self.is_streaming_narration = true;
                     self.chat_history.push(ChatEntry {
                         role: ChatRole::Agent,
@@ -858,6 +898,7 @@ impl eframe::App for OverlayApp {
                     });
                 }
                 AgentEvent::NarrationChunk(chunk) => {
+                    self.restore_window_if_minimized(&ctx);
                     if self.is_streaming_narration {
                         if let Some(last) = self.chat_history.last_mut() {
                             if matches!(last.role, ChatRole::Agent) {
@@ -887,6 +928,7 @@ impl eframe::App for OverlayApp {
                     }
                 }
                 AgentEvent::ReplaceNarration { text, quick_suggestions } => {
+                    self.restore_window_if_minimized(&ctx);
                     let was_streaming = self.is_streaming_narration;
                     self.is_streaming_narration = false;
 
@@ -1487,6 +1529,9 @@ impl eframe::App for OverlayApp {
                     ctx.request_repaint();
                 }
                 AgentEvent::TwitchChatReceived(twitch_msg) => {
+                    self.restore_window_if_minimized(&ctx);
+                    let speech = format!("{} : {}", twitch_msg.author, twitch_msg.text);
+                    let _ = self.tts_sender.send(TtsCommand::Enqueue(speech));
                     self.twitch_messages.push(twitch_msg);
                     if self.twitch_messages.len() > 300 {
                         self.twitch_messages.drain(0..self.twitch_messages.len() - 300);
@@ -4534,6 +4579,51 @@ fn fix_startup_working_directory() {
     }
 }
 
+fn spawn_event_wake_watcher(
+    incoming_rx: Receiver<AgentEvent>,
+    outgoing_tx: StdSender<AgentEvent>,
+    egui_ctx: egui::Context,
+) {
+    std::thread::Builder::new()
+        .name("event_wake_watcher".to_string())
+        .spawn(move || {
+            while let Ok(event) = incoming_rx.recv() {
+                let should_wake = matches!(
+                    event,
+                    AgentEvent::NarrationStart
+                        | AgentEvent::ReplaceNarration { .. }
+                        | AgentEvent::TwitchChatReceived(_)
+                        | AgentEvent::VoicePromptReady(_)
+                );
+
+                if should_wake {
+                    #[cfg(windows)]
+                    unsafe {
+                        use windows::core::w;
+                        use windows::Win32::UI::WindowsAndMessaging::{
+                            FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
+                        };
+                        let overlay = FindWindowW(None, w!("Libertide overlay"))
+                            .unwrap_or(windows::Win32::Foundation::HWND(std::ptr::null_mut()));
+                        if !overlay.0.is_null() {
+                            let _ = ShowWindow(overlay, SW_RESTORE);
+                            let _ = SetForegroundWindow(overlay);
+                        }
+                    }
+
+                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    egui_ctx.request_repaint();
+                }
+
+                if outgoing_tx.send(event).is_err() {
+                    break;
+                }
+            }
+        })
+        .expect("Échec lancement worker event_wake_watcher");
+}
+
 fn run_overlay_gui(
     event_tx: StdSender<AgentEvent>,
     event_rx: Receiver<AgentEvent>,
@@ -4567,10 +4657,13 @@ fn run_overlay_gui(
         "Libertide overlay",
         native_options,
         Box::new(move |cc| {
+            let (app_event_tx, app_event_rx) = channel::<AgentEvent>();
+            spawn_event_wake_watcher(event_rx, app_event_tx, cc.egui_ctx.clone());
+
             Ok(Box::new(OverlayApp::new(
                 cc,
                 event_tx,
-                event_rx,
+                app_event_rx,
                 cmd_tx,
                 tts_tx,
                 audio_tx,
