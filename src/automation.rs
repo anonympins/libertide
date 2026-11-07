@@ -28,11 +28,10 @@ use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationScrollPattern,
+    CUIAutomation, IUIAutomation, IUIAutomationElement,
     IUIAutomationTextPattern,
     IUIAutomationValuePattern, TreeScope_Descendants, UIA_DocumentControlTypeId,
     UIA_EditControlTypeId,
-    UIA_ScrollPatternId,
     UIA_TextPatternId,
     UIA_ValuePatternId,
 };

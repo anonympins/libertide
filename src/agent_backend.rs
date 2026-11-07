@@ -8,7 +8,6 @@ use rust_i18n::t;
 use crate::automation::*;
 use crate::html_util;
 use crate::local_llm;
-use crate::scheduler::*;
 use crate::tts::sanitize_for_tts;
 use crate::twitch::search_twitch_channels;
 use crate::types::*;

@@ -258,3 +258,47 @@ impl AppTheme {
         }
     }
 }
+
+pub fn localized_theme_name(theme: AppTheme) -> String {
+    let key = theme.key().to_lowercase();
+    let name_low = theme.display_name().to_lowercase();
+    if key.contains("cyan") || name_low.contains("cyan") {
+        t!("themes.cyber_cyan.name").to_string()
+    } else if key.contains("emerald") || key.contains("emeraude") || name_low.contains("menthe") || name_low.contains("emerald") || name_low.contains("émeraude") {
+        t!("themes.mint_emerald.name").to_string()
+    } else if key.contains("purple") || key.contains("amethyst") || name_low.contains("améthyste") || name_low.contains("purple") {
+        t!("themes.neon_purple.name").to_string()
+    } else if (key.contains("yellow") || name_low.contains("jaune") || name_low.contains("yellow")) && (key.contains("contrast") || name_low.contains("contraste")) {
+        t!("themes.high_contrast_yellow.name").to_string()
+    } else if (key.contains("white") || name_low.contains("blanc") || name_low.contains("white")) && (key.contains("contrast") || name_low.contains("contraste")) {
+        t!("themes.high_contrast_white.name").to_string()
+    } else if key.contains("amber") || key.contains("ambre") || name_low.contains("ambre") || name_low.contains("amber") {
+        t!("themes.soft_amber.name").to_string()
+    } else if key.contains("colorblind") || key.contains("dalton") || name_low.contains("dalton") || name_low.contains("colorblind") {
+        t!("themes.colorblind_friendly.name").to_string()
+    } else {
+        theme.display_name().to_string()
+    }
+}
+
+pub fn localized_theme_desc(theme: AppTheme) -> String {
+    let key = theme.key().to_lowercase();
+    let name_low = theme.display_name().to_lowercase();
+    if key.contains("cyan") || name_low.contains("cyan") {
+        t!("themes.cyber_cyan.desc").to_string()
+    } else if key.contains("emerald") || key.contains("emeraude") || name_low.contains("menthe") || name_low.contains("emerald") || name_low.contains("émeraude") {
+        t!("themes.mint_emerald.desc").to_string()
+    } else if key.contains("purple") || key.contains("amethyst") || name_low.contains("améthyste") || name_low.contains("purple") {
+        t!("themes.neon_purple.desc").to_string()
+    } else if (key.contains("yellow") || name_low.contains("jaune") || name_low.contains("yellow")) && (key.contains("contrast") || name_low.contains("contraste")) {
+        t!("themes.high_contrast_yellow.desc").to_string()
+    } else if (key.contains("white") || name_low.contains("blanc") || name_low.contains("white")) && (key.contains("contrast") || name_low.contains("contraste")) {
+        t!("themes.high_contrast_white.desc").to_string()
+    } else if key.contains("amber") || key.contains("ambre") || name_low.contains("ambre") || name_low.contains("amber") {
+        t!("themes.soft_amber.desc").to_string()
+    } else if key.contains("colorblind") || key.contains("dalton") || name_low.contains("dalton") || name_low.contains("colorblind") {
+        t!("themes.colorblind_friendly.desc").to_string()
+    } else {
+        theme.description().to_string()
+    }
+}
