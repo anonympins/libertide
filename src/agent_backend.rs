@@ -8,7 +8,6 @@ use rust_i18n::t;
 use crate::automation::*;
 use crate::html_util;
 use crate::local_llm;
-use crate::scheduler::*;
 use crate::tts::sanitize_for_tts;
 use crate::twitch::search_twitch_channels;
 use crate::types::*;
@@ -87,6 +86,21 @@ pub fn get_foreground_window_title() -> Option<String> {
     })
 }
 
+#[cfg(not(windows))]
+pub fn get_foreground_window_title() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::window_util::get_active_macos_window()
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        crate::window_util::get_active_x11_window().and_then(|id| {
+            let user_wins = crate::window_util::list_user_windows();
+            user_wins.into_iter().find(|(w_id, _)| *w_id == id).map(|(_, title)| title)
+        })
+    }
+}
+
 /// Extrait les derniers messages de l'historique en conservant au maximum `max_user_msgs` messages utilisateur
 pub fn get_recent_history_capped_at_user_messages(history: &[ChatMessage], max_user_msgs: usize) -> Vec<ChatMessage> {
     let mut user_count = 0;
@@ -114,7 +128,13 @@ pub fn get_recent_history_capped_at_user_messages(history: &[ChatMessage], max_u
                 let content = &recent[idx].content;
                 if let Some(pos) = content.rfind("[Demande utilisateur]\n") {
                     recent[idx].content = content[pos + "[Demande utilisateur]\n".len()..].trim().to_string();
+                } else if let Some(pos) = content.rfind("[Étape ") {
+                    recent[idx].content = content[pos..].trim().to_string();
                 } else if let Some(pos) = content.find("[État actuel de l'écran]") {
+                    if let Some(end_pos) = content[pos..].find("\n\n") {
+                        recent[idx].content = content[pos + end_pos + 2..].trim().to_string();
+                    }
+                } else if let Some(pos) = content.find("[État de l'écran suite aux actions]") {
                     if let Some(end_pos) = content[pos..].find("\n\n") {
                         recent[idx].content = content[pos + end_pos + 2..].trim().to_string();
                     }
@@ -433,11 +453,14 @@ pub async fn call_llm_prompt(
     let (_, system_lang) = get_system_locale_language();
     let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::SeqCst);
     let local_opts = local_llm::get_local_llm_options();
+    let safe_user_instruction = truncate_with_notice(&user_instruction, 1000);
+    let safe_full_prompt = truncate_with_notice(&full_prompt, 32000);
+
     let system_instructions = if is_dictation {
         DICTATION_SYSTEM_INSTRUCTIONS.to_string()
     } else {
         let clean_goal = local_llm::extract_clean_user_message(&user_instruction);
-        let tags = local_llm::resolve_query_tags(clean_goal);
+        let tags = local_llm::resolve_query_tags(clean_goal, Some(&safe_full_prompt));
         println!(
             "[Universal LLM Router] Modèle: {:?} ({}) | Consigne: \"{}\" | Tags: {:?}",
             llm_config.provider, llm_config.model, clean_goal, tags
@@ -445,8 +468,6 @@ pub async fn call_llm_prompt(
         local_llm::build_routed_system_prompt(&tags, &system_lang)
     };
 
-    let safe_user_instruction = truncate_with_notice(&user_instruction, 1000);
-    let safe_full_prompt = truncate_with_notice(&full_prompt, 32000);
     {
         let mut hist_guard = history.lock().await;
         hist_guard.push(ChatMessage {
@@ -535,18 +556,16 @@ pub async fn call_llm_prompt(
                 total_tokens = total_tokens.saturating_sub(estimate_token_count(&removed.content) + 4);
             }
 
-            // Si même le dernier message dépasse le budget, réinitialisation complète de l'historique
+            // Si même le dernier message dépasse le budget, tronquer proportionnellement l'écran plutôt que de tout vider
             if total_tokens > max_input_budget {
-                println!("[LLM Contexte] Réinitialisation complète de l'historique pour ne pas saturer la logique du modèle.");
-                history.lock().await.clear();
-                let _ = event_tx.send(AgentEvent::SilentNarration(
-                    "Quota de mémoire du modèle dépassé : historique réinitialisé pour préserver la précision de raisonnement.".into(),
-                ));
-                let clean_short_user = format!("[Demande utilisateur]\n{}", safe_user_instruction);
-                hist_snapshot = vec![ChatMessage {
-                    role: "user".to_string(),
-                    content: clean_short_user,
-                }];
+                println!("[LLM Contexte] Tronquage proportionnel de l'état d'écran pour respecter le budget.");
+                let available_for_msg = max_input_budget.saturating_sub(sys_tokens + 32);
+                let max_chars = available_for_msg * 3;
+                if let Some(last_msg) = hist_snapshot.last_mut() {
+                    if last_msg.content.len() > max_chars {
+                        last_msg.content = truncate_with_notice(&last_msg.content, max_chars);
+                    }
+                }
             }
         }
 
@@ -560,13 +579,21 @@ pub async fn call_llm_prompt(
                 return;
             }
 
+            let auto_read_messages = std::env::var("AUTO_READ_MESSAGES")
+                .ok()
+                .or_else(|| crate::fs_util::read_env_var_from_file(".env", "AUTO_READ_MESSAGES"))
+                .map(|s| !s.trim().eq_ignore_ascii_case("false") && s.trim() != "0")
+                .unwrap_or(true);
+
+            let effective_tts_sender = if auto_read_messages { Some(&tts_tx) } else { None };
+
             if llm_config.provider == LlmProvider::Local {
                 match local_llm::run_local_llama_completion(
                     &system_instructions,
                     &hist_snapshot,
                     max_tokens,
                     &event_tx,
-                    Some(&tts_tx),
+                    effective_tts_sender,
                 ) {
                     Ok(raw_content) => {
                         history.lock().await.push(ChatMessage {
@@ -1391,19 +1418,33 @@ pub fn spawn_agent_backend(
                             } else {
                                 println!("[Backend Tokio] Collecte de l'état de l'écran et préparation de l'appel LLM...");
                                 let clean_prompt = local_llm::extract_clean_user_message(&prompt);
-                                let detected_tags = local_llm::resolve_query_tags(clean_prompt);
+                                let last_summary_hint = LAST_SCREEN_SUMMARY.lock().ok().and_then(|s| s.clone());
+                                let fg_title = get_foreground_window_title();
+                                let mut initial_screen_hint = String::new();
+                                if let Some(ref title) = fg_title {
+                                    initial_screen_hint.push_str(&format!("Fenêtre active: \"{}\"\n", title));
+                                }
+                                if let Some(ref sum) = last_summary_hint {
+                                    let truncated = if sum.len() > 600 { &sum[..600] } else { sum };
+                                    initial_screen_hint.push_str(truncated);
+                                }
+                                let detected_tags = local_llm::resolve_query_tags(clean_prompt, Some(&initial_screen_hint));
                                 let is_pure_conversational_or_question = !detected_tags.is_empty()
                                     && detected_tags.iter().all(|t| matches!(
                                         t,
                                         local_llm::CommandTag::GeneralChitChat
-                                            | local_llm::CommandTag::KnowledgeAndQuestions
                                             | local_llm::CommandTag::ClarificationRequired
                                             | local_llm::CommandTag::UnintelligibleOrNoise
                                             | local_llm::CommandTag::CorrectionOrDisagreement
                                             | local_llm::CommandTag::AgentIdentityAndCapabilities
                                             | local_llm::CommandTag::EmotionalSupportAndEmpathy
                                             | local_llm::CommandTag::ChattyAndEthicalCompanion
-                                    ));
+                                    ))
+                                    && !clean_prompt.to_lowercase().contains("page")
+                                    && !clean_prompt.to_lowercase().contains("site")
+                                    && !clean_prompt.to_lowercase().contains("écran")
+                                    && !clean_prompt.to_lowercase().contains("ecran")
+                                    && !clean_prompt.to_lowercase().contains("analyse");
 
                                 let active_win_only = local_llm::get_local_llm_options().active_window_only;
                                 let (field_content, screen_state): (Option<String>, String) = tokio::task::spawn_blocking(move || {

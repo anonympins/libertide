@@ -11,6 +11,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_TARGET_DIR: "target"
+  CMAKE_GENERATOR: "Ninja"
 
 jobs:
   build-macos:
@@ -25,6 +26,12 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build tools (Ninja)
+        run: |
+          if ! command -v ninja &> /dev/null; then
+            brew install ninja
+          fi
 
       - name: Set Environment for Metal acceleration
         run: |
@@ -63,7 +70,6 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-

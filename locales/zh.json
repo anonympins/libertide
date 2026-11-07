@@ -1,4 +1,10 @@
 {
+  "a11y": {
+    "preset_visual": "👁️ 视力障碍 / 低视力",
+    "preset_motor_switch": "🎯 肢体障碍 / 单开关控制",
+    "preset_tremor": "🤲 肢体抖动 / 帕金森 / 痉挛",
+    "preset_cognitive": "🧠 认知舒缓 / 神经多样性"
+  },
   "speech": {
     "ask_hover_nav": "是否要启用悬停导航？",
     "hover_mode_btn": "悬停模式",
@@ -171,7 +177,20 @@
     "twitch_open_tooltip": "在 Twitch 中打开",
     "twitch_waiting": "等待 Twitch 聊天消息中...",
     "settings_tab_llm": "🔑 大模型供应商",
-    "settings_tab_theme": "🎨 主题与无障碍",
+    "settings_tab_accessibility": "♿ 无障碍",
+    "settings_tab_theme": "🎨 主题与显示",
+    "a11y_presets_title": "可组合的无障碍配置文件（多重需求）",
+    "a11y_presets_desc": "勾选一个或多个配置以组合辅助设置（例如：低视力 + 肢体抖动）：",
+    "a11y_preset_solo": "单选",
+    "a11y_preset_solo_active": "★ 单选",
+    "a11y_preset_solo_tooltip": "仅激活此配置文件（重置其他项）",
+    "a11y_reset_presets_btn": "↺ 重置所有配置",
+    "a11y_reset_presets_tooltip": "停用所有配置文件并恢复默认中性设置",
+    "a11y_audio_section_title": "朗读器设置与声音反馈",
+    "a11y_narrator_voice": "朗读声音：",
+    "a11y_auto_read_msgs": "🗣️ 自动语音朗读助手回复",
+    "a11y_auto_read_sugs": "💡 同时大声朗读操作建议",
+    "a11y_earcons": "🔔 操作确认音与提示音效 (Earcons)",
     "settings_tab_language": "🌐 界面语言",
     "settings_tab_devices": "🎙️ 输入设备",
     "settings_tab_macros": "⚡ 快捷指令",

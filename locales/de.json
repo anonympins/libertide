@@ -1,4 +1,10 @@
 {
+  "a11y": {
+    "preset_visual": "👁️ Sehbehinderung / Geringe Sehkraft",
+    "preset_motor_switch": "🎯 Motorische Einschränkung / Einzelschalter",
+    "preset_tremor": "🤲 Zittern / Parkinson / Spastik",
+    "preset_cognitive": "🧠 Kognitiver Komfort / Neurodivergent"
+  },
   "speech": {
     "ask_hover_nav": "Möchten Sie die Hover-Navigation aktivieren?",
     "hover_mode_btn": "Hover-Modus",
@@ -174,7 +180,20 @@
     "twitch_open_tooltip": "Auf Twitch öffnen",
     "twitch_waiting": "Warte auf Twitch-Nachrichten...",
     "settings_tab_llm": "🔑 LLM-Anbieter",
-    "settings_tab_theme": "🎨 Themes & Barrierefreiheit",
+    "settings_tab_accessibility": "♿ Barrierefreiheit",
+    "settings_tab_theme": "🎨 Design & Anzeige",
+    "a11y_presets_title": "Kombinierbare Barrierefreiheitsprofile (Mehrfachbedarfe)",
+    "a11y_presets_desc": "Aktivieren Sie ein oder mehrere Profile, um deren Anpassungen zu kombinieren (z. B. Sehbehinderung + Zittern):",
+    "a11y_preset_solo": "Allein",
+    "a11y_preset_solo_active": "★ Allein",
+    "a11y_preset_solo_tooltip": "Nur dieses Profil aktivieren (setzt andere zurück)",
+    "a11y_reset_presets_btn": "↺ Alle Profile zurücksetzen",
+    "a11y_reset_presets_tooltip": "Deaktiviert alle Profile und stellt Standardeinstellungen wieder her",
+    "a11y_audio_section_title": "Sprachausgabe- und Audio-Feedback-Optionen",
+    "a11y_narrator_voice": "Stimme des Sprechers:",
+    "a11y_auto_read_msgs": "🗣️ Automatische Sprachausgabe von Assistentennachrichten",
+    "a11y_auto_read_sugs": "💡 Handlungsvorschläge ebenfalls laut vorlesen",
+    "a11y_earcons": "🔔 Bestätigungstöne und akustische Signale (Earcons)",
     "settings_tab_language": "🌐 Sprache",
     "settings_tab_devices": "🎙️ Geräte",
     "settings_tab_macros": "⚡ Makros",

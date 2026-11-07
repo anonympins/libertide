@@ -338,6 +338,7 @@ pub enum CommandTag {
     TravelAndFlightBooking,
     BrowserTabNavigation,
     NavigateInWebpage,
+    WebpageAnalysis,
     EcommerceAndShopping,
     CodeAndDevelopment,
     CommunicationAndMessaging,
@@ -381,6 +382,7 @@ impl CommandTag {
         Self::TravelAndFlightBooking,
         Self::BrowserTabNavigation,
         Self::NavigateInWebpage,
+        Self::WebpageAnalysis,
         Self::EcommerceAndShopping,
         Self::CodeAndDevelopment,
         Self::CommunicationAndMessaging,
@@ -424,6 +426,7 @@ impl CommandTag {
             Self::TravelAndFlightBooking => "TRAVEL_AND_FLIGHT_BOOKING",
             Self::BrowserTabNavigation => "BROWSER_TAB_NAVIGATION",
             Self::NavigateInWebpage => "NAVIGATE_IN_WEBPAGE",
+            Self::WebpageAnalysis => "WEBPAGE_ANALYSIS",
             Self::EcommerceAndShopping => "ECOMMERCE_AND_SHOPPING",
             Self::CodeAndDevelopment => "CODE_AND_DEVELOPMENT",
             Self::CommunicationAndMessaging => "COMMUNICATION_AND_MESSAGING",
@@ -468,6 +471,7 @@ impl CommandTag {
             Self::TravelAndFlightBooking => "Recherche et comparatifs de vols d'avion, horaires de voyage, formulaire de critères de transport. Actions : show_floating_card (formulaire/tableau), navigate_to_url.",
             Self::BrowserTabNavigation => "Gestion des onglets du navigateur : sélection d'un onglet ouvert, nouvel onglet, fermeture d'onglet (Ctrl+W). Actions : click_element sur onglet, accessibility_shortcut: close_tab/reopen_tab.",
             Self::NavigateInWebpage => "Exploration en profondeur d'une page web ouverte : acceptation obligatoire des bannières cookies, fermeture des popups, navigation via Google Search. Actions : click_element, click_button, scroll, navigate_back.",
+            Self::WebpageAnalysis => "Analyse, lecture et synthèse approfondie du contenu textuel, des articles, documents ou données d'une page web active ou d'un site affiché à l'écran (ex: 'analyse la page', 'de quoi parle ce site ?', 'résume cet article', 'lis la page web'). Actions : show_floating_card (markdown/table), scroll, click_element.",
             Self::EcommerceAndShopping => "Achats en ligne, consultation de panier, comparatif de prix et passation de commande (avec arrêt obligatoire avant paiement). Actions : navigate_to_url, click_button, show_floating_card (table).",
             Self::CodeAndDevelopment => "Développement informatique : inspection de code, consultation de fichiers sources (.rs, .py, .js), exécution de commandes de test ou compilation. Actions : read_editor_content, run_command.",
             Self::CommunicationAndMessaging => "Communication interpersonnelle : rédaction d'e-mails, messageries professionnelles (Teams, Slack, Outlook, Discord), consultation de fiches de contacts. Actions : write_text, show_floating_card, focus_window.",
@@ -499,8 +503,71 @@ pub fn all_command_tags_prompt_list() -> String {
 }
 
 /// Filtrage rapide des cas évidents (bruit pur, signal de micro, impulsions système)
-pub fn fast_classify_intent(query: &str) -> Vec<CommandTag> {
+pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<CommandTag> {
     let lower = query.to_lowercase();
+
+    // Détection immédiate d'analyse de page web ou d'écran
+    if lower.contains("analyse la page")
+        || lower.contains("analyse cette page")
+        || lower.contains("analyse ce site")
+        || lower.contains("analyse le site")
+        || lower.contains("analyse du site")
+        || lower.contains("analyse de la page")
+        || lower.contains("analyse l'ecran")
+        || lower.contains("analyse l'écran")
+        || lower.contains("analyse ecran")
+        || lower.contains("analyse écran")
+        || lower.contains("analyse l ecran")
+        || lower.contains("analyse l écran")
+        || lower.contains("analyser la page")
+        || lower.contains("analyser ce site")
+        || lower.contains("analyser l'écran")
+        || lower.contains("analyser l'ecran")
+        || lower.contains("de quoi parle la page")
+        || lower.contains("de quoi parle ce site")
+        || lower.contains("de quoi parle cet article")
+        || lower.contains("de quoi parle l'article")
+        || lower.contains("que dit la page")
+        || lower.contains("que dit le site")
+        || lower.contains("que dit cet article")
+        || lower.contains("résume la page")
+        || lower.contains("resume la page")
+        || lower.contains("résumer la page")
+        || lower.contains("resumer la page")
+        || lower.contains("résumé de la page")
+        || lower.contains("resume de la page")
+        || lower.contains("résume ce site")
+        || lower.contains("resume ce site")
+        || lower.contains("lis la page")
+        || lower.contains("lire la page")
+        || lower.contains("qu'est-ce qu'il y a sur la page")
+        || lower.contains("qu'y a-t-il sur la page")
+        || lower.contains("qu'est-ce qui est écrit")
+        || lower.contains("qu'est-ce qu'il y a d'écrit")
+        || lower.contains("qu'est-ce que tu vois")
+        || lower.contains("que vois-tu")
+        || lower.contains("webpage analysis")
+        || lower.contains("analyze page")
+        || lower.contains("analyze webpage")
+        || lower.contains("read page")
+        || lower.contains("summarize page")
+    {
+        return vec![CommandTag::WebpageAnalysis, CommandTag::ScreenReadingOrSummary];
+    }
+
+    // Si le contexte d'écran montre une page web active et que l'utilisateur pose une question dessus
+    if let Some(hint) = screen_hint {
+        let hint_lower = hint.to_lowercase();
+        let is_web = hint_lower.contains("[page web")
+            || hint_lower.contains("chrome")
+            || hint_lower.contains("firefox")
+            || hint_lower.contains("edge")
+            || hint_lower.contains("brave");
+
+        if is_web && (lower.contains("résume") || lower.contains("resume") || lower.contains("analyse") || lower.contains("explique") || lower.contains("c'est quoi") || lower.contains("qui est") || lower.contains("combien")) {
+            return vec![CommandTag::WebpageAnalysis, CommandTag::ScreenReadingOrSummary];
+        }
+    }
 
     // Bruit de micro et onomatopées isolées
     let trimmed_words: Vec<&str> = lower.split_whitespace().collect();
@@ -703,6 +770,14 @@ pub fn build_routed_system_prompt(tags: &[CommandTag], lang_name: &str) -> Strin
             effective_tags.push(CommandTag::ClickElementOrButton);
         }
     }
+    if effective_tags.contains(&CommandTag::WebpageAnalysis) {
+        if !effective_tags.contains(&CommandTag::ScreenReadingOrSummary) {
+            effective_tags.push(CommandTag::ScreenReadingOrSummary);
+        }
+        if !effective_tags.contains(&CommandTag::FloatingCardOrForm) {
+            effective_tags.push(CommandTag::FloatingCardOrForm);
+        }
+    }
     if effective_tags.contains(&CommandTag::EcommerceAndShopping) {
         if !effective_tags.contains(&CommandTag::WebNavigateOrSearch) {
             effective_tags.push(CommandTag::WebNavigateOrSearch);
@@ -857,6 +932,16 @@ Règles NAVIGATION WEB & RECHERCHE :
 - Accepte systématiquement les bannières cookies Google ("Tout accepter").
 - Clique directement sur le résultat textuel du sujet demandé parmi la liste des sites proposés par Google, JAMAIS sur les filtres/onglets génériques ("Actualités", "Vidéos", "Images", "Outils").
 - Pour revenir en arrière : "navigate_back".
+"#);
+            }
+            CommandTag::WebpageAnalysis => {
+                prompt.push_str(r#"
+Règles ANALYSE DE PAGE WEB (TAG WEBPAGE_ANALYSIS) :
+- L'utilisateur demande d'analyser, synthétiser, expliquer ou extraire le contenu d'une page web ou d'un site affiché à l'écran.
+- Tu DOIS exploiter en priorité les sections [État actuel de l'écran] et particulièrement [Page web - Corps textuel et résultats rendus] pour fournir une synthèse riche, structurée et précise.
+- Si le contenu est long ou structuré, projette une fenêtre volante Markdown via "show_floating_card" (card_type: "markdown", id: "analyse_page", title: "Analyse de la page", data: {"text": "..."}).
+- Si des éléments pertinents se trouvent plus bas dans la page, utilise l'action "scroll" ("direction": "down", "amount": 1).
+- Si l'analyse complète est fournie dans la narration ou la carte volante, termine la séquence avec "actions": [], "next_passes": 0.
 "#);
             }
             CommandTag::NavigateInWebpage => {
@@ -1214,6 +1299,10 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
                 prompt.push_str("- {\"action\": \"open_search_browser\"}\n");
                 prompt.push_str("- {\"action\": \"navigate_back\"}\n");
                 prompt.push_str("- {\"action\": \"navigate_forward\"}\n");
+            }
+            CommandTag::WebpageAnalysis => {
+                prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"analyse_page\", \"title\": \"Analyse\", \"card_type\": \"markdown\", \"data\": {\"text\": \"...\"}}\n");
+                prompt.push_str("- {\"action\": \"scroll\", \"direction\": \"down\"|\"up\", \"amount\": 1}\n");
             }
             CommandTag::NavigateInWebpage => {
                 prompt.push_str("- {\"action\": \"click_element\", \"target_name\": \"Écouter le direct\"}\n");
@@ -2084,8 +2173,11 @@ impl LocalLlamaEngine {
         event_tx: Option<&Sender<AgentEvent>>,
         tts_tx: Option<&Sender<TtsCommand>>,
     ) -> Result<String, String> {
-        // Réduction du contexte alloué à 2048 tokens pour diviser par deux l'empreinte mémoire du KV-cache
-        let max_ctx = 2048;
+        // Contexte étendu à 8192 tokens par défaut (ou valeur personnalisée via LLAMA_CTX_SIZE)
+        let max_ctx = std::env::var("LLAMA_CTX_SIZE")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(8192);
         // Micro-batch standard à 512 tokens : évite le goulet d'étranglement quadratique O(N^2) de 2048 tokens
         let n_batch = 512;
         let num_cpus = std::thread::available_parallelism().map_or(4, |p| p.get());
@@ -2120,8 +2212,8 @@ impl LocalLlamaEngine {
             return Ok(String::new());
         }
 
-        // Tronquage de sécurité : si les tokens dépassent la capacité, tronquer sans découpe centrale corruptrice
-        let max_prompt_tokens = (max_ctx as usize).saturating_sub(400);
+        // Tronquage de sécurité basé sur la capacité maximale étendue
+        let max_prompt_tokens = (max_ctx as usize).saturating_sub(max_tokens.max(512));
         if tokens.len() > max_prompt_tokens {
             println!(
                 "[Local Llama] Avertissement: prompt ({} tokens) dépasse la capacité ({}) : tronquage sécurisé.",
@@ -2270,7 +2362,10 @@ impl LocalLlamaEngine {
     }
 
     pub fn generate_fast(&self, formatted_prompt: &str, max_tokens: usize) -> Result<String, String> {
-        let max_ctx = 3072;
+        let max_ctx = std::env::var("LLAMA_CTX_SIZE")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(4096);
         let n_batch = 512;
         let threads = std::thread::available_parallelism()
             .map_or(4, |p| p.get())
@@ -2339,27 +2434,33 @@ impl LocalLlamaEngine {
         Ok(output)
     }
 
-    pub fn classify_intent(&self, user_query: &str) -> Vec<CommandTag> {
+    pub fn classify_intent(&self, user_query: &str, screen_hint: Option<&str>) -> Vec<CommandTag> {
         let clean = user_query.trim();
         if clean.is_empty() {
             return vec![CommandTag::GeneralChitChat];
         }
 
-        let mut fast_tags = fast_classify_intent(clean);
-    println!("[LLM Router] Heuristique directe pour \"{}\" -> {:?}", clean, fast_tags);
-    if !fast_tags.is_empty() {
-        return fast_tags;
-    }
+        let mut fast_tags = fast_classify_intent(clean, screen_hint);
+        println!("[LLM Router] Heuristique directe pour \"{}\" -> {:?}", clean, fast_tags);
+        if !fast_tags.is_empty() {
+            return fast_tags;
+        }
 
         let preset = get_active_preset();
         let tags_list = all_command_tags_prompt_list();
+        let screen_info = if let Some(hint) = screen_hint.filter(|h| !h.trim().is_empty()) {
+            let truncated = safe_truncate_str(hint.trim(), 500);
+            format!("\n[Contexte d'écran actuel / Fenêtre active] :\n{}\n", truncated)
+        } else {
+            String::new()
+        };
         let prompt_text = format!(
             "Tu es le routeur sémantique d'intention pour l'agent d'accessibilité numérique Libertide.\n\
-            Analyse la demande de l'utilisateur et sélectionne 1 à 3 tags pertinents parmi la liste exhaustive ci-dessous.\n\n\
+            Analyse la demande de l'utilisateur et le contexte d'écran fourni ci-dessous, puis sélectionne 1 à 3 tags pertinents parmi la liste exhaustive.\n{}\n\
             CATALOGUE COMPLET DES COMMANDTAGS ET RÈGLES D'ÉVALUATION (NOM = DESCRIPTION) :\n\
             {}\n\n\
-            Réponds STRICTEMENT avec les tags choisis séparés par une virgule (ex: RADIO_AND_MUSIC_STREAM, WEB_NAVIGATE_OR_SEARCH).",
-            tags_list
+            Réponds STRICTEMENT avec les tags choisis séparés par une virgule (ex: WEBPAGE_ANALYSIS, SCREEN_READING_OR_SUMMARY).",
+            screen_info, tags_list
         );
 
         let formatted = match preset.family {
@@ -2388,22 +2489,24 @@ impl LocalLlamaEngine {
 }
 
 /// Résout les tags sémantiques pertinents pour n'importe quelle requête (utilisable par tous les LLM)
-pub fn resolve_query_tags(query: &str) -> Vec<CommandTag> {
+pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<CommandTag> {
     let clean = query.trim();
-    let mut resolved = if clean.is_empty() {
+    if clean.is_empty() {
         vec![CommandTag::GeneralChitChat]
     } else {
-        let fast = fast_classify_intent(clean);
+        let fast = fast_classify_intent(clean, screen_hint);
         if !fast.is_empty() {
             fast
         } else if let Ok(lock) = LOCAL_ENGINE.lock() {
             if let Some(ref engine) = *lock {
-                let tags = engine.classify_intent(clean);
+                let tags = engine.classify_intent(clean, screen_hint);
                 if tags.is_empty() {
                     vec![CommandTag::GeneralChitChat]
                 } else {
                     tags
                 }
+            } else if clean.to_lowercase().contains("page") || clean.to_lowercase().contains("site") || clean.to_lowercase().contains("écran") || clean.to_lowercase().contains("ecran") {
+                vec![CommandTag::WebpageAnalysis, CommandTag::ScreenReadingOrSummary]
             } else if clean.ends_with('?') {
                 vec![CommandTag::KnowledgeAndQuestions]
             } else {
@@ -2412,8 +2515,7 @@ pub fn resolve_query_tags(query: &str) -> Vec<CommandTag> {
         } else {
             vec![CommandTag::GeneralChitChat]
         }
-    };
-    resolved
+    }
 }
 
 pub fn get_or_load_local_llama(event_tx: &Sender<AgentEvent>) -> Result<(), String> {
@@ -2516,6 +2618,9 @@ pub fn run_local_llama_completion(
         .map(|m| m.content.trim())
         .unwrap_or("");
 
+    // Conserver le message utilisateur complet avec [État actuel de l'écran] pour la consigne courante
+    let clean_query = last_user_msg;
+
     // Remonte l'historique utilisateur pour trouver la consigne réelle non-vide
     let clean_goal = messages
         .iter()
@@ -2527,11 +2632,11 @@ pub fn run_local_llama_completion(
 
     // Résolution d'intention sans réentrance de verrou
     let tags = {
-        let fast = fast_classify_intent(clean_goal);
+        let fast = fast_classify_intent(clean_goal, Some(clean_query));
         if !fast.is_empty() {
             fast
         } else {
-            let classified = engine.classify_intent(clean_goal);
+            let classified = engine.classify_intent(clean_goal, Some(clean_query));
             if classified.is_empty() {
                 vec![CommandTag::GeneralChitChat]
             } else {
@@ -2554,9 +2659,6 @@ pub fn run_local_llama_completion(
         build_routed_system_prompt(&tags, &lang_name)
     };
 
-    // Conserver le message utilisateur complet avec [État actuel de l'écran] pour la consigne courante
-    let clean_query = last_user_msg;
-
     // Prise en compte intégrale de l'historique de conversation (identique au remote)
     let candidate_messages: Vec<&ChatMessage> = messages.iter().collect();
 
@@ -2565,8 +2667,11 @@ pub fn run_local_llama_completion(
     let start_idx = candidate_messages.len().saturating_sub(max_history_msgs);
     let mut recent_messages: Vec<ChatMessage> = candidate_messages[start_idx..].iter().map(|&m| m.clone()).collect();
 
-    // Régulation basée sur le nombre de tokens pour le modèle local (budget de 1400 tokens pour l'entrée)
-    let local_budget = 1400usize;
+    // Budget d'entrée étendu pour le modèle local
+    let local_budget = std::env::var("LLAMA_CTX_SIZE")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(8192).saturating_sub(max_tokens as usize + 256);
     let sys_tokens = estimate_token_count(&effective_system_prompt);
     let mut current_tokens = sys_tokens;
     for m in &recent_messages {
@@ -2585,8 +2690,8 @@ pub fn run_local_llama_completion(
         .rposition(|m| m.role == "user");
 
     let mut formatted_prompt = String::new();
-    let user_token_budget = 3000;
-    let query_token_budget = 3000;
+    let user_token_budget = 6000;
+    let query_token_budget = 6000;
 
     match preset.family {
         ModelFamily::Llama3 => {

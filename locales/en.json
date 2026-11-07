@@ -1,4 +1,10 @@
 {
+  "a11y": {
+    "preset_visual": "👁️ Visual impairment / Low vision",
+    "preset_motor_switch": "🎯 Motor impairment / Single switch",
+    "preset_tremor": "🤲 Tremors / Parkinson's / Spasticity",
+    "preset_cognitive": "🧠 Cognitive comfort / Neurodivergent"
+  },
   "speech": {
     "ask_hover_nav": "Do you want to enable hover navigation?",
     "hover_mode_btn": "Hover mode",
@@ -174,7 +180,20 @@
     "twitch_open_tooltip": "Open on Twitch",
     "twitch_waiting": "Waiting for Twitch messages...",
     "settings_tab_llm": "🔑 LLM Provider",
-    "settings_tab_theme": "🎨 Themes & Accessibility",
+    "settings_tab_accessibility": "♿ Accessibility",
+    "settings_tab_theme": "🎨 Theme & Display",
+    "a11y_presets_title": "Cumulative accessibility profiles (Multiple needs)",
+    "a11y_presets_desc": "Check one or more profiles to combine their adaptations (e.g. Low vision + Tremors):",
+    "a11y_preset_solo": "Solo",
+    "a11y_preset_solo_active": "★ Solo",
+    "a11y_preset_solo_tooltip": "Activate only this profile (resets others)",
+    "a11y_reset_presets_btn": "↺ Reset all profiles",
+    "a11y_reset_presets_tooltip": "Disables all profiles and restores default neutral settings",
+    "a11y_audio_section_title": "Narrator options and audio feedback",
+    "a11y_narrator_voice": "Narrator voice:",
+    "a11y_auto_read_msgs": "🗣️ Automatic speech reading of agent messages",
+    "a11y_auto_read_sugs": "💡 Also speak action suggestions aloud",
+    "a11y_earcons": "🔔 Confirmation sounds and audio cues (Earcons)",
     "settings_tab_language": "🌐 Language",
     "settings_tab_devices": "🎙️ Devices",
     "settings_tab_macros": "⚡ Macros",
