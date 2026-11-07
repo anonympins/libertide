@@ -3,6 +3,39 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.7.2] - 2026-11-07
+
+### ♿ Cumulative Accessibility Profiles & Voice Selector Migration (`app_settings.rs`, `main.rs`, `locales/`)
+- **Cumulative Disability Presets (`57a31a9`)**:
+  - Added multi-selection and cumulative adaptation presets (`DisabilityPreset::Visual`, `MotorSwitch`, `Tremor`, `Cognitive`) combining high-contrast themes, dynamic font scaling, switch debounce, and dwell timings.
+  - Added a "Solo" profile activator (`a11y_preset_solo`) and global reset (`a11y_reset_presets_btn`) with persistence in `DISABILITY_PRESETS`.
+  - **Voice Selection Moved to Settings**: Removed the voice toggle button from the main bottom action bar (reducing clutter to 6 WCAG AAA buttons) and integrated a narrator voice selector in the Accessibility tab with full Dwell, Click, and Tab/Space keyboard support.
+  - Comprehensive translation across all 9 locales (`fr`, `en`, `de`, `es`, `it`, `pt`, `ru`, `ja`, `zh`).
+
+### 🔔 Asynchronous Wake & Focus Watcher (`main.rs`)
+- **Event Wake Watcher Worker (`c5e05bc`)**:
+  - Implemented background event listener thread (`spawn_event_wake_watcher`) monitoring agent events (`NarrationStart`, `ReplaceNarration`, `TwitchChatReceived`, `VoicePromptReady`).
+  - Automatically restores, un-minimizes (`SW_RESTORE`), and brings the Libertide overlay window to foreground when agent answers, Twitch messages, or voice prompts are triggered.
+
+### ⚙️ Modular Architecture & Settings Refactoring (`app_settings.rs`, `main.rs`, `locales/`)
+- **Codebase Modularization (`c5d8272`)**:
+  - Extracted settings view and configuration management into `app_settings.rs`.
+  - Modularized switch access handling, locale detection, and intent taxonomies across localized intent files.
+  - Improved Tab navigation order and accessible focus indicators for modals and dropdowns.
+
+### 🌐 Enhanced Webpage & Document Context Extraction (`overlay.rs`, `ui.rs`)
+- **Deep Webpage & Context Analysis (`d6f79ca`)**:
+  - Integrated `extract_window_context_meta` leveraging UI Automation `UIA_DocumentControlTypeId` and `extract_web_document_text` to sample DOM page text (up to 1,500 chars) for browser windows.
+  - Integrated terminal buffer extraction and document title metadata injection directly into LLM navigation zone reasoning (`analyze_navigation_zones_with_llm`).
+
+### 🎨 UI Contrast & Increased Generation Quotas (`theme.rs`, `overlay.rs`, `local_llm.rs`)
+- **Opaque Selectboxes & Dropdowns (`d138ad5`)**:
+  - Fixed transparency bleed-through on `egui::ComboBox` popups and dropdown menus by enforcing opaque theme fills (`window_fill`, `control_bg`).
+- **Expanded LLM Output Token Limits (`d138ad5`)**:
+  - Increased token generation ceilings for richer webpage analyses, summaries, and complex multi-step accessibility DOM reasoning.
+
+---
+
 ## [0.7.1] - 2026-11-06
 
 ### 🎙️🖱️ Devices & Hardware Detection (`devices.rs`, `main.rs`)
