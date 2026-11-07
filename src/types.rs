@@ -8,6 +8,51 @@ pub enum SwitchAccessStep {
     Elements,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum DisabilityPreset {
+    Visual,
+    MotorSwitch,
+    Tremor,
+    Cognitive,
+}
+
+impl DisabilityPreset {
+    pub const ALL: &'static [Self] = &[
+        Self::Visual,
+        Self::MotorSwitch,
+        Self::Tremor,
+        Self::Cognitive,
+    ];
+
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::Visual => t!("a11y.preset_visual").to_string(),
+            Self::MotorSwitch => t!("a11y.preset_motor_switch").to_string(),
+            Self::Tremor => t!("a11y.preset_tremor").to_string(),
+            Self::Cognitive => t!("a11y.preset_cognitive").to_string(),
+        }
+    }
+
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Visual => "visual",
+            Self::MotorSwitch => "switch",
+            Self::Tremor => "tremor",
+            Self::Cognitive => "cognitive",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "visual" | "visuel" => Some(Self::Visual),
+            "motorswitch" | "switch" | "moteur" => Some(Self::MotorSwitch),
+            "tremor" | "tremblement" => Some(Self::Tremor),
+            "cognitive" | "cognitif" => Some(Self::Cognitive),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct NumberedElementTarget {
     pub index: usize,

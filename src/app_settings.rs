@@ -3,15 +3,18 @@ use std::time::Duration;
 use eframe::egui;
 
 use crate::automation::{
-    get_clipboard_text, get_plain_clipboard_text, set_clipboard_text, SWITCH_DEBOUNCE_MS,
+    get_clipboard_text, get_plain_clipboard_text, SWITCH_DEBOUNCE_MS,
     SWITCH_LONG_PRESS_MS,
 };
 use crate::fs_util::{read_env_var_from_file, save_macros, write_env_var_to_file};
 use crate::local_llm;
 use crate::locale::get_system_locale_language;
-use crate::overlay::{apply_dwell_to_response, play_earcon, resolve_llm_config, Earcon};
+use crate::overlay::{
+    apply_dwell_to_response, make_slider_accessible, make_toggle_accessible,
+    make_widget_accessible_and_activated, play_earcon, resolve_llm_config, Earcon,
+};
 use crate::theme::{localized_theme_desc, localized_theme_name, AppTheme, SettingsTab, ThemeColors};
-use crate::types::{AgentEvent, LlmProvider};
+use crate::types::{AgentEvent, DisabilityPreset, LlmProvider, VoiceProfile};
 use crate::OverlayApp;
 
 impl OverlayApp {
@@ -57,6 +60,119 @@ impl OverlayApp {
         self.theme = theme;
         let _ = write_env_var_to_file(".env", "THEME", theme.key());
         std::env::set_var("THEME", theme.key());
+    }
+
+    pub fn reset_disability_parameters_to_default(&mut self, ctx: &egui::Context) {
+        self.set_theme(AppTheme::CyberCyan);
+        self.set_zoom_factor(1.0);
+        ctx.set_zoom_factor(1.0);
+        self.auto_read_agent_messages = true;
+        self.auto_read_suggestions = true;
+        self.earcons_enabled = true;
+        crate::overlay::set_earcons_enabled(true);
+        self.dwell_state.dwell_duration = Duration::ZERO;
+        self.dwell_state.activation_delay = Duration::from_millis(200);
+        SWITCH_DEBOUNCE_MS.store(180, Ordering::Relaxed);
+        SWITCH_LONG_PRESS_MS.store(1100, Ordering::Relaxed);
+    }
+
+    pub fn select_exclusive_disability_preset(&mut self, preset: DisabilityPreset, ctx: &egui::Context) {
+        self.active_disability_presets.clear();
+        self.active_disability_presets.insert(preset);
+        self.apply_active_disability_presets(ctx);
+    }
+
+    pub fn toggle_disability_preset(&mut self, preset: DisabilityPreset, ctx: &egui::Context) {
+        if self.active_disability_presets.contains(&preset) {
+            self.active_disability_presets.remove(&preset);
+        } else {
+            self.active_disability_presets.insert(preset);
+        }
+        self.apply_active_disability_presets(ctx);
+    }
+
+    pub fn apply_active_disability_presets(&mut self, ctx: &egui::Context) {
+        let keys_str = self
+            .active_disability_presets
+            .iter()
+            .map(|p| p.key())
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = write_env_var_to_file(".env", "DISABILITY_PRESETS", &keys_str);
+        std::env::set_var("DISABILITY_PRESETS", &keys_str);
+
+        // Si aucun profil ou un seul profil est actif (bascule d'un preset à l'autre),
+        // on réinitialise l'ensemble des réglages par défaut avant d'appliquer le profil.
+        if self.active_disability_presets.len() <= 1 {
+            self.reset_disability_parameters_to_default(ctx);
+        }
+
+        let has_visual = self.active_disability_presets.contains(&DisabilityPreset::Visual);
+        let has_switch = self.active_disability_presets.contains(&DisabilityPreset::MotorSwitch);
+        let has_tremor = self.active_disability_presets.contains(&DisabilityPreset::Tremor);
+        let has_cognitive = self.active_disability_presets.contains(&DisabilityPreset::Cognitive);
+
+        // 1. Thème d'affichage cumulatif
+        if has_visual {
+            self.set_theme(AppTheme::HighContrastYellow);
+        } else if has_cognitive {
+            self.set_theme(AppTheme::SoftAmber);
+        }
+
+        // 2. Facteur de zoom cumulatif (prend la valeur la plus adaptée aux besoins cochés)
+        let mut min_zoom = 1.0f32;
+        if has_visual {
+            min_zoom = min_zoom.max(1.40);
+        }
+        if has_tremor {
+            min_zoom = min_zoom.max(1.20);
+        }
+        if has_switch {
+            min_zoom = min_zoom.max(1.15);
+        }
+        if has_cognitive {
+            min_zoom = min_zoom.max(1.10);
+        }
+        self.set_zoom_factor(min_zoom);
+        ctx.set_zoom_factor(min_zoom);
+
+        // 3. Synthèse vocale & retours sonores
+        if has_visual {
+            self.auto_read_agent_messages = true;
+            self.auto_read_suggestions = true;
+            self.earcons_enabled = true;
+            crate::overlay::set_earcons_enabled(true);
+        } else if has_cognitive || has_tremor {
+            self.auto_read_agent_messages = true;
+            self.auto_read_suggestions = false;
+        } else if !has_switch {
+            self.auto_read_agent_messages = true;
+            self.auto_read_suggestions = true;
+        }
+
+        // 4. Contacteur, Dwell time et anti-rebond (debounce)
+        if has_tremor && has_switch {
+            self.dwell_state.dwell_duration = Duration::from_millis(1800);
+            self.dwell_state.activation_delay = Duration::from_millis(600);
+            SWITCH_DEBOUNCE_MS.store(450, Ordering::Relaxed);
+            SWITCH_LONG_PRESS_MS.store(1600, Ordering::Relaxed);
+        } else if has_tremor {
+            self.dwell_state.dwell_duration = Duration::ZERO;
+            self.dwell_state.activation_delay = Duration::from_millis(200);
+            SWITCH_DEBOUNCE_MS.store(450, Ordering::Relaxed);
+            SWITCH_LONG_PRESS_MS.store(1600, Ordering::Relaxed);
+        } else if has_switch {
+            self.dwell_state.dwell_duration = Duration::from_millis(1400);
+            self.dwell_state.activation_delay = Duration::from_millis(450);
+            SWITCH_DEBOUNCE_MS.store(220, Ordering::Relaxed);
+            SWITCH_LONG_PRESS_MS.store(1200, Ordering::Relaxed);
+        }
+        let _ = write_env_var_to_file(".env", "DWELL_TIME_MS", &self.dwell_state.dwell_duration.as_millis().to_string());
+        let _ = write_env_var_to_file(".env", "DWELL_ACTIVATION_DELAY_MS", &self.dwell_state.activation_delay.as_millis().to_string());
+        let _ = write_env_var_to_file(".env", "SWITCH_DEBOUNCE_MS", &SWITCH_DEBOUNCE_MS.load(Ordering::Relaxed).to_string());
+        let _ = write_env_var_to_file(".env", "SWITCH_LONG_PRESS_MS", &SWITCH_LONG_PRESS_MS.load(Ordering::Relaxed).to_string());
+        let _ = write_env_var_to_file(".env", "AUTO_READ_MESSAGES", if self.auto_read_agent_messages { "true" } else { "false" });
+        let _ = write_env_var_to_file(".env", "AUTO_READ_SUGGESTIONS", if self.auto_read_suggestions { "true" } else { "false" });
     }
 
     pub fn current_agent_model_display_name(&self) -> String {
@@ -122,7 +238,7 @@ impl OverlayApp {
 
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                        if ui.add(
+                        let close_btn = ui.add(
                             egui::Button::new(
                                 egui::RichText::new("✕")
                                     .size(11.0)
@@ -130,7 +246,11 @@ impl OverlayApp {
                             )
                             .min_size(egui::vec2(18.0, 16.0))
                             .corner_radius(egui::CornerRadius::same(4)),
-                        ).on_hover_text(t!("ui.btn_close")).clicked() {
+                        ).on_hover_text(t!("ui.btn_close"));
+                        close_btn.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), t!("ui.btn_close").to_string())
+                        });
+                        if make_widget_accessible_and_activated(ui, &close_btn, theme.accent) {
                             self.show_api_key_modal = false;
                             self.api_key_error = None;
                         }
@@ -153,8 +273,27 @@ impl OverlayApp {
                                 } else {
                                     tab_llm.clicked()
                                 };
-                                if llm_activated {
+                                let is_llm_key = make_widget_accessible_and_activated(ui, &tab_llm, theme.accent);
+                                if llm_activated || is_llm_key {
                                     self.settings_tab = SettingsTab::LlmProvider;
+                                }
+
+                                let is_a11y_active = self.settings_tab == SettingsTab::Accessibility;
+                                let tab_a11y = ui.selectable_label(
+                                    is_a11y_active,
+                                    egui::RichText::new(t!("ui.settings_tab_accessibility"))
+                                        .size(12.0)
+                                        .color(if is_a11y_active { theme.accent } else { theme.text_secondary })
+                                        .strong(),
+                                );
+                                let tab_a11y_id = ui.make_persistent_id("dwell_tab_accessibility");
+                                let is_a11y_key = make_widget_accessible_and_activated(ui, &tab_a11y, theme.accent);
+                                if !is_a11y_active {
+                                    if apply_dwell_to_response(ui, &mut self.dwell_state, tab_a11y_id, &tab_a11y) || is_a11y_key {
+                                        self.settings_tab = SettingsTab::Accessibility;
+                                    }
+                                } else if tab_a11y.clicked() || is_a11y_key {
+                                    self.settings_tab = SettingsTab::Accessibility;
                                 }
 
                                 let is_theme_active = self.settings_tab == SettingsTab::Theme;
@@ -171,7 +310,8 @@ impl OverlayApp {
                                 } else {
                                     tab_theme.clicked()
                                 };
-                                if theme_activated {
+                                let is_theme_key = make_widget_accessible_and_activated(ui, &tab_theme, theme.accent);
+                                if theme_activated || is_theme_key {
                                     self.settings_tab = SettingsTab::Theme;
                                 }
 
@@ -189,7 +329,8 @@ impl OverlayApp {
                                 } else {
                                     tab_lang.clicked()
                                 };
-                                if lang_activated {
+                                let is_lang_key = make_widget_accessible_and_activated(ui, &tab_lang, theme.accent);
+                                if lang_activated || is_lang_key {
                                     self.settings_tab = SettingsTab::Language;
                                 }
 
@@ -207,7 +348,8 @@ impl OverlayApp {
                                 } else {
                                     tab_macro.clicked()
                                 };
-                                if macro_activated {
+                                let is_macro_key = make_widget_accessible_and_activated(ui, &tab_macro, theme.accent);
+                                if macro_activated || is_macro_key {
                                     self.settings_tab = SettingsTab::Macros;
                                 }
 
@@ -225,7 +367,8 @@ impl OverlayApp {
                                 } else {
                                     tab_devices.clicked()
                                 };
-                                if devices_activated {
+                                let is_devices_key = make_widget_accessible_and_activated(ui, &tab_devices, theme.accent);
+                                if devices_activated || is_devices_key {
                                     self.settings_tab = SettingsTab::Devices;
                                     self.refresh_devices();
                                 }
@@ -268,7 +411,8 @@ impl OverlayApp {
                                             egui::RichText::new(label)
                                         };
 
-                                        if ui.selectable_label(is_selected_in_modal, label_rich).clicked() {
+                                        let p_resp = ui.selectable_label(is_selected_in_modal, label_rich);
+                                        if make_widget_accessible_and_activated(ui, &p_resp, theme.accent) {
                                             self.sync_modal_inputs_for_provider(provider);
                                         }
                                     }
@@ -278,13 +422,15 @@ impl OverlayApp {
 
                                 ui.horizontal(|ui| {
                                     let mut is_enabled = self.selected_provider_modal.is_enabled();
-                                    if ui.checkbox(&mut is_enabled, t!("ui.provider_enabled_checkbox")).changed() {
+                                    let chk_resp = ui.checkbox(&mut is_enabled, t!("ui.provider_enabled_checkbox"));
+                                    if make_toggle_accessible(ui, &chk_resp, theme.accent) {
                                         let _ = self.selected_provider_modal.set_enabled(is_enabled);
                                         self.llm_config = resolve_llm_config();
                                     }
 
                                     if self.selected_provider_modal != self.llm_config.provider {
-                                        if ui.button(t!("ui.btn_set_primary_provider")).clicked() {
+                                        let prim_btn = ui.button(t!("ui.btn_set_primary_provider"));
+                                        if make_widget_accessible_and_activated(ui, &prim_btn, theme.accent) {
                                             let _ = self.selected_provider_modal.set_enabled(true);
                                             let _ = write_env_var_to_file(".env", "LLM_PROVIDER", self.selected_provider_modal.display_name());
                                             std::env::set_var("LLM_PROVIDER", self.selected_provider_modal.display_name());
@@ -324,7 +470,7 @@ impl OverlayApp {
                                                 ui.horizontal(|ui| {
                                                     let radio_label = format!("{} ({})", preset.name, preset.size_desc);
                                                     let radio_resp = ui.radio(is_active, radio_label);
-                                                    if radio_resp.clicked() && !is_active {
+                                                    if make_widget_accessible_and_activated(ui, &radio_resp, theme.accent) && !is_active {
                                                         self.llm_config.model = preset.name.to_string();
                                                         self.model_input = preset.name.to_string();
                                                         play_earcon(Earcon::Success);
@@ -349,7 +495,8 @@ impl OverlayApp {
 
                                                     if is_installed {
                                                         ui.label(egui::RichText::new(t!("ui.local_model_ready")).size(10.5).color(egui::Color32::from_rgb(100, 225, 130)).strong());
-                                                        if ui.small_button("🗑").on_hover_text(t!("ui.local_model_delete_tooltip")).clicked() {
+                                                        let del_btn = ui.small_button("🗑").on_hover_text(t!("ui.local_model_delete_tooltip"));
+                                                        if make_widget_accessible_and_activated(ui, &del_btn, theme.accent) {
                                                             model_to_delete = Some(preset);
                                                         }
                                                     } else {
@@ -383,7 +530,8 @@ impl OverlayApp {
                                                 let event_tx_clone = self.event_sender.clone();
                                                 let p = *active_preset;
                                                 let btn_text = t!("ui.local_model_download_btn", name = p.name, size = p.size_desc).to_string();
-                                                if ui.button(egui::RichText::new(btn_text).strong().color(theme.accent)).clicked() {
+                                                let dl_btn = ui.button(egui::RichText::new(btn_text).strong().color(theme.accent));
+                                                if make_widget_accessible_and_activated(ui, &dl_btn, theme.accent) {
                                                     std::thread::spawn(move || {
                                                         if local_llm::ensure_llama_model_downloaded_for_preset(&p, &event_tx_clone).is_ok() {
                                                             local_llm::init_local_llm();
@@ -423,14 +571,16 @@ impl OverlayApp {
                                             .password(!self.show_api_key_plain)
                                             .hint_text(t!("ui.api_key_hint"))
                                             .desired_width(230.0);
-                                        let edit_resp = ui.add(edit);
+                                       ui.add(edit);
 
                                         let eye_icon = if self.show_api_key_plain { "🔒" } else { "👁" };
-                                        if ui.button(eye_icon).on_hover_text(t!("ui.toggle_api_key_visibility")).clicked() {
+                                        let eye_btn = ui.button(eye_icon).on_hover_text(t!("ui.toggle_api_key_visibility"));
+                                        if make_widget_accessible_and_activated(ui, &eye_btn, theme.accent) {
                                             self.show_api_key_plain = !self.show_api_key_plain;
                                         }
 
-                                        if ui.button("📋").on_hover_text(t!("ui.paste_from_clipboard")).clicked() {
+                                        let paste_btn = ui.button("📋").on_hover_text(t!("ui.paste_from_clipboard"));
+                                        if make_widget_accessible_and_activated(ui, &paste_btn, theme.accent) {
                                             if let Some(clip) = get_clipboard_text() {
                                                 self.api_key_input = clip.trim().to_string();
                                             }
@@ -441,7 +591,8 @@ impl OverlayApp {
                                     ui.horizontal(|ui| {
                                         ui.label(egui::RichText::new(t!("ui.model_label", env = env_model_target)).size(11.0).color(egui::Color32::WHITE).strong());
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            if ui.small_button(t!("ui.btn_model_recommended")).on_hover_text(t!("ui.restore_default_model_tooltip", model = default_model_name)).clicked() {
+                                                let rec_btn = ui.small_button(t!("ui.btn_model_recommended")).on_hover_text(t!("ui.restore_default_model_tooltip", model = default_model_name));
+                                                if make_widget_accessible_and_activated(ui, &rec_btn, theme.accent) {
                                                 self.model_input = default_model_name.to_string();
                                             }
                                         });
@@ -457,7 +608,8 @@ impl OverlayApp {
                                     ui.horizontal(|ui| {
                                         ui.label(egui::RichText::new(t!("ui.endpoint_label")).size(11.0).color(egui::Color32::WHITE).strong());
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            if ui.small_button(t!("ui.btn_endpoint_default")).on_hover_text(t!("ui.btn_endpoint_default_tooltip", url = default_endpoint_url).to_string()).clicked() {
+                                                let def_ep_btn = ui.small_button(t!("ui.btn_endpoint_default")).on_hover_text(t!("ui.btn_endpoint_default_tooltip", url = default_endpoint_url).to_string());
+                                                if make_widget_accessible_and_activated(ui, &def_ep_btn, theme.accent) {
                                                 self.endpoint_input = default_endpoint_url.to_string();
                                             }
                                         });
@@ -482,7 +634,8 @@ impl OverlayApp {
 
                                 ui.add_space(5.0);
                                 ui.horizontal(|ui| {
-                                    if ui.button(t!("ui.btn_save_apply")).clicked() {
+                                    let save_btn = ui.button(t!("ui.btn_save_apply"));
+                                    if make_widget_accessible_and_activated(ui, &save_btn, theme.accent) {
                                         let key = self.api_key_input.trim();
                                         let model = if self.model_input.trim().is_empty() { default_model_name } else { &self.model_input };
                                         let endpoint = if self.endpoint_input.trim().is_empty() { default_endpoint_url } else { &self.endpoint_input };
@@ -524,13 +677,276 @@ impl OverlayApp {
                                             self.show_api_key_modal = false;
                                         }
                                     }
-                                    if ui.button(t!("ui.btn_cancel")).clicked() {
+                                    let cancel_btn = ui.button(t!("ui.btn_cancel"));
+                                    if make_widget_accessible_and_activated(ui, &cancel_btn, theme.accent) {
                                         self.show_api_key_modal = false;
                                         self.api_key_error = None;
                                     }
                                 });
                             }
+                            SettingsTab::Accessibility => {
+                                // 1. Profils de handicap
+                                ui.label(
+                                    egui::RichText::new(t!("ui.a11y_presets_title"))
+                                        .size(12.0)
+                                        .color(theme.accent)
+                                        .strong(),
+                                );
+                                ui.label(
+                                    egui::RichText::new(t!("ui.a11y_presets_desc"))
+                                        .size(11.0)
+                                        .color(theme.text_secondary),
+                                );
+                                ui.add_space(6.0);
+
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        for &preset in DisabilityPreset::ALL {
+                                            let mut is_checked = self.active_disability_presets.contains(&preset);
+                                            ui.horizontal(|ui| {
+                                                let chk_resp = ui.checkbox(&mut is_checked, preset.display_name());
+                                                let chk_id = ui.make_persistent_id(format!("dwell_preset_{:?}", preset));
+                                                let is_toggle_hit = make_toggle_accessible(ui, &chk_resp, theme.accent);
+                                                if chk_resp.changed() || apply_dwell_to_response(ui, &mut self.dwell_state, chk_id, &chk_resp) || is_toggle_hit {
+                                                    self.toggle_disability_preset(preset, ctx);
+                                                    play_earcon(Earcon::Success);
+                                                }
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    let is_solo = is_checked && self.active_disability_presets.len() == 1;
+                                                    let solo_label = if is_solo { t!("ui.a11y_preset_solo_active").to_string() } else { t!("ui.a11y_preset_solo").to_string() };
+                                                    let solo_btn = ui.small_button(solo_label).on_hover_text(t!("ui.a11y_preset_solo_tooltip"));
+                                                    if make_widget_accessible_and_activated(ui, &solo_btn, theme.accent) {
+                                                        self.select_exclusive_disability_preset(preset, ctx);
+                                                        play_earcon(Earcon::Success);
+                                                    }
+                                                });
+                                            });
+                                            ui.add_space(2.0);
+                                        }
+                                        ui.add_space(4.0);
+                                        ui.horizontal(|ui| {
+                                            let reset_all_btn = ui.small_button(t!("ui.a11y_reset_presets_btn"))
+                                                .on_hover_text(t!("ui.a11y_reset_presets_tooltip"));
+                                            if make_widget_accessible_and_activated(ui, &reset_all_btn, theme.accent) {
+                                                self.active_disability_presets.clear();
+                                                self.apply_active_disability_presets(ctx);
+                                                play_earcon(Earcon::Success);
+                                            }
+                                        });
+                                    });
+
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(6.0);
+
+                                // 2. Options du narrateur et retours audio
+                                ui.label(
+                                    egui::RichText::new(t!("ui.a11y_audio_section_title"))
+                                        .size(12.0)
+                                        .color(theme.accent)
+                                        .strong(),
+                                );
+                                ui.add_space(4.0);
+
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(t!("ui.a11y_narrator_voice"))
+                                                .size(11.5)
+                                                .strong()
+                                                .color(egui::Color32::WHITE),
+                                        );
+                                        ui.add_space(4.0);
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                                            for &profile in VoiceProfile::ALL {
+                                                let is_selected = self.voice_gender == profile;
+                                                let (icon, label) = match profile {
+                                                    VoiceProfile::Denise => ("👩", "Denise"),
+                                                    VoiceProfile::Henri => ("👨", "Henri"),
+                                                    VoiceProfile::Hortense => ("🎙️", "Hortense"),
+                                                    VoiceProfile::Paul => ("🎩", "Paul"),
+                                                    VoiceProfile::Sylvie => ("🍁", "Sylvie"),
+                                                    VoiceProfile::Jean => ("⚡", "Jean"),
+                                                };
+                                                let btn_text = format!("{icon} {label}");
+                                                let resp = ui.selectable_label(is_selected, btn_text);
+                                                let id = ui.make_persistent_id(format!("dwell_voice_{:?}", profile));
+                                                let is_key = make_widget_accessible_and_activated(ui, &resp, theme.accent);
+                                                if resp.clicked() || apply_dwell_to_response(ui, &mut self.dwell_state, id, &resp) || is_key {
+                                                    if !is_selected {
+                                                        self.set_voice_gender(profile);
+                                                        play_earcon(Earcon::Success);
+                                                    }
+                                                }
+                                            }
+                                        });
+                                        ui.add_space(6.0);
+                                        ui.separator();
+                                        ui.add_space(4.0);
+                                        let mut read_msgs = self.auto_read_agent_messages;
+                                        let resp_msgs = ui.checkbox(
+                                            &mut read_msgs,
+                                            egui::RichText::new(t!("ui.a11y_auto_read_msgs"))
+                                                .size(11.5)
+                                                .color(theme.text_primary),
+                                        );
+                                        let id_msgs = ui.make_persistent_id("dwell_auto_read_msgs");
+                                        let is_msgs_key = make_toggle_accessible(ui, &resp_msgs, theme.accent);
+                                        if resp_msgs.changed() || apply_dwell_to_response(ui, &mut self.dwell_state, id_msgs, &resp_msgs) || is_msgs_key {
+                                            if resp_msgs.changed() {
+                                                self.auto_read_agent_messages = read_msgs;
+                                            } else {
+                                                self.auto_read_agent_messages = !self.auto_read_agent_messages;
+                                            }
+                                            let val_str = if self.auto_read_agent_messages { "true" } else { "false" };
+                                            let _ = write_env_var_to_file(".env", "AUTO_READ_MESSAGES", val_str);
+                                            std::env::set_var("AUTO_READ_MESSAGES", val_str);
+                                        }
+
+                                        ui.add_space(4.0);
+
+                                        let mut read_sugs = self.auto_read_suggestions;
+                                        let resp_sugs = ui.checkbox(
+                                            &mut read_sugs,
+                                            egui::RichText::new(t!("ui.a11y_auto_read_sugs"))
+                                                .size(11.5)
+                                                .color(theme.text_primary),
+                                        );
+                                        let id_sugs = ui.make_persistent_id("dwell_auto_read_sugs");
+                                        let is_sugs_key = make_toggle_accessible(ui, &resp_sugs, theme.accent);
+                                        if resp_sugs.changed() || apply_dwell_to_response(ui, &mut self.dwell_state, id_sugs, &resp_sugs) || is_sugs_key {
+                                            if resp_sugs.changed() {
+                                                self.auto_read_suggestions = read_sugs;
+                                            } else {
+                                                self.auto_read_suggestions = !self.auto_read_suggestions;
+                                            }
+                                            let val_str = if self.auto_read_suggestions { "true" } else { "false" };
+                                            let _ = write_env_var_to_file(".env", "AUTO_READ_SUGGESTIONS", val_str);
+                                            std::env::set_var("AUTO_READ_SUGGESTIONS", val_str);
+                                        }
+
+                                        ui.add_space(4.0);
+
+                                        let mut earcons = self.earcons_enabled;
+                                        let resp_earcons = ui.checkbox(
+                                            &mut earcons,
+                                            egui::RichText::new(t!("ui.a11y_earcons"))
+                                                .size(11.5)
+                                                .color(theme.text_primary),
+                                        );
+                                        let id_earcons = ui.make_persistent_id("dwell_earcons_enabled");
+                                        let is_earcons_key = make_toggle_accessible(ui, &resp_earcons, theme.accent);
+                                        if resp_earcons.changed() || apply_dwell_to_response(ui, &mut self.dwell_state, id_earcons, &resp_earcons) || is_earcons_key {
+                                            if resp_earcons.changed() {
+                                                self.earcons_enabled = earcons;
+                                            } else {
+                                                self.earcons_enabled = !self.earcons_enabled;
+                                            }
+                                            crate::overlay::set_earcons_enabled(self.earcons_enabled);
+                                        }
+                                    });
+
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(6.0);
+
+                                // 3. Clic par temporisation au survol (Dwell Timing)
+                                ui.label(egui::RichText::new(t!("ui.dwell_timing_label")).size(12.0).color(theme.accent).strong());
+                                ui.add_space(4.0);
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        let mut current_dwell_ms = self.dwell_state.dwell_duration.as_millis() as u64;
+                                        let prev_dwell_ms = current_dwell_ms;
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(t!("ui.dwell_delay_label")).size(11.5).strong().color(egui::Color32::WHITE));
+                                            let slider = egui::Slider::new(&mut current_dwell_ms, 0..=5000).step_by(50.0).custom_formatter(|val, _| {
+                                                if val <= 0.0 { t!("ui.dwell_disabled").to_string() } else { format!("{:.0} ms", val) }
+                                            });
+                                            let slider_resp = ui.add(slider).on_hover_text(t!("ui.dwell_tooltip"));
+                                            make_slider_accessible(ui, &slider_resp, theme.accent);
+                                        });
+                                        if current_dwell_ms != prev_dwell_ms {
+                                            self.dwell_state.dwell_duration = Duration::from_millis(current_dwell_ms);
+                                            let _ = write_env_var_to_file(".env", "DWELL_TIME_MS", &current_dwell_ms.to_string());
+                                            std::env::set_var("DWELL_TIME_MS", current_dwell_ms.to_string());
+                                        }
+
+                                        if current_dwell_ms > 0 {
+                                            ui.add_space(3.0);
+                                            let mut current_act_delay_ms = self.dwell_state.activation_delay.as_millis() as u64;
+                                            let prev_act_delay_ms = current_act_delay_ms;
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new(t!("ui.dwell_gauge_delay_label")).size(11.5).strong().color(egui::Color32::WHITE));
+                                                let act_slider = egui::Slider::new(&mut current_act_delay_ms, 0..=2500).step_by(50.0).custom_formatter(|val, _| {
+                                                    if val <= 0.0 { t!("ui.dwell_gauge_delay_immediate").to_string() } else { format!("{:.0} ms", val) }
+                                                });
+                                                let act_resp = ui.add(act_slider).on_hover_text(t!("ui.dwell_gauge_delay_tooltip"));
+                                                make_slider_accessible(ui, &act_resp, theme.accent);
+                                            });
+                                            if current_act_delay_ms != prev_act_delay_ms {
+                                                self.dwell_state.activation_delay = Duration::from_millis(current_act_delay_ms);
+                                                let _ = write_env_var_to_file(".env", "DWELL_ACTIVATION_DELAY_MS", &current_act_delay_ms.to_string());
+                                                std::env::set_var("DWELL_ACTIVATION_DELAY_MS", current_act_delay_ms.to_string());
+                                            }
+                                        }
+
+                                        ui.add_space(4.0);
+                                        ui.separator();
+                                        ui.add_space(4.0);
+
+                                        // 4. Contacteur unique (Switch Access)
+                                        let mut cur_long_press = SWITCH_LONG_PRESS_MS.load(Ordering::Relaxed);
+                                        let prev_long_press = cur_long_press;
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(t!("ui.switch_long_press_label")).size(11.5).strong().color(egui::Color32::WHITE));
+                                            let slider = egui::Slider::new(&mut cur_long_press, 400..=4000).step_by(50.0).suffix(" ms");
+                                            let slider_resp = ui.add(slider).on_hover_text(t!("ui.switch_long_press_tooltip"));
+                                            make_slider_accessible(ui, &slider_resp, theme.accent);
+                                        });
+                                        if cur_long_press != prev_long_press {
+                                            SWITCH_LONG_PRESS_MS.store(cur_long_press, Ordering::Relaxed);
+                                            let _ = write_env_var_to_file(".env", "SWITCH_LONG_PRESS_MS", &cur_long_press.to_string());
+                                            std::env::set_var("SWITCH_LONG_PRESS_MS", cur_long_press.to_string());
+                                        }
+
+                                        let mut cur_debounce = SWITCH_DEBOUNCE_MS.load(Ordering::Relaxed);
+                                        let prev_debounce = cur_debounce;
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(t!("ui.switch_debounce_label")).size(11.5).strong().color(egui::Color32::WHITE));
+                                            let slider = egui::Slider::new(&mut cur_debounce, 50..=1500).step_by(25.0).suffix(" ms");
+                                            let slider_resp = ui.add(slider).on_hover_text(t!("ui.switch_debounce_tooltip"));
+                                            make_slider_accessible(ui, &slider_resp, theme.accent);
+                                        });
+                                        if cur_debounce != prev_debounce {
+                                            SWITCH_DEBOUNCE_MS.store(cur_debounce, Ordering::Relaxed);
+                                            let _ = write_env_var_to_file(".env", "SWITCH_DEBOUNCE_MS", &cur_debounce.to_string());
+                                            std::env::set_var("SWITCH_DEBOUNCE_MS", cur_debounce.to_string());
+                                        }
+                                    });
+
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    let close_a11y_btn = ui.button(t!("ui.btn_close"));
+                                    if make_widget_accessible_and_activated(ui, &close_a11y_btn, theme.accent) {
+                                        self.show_api_key_modal = false;
+                                    }
+                                });
+                            }
                             SettingsTab::Theme => {
+                                // 1. Sélection du thème et des contrastes
                                 ui.label(egui::RichText::new(t!("ui.theme_profiles_label")).size(11.5).color(theme.text_secondary));
                                 ui.add_space(6.0);
 
@@ -580,6 +996,8 @@ impl OverlayApp {
                                 ui.add_space(8.0);
                                 ui.separator();
                                 ui.add_space(4.0);
+
+                                // 2. Taille de police & Facteur de zoom
                                 ui.label(egui::RichText::new(t!("ui.font_size_label")).size(11.5).color(theme.text_secondary));
                                 ui.add_space(6.0);
                                 let mut current_zoom = self.zoom_factor;
@@ -591,7 +1009,8 @@ impl OverlayApp {
                                     let btn_minus = egui::Button::new(egui::RichText::new("A −").size(13.0).strong().color(egui::Color32::WHITE)).min_size(egui::vec2(52.0, 30.0)).corner_radius(egui::CornerRadius::same(6));
                                     let resp_minus = ui.add(btn_minus).on_hover_text(t!("ui.font_minus_tooltip"));
                                     let id_minus = ui.make_persistent_id("dwell_zoom_minus");
-                                    if apply_dwell_to_response(ui, &mut self.dwell_state, id_minus, &resp_minus) {
+                                    let is_minus_key = make_widget_accessible_and_activated(ui, &resp_minus, theme.accent);
+                                    if apply_dwell_to_response(ui, &mut self.dwell_state, id_minus, &resp_minus) || is_minus_key {
                                         current_zoom = ((current_zoom - 0.10).max(0.70) * 100.0).round() / 100.0;
                                     }
 
@@ -600,14 +1019,16 @@ impl OverlayApp {
                                     let btn_plus = egui::Button::new(egui::RichText::new("A +").size(13.0).strong().color(egui::Color32::WHITE)).min_size(egui::vec2(52.0, 30.0)).corner_radius(egui::CornerRadius::same(6));
                                     let resp_plus = ui.add(btn_plus).on_hover_text(t!("ui.font_plus_tooltip"));
                                     let id_plus = ui.make_persistent_id("dwell_zoom_plus");
-                                    if apply_dwell_to_response(ui, &mut self.dwell_state, id_plus, &resp_plus) {
+                                    let is_plus_key = make_widget_accessible_and_activated(ui, &resp_plus, theme.accent);
+                                    if apply_dwell_to_response(ui, &mut self.dwell_state, id_plus, &resp_plus) || is_plus_key {
                                         current_zoom = ((current_zoom + 0.10).min(2.50) * 100.0).round() / 100.0;
                                     }
 
                                     let btn_reset = egui::Button::new(egui::RichText::new("100 %").size(12.0).color(theme.text_secondary)).min_size(egui::vec2(52.0, 30.0)).corner_radius(egui::CornerRadius::same(6));
                                     let resp_reset = ui.add(btn_reset).on_hover_text(t!("ui.font_reset_tooltip"));
                                     let id_reset = ui.make_persistent_id("dwell_zoom_reset");
-                                    if apply_dwell_to_response(ui, &mut self.dwell_state, id_reset, &resp_reset) {
+                                    let is_reset_key = make_widget_accessible_and_activated(ui, &resp_reset, theme.accent);
+                                    if apply_dwell_to_response(ui, &mut self.dwell_state, id_reset, &resp_reset) || is_reset_key {
                                         current_zoom = 1.0;
                                     }
                                 });
@@ -616,79 +1037,10 @@ impl OverlayApp {
                                     ctx.set_zoom_factor(self.zoom_factor);
                                 }
 
-                                ui.add_space(8.0);
-                                ui.separator();
-                                ui.add_space(4.0);
-                                ui.label(egui::RichText::new(t!("ui.dwell_timing_label")).size(11.5).color(theme.text_secondary));
-                                ui.add_space(3.0);
-                                let mut current_dwell_ms = self.dwell_state.dwell_duration.as_millis() as u64;
-                                let prev_dwell_ms = current_dwell_ms;
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(t!("ui.dwell_delay_label")).size(12.0).strong().color(egui::Color32::WHITE));
-                                    let slider = egui::Slider::new(&mut current_dwell_ms, 0..=2500).step_by(50.0).custom_formatter(|val, _| {
-                                        if val <= 0.0 { t!("ui.dwell_disabled").to_string() } else { format!("{:.0} ms", val) }
-                                    });
-                                    ui.add(slider).on_hover_text(t!("ui.dwell_tooltip"));
-                                });
-                                if current_dwell_ms != prev_dwell_ms {
-                                    self.dwell_state.dwell_duration = Duration::from_millis(current_dwell_ms);
-                                    let _ = write_env_var_to_file(".env", "DWELL_TIME_MS", &current_dwell_ms.to_string());
-                                    std::env::set_var("DWELL_TIME_MS", current_dwell_ms.to_string());
-                                }
-
-                                if current_dwell_ms > 0 {
-                                    ui.add_space(3.0);
-                                    let mut current_act_delay_ms = self.dwell_state.activation_delay.as_millis() as u64;
-                                    let prev_act_delay_ms = current_act_delay_ms;
-                                    ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new(t!("ui.dwell_gauge_delay_label")).size(12.0).strong().color(egui::Color32::WHITE));
-                                        let act_slider = egui::Slider::new(&mut current_act_delay_ms, 0..=600).step_by(25.0).custom_formatter(|val, _| {
-                                            if val <= 0.0 { t!("ui.dwell_gauge_delay_immediate").to_string() } else { format!("{:.0} ms", val) }
-                                        });
-                                        ui.add(act_slider).on_hover_text(t!("ui.dwell_gauge_delay_tooltip"));
-                                    });
-                                    if current_act_delay_ms != prev_act_delay_ms {
-                                        self.dwell_state.activation_delay = Duration::from_millis(current_act_delay_ms);
-                                        let _ = write_env_var_to_file(".env", "DWELL_ACTIVATION_DELAY_MS", &current_act_delay_ms.to_string());
-                                        std::env::set_var("DWELL_ACTIVATION_DELAY_MS", current_act_delay_ms.to_string());
-                                    }
-                                }
-
-                                ui.add_space(8.0);
-                                ui.separator();
-                                ui.add_space(4.0);
-                                ui.label(egui::RichText::new(t!("ui.switch_settings_label")).size(11.5).color(theme.text_secondary));
-                                ui.add_space(3.0);
-
-                                let mut cur_long_press = SWITCH_LONG_PRESS_MS.load(Ordering::Relaxed);
-                                let prev_long_press = cur_long_press;
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(t!("ui.switch_long_press_label")).size(12.0).strong().color(egui::Color32::WHITE));
-                                    let slider = egui::Slider::new(&mut cur_long_press, 400..=2500).step_by(50.0).suffix(" ms");
-                                    ui.add(slider).on_hover_text(t!("ui.switch_long_press_tooltip"));
-                                });
-                                if cur_long_press != prev_long_press {
-                                    SWITCH_LONG_PRESS_MS.store(cur_long_press, Ordering::Relaxed);
-                                    let _ = write_env_var_to_file(".env", "SWITCH_LONG_PRESS_MS", &cur_long_press.to_string());
-                                    std::env::set_var("SWITCH_LONG_PRESS_MS", cur_long_press.to_string());
-                                }
-
-                                let mut cur_debounce = SWITCH_DEBOUNCE_MS.load(Ordering::Relaxed);
-                                let prev_debounce = cur_debounce;
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(t!("ui.switch_debounce_label")).size(12.0).strong().color(egui::Color32::WHITE));
-                                    let slider = egui::Slider::new(&mut cur_debounce, 50..=800).step_by(25.0).suffix(" ms");
-                                    ui.add(slider).on_hover_text(t!("ui.switch_debounce_tooltip"));
-                                });
-                                if cur_debounce != prev_debounce {
-                                    SWITCH_DEBOUNCE_MS.store(cur_debounce, Ordering::Relaxed);
-                                    let _ = write_env_var_to_file(".env", "SWITCH_DEBOUNCE_MS", &cur_debounce.to_string());
-                                    std::env::set_var("SWITCH_DEBOUNCE_MS", cur_debounce.to_string());
-                                }
-
                                 ui.add_space(6.0);
                                 ui.horizontal(|ui| {
-                                    if ui.button(t!("ui.btn_close")).clicked() {
+                                    let close_theme_btn = ui.button(t!("ui.btn_close"));
+                                    if make_widget_accessible_and_activated(ui, &close_theme_btn, theme.accent) {
                                         self.show_api_key_modal = false;
                                     }
                                 });
@@ -717,7 +1069,8 @@ impl OverlayApp {
                                         let is_selected = selected_lang == code;
                                         let btn = ui.selectable_label(is_selected, label);
                                         let btn_id = ui.make_persistent_id(format!("dwell_lang_{code}"));
-                                        if apply_dwell_to_response(ui, &mut self.dwell_state, btn_id, &btn) {
+                                        let is_lang_key = make_widget_accessible_and_activated(ui, &btn, theme.accent);
+                                        if apply_dwell_to_response(ui, &mut self.dwell_state, btn_id, &btn) || is_lang_key {
                                             selected_lang = code.to_string();
                                         }
                                     }
@@ -731,7 +1084,8 @@ impl OverlayApp {
                                 ui.separator();
                                 ui.add_space(6.0);
                                 ui.horizontal(|ui| {
-                                    if ui.button(t!("ui.btn_close")).clicked() {
+                                    let close_lang_btn = ui.button(t!("ui.btn_close"));
+                                    if make_widget_accessible_and_activated(ui, &close_lang_btn, theme.accent) {
                                         self.show_api_key_modal = false;
                                     }
                                 });
@@ -767,7 +1121,8 @@ impl OverlayApp {
                                         }
 
                                         ui.horizontal(|ui| {
-                                            if ui.button(egui::RichText::new(t!("ui.macros_add_btn")).strong().color(theme.accent)).clicked() {
+                                            let add_btn = ui.button(egui::RichText::new(t!("ui.macros_add_btn")).strong().color(theme.accent));
+                                            if make_widget_accessible_and_activated(ui, &add_btn, theme.accent) {
                                                 let sc = self.macro_shortcut_input.trim().to_string();
                                                 let tx = self.macro_text_input.trim().to_string();
                                                 if sc.is_empty() {
@@ -806,7 +1161,8 @@ impl OverlayApp {
                                                 let preview = if tx.len() > 38 { format!("{}...", &tx[..35]) } else { tx.clone() };
                                                 ui.label(egui::RichText::new(preview).size(11.0).color(egui::Color32::WHITE)).on_hover_text(tx);
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                    if ui.small_button("🗑").on_hover_text(t!("ui.macros_delete_tooltip")).clicked() {
+                                                    let del_macro_btn = ui.small_button("🗑").on_hover_text(t!("ui.macros_delete_tooltip"));
+                                                    if make_widget_accessible_and_activated(ui, &del_macro_btn, theme.accent) {
                                                         to_remove = Some(idx);
                                                     }
                                                 });
@@ -826,7 +1182,8 @@ impl OverlayApp {
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new(t!("ui.devices_tab_desc")).size(11.5).color(theme.text_secondary));
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.button(t!("ui.devices_refresh_btn")).on_hover_text(t!("ui.devices_refresh_btn")).clicked() {
+                                        let ref_btn = ui.button(t!("ui.devices_refresh_btn")).on_hover_text(t!("ui.devices_refresh_btn"));
+                                        if make_widget_accessible_and_activated(ui, &ref_btn, theme.accent) {
                                             self.refresh_devices();
                                             play_earcon(Earcon::Success);
                                         }
@@ -905,7 +1262,8 @@ impl OverlayApp {
 
                                 ui.add_space(8.0);
                                 ui.horizontal(|ui| {
-                                    if ui.button(t!("ui.btn_close")).clicked() {
+                                    let close_dev_btn = ui.button(t!("ui.btn_close"));
+                                    if make_widget_accessible_and_activated(ui, &close_dev_btn, theme.accent) {
                                         self.show_api_key_modal = false;
                                     }
                                 });

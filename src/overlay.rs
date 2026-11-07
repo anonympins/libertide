@@ -1,6 +1,6 @@
 use eframe::egui;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::{get_system_locale_language, parse_llm_response_text, send_llm_chat_completion};
@@ -24,7 +24,21 @@ pub enum Earcon {
     Warning,
 }
 
+pub static EARCONS_ENABLED: AtomicBool = AtomicBool::new(true);
+
+pub fn is_earcons_enabled() -> bool {
+    EARCONS_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn set_earcons_enabled(enabled: bool) {
+    EARCONS_ENABLED.store(enabled, Ordering::Relaxed);
+    let _ = write_env_var_to_file(".env", "EARCONS_ENABLED", if enabled { "true" } else { "false" });
+}
+
 pub fn play_earcon(earcon: Earcon) {
+    if !is_earcons_enabled() {
+        return;
+    }
     #[cfg(windows)]
     std::thread::spawn(move || unsafe {
         extern "system" {
@@ -187,7 +201,7 @@ impl DwellState {
         if self.dwell_duration.is_zero() {
             Duration::ZERO
         } else {
-            self.activation_delay.min(self.dwell_duration / 2)
+            self.activation_delay.min(self.dwell_duration.saturating_sub(Duration::from_millis(150)))
         }
     }
 
@@ -1596,6 +1610,65 @@ pub fn resolve_initial_voice() -> VoiceGender {
     VoiceGender::Denise
 }
 
+/// Enregistre un widget dans la chaîne de tabulation egui, affiche un anneau de focus contrasté
+/// et détecte l'activation au clavier par Espace ou Entrée.
+pub fn make_widget_accessible_and_activated(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    focus_color: egui::Color32,
+) -> bool {
+    let layer_id = ui.layer_id();
+    ui.memory_mut(|m| m.interested_in_focus(response.id, layer_id));
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            response.rect.expand(2.0),
+            egui::CornerRadius::same(5),
+            egui::Stroke::new(2.0, focus_color),
+            egui::StrokeKind::Outside,
+        );
+        if ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter)) {
+            return true;
+        }
+    }
+    response.clicked()
+}
+
+/// Enregistre une case à cocher ou un bouton radio pour la navigation Tab et l'activation Espace / Entrée.
+pub fn make_toggle_accessible(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    focus_color: egui::Color32,
+) -> bool {
+    let layer_id = ui.layer_id();
+    ui.memory_mut(|m| m.interested_in_focus(response.id, layer_id));
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            response.rect.expand(2.0),
+            egui::CornerRadius::same(4),
+            egui::Stroke::new(2.0, focus_color),
+            egui::StrokeKind::Outside,
+        );
+        if ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter)) {
+            return true;
+        }
+    }
+    response.changed()
+}
+
+/// Enregistre un slider pour la navigation Tab et affiche son contour de focus.
+pub fn make_slider_accessible(ui: &mut egui::Ui, response: &egui::Response, focus_color: egui::Color32) {
+    let layer_id = ui.layer_id();
+    ui.memory_mut(|m| m.interested_in_focus(response.id, layer_id));
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            response.rect.expand(2.0),
+            egui::CornerRadius::same(4),
+            egui::Stroke::new(2.0, focus_color),
+            egui::StrokeKind::Outside,
+        );
+    }
+}
+
 pub fn render_accessible_icon_button(
     ui: &mut egui::Ui,
     icon: &str,
@@ -1607,6 +1680,17 @@ pub fn render_accessible_icon_button(
     hover_color: Option<egui::Color32>,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(ACCESSIBILITY_BTN_SIZE, egui::Sense::click());
+    let layer_id = ui.layer_id();
+    ui.memory_mut(|m| m.interested_in_focus(response.id, layer_id));
+
+    let accessible_name = if sub_label.is_empty() {
+        format!("{icon} {tooltip}")
+    } else {
+        format!("{sub_label} ({tooltip})")
+    };
+    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), active, accessible_name.clone()));
+
+    let has_focus = response.has_focus();
 
     let default_active = egui::Color32::from_rgb(0, 120, 215);
     let chosen_active = active_color.unwrap_or(default_active);
@@ -1615,6 +1699,8 @@ pub fn render_accessible_icon_button(
 
     let bg_color = if active {
         chosen_active
+    } else if has_focus || response.hovered() {
+        chosen_hover
     } else if response.hovered() {
         chosen_hover
     } else {
@@ -1639,17 +1725,20 @@ pub fn render_accessible_icon_button(
         }
     }
 
-    let stroke_color = if active {
+    let stroke_color = if has_focus {
+        egui::Color32::from_rgb(0, 220, 255)
+    } else if active {
         egui::Color32::WHITE
     } else if response.hovered() {
         egui::Color32::from_rgb(180, 220, 255)
     } else {
         egui::Color32::from_gray(80)
     };
+    let stroke_w = if has_focus { 2.5 } else if active { 2.0 } else { 1.2 };
     ui.painter().rect_stroke(
         rect,
         egui::CornerRadius::same(10),
-        egui::Stroke::new(if active { 2.0 } else { 1.2 }, stroke_color),
+        egui::Stroke::new(stroke_w, stroke_color),
         egui::StrokeKind::Inside,
     );
 

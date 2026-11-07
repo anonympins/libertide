@@ -579,13 +579,21 @@ pub async fn call_llm_prompt(
                 return;
             }
 
+            let auto_read_messages = std::env::var("AUTO_READ_MESSAGES")
+                .ok()
+                .or_else(|| crate::fs_util::read_env_var_from_file(".env", "AUTO_READ_MESSAGES"))
+                .map(|s| !s.trim().eq_ignore_ascii_case("false") && s.trim() != "0")
+                .unwrap_or(true);
+
+            let effective_tts_sender = if auto_read_messages { Some(&tts_tx) } else { None };
+
             if llm_config.provider == LlmProvider::Local {
                 match local_llm::run_local_llama_completion(
                     &system_instructions,
                     &hist_snapshot,
                     max_tokens,
                     &event_tx,
-                    Some(&tts_tx),
+                    effective_tts_sender,
                 ) {
                     Ok(raw_content) => {
                         history.lock().await.push(ChatMessage {

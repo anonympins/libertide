@@ -1,4 +1,10 @@
 {
+  "a11y": {
+    "preset_visual": "👁️ 視覚障がい / ロービジョン",
+    "preset_motor_switch": "🎯 運動機能障がい / ワンボタンスイッチ",
+    "preset_tremor": "🤲 手の震え / パーキンソン / 痙縮",
+    "preset_cognitive": "🧠 認知的配慮 / ニューロダイバージェント"
+  },
   "speech": {
     "ask_hover_nav": "ホバーナビゲーションを有効にしますか？",
     "hover_mode_btn": "ホバーモード",
@@ -171,7 +177,20 @@
     "twitch_open_tooltip": "Twitchで開く",
     "twitch_waiting": "Twitchメッセージを待機中...",
     "settings_tab_llm": "🔑 LLMプロバイダ",
-    "settings_tab_theme": "🎨 テーマ＆アクセシビリティ",
+    "settings_tab_accessibility": "♿ アクセシビリティ",
+    "settings_tab_theme": "🎨 テーマ＆表示",
+    "a11y_presets_title": "組み合わせ可能なアクセシビリティプロファイル（重複対応）",
+    "a11y_presets_desc": "チェックを入れて複数の適応設定を組み合わせられます（例：ロービジョン＋手の震え）：",
+    "a11y_preset_solo": "単独",
+    "a11y_preset_solo_active": "★ 単独",
+    "a11y_preset_solo_tooltip": "このプロファイルのみを適用（他をリセット）",
+    "a11y_reset_presets_btn": "↺ すべてのプロファイルをリセット",
+    "a11y_reset_presets_tooltip": "すべてのプロファイルを無効化し標準のニュートラル設定に戻します",
+    "a11y_audio_section_title": "ナレーター設定と音声フィードバック",
+    "a11y_narrator_voice": "ナレーターの音声:",
+    "a11y_auto_read_msgs": "🗣️ アシスタントメッセージの自動音声読み上げ",
+    "a11y_auto_read_sugs": "💡 アクションの提案候補も音声で読み上げる",
+    "a11y_earcons": "🔔 確認音および効果音フィードバック (Earcons)",
     "settings_tab_language": "🌐 言語",
     "settings_tab_devices": "🎙️ デバイス",
     "settings_tab_macros": "⚡ マクロ",

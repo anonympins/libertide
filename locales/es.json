@@ -1,4 +1,10 @@
 {
+  "a11y": {
+    "preset_visual": "👁️ Discapacidad visual / Baja visión",
+    "preset_motor_switch": "🎯 Discapacidad motora / Conmutador único",
+    "preset_tremor": "🤲 Temblores / Párkinson / Espasticidad",
+    "preset_cognitive": "🧠 Comodidad cognitiva / Neurodivergente"
+  },
   "speech": {
     "ask_hover_nav": "¿Desea activar la navegación al pasar el cursor?",
     "hover_mode_btn": "Modo sobrevuelo",
@@ -174,7 +180,20 @@
     "twitch_open_tooltip": "Abrir en Twitch",
     "twitch_waiting": "Esperando mensajes de Twitch...",
     "settings_tab_llm": "🔑 Proveedor LLM",
-    "settings_tab_theme": "🎨 Temas y Accesibilidad",
+    "settings_tab_accessibility": "♿ Accesibilidad",
+    "settings_tab_theme": "🎨 Tema y Pantalla",
+    "a11y_presets_title": "Perfiles de accesibilidad acumulables (Necesidades múltiples)",
+    "a11y_presets_desc": "Marque uno o varios perfiles para combinar adaptaciones (ej.: Baja visión + Temblores):",
+    "a11y_preset_solo": "Solo",
+    "a11y_preset_solo_active": "★ Solo",
+    "a11y_preset_solo_tooltip": "Activar únicamente este perfil (restablece los demás)",
+    "a11y_reset_presets_btn": "↺ Restablecer todos los perfiles",
+    "a11y_reset_presets_tooltip": "Desactiva todos los perfiles y restaura los ajustes neutrales predeterminados",
+    "a11y_audio_section_title": "Opciones de narrador y respuesta de audio",
+    "a11y_narrator_voice": "Voz del narrador:",
+    "a11y_auto_read_msgs": "🗣️ Lectura de voz automática de los mensajes del asistente",
+    "a11y_auto_read_sugs": "💡 Leer también las sugerencias de acción en voz alta",
+    "a11y_earcons": "🔔 Sonidos de confirmación y avisos sonoros (Earcons)",
     "settings_tab_language": "🌐 Idioma",
     "settings_tab_devices": "🎙️ Dispositivos",
     "settings_tab_macros": "⚡ Macros",

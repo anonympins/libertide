@@ -151,6 +151,12 @@ pub struct OverlayApp {
     macro_text_input: String,
     macro_error: Option<String>,
 
+    // Options d'accessibilité et presets cumulatifs
+    active_disability_presets: std::collections::BTreeSet<DisabilityPreset>,
+    auto_read_agent_messages: bool,
+    auto_read_suggestions: bool,
+    earcons_enabled: bool,
+
     // Périphériques matériels (Pointage et Microphones)
     detected_microphones: Vec<String>,
     selected_microphone: String,
@@ -259,6 +265,37 @@ impl OverlayApp {
         let selected_microphone = crate::devices::get_active_microphone();
         let detected_pointing_devices = crate::devices::list_pointing_devices();
 
+        let auto_read_agent_messages = std::env::var("AUTO_READ_MESSAGES")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "AUTO_READ_MESSAGES"))
+            .map(|s| !s.trim().eq_ignore_ascii_case("false") && s.trim() != "0")
+            .unwrap_or(true);
+
+        let auto_read_suggestions = std::env::var("AUTO_READ_SUGGESTIONS")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "AUTO_READ_SUGGESTIONS"))
+            .map(|s| !s.trim().eq_ignore_ascii_case("false") && s.trim() != "0")
+            .unwrap_or(true);
+
+        let earcons_enabled = std::env::var("EARCONS_ENABLED")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "EARCONS_ENABLED"))
+            .map(|s| !s.trim().eq_ignore_ascii_case("false") && s.trim() != "0")
+            .unwrap_or(true);
+        crate::overlay::EARCONS_ENABLED.store(earcons_enabled, Ordering::Relaxed);
+
+        let active_disability_presets: std::collections::BTreeSet<DisabilityPreset> = std::env::var("DISABILITY_PRESETS")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "DISABILITY_PRESETS"))
+            .or_else(|| std::env::var("DISABILITY_PRESET").ok())
+            .or_else(|| read_env_var_from_file(".env", "DISABILITY_PRESET"))
+            .map(|s| {
+                s.split([',', ';', ' '])
+                    .filter_map(DisabilityPreset::from_key)
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let mut app = Self {
             status: AgentStatus::Idle,
             chat_history: vec![ChatEntry {
@@ -353,6 +390,11 @@ impl OverlayApp {
             macro_shortcut_input: String::new(),
             macro_text_input: String::new(),
             macro_error: None,
+
+            active_disability_presets,
+            auto_read_agent_messages,
+            auto_read_suggestions,
+            earcons_enabled,
 
             detected_microphones,
             selected_microphone,
@@ -943,10 +985,12 @@ impl eframe::App for OverlayApp {
                                 }
                             }
                         }
-                        if let Some(sug_speech) = format_suggestions_for_speech(&quick_suggestions) {
-                            if !sanitize_for_tts(&sug_speech).trim().is_empty() {
-                                self.status = AgentStatus::Speaking;
-                                let _ = self.tts_sender.send(TtsCommand::Enqueue(sug_speech));
+                        if self.auto_read_suggestions && self.auto_read_agent_messages {
+                            if let Some(sug_speech) = format_suggestions_for_speech(&quick_suggestions) {
+                                if !sanitize_for_tts(&sug_speech).trim().is_empty() {
+                                    self.status = AgentStatus::Speaking;
+                                    let _ = self.tts_sender.send(TtsCommand::Enqueue(sug_speech));
+                                }
                             }
                         }
                     } else if was_streaming || self.llm_config.provider == LlmProvider::Local {
@@ -962,21 +1006,32 @@ impl eframe::App for OverlayApp {
                                 screen_size_kb: None,
                             });
                         }
-                        if let Some(sug_speech) = format_suggestions_for_speech(&quick_suggestions) {
-                            if !sanitize_for_tts(&sug_speech).trim().is_empty() {
-                                self.status = AgentStatus::Speaking;
-                                let _ = self.tts_sender.send(TtsCommand::Enqueue(sug_speech));
+                        if self.auto_read_suggestions && self.auto_read_agent_messages {
+                            if let Some(sug_speech) = format_suggestions_for_speech(&quick_suggestions) {
+                                if !sanitize_for_tts(&sug_speech).trim().is_empty() {
+                                    self.status = AgentStatus::Speaking;
+                                    let _ = self.tts_sender.send(TtsCommand::Enqueue(sug_speech));
+                                }
                             }
                         }
                     } else {
-                        let full_speech = if let Some(sug_speech) = format_suggestions_for_speech(&quick_suggestions) {
-                            if !sanitize_for_tts(&text).trim().is_empty() {
-                                format!("{text}\n\n{sug_speech}")
-                            } else {
-                                sug_speech
-                            }
+                        let sug_speech_opt = if self.auto_read_suggestions && self.auto_read_agent_messages {
+                            format_suggestions_for_speech(&quick_suggestions)
                         } else {
-                            text.clone()
+                            None
+                        };
+
+                        let full_speech = match (self.auto_read_agent_messages, sug_speech_opt) {
+                            (true, Some(sug_speech)) => {
+                                if !sanitize_for_tts(&text).trim().is_empty() {
+                                    format!("{text}\n\n{sug_speech}")
+                                } else {
+                                    sug_speech
+                                }
+                            }
+                            (true, None) => text.clone(),
+                            (false, Some(sug_speech)) => sug_speech,
+                            (false, None) => String::new(),
                         };
                         if !sanitize_for_tts(&full_speech).trim().is_empty() {
                             self.status = AgentStatus::Speaking;
@@ -2871,10 +2926,18 @@ impl eframe::App for OverlayApp {
                             }
                         }
                     }
-                } else if !is_over_overlay
-                    && self.hover_physical_mouse_moved
-                    && !is_recent_switch_nav
-                    && self.hover_cursor_still_since.elapsed() >= Duration::from_millis(200) {
+                } else {
+                    let hover_still_min = if self.active_disability_presets.contains(&DisabilityPreset::Tremor) {
+                        Duration::from_millis(450)
+                    } else if self.dwell_state.is_enabled() {
+                        self.dwell_state.effective_activation_delay().clamp(Duration::from_millis(350), Duration::from_millis(800))
+                    } else {
+                        Duration::from_millis(350)
+                    };
+                    if !is_over_overlay
+                        && self.hover_physical_mouse_moved
+                        && !is_recent_switch_nav
+                        && self.hover_cursor_still_since.elapsed() >= hover_still_min {
                     // Le curseur est immobilisé depuis au moins 200 ms : annonce détaillée selon l'étape
                     match self.switch_step {
                         SwitchAccessStep::Elements => {
@@ -3017,6 +3080,7 @@ impl eframe::App for OverlayApp {
                             }
                         }
                     }
+                    }
                 }
             }
 
@@ -3083,13 +3147,14 @@ impl eframe::App for OverlayApp {
                     ui.horizontal(|ui| {
                         let is_assist_active = self.active_tab == ActiveTab::Assistance;
                         let tab_assist = ui.selectable_label(is_assist_active, t!("ui.assistance_tab"));
+                        let is_assist_key_hit = make_widget_accessible_and_activated(ui, &tab_assist, theme.accent);
                         let tab_assist_id = ui.make_persistent_id("dwell_tab_assistance");
                         let assist_activated = if !is_assist_active {
                             apply_dwell_to_response(ui, &mut self.dwell_state, tab_assist_id, &tab_assist)
                         } else {
                             tab_assist.clicked()
                         };
-                        if assist_activated {
+                        if assist_activated || is_assist_key_hit {
                             self.active_tab = ActiveTab::Assistance;
                         }
                         let chat_title = if self.twitch_messages.is_empty() {
@@ -3099,13 +3164,14 @@ impl eframe::App for OverlayApp {
                         };
                         let is_chat_active = self.active_tab == ActiveTab::Chat;
                         let tab_chat = ui.selectable_label(is_chat_active, chat_title);
+                        let is_chat_key_hit = make_widget_accessible_and_activated(ui, &tab_chat, theme.accent);
                         let tab_chat_id = ui.make_persistent_id("dwell_tab_twitch_chat");
                         let chat_activated = if !is_chat_active {
                             apply_dwell_to_response(ui, &mut self.dwell_state, tab_chat_id, &tab_chat)
                         } else {
                             tab_chat.clicked()
                         };
-                        if chat_activated {
+                        if chat_activated || is_chat_key_hit {
                             self.active_tab = ActiveTab::Chat;
                         }
                         tab_bar_max_x = tab_assist.rect.max.x.max(tab_chat.rect.max.x);
@@ -3122,12 +3188,17 @@ impl eframe::App for OverlayApp {
                                 )
                                 .min_size(egui::vec2(20.0, 18.0))
                                 .corner_radius(egui::CornerRadius::same(4)),
-                            );
-                            if close_btn.on_hover_text(t!("ui.btn_close")).clicked() {
+                            ).on_hover_text(t!("ui.btn_close"));
+                            close_btn.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), t!("ui.btn_close").to_string())
+                            });
+                            let close_btn_hit = make_widget_accessible_and_activated(ui, &close_btn, theme.accent);
+                            if close_btn_hit {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             }
 
                             let max_icon = if is_maximized { "⧉" } else { "□" };
+                            let max_label = if is_maximized { t!("ui.btn_restore").to_string() } else { t!("ui.btn_maximize").to_string() };
                             let max_btn = ui.add(
                                 egui::Button::new(
                                     egui::RichText::new(max_icon)
@@ -3136,8 +3207,12 @@ impl eframe::App for OverlayApp {
                                 )
                                 .min_size(egui::vec2(20.0, 18.0))
                                 .corner_radius(egui::CornerRadius::same(4)),
-                            );
-                            if max_btn.on_hover_text(if is_maximized { t!("ui.btn_restore") } else { t!("ui.btn_maximize") }).clicked() {
+                            ).on_hover_text(&max_label);
+                            max_btn.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), max_label.clone())
+                            });
+                            let max_btn_hit = make_widget_accessible_and_activated(ui, &max_btn, theme.accent);
+                            if max_btn_hit {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
                             }
 
@@ -3149,8 +3224,12 @@ impl eframe::App for OverlayApp {
                                 )
                                 .min_size(egui::vec2(20.0, 18.0))
                                 .corner_radius(egui::CornerRadius::same(4)),
-                            );
-                            if min_btn.on_hover_text(t!("ui.btn_minimize")).clicked() {
+                            ).on_hover_text(t!("ui.btn_minimize"));
+                            min_btn.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), t!("ui.btn_minimize").to_string())
+                            });
+                            let min_btn_hit = make_widget_accessible_and_activated(ui, &min_btn, theme.accent);
+                            if min_btn_hit {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                             }
                         });
@@ -3178,11 +3257,30 @@ impl eframe::App for OverlayApp {
 
                             let avatar_rect = egui::Rect::from_center_size(avatar_pos, egui::vec2(32.0, 32.0));
                             let avatar_resp = ui.interact(avatar_rect, ui.id().with("avatar_interact"), egui::Sense::click());
+                            let layer_id = ui.layer_id();
+                            let avatar_label = if self.status == AgentStatus::Speaking {
+                                t!("ui.avatar_mute_tooltip").to_string()
+                            } else {
+                                format!("Avatar Libertide ({:?})", self.status)
+                            };
+                            avatar_resp.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), avatar_label.clone())
+                            });
+                            ui.memory_mut(|m| m.interested_in_focus(avatar_resp.id, layer_id));
+                            if avatar_resp.has_focus() {
+                                ui.painter().rect_stroke(
+                                    avatar_rect.expand(3.0),
+                                    egui::CornerRadius::same(16),
+                                    egui::Stroke::new(2.0, theme.accent),
+                                    egui::StrokeKind::Outside,
+                                );
+                            }
+                            let is_avatar_key_hit = avatar_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
                             if self.status == AgentStatus::Speaking {
                                 if avatar_resp.hovered() {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                 }
-                                if avatar_resp.on_hover_text(t!("ui.avatar_mute_tooltip")).clicked() {
+                                if avatar_resp.on_hover_text(t!("ui.avatar_mute_tooltip")).clicked() || is_avatar_key_hit {
                                     self.stop_speaking();
                                 }
                             }
@@ -3317,7 +3415,8 @@ impl eframe::App for OverlayApp {
                                                 let resp = ui.add(chip)
                                                     .on_hover_text(t!("ui.app_suggestion_tooltip", app = sug));
                                                 let sug_dwell_id = ui.make_persistent_id(format!("dwell_app_sug_{sug}"));
-                                                if apply_dwell_to_response(ui, &mut self.dwell_state, sug_dwell_id, &resp) {
+                                                let is_chip_hit = make_widget_accessible_and_activated(ui, &resp, theme.accent);
+                                                if apply_dwell_to_response(ui, &mut self.dwell_state, sug_dwell_id, &resp) || is_chip_hit {
                                                     clicked_app_suggestion = Some(t!("ui.open_app_cmd", app = sug).to_string());
                                                 }
                                                 resp.context_menu(|ui| {
@@ -3536,7 +3635,7 @@ impl eframe::App for OverlayApp {
 
                                     ui.add_space(3.0);
 
-                                    // 2e rangée : 7 boutons d'action ergonomiques (WCAG 2.2 AAA, Clic & Dwell 800 ms)
+                                    // 2e rangée : 6 boutons d'action ergonomiques (WCAG 2.2 AAA, Clic & Dwell 800 ms)
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 6.0;
 
@@ -3554,7 +3653,8 @@ impl eframe::App for OverlayApp {
                                             Some(egui::Color32::from_rgb(0, 165, 245)),
                                         );
                                         let (analyze_dwell, _) = self.dwell_state.update(analyze_id, analyze_resp.hovered());
-                                        let analyze_btn_hit = analyze_resp.clicked() || analyze_dwell;
+                                        let is_analyze_key = analyze_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
+                                        let analyze_btn_hit = analyze_resp.clicked() || analyze_dwell || is_analyze_key;
                                         let enter_with_text = enter_hit && !self.input_text.trim().is_empty();
 
                                         if analyze_btn_hit || enter_with_text {
@@ -3756,7 +3856,8 @@ impl eframe::App for OverlayApp {
                                             None,
                                         );
                                         let (mic_dwell, _) = self.dwell_state.update(mic_id, mic_resp.hovered());
-                                        if mic_resp.clicked() || mic_dwell {
+                                        let is_mic_key = mic_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
+                                        if mic_resp.clicked() || mic_dwell || is_mic_key {
                                             self.toggle_recording(ui.ctx());
                                         }
 
@@ -3775,7 +3876,8 @@ impl eframe::App for OverlayApp {
                                             None,
                                         );
                                         let (dict_dwell, _) = self.dwell_state.update(dict_id, dict_resp.hovered());
-                                        if dict_resp.clicked() || dict_dwell {
+                                        let is_dict_key = dict_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
+                                        if dict_resp.clicked() || dict_dwell || is_dict_key {
                                             if self.dictation_mode {
                                                 self.exit_dictation_mode();
                                             } else {
@@ -3798,51 +3900,12 @@ impl eframe::App for OverlayApp {
                                             None,
                                         );
                                         let (switch_dwell, _) = self.dwell_state.update(switch_id, switch_resp.hovered());
-                                        if switch_resp.clicked() || switch_dwell {
+                                        let is_switch_key = switch_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
+                                        if switch_resp.clicked() || switch_dwell || is_switch_key {
                                             self.toggle_switch_access_mode(None);
                                         }
 
-                                        // 5. Bouton Voix
-                                        let voice_id = ui.make_persistent_id("dwell_btn_voice");
-                                        let voice_prog = self.dwell_state.get_progress(voice_id);
-                                        let (voice_icon, voice_sub) = match self.voice_gender {
-                                            VoiceProfile::Denise => ("👩", "Denise"),
-                                            VoiceProfile::Henri => ("👨", "Henri"),
-                                            VoiceProfile::Hortense => ("🎙️", "Hortense"),
-                                            VoiceProfile::Paul => ("🎩", "Paul"),
-                                            VoiceProfile::Sylvie => ("🍁", "Sylvie"),
-                                            VoiceProfile::Jean => ("⚡", "Jean"),
-                                        };
-                                        let next_gender = self.voice_gender.next();
-                                        let voice_resp = render_accessible_icon_button(
-                                            ui,
-                                            voice_icon,
-                                            voice_sub,
-                                            &t!(
-                                                "ui.btn_voice_tooltip",
-                                                current = self.voice_gender.display_name(),
-                                                next = next_gender.display_name()
-                                            ).to_string(),
-                                            self.status == AgentStatus::Speaking,
-                                            voice_prog,
-                                            Some(theme.accent),
-                                            None,
-                                        );
-                                        let (voice_dwell, _) = self.dwell_state.update(voice_id, voice_resp.hovered());
-                                        if voice_resp.clicked() || voice_dwell {
-                                            self.set_voice_gender(next_gender);
-                                        }
-                                        voice_resp.context_menu(|ui| {
-                                            for &profile in VoiceProfile::ALL {
-                                                let is_selected = self.voice_gender == profile;
-                                                if ui.selectable_label(is_selected, profile.display_name()).clicked() {
-                                                    self.set_voice_gender(profile);
-                                                    ui.close();
-                                                }
-                                            }
-                                        });
-
-                                        // 6. Bouton Réglages
+                                        // 5. Bouton Réglages
                                         let settings_id = ui.make_persistent_id("dwell_btn_settings");
                                         let settings_prog = self.dwell_state.get_progress(settings_id);
                                         let settings_resp = render_accessible_icon_button(
@@ -3856,7 +3919,8 @@ impl eframe::App for OverlayApp {
                                             None,
                                         );
                                         let (settings_dwell, _) = self.dwell_state.update(settings_id, settings_resp.hovered());
-                                        if settings_resp.clicked() || settings_dwell {
+                                        let is_settings_key = settings_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
+                                        if settings_resp.clicked() || settings_dwell || is_settings_key {
                                             self.settings_tab = SettingsTab::LlmProvider;
                                             self.show_api_key_modal = true;
                                             self.sync_modal_inputs_for_provider(self.llm_config.provider);
@@ -3864,7 +3928,7 @@ impl eframe::App for OverlayApp {
                                             self.stop_speaking();
                                         }
 
-                                        // 7. Bouton Effacer
+                                        // 6. Bouton Effacer
                                         let clear_id = ui.make_persistent_id("dwell_btn_clear");
                                         let clear_prog = self.dwell_state.get_progress(clear_id);
                                         let clear_resp = render_accessible_icon_button(
@@ -3878,7 +3942,8 @@ impl eframe::App for OverlayApp {
                                             None,
                                         );
                                         let (clear_dwell, _) = self.dwell_state.update(clear_id, clear_resp.hovered());
-                                        if clear_resp.clicked() || clear_dwell {
+                                        let is_clear_key = clear_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
+                                        if clear_resp.clicked() || clear_dwell || is_clear_key {
                                             let _ = self.command_sender.send(AgentCommand::ClearHistory);
                                             self.chat_history.clear();
                                             self.window_analysis_cache.clear();
@@ -3936,7 +4001,6 @@ impl eframe::App for OverlayApp {
                                         let is_msg_focused = ui.memory(|m| m.has_focus(msg_id));
 
                                         ui.vertical(|ui| {
-                                            ui.horizontal(|ui| {
                                                 let (label_name, label_color) = match entry.role {
                                                     ChatRole::User => {
                                                         let name = if let Some(kb) = entry.screen_size_kb {
@@ -3946,8 +4010,10 @@ impl eframe::App for OverlayApp {
                                                         };
                                                         (name, egui::Color32::from_rgb(255, 215, 120))
                                                     }
-                                            ChatRole::Agent => (agent_display_name.clone(), theme.accent),
+                                                    ChatRole::Agent => (agent_display_name.clone(), theme.accent),
                                                 };
+
+                                            ui.horizontal(|ui| {
                                                 ui.label(
                                                     egui::RichText::new(&label_name)
                                                         .size(if is_highlighted { 11.5 } else { 10.0 })
@@ -4019,6 +4085,13 @@ impl eframe::App for OverlayApp {
                                             }
                                             let label_resp = ui.add(egui::Label::new(rich).wrap());
                                             let interact_resp = ui.interact(label_resp.rect, msg_id, egui::Sense::click());
+                                            interact_resp.widget_info(|| {
+                                                egui::WidgetInfo::labeled(
+                                                    egui::WidgetType::Label,
+                                                    ui.is_enabled(),
+                                                    format!("{}: {}", label_name, entry.text),
+                                                )
+                                            });
 
                                             let msg_dwell_id = ui.make_persistent_id(format!("dwell_chat_msg_{idx}"));
                                             let dwell_triggered = apply_dwell_to_response(ui, dwell_state, msg_dwell_id, &interact_resp);
@@ -4091,7 +4164,8 @@ impl eframe::App for OverlayApp {
 
                                                             let resp = ui.add(btn).on_hover_text(t!("ui.quick_suggestion_tooltip"));
                                                             let sug_dwell_id = ui.make_persistent_id(format!("dwell_quick_sug_{idx}_{sug_idx}"));
-                                                            if apply_dwell_to_response(ui, dwell_state, sug_dwell_id, &resp) {
+                                                            let is_quick_hit = make_widget_accessible_and_activated(ui, &resp, theme.accent);
+                                                            if apply_dwell_to_response(ui, dwell_state, sug_dwell_id, &resp) || is_quick_hit {
                                                                 clicked_quick_suggestion = Some(clean_label.to_string());
                                                             }
                                                         }
@@ -4313,6 +4387,13 @@ impl eframe::App for OverlayApp {
                                                 );
                                             }).response;
                                             let resp = ui.interact(resp.rect, t_id, egui::Sense::click());
+                                            resp.widget_info(|| {
+                                                egui::WidgetInfo::labeled(
+                                                    egui::WidgetType::Label,
+                                                    ui.is_enabled(),
+                                                    format!("{}: {}", msg.author, msg.text),
+                                                )
+                                            });
 
                                             let t_dwell_id = ui.make_persistent_id(format!("dwell_twitch_msg_{idx}"));
                                             if apply_dwell_to_response(ui, &mut self.dwell_state, t_dwell_id, &resp) {
