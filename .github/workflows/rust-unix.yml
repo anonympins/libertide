@@ -31,7 +31,6 @@ jobs:
             build-essential \
             cmake \
             pkg-config \
-            mold \
             libasound2-dev \
             libxkbcommon-dev \
             libx11-xcb-dev \
