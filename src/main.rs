@@ -4,6 +4,7 @@ i18n!("locales", fallback = "en");
 
 mod autostart;
 mod audio;
+mod audio_player;
 mod automation;
 mod floating_window;
 mod fs_util;
@@ -67,6 +68,21 @@ pub struct OverlayApp {
     zoom_factor: f32,
     app_language: String,
     voice_gender: VoiceGender,
+    voice_clone_url_input: String,
+    voice_reference_wav_input: String,
+    voice_reference_text_input: String,
+    voice_test_text_input: String,
+    voice_status_feedback: Option<String>,
+    voice_is_recording_sample: bool,
+    voice_record_append: bool,
+    voice_record_start: Option<Instant>,
+    voice_recorder_stop_tx: Option<std::sync::mpsc::Sender<()>>,
+    voice_recorder_result_rx: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
+    voice_sample_player: Option<crate::audio_player::AudioPlayer>,
+    voice_sample_duration_secs: f32,
+    voice_guide_phrase: String,
+    voice_guide_generating: bool,
+    voice_guide_rx: Option<std::sync::mpsc::Receiver<String>>,
     llm_config: LlmConfig,
     theme: AppTheme,
     settings_tab: SettingsTab,
@@ -277,6 +293,23 @@ impl OverlayApp {
         let selected_microphone = crate::devices::get_active_microphone();
         let detected_pointing_devices = crate::devices::list_pointing_devices();
 
+        let voice_clone_url_input = std::env::var("VOICE_CLONE_URL")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "VOICE_CLONE_URL"))
+            .or_else(|| std::env::var("TTS_CLONE_URL").ok())
+            .or_else(|| read_env_var_from_file(".env", "TTS_CLONE_URL"))
+            .unwrap_or_else(|| "http://127.0.0.1:8020/tts".to_string());
+
+        let voice_reference_wav_input = std::env::var("VOICE_REFERENCE_WAV")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "VOICE_REFERENCE_WAV"))
+            .unwrap_or_default();
+
+        let voice_reference_text_input = std::env::var("VOICE_REFERENCE_TEXT")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "VOICE_REFERENCE_TEXT"))
+            .unwrap_or_default();
+
         let auto_read_agent_messages = std::env::var("AUTO_READ_MESSAGES")
             .ok()
             .or_else(|| read_env_var_from_file(".env", "AUTO_READ_MESSAGES"))
@@ -329,6 +362,21 @@ impl OverlayApp {
             zoom_factor: initial_zoom,
             app_language,
             voice_gender: initial_voice,
+            voice_clone_url_input,
+            voice_reference_wav_input,
+            voice_reference_text_input,
+            voice_test_text_input: "Bonjour, ceci est un test de synthèse vocale avec Libertide.".to_string(),
+            voice_status_feedback: None,
+            voice_is_recording_sample: false,
+            voice_record_append: false,
+            voice_record_start: None,
+            voice_recorder_stop_tx: None,
+            voice_recorder_result_rx: None,
+            voice_sample_player: crate::audio_player::AudioPlayer::new().ok(),
+            voice_sample_duration_secs: 0.0,
+            voice_guide_phrase: "« Bonjour, je configure ma voix personnalisée dans Libertide. Ce court extrait audio sert de référence pour le modèle de clonage vocal. »".to_string(),
+            voice_guide_generating: false,
+            voice_guide_rx: None,
             llm_config: llm_config.clone(),
             theme,
             settings_tab: SettingsTab::LlmProvider,
@@ -454,6 +502,7 @@ impl OverlayApp {
             VoiceProfile::Paul => t!("speech.voice_paul").to_string(),
             VoiceProfile::Sylvie => t!("speech.voice_sylvie").to_string(),
             VoiceProfile::Jean => t!("speech.voice_jean").to_string(),
+            VoiceProfile::Clone => "Voix clonée personnalisée activée.".to_string(),
         };
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
@@ -812,6 +861,10 @@ impl eframe::App for OverlayApp {
                 || m.has_focus(egui::Id::NULL.with("macro_shortcut_input"))
                 || m.has_focus(egui::Id::NULL.with("macro_text_input"))
                 || m.has_focus(egui::Id::NULL.with("twitch_search_query_input"))
+                || m.has_focus(egui::Id::NULL.with("voice_clone_url_input"))
+                || m.has_focus(egui::Id::NULL.with("voice_reference_wav_input"))
+                || m.has_focus(egui::Id::NULL.with("voice_reference_text_input"))
+                || m.has_focus(egui::Id::NULL.with("voice_test_text_input"))
         });
         let is_typing = ctx.egui_wants_keyboard_input()
             || self.show_api_key_modal
@@ -1206,6 +1259,14 @@ impl eframe::App for OverlayApp {
                     if norm_prompt.contains("voix suivante") || norm_prompt.contains("autre voix") || norm_prompt.contains("change de voix") || norm_prompt.contains("changer voix") || norm_prompt.contains("changer de voix") {
                         play_earcon(Earcon::Success);
                         self.set_voice_gender(self.voice_gender.next());
+                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                            self.start_recording(&ctx, false);
+                        }
+                        return;
+                    }
+                    if norm_prompt.contains("voix clone") || norm_prompt.contains("voix clonée") || norm_prompt == "clone" {
+                        play_earcon(Earcon::Success);
+                        self.set_voice_gender(VoiceProfile::Clone);
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx, false);
                         }
@@ -5107,7 +5168,32 @@ fn run_overlay_gui(
     )
 }
 
+#[cfg(windows)]
+pub fn disable_crt_assertion_dialogs() {
+    extern "C" {
+        fn _set_invalid_parameter_handler(
+            handler: Option<unsafe extern "C" fn(*const u16, *const u16, *const u16, u32, usize)>,
+        ) -> Option<unsafe extern "C" fn(*const u16, *const u16, *const u16, u32, usize)>;
+    }
+
+    unsafe extern "C" fn silent_invalid_parameter(
+        _expression: *const u16,
+        _function: *const u16,
+        _file: *const u16,
+        _line: u32,
+        _reserved: usize,
+    ) {
+        // Intercepte silencieusement les assertions CRT (ex: _osfile(fh) & FOPEN dans lowio\read.cpp)
+    }
+
+    unsafe {
+        let _ = _set_invalid_parameter_handler(Some(silent_invalid_parameter));
+    }
+}
+
 fn main() -> eframe::Result<()> {
+    #[cfg(windows)]
+    disable_crt_assertion_dialogs();
     fix_startup_working_directory();
 
     let (event_tx, event_rx) = channel::<AgentEvent>();
@@ -5129,8 +5215,13 @@ fn main() -> eframe::Result<()> {
     spawn_agent_backend(cmd_rx, cmd_tx.clone(), event_tx.clone(), tts_tx.clone(), llm_config.clone());
 
     if llm_config.provider == LlmProvider::Local {
+        // Légère temporisation (500 ms) pour laisser Whisper initialiser ses handles
+        // et éviter la collision concurrente sur la table des descripteurs CRT de bas niveau
+        std::thread::sleep(Duration::from_millis(500));
         std::thread::spawn(|| {
+            println!("[Main] Démarrage du thread de préchargement LLM local...");
             local_llm::init_local_llm();
+            println!("[Main] Thread de préchargement LLM local terminé.");
         });
     }
 

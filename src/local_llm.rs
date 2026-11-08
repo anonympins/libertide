@@ -2084,13 +2084,15 @@ pub fn extract_clean_user_message(content: &str) -> &str {
 }
 
 pub fn find_model_file_for_preset(preset: &ModelPreset) -> Option<PathBuf> {
+    const MIN_GGUF_SIZE: u64 = 200_000_000; // Au moins 200 Mo pour un modèle GGUF valide
+
     let candidates = [
         PathBuf::from("models").join(preset.filename),
         PathBuf::from(preset.filename),
     ];
 
     for cand in &candidates {
-        if cand.is_file() {
+        if cand.is_file() && cand.metadata().map_or(0, |m| m.len()) > MIN_GGUF_SIZE {
             return Some(cand.clone());
         }
     }
@@ -2100,7 +2102,7 @@ pub fn find_model_file_for_preset(preset: &ModelPreset) -> Option<PathBuf> {
         for _ in 0..5 {
             if let Some(dir) = curr {
                 let p = dir.join("models").join(preset.filename);
-                if p.is_file() {
+                if p.is_file() && p.metadata().map_or(0, |m| m.len()) > MIN_GGUF_SIZE {
                     return Some(p);
                 }
                 curr = dir.parent();
@@ -2296,6 +2298,26 @@ unsafe impl Sync for LocalLlamaEngine {}
 
 impl LocalLlamaEngine {
     pub fn load(model_path: &Path) -> Result<Self, String> {
+        let abs_path = if model_path.is_absolute() {
+            model_path.to_path_buf()
+        } else if let Ok(cwd) = std::env::current_dir() {
+            cwd.join(model_path)
+        } else {
+            model_path.to_path_buf()
+        };
+
+        // Supprime le préfixe UNC '\\?\' non supporté par la CRT C fopen/mmap
+        let clean_path = abs_path.to_string_lossy().replace(r"\\?\", "");
+        let path_buf = PathBuf::from(&clean_path);
+
+        println!("[Local Llama Load] Début du chargement du modèle LLM : {:?}", clean_path);
+        if let Ok(metadata) = std::fs::metadata(&path_buf) {
+            let len_mb = metadata.len() as f64 / (1024.0 * 1024.0);
+            println!("[Local Llama Load] Fichier GGUF présent sur le disque ({:.1} Mo)", len_mb);
+        } else {
+            eprintln!("[Local Llama Load] ATTENTION : Fichier GGUF introuvable ou inaccessible via std::fs::metadata");
+        }
+
         let backend = LlamaBackend::init().map_err(|e| format!("LlamaBackend init: {e}"))?;
         let requested_gpu_layers = std::env::var("LLAMA_GPU_LAYERS")
             .ok()
@@ -2308,7 +2330,8 @@ impl LocalLlamaEngine {
                 requested_gpu_layers
             );
             let model_params = LlamaModelParams::default().with_n_gpu_layers(requested_gpu_layers);
-            match LlamaModel::load_from_file(&backend, model_path, &model_params) {
+            println!("[Local Llama Load] Appel de LlamaModel::load_from_file (GPU)...");
+            match LlamaModel::load_from_file(&backend, &path_buf, &model_params) {
                 Ok(m) => {
                     println!(
                         "[Local Llama] Modèle chargé avec succès sur GPU ({} couches déchargées en VRAM).",
@@ -2321,7 +2344,8 @@ impl LocalLlamaEngine {
                         "[Local Llama] Avertissement: Échec du chargement GPU ({e}). Bascule automatique sur CPU (0 couches)..."
                     );
                     let cpu_params = LlamaModelParams::default().with_n_gpu_layers(0);
-                    let m = LlamaModel::load_from_file(&backend, model_path, &cpu_params)
+                    println!("[Local Llama Load] Appel de LlamaModel::load_from_file (CPU fallback)...");
+                    let m = LlamaModel::load_from_file(&backend, &path_buf, &cpu_params)
                         .map_err(|e_cpu| format!("Erreur chargement modèle (GPU et CPU ont échoué): {e_cpu}"))?;
                     println!("[Local Llama] Modèle chargé en mode CPU.");
                     (m, 0, false)
@@ -2330,11 +2354,13 @@ impl LocalLlamaEngine {
         } else {
             println!("[Local Llama] Chargement forcé en mode CPU (LLAMA_GPU_LAYERS=0)...");
             let cpu_params = LlamaModelParams::default().with_n_gpu_layers(0);
-            let m = LlamaModel::load_from_file(&backend, model_path, &cpu_params)
+            println!("[Local Llama Load] Appel de LlamaModel::load_from_file (CPU)...");
+            let m = LlamaModel::load_from_file(&backend, &path_buf, &cpu_params)
                 .map_err(|e| format!("Erreur chargement modèle Llama: {e}"))?;
             (m, 0, false)
         };
 
+        println!("[Local Llama Load] Fin du chargement du modèle LLM avec succès.");
         Ok(Self { backend, model, gpu_layers, gpu_enabled })
     }
 
@@ -2608,6 +2634,23 @@ impl LocalLlamaEngine {
         }
 
         Ok(output)
+    }
+
+    pub fn generate_local_text(prompt: &str, max_tokens: usize) -> Result<String, String> {
+        let lock = LOCAL_ENGINE.lock().map_err(|e| e.to_string())?;
+        let engine = lock.as_ref().ok_or_else(|| "Moteur local non initialisé".to_string())?;
+        let preset = get_active_preset();
+        let formatted = match preset.family {
+            ModelFamily::Llama3 => format!(
+                "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+                prompt
+            ),
+            ModelFamily::ChatML => format!(
+                "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+                prompt
+            ),
+        };
+        engine.generate_fast(&formatted, max_tokens)
     }
 
     pub fn classify_intent(&self, user_query: &str, screen_hint: Option<&str>) -> Vec<CommandTag> {
