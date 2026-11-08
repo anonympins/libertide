@@ -324,6 +324,7 @@ pub enum CommandTag {
     ClickElementOrButton,
     TextInputOrDictation,
     AppManagement,
+    FocusWindow,
     WindowManagementOrImmersion,
     ScreenReadingOrSummary,
     FloatingCardOrForm,
@@ -369,6 +370,7 @@ impl CommandTag {
         Self::ClickElementOrButton,
         Self::TextInputOrDictation,
         Self::AppManagement,
+        Self::FocusWindow,
         Self::WindowManagementOrImmersion,
         Self::ScreenReadingOrSummary,
         Self::FloatingCardOrForm,
@@ -414,6 +416,7 @@ impl CommandTag {
             Self::ClickElementOrButton => "CLICK_ELEMENT_OR_BUTTON",
             Self::TextInputOrDictation => "TEXT_INPUT_OR_DICTATION",
             Self::AppManagement => "APP_MANAGEMENT",
+            Self::FocusWindow => "FOCUS_WINDOW",
             Self::WindowManagementOrImmersion => "WINDOW_MANAGEMENT_OR_IMMERSION",
             Self::ScreenReadingOrSummary => "SCREEN_READING_OR_SUMMARY",
             Self::FloatingCardOrForm => "FLOATING_CARD_OR_FORM",
@@ -460,6 +463,7 @@ impl CommandTag {
             Self::ClickElementOrButton => "Interactivité graphique directe : clics sur boutons, liens, menus, cases à cocher, onglets ou badges numérotés #N à l'écran. Actions : click_element, click_button, click_numbered_target, focus_element, scroll.",
             Self::TextInputOrDictation => "Saisie de texte au clavier, remplissage de formulaires, barres de recherche, remplacement ou effacement de champ. Actions : write_text, replace_field_text, clear_text, focus_element.",
             Self::AppManagement => "Démarrage ou fermeture d'applications locales (ex: 'ouvre le bloc-notes', 'ferme Chrome', 'lance la calculatrice'). Actions : open_app, close_app, open_search.",
+            Self::FocusWindow => "Changer de fenêtre active, basculer ou donner le focus à une autre fenêtre ou application déjà ouverte (ex: 'mets Chrome en premier plan', 'bascule sur la fenêtre Bloc-notes', 'focus Discord', 'passe sur VS Code'). Action : focus_window.",
             Self::WindowManagementOrImmersion => "Organisation de l'espace de travail, redimensionnement, déplacement, disposition en mosaïque ou mode immersion fenêtrée. Actions : arrange_window, tile_windows, activate_immersion, focus_window.",
             Self::ScreenReadingOrSummary => "Lecture et résumé du contenu textuel de l'écran ou d'un fichier ouvert dans un éditeur (ex: 'de quoi parle la page ?', 'résume le document'). Actions : read_editor_content, show_floating_card, scroll.",
             Self::FloatingCardOrForm => "Affichage et fermeture de fenêtres volantes transparentes (fiches d'information Markdown, formulaires de critères, tableaux de données). Actions : show_floating_card, close_floating_card.",
@@ -647,6 +651,34 @@ pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<Comma
             return vec![CommandTag::MuteAudio, CommandTag::SetVolumeOrMuteUnMute];
         }
         return vec![CommandTag::SetVolumeOrMuteUnMute, CommandTag::AudioSettings];
+    }
+
+    // Détection de changement ou focus de fenêtre
+    if lower.contains("focus la fenêtre")
+        || lower.contains("focus la fenetre")
+        || lower.contains("focus fenêtre")
+        || lower.contains("focus fenetre")
+        || lower.contains("focus window")
+        || lower.contains("change de fenêtre")
+        || lower.contains("change de fenetre")
+        || lower.contains("changer de fenêtre")
+        || lower.contains("changer de fenetre")
+        || lower.contains("bascule sur la fenêtre")
+        || lower.contains("bascule sur la fenetre")
+        || lower.contains("basculer sur la fenêtre")
+        || lower.contains("basculer sur la fenetre")
+        || lower.contains("passe sur la fenêtre")
+        || lower.contains("passe sur la fenetre")
+        || lower.contains("passer sur la fenêtre")
+        || lower.contains("passer sur la fenetre")
+        || lower.contains("mets en premier plan")
+        || lower.contains("mettre en premier plan")
+        || lower.contains("au premier plan")
+        || lower.contains("affiche la fenêtre")
+        || lower.contains("affiche la fenetre")
+        || lower.contains("activer la fenêtre")
+    {
+        return vec![CommandTag::FocusWindow];
     }
 
     // Détection directe des impulsions du compagnon proactif
@@ -1012,6 +1044,16 @@ Règles APPLICATIONS :
 - Distinction : "open_search" = recherche locale Windows/OS (Win+S). "open_search_browser" = recherche web.
 "#);
             }
+            CommandTag::FocusWindow => {
+                prompt.push_str(r#"
+Règles FOCUS ET BASCULEMENT DE FENÊTRE (TAG FOCUS_WINDOW) :
+- L'utilisateur demande d'activer, basculer ou donner le focus à une fenêtre ou application déjà ouverte (ex: "mets Chrome en premier plan", "va sur la fenêtre Discord", "focus le bloc-notes").
+- Consulte la liste des fenêtres ouvertes dans [État actuel de l'écran].
+- Émets l'action "focus_window" avec le titre ou nom exact de la cible : {"action": "focus_window", "title": "Titre exact de la fenêtre"}.
+- INTERDICTION FORMELLE d'utiliser "open_app" ou de relancer le logiciel si sa fenêtre est déjà présente à l'écran.
+- Dès que la fenêtre est activée ou si elle est déjà au premier plan, arrête la boucle avec "actions": [], "next_passes": 0.
+"#);
+            }
             CommandTag::WindowManagementOrImmersion => {
                 prompt.push_str(r#"
 Règles FENÊTRES & IMMERSION :
@@ -1354,6 +1396,9 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
                 prompt.push_str("- {\"action\": \"open_app\", \"name\": \"nom_application\"}\n");
                 prompt.push_str("- {\"action\": \"close_app\", \"name\": \"nom_application\"}\n");
                 prompt.push_str("- {\"action\": \"open_search\"}\n");
+            }
+            CommandTag::FocusWindow => {
+                prompt.push_str("- {\"action\": \"focus_window\", \"title\": \"Titre ou nom exact de la fenêtre\"}\n");
             }
             CommandTag::WindowManagementOrImmersion => {
                 prompt.push_str("- {\"action\": \"arrange_window\", \"title\": \"...\", \"position\": \"left\"|\"right\"|\"maximize\"}\n");
@@ -2470,7 +2515,7 @@ impl LocalLlamaEngine {
     pub fn classify_intent(&self, user_query: &str, screen_hint: Option<&str>) -> Vec<CommandTag> {
         let clean = user_query.trim();
         if clean.is_empty() {
-            return vec![CommandTag::GeneralChitChat];
+            return vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch];
         }
 
         let mut fast_tags = fast_classify_intent(clean, screen_hint);
@@ -2525,7 +2570,7 @@ impl LocalLlamaEngine {
 pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<CommandTag> {
     let clean = query.trim();
     if clean.is_empty() {
-        vec![CommandTag::GeneralChitChat]
+        vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch]
     } else {
         let fast = fast_classify_intent(clean, screen_hint);
         if !fast.is_empty() {
@@ -2534,19 +2579,21 @@ pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<Command
             if let Some(ref engine) = *lock {
                 let tags = engine.classify_intent(clean, screen_hint);
                 if tags.is_empty() {
-                    vec![CommandTag::GeneralChitChat]
+                    vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch]
                 } else {
                     tags
                 }
             } else if clean.to_lowercase().contains("page") || clean.to_lowercase().contains("site") || clean.to_lowercase().contains("écran") || clean.to_lowercase().contains("ecran") {
                 vec![CommandTag::WebpageAnalysis, CommandTag::ScreenReadingOrSummary]
+            } else if clean.to_lowercase().contains("fenêtre") || clean.to_lowercase().contains("fenetre") {
+                vec![CommandTag::FocusWindow, CommandTag::WindowManagementOrImmersion]
             } else if clean.ends_with('?') {
                 vec![CommandTag::KnowledgeAndQuestions]
             } else {
-                vec![CommandTag::GeneralChitChat]
+                vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch]
             }
         } else {
-            vec![CommandTag::GeneralChitChat]
+            vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch]
         }
     }
 }
@@ -2671,7 +2718,7 @@ pub fn run_local_llama_completion(
         } else {
             let classified = engine.classify_intent(clean_goal, Some(clean_query));
             if classified.is_empty() {
-                vec![CommandTag::GeneralChitChat]
+                vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch]
             } else {
                 classified
             }
