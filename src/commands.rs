@@ -2324,13 +2324,32 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 println!("[Actions] Quota de passes ajusté à {} (motif: {})", clamped, reason_desc);
                 feedback.push(format!("Budget de raisonnement configuré à {} passes ({reason_desc}).", clamped));
             }
-            AgentAction::SchedulePrompt { delay_seconds, prompt } => {
+            AgentAction::SchedulePrompt { delay_seconds, prompt, label } => {
                 let dur = Duration::from_secs((*delay_seconds).max(1));
-                schedule_prompt_execution(dur, prompt.clone());
+                schedule_prompt_execution_with_label(dur, prompt.clone(), label.clone());
                 crate::play_earcon(crate::Earcon::Success);
                 let friendly = format_duration_friendly(dur);
-                println!("[Actions] Commande différée planifiée dans {} : \"{}\"", friendly, prompt);
-                feedback.push(format!("Commande différée planifiée dans {friendly} : « {prompt} »."));
+                let title = label.as_deref().unwrap_or(&prompt);
+                println!("[Actions] Commande différée planifiée dans {} : \"{}\"", friendly, title);
+                feedback.push(format!("Rappel « {title} » planifié dans {friendly}."));
+            }
+            AgentAction::ScheduleCron { cron, prompt, label } => {
+                match schedule_cron_execution(cron.clone(), prompt.clone(), label.clone()) {
+                    Ok(id) => {
+                        crate::play_earcon(crate::Earcon::Success);
+                        let title = label.as_deref().unwrap_or(&prompt);
+                        feedback.push(format!("Cronjob #{id} « {title} » programmé ({cron})."));
+                    }
+                    Err(e) => feedback.push(format!("Erreur planification cron : {e}")),
+                }
+            }
+            AgentAction::CancelScheduledTask { id } => {
+                if cancel_scheduled_task_by_id(*id) {
+                    crate::play_earcon(crate::Earcon::Success);
+                    feedback.push(format!("Rappel #{id} annulé avec succès."));
+                } else {
+                    feedback.push(format!("Aucun rappel actif trouvé avec l'identifiant #{id}."));
+                }
             }
             AgentAction::SchedulePrompts { tasks } => {
                 let mut count = 0;
@@ -2924,12 +2943,31 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 let reason_desc = reason.as_deref().unwrap_or("ajustement au contexte d'urgence");
                 feedback.push(format!("Budget de raisonnement configuré à {} passes ({reason_desc}).", clamped));
             }
-            AgentAction::SchedulePrompt { delay_seconds, prompt } => {
+            AgentAction::SchedulePrompt { delay_seconds, prompt, label } => {
                 let dur = Duration::from_secs((*delay_seconds).max(1));
-                schedule_prompt_execution(dur, prompt.clone());
+                schedule_prompt_execution_with_label(dur, prompt.clone(), label.clone());
                 crate::play_earcon(crate::Earcon::Success);
                 let friendly = format_duration_friendly(dur);
-                feedback.push(format!("Commande différée planifiée dans {friendly} : « {prompt} »."));
+                let title = label.as_deref().unwrap_or(prompt);
+                feedback.push(format!("Commande différée planifiée dans {friendly} : « {title} »."));
+            }
+            AgentAction::ScheduleCron { cron, prompt, label } => {
+                match schedule_cron_execution(cron.clone(), prompt.clone(), label.clone()) {
+                    Ok(id) => {
+                        crate::play_earcon(crate::Earcon::Success);
+                        let title = label.as_deref().unwrap_or(prompt);
+                        feedback.push(format!("Cronjob #{id} « {title} » programmé ({cron})."));
+                    }
+                    Err(e) => feedback.push(format!("Erreur planification cron : {e}")),
+                }
+            }
+            AgentAction::CancelScheduledTask { id } => {
+                if cancel_scheduled_task_by_id(*id) {
+                    crate::play_earcon(crate::Earcon::Success);
+                    feedback.push(format!("Rappel #{id} annulé avec succès."));
+                } else {
+                    feedback.push(format!("Aucun rappel actif trouvé avec l'identifiant #{id}."));
+                }
             }
             AgentAction::SchedulePrompts { tasks } => {
                 let mut count = 0;

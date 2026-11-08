@@ -461,6 +461,8 @@ pub struct TwitchChannelItem {
     pub is_live: bool,
     #[serde(default)]
     pub viewers_count: Option<u32>,
+    #[serde(default)]
+    pub stream_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -547,6 +549,10 @@ pub enum AgentEvent {
         window_title: String,
         summary: String,
         zones: Vec<NavigationZone>,
+    },
+    ReminderTriggered {
+        label: String,
+        prompt: String,
     },
 }
 
@@ -782,11 +788,26 @@ pub enum AgentAction {
         delay_seconds: u64,
         #[serde(default, alias = "instruction", alias = "command", alias = "text")]
         prompt: String,
+        #[serde(default, alias = "name", alias = "title")]
+        label: Option<String>,
     },
     #[serde(alias = "schedule_tasks", alias = "delayed_prompts")]
     SchedulePrompts {
         #[serde(default, alias = "prompts", alias = "scheduled_tasks", alias = "items")]
         tasks: Vec<ScheduledTaskItem>,
+    },
+    #[serde(alias = "schedule_cron", alias = "cron", alias = "cronjob")]
+    ScheduleCron {
+        #[serde(default, alias = "expression", alias = "spec", alias = "schedule")]
+        cron: String,
+        #[serde(default, alias = "instruction", alias = "command", alias = "text")]
+        prompt: String,
+        #[serde(default, alias = "name", alias = "title")]
+        label: Option<String>,
+    },
+    #[serde(alias = "cancel_task", alias = "cancel_reminder", alias = "supprimer_rappel")]
+    CancelScheduledTask {
+        id: u64,
     },
     #[serde(alias = "cancel_scheduled_prompts", alias = "clear_scheduled_tasks", alias = "cancel_timers", alias = "annuler_differe")]
     CancelScheduledTasks,
@@ -918,8 +939,16 @@ impl QuickSuggestionItem {
                 AgentAction::SetReasoningPasses { passes, .. } => {
                     Some(format!("Ajuster à {passes} passes"))
                 }
-                AgentAction::SchedulePrompt { delay_seconds, prompt } => {
-                    Some(format!("Différer ({delay_seconds}s) : {prompt}"))
+                AgentAction::SchedulePrompt { delay_seconds, prompt, label } => {
+                    let title = label.as_deref().unwrap_or(prompt);
+                    Some(format!("Différer ({delay_seconds}s) : {title}"))
+                }
+                AgentAction::ScheduleCron { cron, prompt, label } => {
+                    let title = label.as_deref().unwrap_or(prompt);
+                    Some(format!("Cron ({cron}) : {title}"))
+                }
+                AgentAction::CancelScheduledTask { id } => {
+                    Some(format!("Annuler le rappel #{id}"))
                 }
                 AgentAction::SchedulePrompts { tasks } => {
                     Some(format!("Planifier {} tâche(s) différée(s)", tasks.len()))

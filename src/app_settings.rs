@@ -11,7 +11,7 @@ use crate::local_llm;
 use crate::locale::get_system_locale_language;
 use crate::overlay::{
     apply_dwell_to_response, make_slider_accessible, make_toggle_accessible,
-    make_widget_accessible_and_activated, play_earcon, resolve_llm_config, Earcon,
+    make_widget_accessible_and_activated, play_earcon, render_accessible_input, resolve_llm_config, Earcon,
 };
 use crate::theme::{localized_theme_desc, localized_theme_name, AppTheme, SettingsTab, ThemeColors};
 use crate::types::{AgentEvent, DisabilityPreset, LlmProvider, VoiceProfile};
@@ -549,11 +549,16 @@ impl OverlayApp {
 
                                     ui.horizontal(|ui| {
                                         let key_input_id = egui::Id::NULL.with("api_key_input_field");
+                                        let model_input_id = egui::Id::NULL.with("model_input_field");
+                                        let endpoint_input_id = egui::Id::NULL.with("endpoint_input_field");
                                         let is_key_focused = ctx.memory(|m| m.has_focus(key_input_id));
+
                                         let paste_key_hit = ctx.input(|i| {
-                                            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
-                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
-                                                || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                            i.events.iter().any(|e| {
+                                                matches!(e, egui::Event::Paste(_))
+                                                    || matches!(e, egui::Event::Key { key: egui::Key::V, pressed: true, modifiers, .. } if modifiers.ctrl || modifiers.command)
+                                                    || matches!(e, egui::Event::Key { key: egui::Key::Insert, pressed: true, modifiers, .. } if modifiers.shift)
+                                            })
                                         });
                                         if is_key_focused && paste_key_hit {
                                             if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
@@ -566,12 +571,18 @@ impl OverlayApp {
                                             ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V));
                                             ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::V));
                                         }
-                                        let edit = egui::TextEdit::singleline(&mut self.api_key_input)
-                                            .id(key_input_id)
-                                            .password(!self.show_api_key_plain)
-                                            .hint_text(t!("ui.api_key_hint"))
-                                            .desired_width(230.0);
-                                       ui.add(edit);
+                                        let key_hint = t!("ui.api_key_hint").to_string();
+                                        render_accessible_input(
+                                            ui,
+                                            key_input_id,
+                                            &mut self.api_key_input,
+                                            &key_hint,
+                                            false,
+                                            Some(230.0),
+                                            None,
+                                            !self.show_api_key_plain,
+                                            theme,
+                                        );
 
                                         let eye_icon = if self.show_api_key_plain { "🔒" } else { "👁" };
                                         let eye_btn = ui.button(eye_icon).on_hover_text(t!("ui.toggle_api_key_visibility"));
@@ -600,8 +611,17 @@ impl OverlayApp {
                                     ui.add_space(2.0);
                                     ui.horizontal(|ui| {
                                         let model_input_id = egui::Id::NULL.with("model_input_field");
-                                        let model_edit = egui::TextEdit::singleline(&mut self.model_input).id(model_input_id).hint_text(default_model_name).desired_width(240.0);
-                                        ui.add(model_edit);
+                                        render_accessible_input(
+                                            ui,
+                                            model_input_id,
+                                            &mut self.model_input,
+                                            default_model_name,
+                                            false,
+                                            Some(240.0),
+                                            None,
+                                            false,
+                                            theme,
+                                        );
                                     });
 
                                     ui.add_space(5.0);
@@ -616,8 +636,18 @@ impl OverlayApp {
                                     });
                                     ui.add_space(2.0);
                                     ui.horizontal(|ui| {
-                                        let endpoint_edit = egui::TextEdit::singleline(&mut self.endpoint_input).hint_text(default_endpoint_url).desired_width(320.0);
-                                        ui.add(endpoint_edit).on_hover_text(t!("ui.endpoint_hint_tooltip"));
+                                        let endpoint_id = egui::Id::NULL.with("endpoint_input_field");
+                                        render_accessible_input(
+                                            ui,
+                                            endpoint_id,
+                                            &mut self.endpoint_input,
+                                            default_endpoint_url,
+                                            false,
+                                            Some(320.0),
+                                            None,
+                                            false,
+                                            theme,
+                                        ).on_hover_text(t!("ui.endpoint_hint_tooltip"));
                                     });
                                 }
 
@@ -632,10 +662,23 @@ impl OverlayApp {
                                     ui.add_space(2.0);
                                 }
 
+                                let enter_pressed_in_fields = ctx.memory(|m| {
+                                    m.has_focus(egui::Id::NULL.with("api_key_input_field"))
+                                        || m.has_focus(egui::Id::NULL.with("model_input_field"))
+                                        || m.has_focus(egui::Id::NULL.with("endpoint_input_field"))
+                                }) && ctx.input(|i| {
+                                    i.events.iter().any(|ev| match ev {
+                                        egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => true,
+                                        egui::Event::Text(t) if t == "\n" || t == "\r" => true,
+                                        _ => false,
+                                    })
+                                });
+
                                 ui.add_space(5.0);
                                 ui.horizontal(|ui| {
                                     let save_btn = ui.button(t!("ui.btn_save_apply"));
-                                    if make_widget_accessible_and_activated(ui, &save_btn, theme.accent) {
+                                    let save_btn_hit = make_widget_accessible_and_activated(ui, &save_btn, theme.accent);
+                                    if save_btn_hit || enter_pressed_in_fields {
                                         let key = self.api_key_input.trim();
                                         let model = if self.model_input.trim().is_empty() { default_model_name } else { &self.model_input };
                                         let endpoint = if self.endpoint_input.trim().is_empty() { default_endpoint_url } else { &self.endpoint_input };
@@ -1105,13 +1148,35 @@ impl OverlayApp {
 
                                         ui.horizontal(|ui| {
                                             ui.label(egui::RichText::new(t!("ui.macros_shortcut_label")).size(11.0).color(egui::Color32::WHITE));
-                                            ui.add(egui::TextEdit::singleline(&mut self.macro_shortcut_input).id(egui::Id::NULL.with("macro_shortcut_input")).hint_text(t!("ui.macros_shortcut_hint")).desired_width(120.0));
+                                            let sc_hint = t!("ui.macros_shortcut_hint").to_string();
+                                            render_accessible_input(
+                                                ui,
+                                                egui::Id::NULL.with("macro_shortcut_input"),
+                                                &mut self.macro_shortcut_input,
+                                                &sc_hint,
+                                                false,
+                                                Some(120.0),
+                                                None,
+                                                false,
+                                                theme,
+                                            );
                                         });
                                         ui.add_space(3.0);
 
                                         ui.horizontal(|ui| {
                                             ui.label(egui::RichText::new(t!("ui.macros_text_label")).size(11.0).color(egui::Color32::WHITE));
-                                            ui.add(egui::TextEdit::singleline(&mut self.macro_text_input).id(egui::Id::NULL.with("macro_text_input")).hint_text(t!("ui.macros_text_hint")).desired_width(260.0));
+                                            let tx_hint = t!("ui.macros_text_hint").to_string();
+                                            render_accessible_input(
+                                                ui,
+                                                egui::Id::NULL.with("macro_text_input"),
+                                                &mut self.macro_text_input,
+                                                &tx_hint,
+                                                false,
+                                                Some(260.0),
+                                                None,
+                                                false,
+                                                theme,
+                                            );
                                         });
                                         ui.add_space(4.0);
 
@@ -1120,9 +1185,21 @@ impl OverlayApp {
                                             ui.add_space(2.0);
                                         }
 
+                                        let enter_in_macro_input = ctx.memory(|m| {
+                                            m.has_focus(egui::Id::NULL.with("macro_shortcut_input"))
+                                                || m.has_focus(egui::Id::NULL.with("macro_text_input"))
+                                        }) && ctx.input(|i| {
+                                            i.events.iter().any(|ev| match ev {
+                                                egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => true,
+                                                egui::Event::Text(t) if t == "\n" || t == "\r" => true,
+                                                _ => false,
+                                            })
+                                        });
+
                                         ui.horizontal(|ui| {
                                             let add_btn = ui.button(egui::RichText::new(t!("ui.macros_add_btn")).strong().color(theme.accent));
-                                            if make_widget_accessible_and_activated(ui, &add_btn, theme.accent) {
+                                            let add_btn_hit = make_widget_accessible_and_activated(ui, &add_btn, theme.accent);
+                                            if add_btn_hit || enter_in_macro_input {
                                                 let sc = self.macro_shortcut_input.trim().to_string();
                                                 let tx = self.macro_text_input.trim().to_string();
                                                 if sc.is_empty() {

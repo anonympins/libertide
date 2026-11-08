@@ -455,7 +455,7 @@ impl CommandTag {
 
     pub fn description(&self) -> &'static str {
         match self {
-            Self::ScheduleTask => "Planification temporelle, minuteurs, rappels, timers, alarmes et commandes différées (ex: 'rappelle-moi dans 5 minutes', 'minuteur 10 min', 'annule les timers'). Actions : schedule_prompt, schedule_prompts, cancel_scheduled_tasks.",
+            Self::ScheduleTask => "Planification temporelle, délais futurs et récurrences : À SÉLECTIONNER DÈS QU'IL Y A UN DÉLAI FUTUR (ex: 'dans 2 min', 'dans 10 secondes', 'dans 1h', 'in 5 minutes'), une fréquence ou répétition (ex: 'toutes les heures', 'chaque heure', 'toutes les 15 minutes', 'every 30m'), ou les termes minuteur, minuterie, timer, alarme, rappel, chronomètre, cronjob. Même si une autre action est demandée (ex: 'dans 2 min ouvre Chrome' -> SCHEDULE_TASK), ce tag doit être inclus pour différer l'action.",
             Self::WebNavigateOrSearch => "Recherche d'information sur Internet, météo, navigation sur sites web, recherche Google et saisie d'URLs. Actions : navigate_to_url, open_search_browser, navigate_back, navigate_forward.",
             Self::AudioSettings => "Gestion des périphériques audio (haut-parleur, casque, mélangeur de volume, panneau son). Actions : accessibility_shortcut: action_center, open_settings.",
             Self::SetVolumeOrMuteUnMute => "Réglage du volume sonore de l'ordinateur (ex: 'mets le son', 'baisse d'un cran', 'volume à fond'). Action : set_volume.",
@@ -521,6 +521,31 @@ pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<Comma
         || lower.contains("live twitch")
     {
         return vec![CommandTag::TwitchStreamAndChat];
+    }
+
+    // Détection immédiate des tâches planifiées, rappels, timers et chronomètres
+    if lower.contains("minuteur")
+        || lower.contains("minuterie")
+        || lower.contains("timer")
+        || lower.contains("timers")
+        || lower.contains("rappel")
+        || lower.contains("rappelle-moi")
+        || lower.contains("rappelle moi")
+        || lower.contains("alarme")
+        || lower.contains("alarmes")
+        || lower.contains("compte à rebours")
+        || lower.contains("compte a rebours")
+        || lower.contains("countdown")
+        || lower.contains("remind me")
+        || lower.contains("reminder")
+        || lower.contains("schedule")
+        || lower.contains("cron")
+        || (lower.contains("dans ") && (lower.contains(" minute") || lower.contains(" seconde") || lower.contains(" heure") || lower.contains(" min") || lower.contains(" sec")))
+        || (lower.contains("in ") && (lower.contains(" minute") || lower.contains(" second") || lower.contains(" hour") || lower.contains(" min") || lower.contains(" sec")))
+        || (lower.contains("toutes les ") && (lower.contains(" minute") || lower.contains(" heure")))
+        || (lower.contains("every ") && (lower.contains(" minute") || lower.contains(" hour")))
+    {
+        return vec![CommandTag::ScheduleTask];
     }
 
     // Détection immédiate d'analyse de page web ou d'écran
@@ -1143,8 +1168,9 @@ Règles LECTURE & RÉSUMÉ D'ÉCRAN :
             CommandTag::ScheduleTask => {
                 prompt.push_str(r#"
 Règles TÂCHES DIFFÉRÉES & TIMERS :
-- Planifier une tâche : action "schedule_prompt" avec "delay_seconds" (secondes : 1 min = 60, 5 min = 300, 10 min = 600, 1h = 3600) et "prompt" (la consigne textuelle à exécuter au terme du délai).
-  Exemple : {"action": "schedule_prompt", "delay_seconds": 300, "prompt": "Rappelle-moi d'éteindre le four"}
+- Planifier une tâche : action "schedule_prompt" avec "delay_seconds" (secondes : 1 min = 60, 5 min = 300, 10 min = 600, 1h = 3600), "prompt" (la consigne textuelle) et "label" (intitulé court du rappel, ex: "Éteindre le four").
+  Exemple : {"action": "schedule_prompt", "delay_seconds": 300, "prompt": "Rappelle-moi d'éteindre le four", "label": "Éteindre le four"}
+- Planifier un cronjob récurrent : action "schedule_cron" avec "cron" (ex: "every 30m", "@hourly", "@daily", "*/15 * * * *"), "prompt" et "label" optionnel.
 - Planifier plusieurs tâches échelonnées : action "schedule_prompts" avec "tasks": [{"delay_seconds": 60, "prompt": "..."}, {"delay_seconds": 300, "prompt": "..."}].
 - Annuler les timers / tâches différées : action "cancel_scheduled_tasks". Utilise-la immédiatement si l'utilisateur demande d'annuler ou d'arrêter des rappels/timers.
 - La "narration" doit confirmer explicitement le délai programmé et l'action différée dans la langue de l'utilisateur ({lang_name}).
@@ -1482,8 +1508,10 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
                 prompt.push_str("- {\"action\": \"scroll\", \"direction\": \"down\"|\"up\", \"amount\": 1}\n");
             }
             CommandTag::ScheduleTask => {
-                prompt.push_str("- {\"action\": \"schedule_prompt\", \"delay_seconds\": 300, \"prompt\": \"consigne à exécuter\"}\n");
+                prompt.push_str("- {\"action\": \"schedule_prompt\", \"delay_seconds\": 300, \"prompt\": \"consigne à exécuter\", \"label\": \"Nom du rappel\"}\n");
+                prompt.push_str("- {\"action\": \"schedule_cron\", \"cron\": \"every 30m\", \"prompt\": \"consigne\", \"label\": \"Nom\"}\n");
                 prompt.push_str("- {\"action\": \"schedule_prompts\", \"tasks\": [{\"delay_seconds\": 60, \"prompt\": \"...\"}]}\n");
+                prompt.push_str("- {\"action\": \"cancel_scheduled_task\", \"id\": 1}\n");
                 prompt.push_str("- {\"action\": \"cancel_scheduled_tasks\"}\n");
             }
             CommandTag::FloatingCardOrForm => {
@@ -2657,6 +2685,8 @@ pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<Command
                 vec![CommandTag::WebpageAnalysis, CommandTag::ScreenReadingOrSummary]
             } else if clean.to_lowercase().contains("fenêtre") || clean.to_lowercase().contains("fenetre") {
                 vec![CommandTag::FocusWindow, CommandTag::WindowManagementOrImmersion]
+        } else if clean.to_lowercase().contains("minuteur") || clean.to_lowercase().contains("rappel") || clean.to_lowercase().contains("timer") || clean.to_lowercase().contains("alarme") {
+            vec![CommandTag::ScheduleTask]
             } else if clean.ends_with('?') {
                 vec![CommandTag::KnowledgeAndQuestions]
             } else {

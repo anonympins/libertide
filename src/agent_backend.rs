@@ -1333,9 +1333,11 @@ pub fn spawn_agent_backend(
     let bg_llm_config = llm_config.clone();
     let bg_tts_tx = tts_tx.clone();
     let scheduler_cmd_tx = cmd_tx.clone();
+    let scheduler_event_tx = event_tx.clone();
+    let scheduler_tts_tx = tts_tx.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("Échec d'initialisation du runtime Tokio");
-        init_scheduler(scheduler_cmd_tx, rt.handle().clone());
+        init_scheduler(scheduler_cmd_tx, scheduler_event_tx, scheduler_tts_tx, rt.handle().clone());
         rt.block_on(async move {
             let history = Arc::new(tokio::sync::Mutex::new(Vec::<ChatMessage>::new()));
             let last_call_time = Arc::new(tokio::sync::Mutex::new(None));

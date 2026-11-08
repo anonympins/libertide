@@ -115,11 +115,11 @@ pub fn spawn_twitch_worker(event_tx: Sender<AgentEvent>, channel_rx: Receiver<St
 /// Vérifie l'état en direct ("open" / LIVE) et retourne un tuple (login, is_live)
 pub async fn check_channels_live_status(channels: &[String]) -> Vec<(String, bool)> {
     let details = check_channels_live_details(channels).await;
-    details.into_iter().map(|(login, (is_live, _))| (login, is_live)).collect()
+    details.into_iter().map(|(login, (is_live, ..))| (login, is_live)).collect()
 }
 
-/// Vérifie en détail le statut live et le nombre de spectateurs pour une liste de logins
-pub async fn check_channels_live_details(channels: &[String]) -> HashMap<String, (bool, Option<u32>)> {
+/// Vérifie en détail le statut live, le nombre de spectateurs et le titre pour une liste de logins
+pub async fn check_channels_live_details(channels: &[String]) -> HashMap<String, (bool, Option<u32>, Option<String>)> {
     let mut map = HashMap::new();
     if channels.is_empty() {
         return map;
@@ -131,7 +131,7 @@ pub async fn check_channels_live_details(channels: &[String]) -> HashMap<String,
         let clean = ch.trim().to_lowercase().trim_start_matches('#').to_string();
         if !clean.is_empty() {
             user_queries.push_str(&format!(
-                r#"u{}: user(login: "{}") {{ login stream {{ id viewersCount }} }} "#,
+                r#"u{}: user(login: "{}") {{ login stream {{ id viewersCount title }} broadcastSettings {{ title }} }} "#,
                 i, clean
             ));
         }
@@ -161,8 +161,15 @@ pub async fn check_channels_live_details(channels: &[String]) -> HashMap<String,
                         let stream_val = user_val.get("stream");
                         let is_live = stream_val.map_or(false, |s| !s.is_null() && s.get("id").is_some());
                         let viewers = stream_val.and_then(|s| s.get("viewersCount")).and_then(|vc| vc.as_u64()).map(|n| n as u32);
+                        let title = stream_val
+                            .and_then(|s| s.get("title"))
+                            .and_then(|t| t.as_str())
+                            .or_else(|| user_val.get("broadcastSettings").and_then(|b| b.get("title")).and_then(|t| t.as_str()))
+                            .map(|s| s.to_string())
+                            .filter(|t| !t.trim().is_empty());
+
                         if !login.is_empty() {
-                            map.insert(login, (is_live, viewers));
+                            map.insert(login, (is_live, viewers, title));
                         }
                     }
                 }
@@ -179,7 +186,7 @@ pub async fn search_twitch_channels(query: &str) -> Vec<TwitchChannelItem> {
     if clean.is_empty() {
         // Requête GraphQL Twitch pour récupérer les 20 streams actuellement en direct
         let gql_body = serde_json::json!({
-            "query": r#"query { streams(first: 20) { edges { node { id viewersCount broadcaster { login displayName profileImageURL(width: 70) } } } } }"#
+            "query": r#"query { streams(first: 20) { edges { node { id viewersCount title broadcaster { login displayName profileImageURL(width: 70) } } } } }"#
         });
 
         let res = client
@@ -197,6 +204,7 @@ pub async fn search_twitch_channels(query: &str) -> Vec<TwitchChannelItem> {
                         for edge in edges {
                             if let Some(node) = edge.get("node") {
                                 let viewers = node.get("viewersCount").and_then(|vc| vc.as_u64()).map(|n| n as u32);
+                                let title = node.get("title").and_then(|t| t.as_str()).map(|s| s.to_string());
                                 if let Some(b) = node.get("broadcaster") {
                                     let login = b.get("login").and_then(|s| s.as_str()).unwrap_or("").to_string();
                                     let display_name = b.get("displayName").and_then(|s| s.as_str()).unwrap_or(&login).to_string();
@@ -208,6 +216,7 @@ pub async fn search_twitch_channels(query: &str) -> Vec<TwitchChannelItem> {
                                             profile_image_url,
                                             is_live: true,
                                             viewers_count: viewers,
+                                            stream_title: title,
                                         });
                                     }
                                 }
@@ -231,7 +240,7 @@ pub async fn search_twitch_channels(query: &str) -> Vec<TwitchChannelItem> {
         let logins: Vec<String> = fallback_list.into_iter().map(String::from).collect();
         let live_details = check_channels_live_details(&logins).await;
         let mut results = Vec::new();
-        for (login, (is_live, viewers)) in live_details {
+        for (login, (is_live, viewers, title)) in live_details {
             if is_live {
                 results.push(TwitchChannelItem {
                     login: login.clone(),
@@ -239,6 +248,7 @@ pub async fn search_twitch_channels(query: &str) -> Vec<TwitchChannelItem> {
                     profile_image_url: None,
                     is_live: true,
                     viewers_count: viewers,
+                    stream_title: title,
                 });
             }
         }
@@ -276,6 +286,7 @@ pub async fn search_twitch_channels(query: &str) -> Vec<TwitchChannelItem> {
                                 profile_image_url,
                                 is_live: false,
                                 viewers_count: None,
+                                stream_title: None,
                             });
                         }
                     }
@@ -286,9 +297,10 @@ pub async fn search_twitch_channels(query: &str) -> Vec<TwitchChannelItem> {
                     let logins: Vec<String> = results.iter().map(|r| r.login.clone()).collect();
                     let live_details = check_channels_live_details(&logins).await;
                     for item in &mut results {
-                        if let Some(&(is_live, viewers)) = live_details.get(&item.login.to_lowercase()) {
-                            item.is_live = is_live;
-                            item.viewers_count = viewers;
+                        if let Some((is_live, viewers, title)) = live_details.get(&item.login.to_lowercase()) {
+                            item.is_live = *is_live;
+                            item.viewers_count = *viewers;
+                            item.stream_title = title.clone();
                         }
                     }
                     // Priorité aux chaînes en direct, puis tri par viewers décroissants
@@ -304,7 +316,7 @@ pub async fn search_twitch_channels(query: &str) -> Vec<TwitchChannelItem> {
     }
 
     let live_details = check_channels_live_details(&[clean.to_string()]).await;
-    let (is_live, viewers) = live_details.get(&clean.to_lowercase()).copied().unwrap_or((false, None));
+    let (is_live, viewers, title) = live_details.get(&clean.to_lowercase()).cloned().unwrap_or((false, None, None));
 
     // Repli automatique avec les informations saisies
     vec![TwitchChannelItem {
@@ -313,5 +325,6 @@ pub async fn search_twitch_channels(query: &str) -> Vec<TwitchChannelItem> {
         profile_image_url: None,
         is_live,
         viewers_count: viewers,
+        stream_title: title,
     }]
 }

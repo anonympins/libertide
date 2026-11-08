@@ -140,6 +140,259 @@ pub fn get_mic_audio_level() -> f32 {
     f32::from_bits(MIC_AUDIO_LEVEL.load(Ordering::Relaxed))
 }
 
+/// Affiche l'encadré accessible des rappels et minuteurs en cours avec compte à rebours dynamique
+pub fn draw_active_reminders_box(
+    ui: &mut egui::Ui,
+    theme: &ThemeColors,
+    dwell_state: &mut DwellState,
+) -> Option<String> {
+    let tasks = crate::scheduler::get_active_scheduled_tasks();
+    if tasks.is_empty() {
+        return None;
+    }
+
+    let mut feedback_msg = None;
+    let now = Instant::now();
+
+    egui::Frame::new()
+        .fill(theme.control_bg)
+        .stroke(egui::Stroke::new(1.0, theme.accent))
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("⏰ Rappels & Minuteurs actifs")
+                        .size(11.5)
+                        .color(theme.accent)
+                        .strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let cancel_all_btn = ui.small_button("Tout annuler").on_hover_text("Annuler tous les rappels et minuteurs");
+                    let cancel_all_id = ui.make_persistent_id("dwell_cancel_all_reminders");
+                    if apply_dwell_to_response(ui, dwell_state, cancel_all_id, &cancel_all_btn) {
+                        let count = crate::scheduler::cancel_all_scheduled_tasks();
+                        play_earcon(Earcon::Success);
+                        feedback_msg = Some(format!("{count} rappel(s) annulé(s)."));
+                    }
+                });
+            });
+
+            ui.add_space(4.0);
+
+            for task in &tasks {
+                let remaining = task.target_instant.saturating_duration_since(now);
+                let rem_secs = remaining.as_secs();
+                let formatted_time = if rem_secs >= 3600 {
+                    format!("{:02}h {:02}m", rem_secs / 3600, (rem_secs % 3600) / 60)
+                } else if rem_secs >= 60 {
+                    format!("{:02}m {:02}s", rem_secs / 60, rem_secs % 60)
+                } else {
+                    format!("{:02}s", rem_secs)
+                };
+
+                let total_secs = task.total_duration.as_secs().max(1) as f32;
+                let progress = 1.0 - (rem_secs as f32 / total_secs).clamp(0.0, 1.0);
+
+                ui.horizontal(|ui| {
+                    let badge = if task.cron_expr.is_some() { "🔁" } else { "⏳" };
+                    ui.label(egui::RichText::new(badge).size(12.0));
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(&task.label)
+                                    .size(11.5)
+                                    .color(theme.text_primary)
+                                    .strong(),
+                            ).on_hover_text(&task.prompt);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let del_btn = ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new("✕")
+                                            .size(10.0)
+                                            .color(egui::Color32::from_rgb(255, 120, 120)),
+                                    )
+                                    .small()
+                                    .corner_radius(egui::CornerRadius::same(4)),
+                                ).on_hover_text("Annuler ce rappel");
+                                let del_id = ui.make_persistent_id(format!("dwell_del_task_{}", task.id));
+                                if apply_dwell_to_response(ui, dwell_state, del_id, &del_btn) {
+                                    crate::scheduler::cancel_scheduled_task_by_id(task.id);
+                                    play_earcon(Earcon::Success);
+                                    feedback_msg = Some(format!("Rappel « {} » annulé.", task.label));
+                                }
+                                ui.label(
+                                    egui::RichText::new(formatted_time)
+                                        .size(11.0)
+                                        .color(theme.text_user)
+                                        .strong(),
+                                );
+                            });
+                        });
+                        ui.add_space(2.0);
+                        ui.add(
+                            egui::ProgressBar::new(progress)
+                                .desired_height(15.0)
+                                .show_percentage(),
+                        );
+                    });
+                });
+                ui.add_space(4.0);
+            }
+        });
+
+    feedback_msg
+}
+
+/// Surcouche d'entrée texte universelle pour egui : garantit la prise en compte des événements
+/// clavier de Windows (PowerToys KeyMapper, touches mortes, copier/coller, focus accessible)
+pub fn render_accessible_input(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    text: &mut String,
+    hint_text: &str,
+    multiline: bool,
+    desired_width: Option<f32>,
+    desired_height: Option<f32>,
+    password: bool,
+    theme: &ThemeColors,
+) -> egui::Response {
+    let layer_id = ui.layer_id();
+    ui.memory_mut(|m| m.interested_in_focus(id, layer_id));
+    let had_focus = ui.memory(|m| m.has_focus(id));
+
+    if had_focus {
+        crate::automation::IS_USER_TYPING.store(true, Ordering::Relaxed);
+    }
+
+    // Gestion universelle du collage (Ctrl+V / Shift+Insert / Événement Paste OS)
+    let paste_hit = ui.input(|i| {
+        i.events.iter().any(|e| match e {
+            egui::Event::Paste(_) => true,
+            egui::Event::Key { key: egui::Key::V, pressed: true, modifiers, .. } if modifiers.ctrl || modifiers.command => true,
+            egui::Event::Key { key: egui::Key::Insert, pressed: true, modifiers, .. } if modifiers.shift => true,
+            _ => false,
+        })
+    });
+
+    if had_focus && paste_hit {
+        if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
+            let clean = if multiline { clip } else { clip.replace(['\r', '\n'], " ") };
+            let trimmed = clean.trim();
+            if !trimmed.is_empty() {
+                text.push_str(trimmed);
+                play_earcon(Earcon::Success);
+                ui.ctx().request_repaint();
+            }
+        }
+        ui.input_mut(|i| {
+            i.consume_key(egui::Modifiers::COMMAND, egui::Key::V);
+            i.consume_key(egui::Modifiers::CTRL, egui::Key::V);
+            i.consume_key(egui::Modifiers::SHIFT, egui::Key::Insert);
+            i.events.retain(|e| !matches!(e, egui::Event::Paste(_)));
+        });
+    }
+
+    let mut edit = if multiline {
+        egui::TextEdit::multiline(text).desired_rows(3)
+    } else {
+        egui::TextEdit::singleline(text)
+    };
+
+    edit = edit.id(id).hint_text(hint_text).password(password);
+    if let Some(w) = desired_width {
+        edit = edit.desired_width(w);
+    }
+
+    let response = if let Some(h) = desired_height {
+        let w = desired_width.unwrap_or_else(|| ui.available_width());
+        ui.add_sized([w, h], edit)
+    } else {
+        ui.add(edit)
+    };
+
+    let now_focused = response.has_focus() || ui.memory(|m| m.has_focus(id));
+    if now_focused {
+        crate::automation::IS_USER_TYPING.store(true, Ordering::Relaxed);
+    }
+
+
+    // Raccourcis Copier / Couper au clavier
+    let copy_hit = ui.input(|i| {
+        i.events.iter().any(|e| match e {
+            egui::Event::Copy => true,
+            egui::Event::Key { key: egui::Key::C, pressed: true, modifiers, .. } if modifiers.ctrl || modifiers.command => true,
+            _ => false,
+        })
+    });
+    if now_focused && copy_hit && !text.is_empty() {
+        set_clipboard_text(text);
+        ui.ctx().copy_text(text.clone());
+        play_earcon(Earcon::Success);
+    }
+
+    let cut_hit = ui.input(|i| {
+        i.events.iter().any(|e| match e {
+            egui::Event::Cut => true,
+            egui::Event::Key { key: egui::Key::X, pressed: true, modifiers, .. } if modifiers.ctrl || modifiers.command => true,
+            _ => false,
+        })
+    });
+    if now_focused && cut_hit && !text.is_empty() {
+        set_clipboard_text(text);
+        ui.ctx().copy_text(text.clone());
+        text.clear();
+        play_earcon(Earcon::Success);
+        ui.ctx().request_repaint();
+    }
+
+    // Menu contextuel complet (Clic droit)
+    response.context_menu(|ui| {
+        if ui.button(t!("ui.ctx_paste")).clicked() {
+            if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
+                let clean = if multiline { clip } else { clip.replace(['\r', '\n'], " ") };
+                let trimmed = clean.trim();
+                if !trimmed.is_empty() {
+                    text.push_str(trimmed);
+                    play_earcon(Earcon::Success);
+                }
+            }
+            ui.memory_mut(|m| m.request_focus(id));
+            ui.close();
+        }
+        if !text.is_empty() {
+            if ui.button(t!("ui.ctx_copy_all")).clicked() {
+                set_clipboard_text(text);
+                ui.ctx().copy_text(text.clone());
+                play_earcon(Earcon::Success);
+                ui.close();
+            }
+            if ui.button(t!("ui.ctx_cut_all")).clicked() {
+                set_clipboard_text(text);
+                ui.ctx().copy_text(text.clone());
+                text.clear();
+                play_earcon(Earcon::Success);
+                ui.close();
+            }
+            if ui.button(t!("ui.ctx_clear")).clicked() {
+                text.clear();
+                ui.close();
+            }
+        }
+    });
+
+    if now_focused {
+        ui.painter().rect_stroke(
+            response.rect.expand(1.5),
+            egui::CornerRadius::same(6),
+            egui::Stroke::new(1.8, theme.accent),
+            egui::StrokeKind::Outside,
+        );
+    }
+
+    response
+}
+
 // Constantes ergonomiques d'accessibilité motrice (WCAG 2.2 AAA Target Size)
 pub const ACCESSIBILITY_BTN_SIZE: egui::Vec2 = egui::vec2(50.0, 50.0);
 pub const ACCESSIBILITY_ICON_FONT: egui::FontId = egui::FontId::proportional(24.0);
@@ -572,7 +825,8 @@ pub fn draw_twitch_channel_search_item(
     theme: &ThemeColors,
     width: f32,
 ) -> egui::Response {
-    let row_height = 32.0;
+    let has_title = item.is_live && item.stream_title.as_ref().map_or(false, |t| !t.trim().is_empty());
+    let row_height = if has_title { 42.0 } else { 32.0 };
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, row_height), egui::Sense::click());
 
     let bg_color = if response.hovered() {
@@ -642,21 +896,46 @@ pub fn draw_twitch_channel_search_item(
         display_title
     };
 
-    let title_pos = egui::pos2(rect.min.x + 28.0, rect.center().y);
     let title_clip_rect = egui::Rect::from_min_max(
         rect.min,
         egui::pos2(rect.max.x - status_reserved_w, rect.max.y),
     );
-    ui.painter().with_clip_rect(title_clip_rect).text(
-        title_pos,
-        egui::Align2::LEFT_CENTER,
-        display_title,
-        egui::FontId::proportional(13.0),
-        title_color,
-    );
+
+    if has_title {
+        let name_pos = egui::pos2(rect.min.x + 28.0, rect.min.y + 11.0);
+        ui.painter().with_clip_rect(title_clip_rect).text(
+            name_pos,
+            egui::Align2::LEFT_CENTER,
+            display_title,
+            egui::FontId::proportional(12.5),
+            title_color,
+        );
+        let stream_title_str = item.stream_title.as_deref().unwrap_or("");
+        let stream_title_pos = egui::pos2(rect.min.x + 28.0, rect.min.y + 27.0);
+        ui.painter().with_clip_rect(title_clip_rect).text(
+            stream_title_pos,
+            egui::Align2::LEFT_CENTER,
+            stream_title_str,
+            egui::FontId::proportional(10.5),
+            egui::Color32::from_rgb(180, 195, 215),
+        );
+    } else {
+        let title_pos = egui::pos2(rect.min.x + 28.0, rect.center().y);
+        ui.painter().with_clip_rect(title_clip_rect).text(
+            title_pos,
+            egui::Align2::LEFT_CENTER,
+            display_title,
+            egui::FontId::proportional(13.0),
+            title_color,
+        );
+    }
 
     let tooltip = if item.is_live {
-        format!("{} est en direct !", item.display_name)
+        if let Some(ref st) = item.stream_title {
+            format!("{} est en direct :\n« {} »", item.display_name, st)
+        } else {
+            format!("{} est en direct !", item.display_name)
+        }
     } else {
         format!("{} est hors-ligne", item.display_name)
     };
@@ -1893,7 +2172,16 @@ pub fn make_widget_accessible_and_activated(
             egui::Stroke::new(2.0, focus_color),
             egui::StrokeKind::Outside,
         );
-        if ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter)) {
+        let activated = ui.input(|i| {
+            i.events.iter().any(|ev| match ev {
+                egui::Event::Key { key, pressed: true, repeat: false, .. } => {
+                    *key == egui::Key::Space || *key == egui::Key::Enter
+                }
+                egui::Event::Text(ref text) => text == " " || text == "\n" || text == "\r",
+                _ => false,
+            }) || i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter)
+        });
+        if activated {
             return true;
         }
     }
@@ -1915,7 +2203,16 @@ pub fn make_toggle_accessible(
             egui::Stroke::new(2.0, focus_color),
             egui::StrokeKind::Outside,
         );
-        if ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter)) {
+        let activated = ui.input(|i| {
+            i.events.iter().any(|ev| match ev {
+                egui::Event::Key { key, pressed: true, repeat: false, .. } => {
+                    *key == egui::Key::Space || *key == egui::Key::Enter
+                }
+                egui::Event::Text(ref text) => text == " " || text == "\n" || text == "\r",
+                _ => false,
+            }) || i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter)
+        });
+        if activated {
             return true;
         }
     }

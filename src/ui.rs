@@ -1064,6 +1064,59 @@ pub fn has_focused_textarea(_hwnd: HWND) -> bool {
     }
 }
 
+#[cfg(windows)]
+pub fn has_focused_text_input(_hwnd: HWND) -> bool {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let Ok(uia): Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else {
+            return false;
+        };
+        let Ok(focused) = uia.GetFocusedElement() else {
+            return false;
+        };
+
+        let overlay_hwnd = FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()));
+        if let Ok(native_handle) = focused.CurrentNativeWindowHandle() {
+            let h = HWND(native_handle.0 as _);
+            if !h.0.is_null() && h == overlay_hwnd {
+                return false;
+            }
+        }
+
+        let ctype = focused.CurrentControlType().unwrap_or_default();
+        let is_edit = ctype == UIA_EditControlTypeId || ctype == UIA_DocumentControlTypeId;
+        let class_name = focused.CurrentClassName().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+        let loc_type = focused.CurrentLocalizedControlType().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+        let automation_id = focused.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+
+        let is_root_web_area = class_name.contains("rootwebarea")
+            || loc_type.contains("rootwebarea")
+            || automation_id.contains("rootwebarea");
+        if is_root_web_area {
+            return false;
+        }
+
+        if is_edit {
+            return true;
+        }
+
+        class_name.contains("input")
+            || class_name.contains("edit")
+            || class_name.contains("textarea")
+            || class_name.contains("textbox")
+            || class_name.contains("searchbox")
+            || loc_type.contains("saisie")
+            || loc_type.contains("edit")
+            || loc_type.contains("texte")
+            || loc_type.contains("input")
+    }
+}
+
+#[cfg(not(windows))]
+pub fn has_focused_text_input(_target: impl AsWindowTarget) -> bool {
+    crate::automation::get_active_field_content().is_some()
+}
+
 #[cfg(not(windows))]
 pub fn has_focused_textarea(_target: impl AsWindowTarget) -> bool {
     crate::automation::get_active_field_content().is_some()
