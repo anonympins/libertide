@@ -1,5 +1,5 @@
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use eframe::egui;
 
 use crate::automation::{
@@ -14,10 +14,148 @@ use crate::overlay::{
     make_widget_accessible_and_activated, play_earcon, render_accessible_input, resolve_llm_config, Earcon,
 };
 use crate::theme::{localized_theme_desc, localized_theme_name, AppTheme, SettingsTab, ThemeColors};
-use crate::types::{AgentEvent, DisabilityPreset, LlmProvider, VoiceProfile};
+use crate::types::{AgentEvent, DisabilityPreset, LlmProvider, TtsCommand, VoiceProfile};
 use crate::OverlayApp;
 
 impl OverlayApp {
+    pub fn set_voice_clone_gender(&mut self, gender: &str) {
+        let clean = if gender.trim().eq_ignore_ascii_case("male") || gender.trim().eq_ignore_ascii_case("homme") {
+            "male"
+        } else {
+            "female"
+        };
+        self.voice_clone_gender = clean.to_string();
+        std::env::set_var("VOICE_CLONE_GENDER", clean);
+        let _ = write_env_var_to_file(".env", "VOICE_CLONE_GENDER", clean);
+
+        let gender_label = if clean == "male" { "homme" } else { "femme" };
+        self.voice_status_feedback = Some(format!("Genre configuré : {gender_label}. Chargement du modèle de voix..."));
+        play_earcon(Earcon::Navigation);
+
+        let tts_tx = self.tts_sender.clone();
+        let event_tx = self.event_sender.clone();
+        let is_clone_active = self.voice_gender == VoiceProfile::Clone;
+        let clean_string = clean.to_string();
+
+        std::thread::spawn(move || {
+            let model_dir = std::path::PathBuf::from("models").join("voice-clone").join(&clean_string);
+            match crate::tts::ensure_voice_clone_model_for_gender(&model_dir, &clean_string) {
+                Ok(()) => {
+                    let _ = tts_tx.send(TtsCommand::SetGender(VoiceProfile::Clone));
+                    let _ = event_tx.send(AgentEvent::SilentNarration(format!(
+                        "Modèle vocal cloné ({}) chargé avec succès.",
+                        if clean_string == "male" { "homme" } else { "femme" }
+                    )));
+                }
+                Err(e) => {
+                    eprintln!("[TTS Clone] Erreur chargement modèle {clean_string}: {e}");
+                }
+            }
+        });
+
+        if is_clone_active {
+            let _ = self.tts_sender.send(TtsCommand::SetGender(VoiceProfile::Clone));
+        }
+    }
+
+    pub fn generate_new_voice_guide_phrase(&mut self) {
+        if self.voice_guide_generating {
+            return;
+        }
+        self.voice_guide_generating = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.voice_guide_rx = Some(rx);
+
+        let config = resolve_llm_config();
+        let (_, sys_lang) = get_system_locale_language();
+
+        std::thread::spawn(move || {
+            const FALLBACKS: &[&str] = &[
+                "Portez ce vieux whisky au juge blond qui fume sur son île enchantée.",
+                "Voix ambiguë d’un cœur qui, au zéphyr printanier, préfère les jattes de kiwis frais.",
+                "Pendant que le vent souffle sur l'océan, je savoure le calme d'un beau matin d'automne.",
+                "L'aube dorée illumine doucement l'horizon lointain tandis que la nature s'éveille paisiblement.",
+                "Voyagez à travers les paysages sauvages et découvrez mille merveilles au crépuscule.",
+                "Chaque parole partagée avec clarté et bienveillance tisse des liens précieux autour de nous.",
+                "Les cinq grands cygnes blancs glissent silencieusement sur le miroir tranquille du lac.",
+                "Dans la douce lumière du crépuscule, les oiseaux chantent une mélodie réconfortante.",
+                "Prenez le temps d'écouter le murmure du ruisseau qui serpente entre les rochers moussus.",
+                "Sous la canopée verdoyante, les rayons du soleil dessinent des motifs dorés sur le sol.",
+            ];
+
+            let fallback_choice = {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                let idx = ((nanos ^ (nanos >> 16)) as usize) % FALLBACKS.len();
+                format!("« {} »", FALLBACKS[idx])
+            };
+
+            let prompt = format!(
+                "Tu es un linguiste expert en phonétique ({sys_lang}) et en synthèse vocale.\n\
+                 Génère une unique phrase en {sys_lang}, naturelle, expressive, riche en sonorités variées (voyelles et consonnes), idéale pour servir d'échantillon d'apprentissage vocal.\n\
+                 Longueur : entre 12 et 22 mots.\n\
+                 Réponds STRICTEMENT avec un objet JSON au format : {{\"phrase\": \"la phrase ici\"}}"
+            );
+
+            let result: Result<String, String> = if config.provider == LlmProvider::Local {
+                local_llm::LocalLlamaEngine::generate_local_text(&prompt, 80)
+            } else {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+                match rt {
+                    Ok(rt) => rt.block_on(async {
+                        let client = reqwest::Client::builder()
+                            .timeout(Duration::from_secs(8))
+                            .build()
+                            .map_err(|e| e.to_string())?;
+                        let messages = vec![crate::types::ChatMessage {
+                            role: "user".to_string(),
+                            content: "Génère une nouvelle phrase d'entraînement vocal variée au format JSON.".to_string(),
+                        }];
+
+                        let resp = crate::agent_backend::send_llm_chat_completion(
+                            &client,
+                            &config,
+                            &prompt,
+                            &messages,
+                            0.7,
+                            80,
+                        ).await.map_err(|e| e.to_string())?;
+                        crate::agent_backend::parse_llm_response_text(resp, config.provider).await
+                    }),
+                    Err(e) => Err(e.to_string()),
+                }
+            };
+
+            let final_phrase = match result {
+                Ok(text) if !text.trim().is_empty() => {
+                    let extracted = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                        val.get("phrase").and_then(|v| v.as_str()).unwrap_or(&text).to_string()
+                    } else if let (Some(s), Some(e)) = (text.find('{'), text.rfind('}')) {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text[s..=e]) {
+                            val.get("phrase").and_then(|v| v.as_str()).unwrap_or(&text).to_string()
+                        } else {
+                            text
+                        }
+                    } else {
+                        text
+                    };
+                    let cleaned = extracted.trim().trim_matches(['"', '«', '»', '`', '\'', '*', ' ', '{', '}']).trim();
+                    if !cleaned.is_empty() {
+                        format!("« {cleaned} »")
+                    } else {
+                        fallback_choice
+                    }
+                }
+                _ => fallback_choice,
+            };
+            let _ = tx.send(final_phrase);
+        });
+    }
+
     pub fn sync_modal_inputs_for_provider(&mut self, provider: LlmProvider) {
         self.selected_provider_modal = provider;
         let key_name = provider.env_key_name();
@@ -296,6 +434,26 @@ impl OverlayApp {
                                     self.settings_tab = SettingsTab::Accessibility;
                                 }
 
+                                let is_voice_active = self.settings_tab == SettingsTab::Voice;
+                                let tab_voice = ui.selectable_label(
+                                    is_voice_active,
+                                    egui::RichText::new("🗣️ Voix")
+                                        .size(12.0)
+                                        .color(if is_voice_active { theme.accent } else { theme.text_secondary })
+                                        .strong(),
+                                );
+                                let tab_voice_id = ui.make_persistent_id("dwell_tab_voice");
+                                let voice_activated = if !is_voice_active {
+                                    apply_dwell_to_response(ui, &mut self.dwell_state, tab_voice_id, &tab_voice)
+                                } else {
+                                    tab_voice.clicked()
+                                };
+                                let is_voice_key = make_widget_accessible_and_activated(ui, &tab_voice, theme.accent);
+                                if voice_activated || is_voice_key {
+                                    self.settings_tab = SettingsTab::Voice;
+                                    self.voice_status_feedback = None;
+                                }
+
                                 let is_theme_active = self.settings_tab == SettingsTab::Theme;
                                 let tab_theme = ui.selectable_label(
                                     is_theme_active,
@@ -549,8 +707,6 @@ impl OverlayApp {
 
                                     ui.horizontal(|ui| {
                                         let key_input_id = egui::Id::NULL.with("api_key_input_field");
-                                        let model_input_id = egui::Id::NULL.with("model_input_field");
-                                        let endpoint_input_id = egui::Id::NULL.with("endpoint_input_field");
                                         let is_key_focused = ctx.memory(|m| m.has_focus(key_input_id));
 
                                         let paste_key_hit = ctx.input(|i| {
@@ -819,6 +975,7 @@ impl OverlayApp {
                                                     VoiceProfile::Paul => ("🎩", "Paul"),
                                                     VoiceProfile::Sylvie => ("🍁", "Sylvie"),
                                                     VoiceProfile::Jean => ("⚡", "Jean"),
+                                                    VoiceProfile::Clone => ("🧬", "Clonée"),
                                                 };
                                                 let btn_text = format!("{icon} {label}");
                                                 let resp = ui.selectable_label(is_selected, btn_text);
@@ -984,6 +1141,616 @@ impl OverlayApp {
                                 ui.horizontal(|ui| {
                                     let close_a11y_btn = ui.button(t!("ui.btn_close"));
                                     if make_widget_accessible_and_activated(ui, &close_a11y_btn, theme.accent) {
+                                        self.show_api_key_modal = false;
+                                    }
+                                });
+                            }
+                            SettingsTab::Voice => {
+                                ui.label(
+                                    egui::RichText::new("Sélection de la voix du narrateur et clonage vocal personnalisé.")
+                                        .size(11.5)
+                                        .color(theme.text_secondary),
+                                );
+                                ui.add_space(6.0);
+
+                                // 1. Choix du profil vocal
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new("Voix active du narrateur")
+                                                .size(12.0)
+                                                .strong()
+                                                .color(theme.accent),
+                                        );
+                                        ui.add_space(4.0);
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                                            for &profile in VoiceProfile::ALL {
+                                                let is_selected = self.voice_gender == profile;
+                                                let (icon, label) = match profile {
+                                                    VoiceProfile::Denise => ("👩", "Denise (Féminine)"),
+                                                    VoiceProfile::Henri => ("👨", "Henri (Masculin)"),
+                                                    VoiceProfile::Hortense => ("🎙️", "Hortense"),
+                                                    VoiceProfile::Paul => ("🎩", "Paul"),
+                                                    VoiceProfile::Sylvie => ("🍁", "Sylvie (CA)"),
+                                                    VoiceProfile::Jean => ("⚡", "Jean"),
+                                                    VoiceProfile::Clone => {
+                                                        let g = if self.voice_clone_gender == "male" { "Masculine" } else { "Féminine" };
+                                                        ("🧬", if g == "Masculine" { "Voix clonée (Masculine)" } else { "Voix clonée (Féminine)" })
+                                                    }
+                                                };
+                                                let btn_text = format!("{icon} {label}");
+                                                let resp = ui.selectable_label(is_selected, btn_text);
+                                                let id = ui.make_persistent_id(format!("dwell_voice_tab_{:?}", profile));
+                                                let is_key = make_widget_accessible_and_activated(ui, &resp, theme.accent);
+                                                if resp.clicked() || apply_dwell_to_response(ui, &mut self.dwell_state, id, &resp) || is_key {
+                                                    if !is_selected {
+                                                        self.set_voice_gender(profile);
+                                                        play_earcon(Earcon::Success);
+                                                    }
+                                                }
+                                            }
+                                        });
+
+                                        ui.add_space(8.0);
+                                        ui.separator();
+                                        ui.add_space(6.0);
+
+                                        // Zone de test de la voix
+                                        ui.label(
+                                            egui::RichText::new("Tester la voix")
+                                                .size(11.0)
+                                                .color(egui::Color32::WHITE)
+                                                .strong(),
+                                        );
+                                        ui.add_space(2.0);
+                                        let enter_in_test_field = ctx.memory(|m| {
+                                            m.has_focus(egui::Id::NULL.with("voice_test_text_input"))
+                                        }) && ctx.input(|i| {
+                                            i.events.iter().any(|ev| match ev {
+                                                egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => true,
+                                                egui::Event::Text(t) if t == "\n" || t == "\r" => true,
+                                                _ => false,
+                                            })
+                                        });
+
+                                        ui.horizontal(|ui| {
+                                            render_accessible_input(
+                                                ui,
+                                                egui::Id::NULL.with("voice_test_text_input"),
+                                                &mut self.voice_test_text_input,
+                                                "Phrase de test audio...",
+                                                false,
+                                                Some((ui.available_width() - 95.0).max(120.0)),
+                                                None,
+                                                false,
+                                                theme,
+                                            );
+                                            let test_btn = ui.button("🔊 Tester");
+                                            let test_btn_id = ui.make_persistent_id("dwell_voice_test_btn");
+                                            let test_btn_hit = make_widget_accessible_and_activated(ui, &test_btn, theme.accent);
+                                            let test_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, test_btn_id, &test_btn);
+                                            if test_btn_hit || test_dwell || enter_in_test_field {
+                                                let tts_text = if self.voice_test_text_input.trim().is_empty() {
+                                                    "Bonjour, ceci est un test de synthèse vocale avec Libertide.".to_string()
+                                                } else {
+                                                    self.voice_test_text_input.trim().to_string()
+                                                };
+                                                let _ = self.tts_sender.send(TtsCommand::Speak(tts_text));
+                                                play_earcon(Earcon::Success);
+                                            }
+                                        });
+                                    });
+
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(6.0);
+
+                                // 2. Entraîneur de données "Click & Record" & Clonage vocal
+                                let sample_path = std::path::Path::new("models/voice_reference.wav");
+                                let effective_path = if sample_path.is_file() {
+                                    Some(sample_path)
+                                } else if !self.voice_reference_wav_input.trim().is_empty() && std::path::Path::new(self.voice_reference_wav_input.trim()).is_file() {
+                                    Some(std::path::Path::new(self.voice_reference_wav_input.trim()))
+                                } else {
+                                    None
+                                };
+                                let sample_exists = effective_path.is_some();
+
+                                if sample_exists && self.voice_sample_duration_secs <= 0.0 {
+                                    if let Some(p) = effective_path {
+                                        if let Some(dur) = crate::tts::get_wav_duration_secs(p) {
+                                            self.voice_sample_duration_secs = dur;
+                                        }
+                                    }
+                                }
+                                let total_dur = self.voice_sample_duration_secs;
+
+                                // Dépouillement asynchrone de la phrase guide générée par le LLM
+                                if let Some(ref rx) = self.voice_guide_rx {
+                                    match rx.try_recv() {
+                                        Ok(phrase) => {
+                                            self.voice_guide_phrase = phrase;
+                                            self.voice_guide_generating = false;
+                                            self.voice_guide_rx = None;
+                                            ctx.request_repaint();
+                                        }
+                                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                            self.voice_guide_generating = false;
+                                            self.voice_guide_rx = None;
+                                            ctx.request_repaint();
+                                        }
+                                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                            ctx.request_repaint_after(Duration::from_millis(80));
+                                        }
+                                    }
+                                }
+
+                                // Dépouillement des samples une fois l'enregistrement terminé
+                                if let Some(ref rx) = self.voice_recorder_result_rx {
+                                    if let Ok(samples) = rx.try_recv() {
+                                        self.voice_is_recording_sample = false;
+                                        self.voice_recorder_stop_tx = None;
+                                        self.voice_recorder_result_rx = None;
+                                        self.voice_record_start = None;
+
+                                        if !samples.is_empty() {
+                                            let sample_rate = 16000;
+                                            let dest_path = std::path::Path::new("models/voice_reference.wav");
+                                            let (saved_dur, save_res) = if self.voice_record_append {
+                                                match crate::tts::append_wav_file(dest_path, &samples, sample_rate) {
+                                                    Ok((_count, dur)) => (dur, Ok(())),
+                                                    Err(e) => (samples.len() as f32 / sample_rate as f32, Err(e)),
+                                                }
+                                            } else {
+                                                let dur = samples.len() as f32 / sample_rate as f32;
+                                                let res = crate::tts::save_wav_file(dest_path, &samples, sample_rate);
+                                                (dur, res)
+                                            };
+
+                                            if let Err(e) = save_res {
+                                                self.voice_status_feedback = Some(format!("Erreur sauvegarde WAV : {e}"));
+                                            } else {
+                                                self.voice_sample_duration_secs = saved_dur;
+                                                self.voice_reference_wav_input = "models/voice_reference.wav".to_string();
+                                                let _ = write_env_var_to_file(".env", "VOICE_REFERENCE_WAV", "models/voice_reference.wav");
+                                                std::env::set_var("VOICE_REFERENCE_WAV", "models/voice_reference.wav");
+
+                                                // Transcription automatique en direct par Whisper
+                                                if let Some(transcription) = crate::audio::transcribe_audio_samples(&samples) {
+                                                    let clean_tr = transcription.trim().to_string();
+                                                    if !clean_tr.is_empty() {
+                                                        let new_text = if self.voice_record_append && !self.voice_reference_text_input.trim().is_empty() {
+                                                            let existing = self.voice_reference_text_input.trim();
+                                                            let sep = if existing.ends_with('.') || existing.ends_with('!') || existing.ends_with('?') {
+                                                                " "
+                                                            } else {
+                                                                ". "
+                                                            };
+                                                            format!("{}{}{}", existing, sep, clean_tr)
+                                                        } else {
+                                                            clean_tr
+                                                        };
+                                                        self.voice_reference_text_input = new_text.clone();
+                                                        let _ = write_env_var_to_file(".env", "VOICE_REFERENCE_TEXT", &new_text);
+                                                        std::env::set_var("VOICE_REFERENCE_TEXT", &new_text);
+                                                    }
+                                                }
+
+                                                self.set_voice_gender_silent(VoiceProfile::Clone);
+                                                if self.voice_record_append {
+                                                    self.voice_status_feedback = Some(format!("Extrait ajouté avec succès ! Durée cumulée totale : {:.1}s.", saved_dur));
+                                                } else {
+                                                    self.voice_status_feedback = Some(format!("Échantillon ({:.1}s) enregistré avec succès et voix clonée prête !", saved_dur));
+                                                }
+                                                play_earcon(Earcon::Success);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                ui.label(
+                                    egui::RichText::new("🧬 Entraîneur vocal instantané (Click & Record)")
+                                        .size(12.0)
+                                        .color(theme.accent)
+                                        .strong(),
+                                );
+                                ui.label(
+                                    egui::RichText::new("Enregistrez votre voix en un clic pour créer votre profil vocal de référence sans manipuler de fichiers.")
+                                        .size(11.0)
+                                        .color(theme.text_secondary),
+                                );
+                                ui.add_space(4.0);
+
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        // Sélecteur de genre pour la voix clonée
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("Genre de la voix clonée :")
+                                                    .size(11.0)
+                                                    .color(egui::Color32::WHITE)
+                                                    .strong(),
+                                            );
+                                            let is_female = self.voice_clone_gender != "male";
+                                            let female_btn = ui.selectable_label(
+                                                is_female,
+                                                egui::RichText::new("👩 Femme (Féminin)")
+                                                    .size(11.0)
+                                                    .color(if is_female { theme.accent } else { theme.text_secondary }),
+                                            ).on_hover_text("Calibre et télécharge le modèle neuronal sur une voix féminine.");
+                                            let female_btn_id = ui.make_persistent_id("dwell_voice_clone_gender_female");
+                                            let is_female_hit = make_widget_accessible_and_activated(ui, &female_btn, theme.accent);
+                                            let is_female_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, female_btn_id, &female_btn);
+                                            if (is_female_hit || is_female_dwell) && !is_female {
+                                                self.set_voice_clone_gender("female");
+                                            }
+
+                                            let is_male = self.voice_clone_gender == "male";
+                                            let male_btn = ui.selectable_label(
+                                                is_male,
+                                                egui::RichText::new("👨 Homme (Masculin)")
+                                                    .size(11.0)
+                                                    .color(if is_male { theme.accent } else { theme.text_secondary }),
+                                            ).on_hover_text("Calibre et télécharge le modèle neuronal sur une voix masculine.");
+                                            let male_btn_id = ui.make_persistent_id("dwell_voice_clone_gender_male");
+                                            let is_male_hit = make_widget_accessible_and_activated(ui, &male_btn, theme.accent);
+                                            let is_male_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, male_btn_id, &male_btn);
+                                            if (is_male_hit || is_male_dwell) && !is_male {
+                                                self.set_voice_clone_gender("male");
+                                            }
+                                        });
+                                        ui.add_space(4.0);
+                                        ui.separator();
+                                        ui.add_space(4.0);
+
+                                        // Phrase guide
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("Phrase recommandée à lire à voix haute :").size(10.5).color(theme.text_secondary));
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                let btn_text = if self.voice_guide_generating {
+                                                    "⏳ Génération..."
+                                                } else {
+                                                    "✨ Nouvelle phrase (IA)"
+                                                };
+                                                let gen_btn = ui.small_button(btn_text).on_hover_text("Demande au LLM de générer une phrase phonétiquement riche et naturelle.");
+                                                let gen_btn_id = ui.make_persistent_id("dwell_voice_gen_phrase_btn");
+                                                let gen_btn_hit = make_widget_accessible_and_activated(ui, &gen_btn, theme.accent);
+                                                let gen_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, gen_btn_id, &gen_btn);
+
+                                                if (gen_btn_hit || gen_dwell) && !self.voice_guide_generating {
+                                                    self.generate_new_voice_guide_phrase();
+                                                    play_earcon(Earcon::Navigation);
+                                                    ctx.request_repaint();
+                                                }
+                                            });
+                                        });
+                                        ui.add_space(1.0);
+                                        egui::Frame::new()
+                                            .fill(theme.modal_bg)
+                                            .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                            .corner_radius(egui::CornerRadius::same(6))
+                                            .inner_margin(egui::Margin::symmetric(8, 6))
+                                            .show(ui, |ui| {
+                                                let btn_w = 26.0;
+                                                let spacing = 6.0;
+                                                let text_w = (ui.available_width() - btn_w - spacing).max(60.0);
+
+                                                ui.horizontal(|ui| {
+                                                    ui.add_sized(
+                                                        [text_w, 0.0],
+                                                        egui::Label::new(
+                                                            egui::RichText::new(&self.voice_guide_phrase)
+                                                                .size(11.5)
+                                                                .italics()
+                                                                .color(egui::Color32::from_rgb(230, 240, 255)),
+                                                        )
+                                                        .wrap(),
+                                                    );
+                                                    let copy_btn = ui.small_button("📋").on_hover_text("Copier la phrase guide");
+                                                    let copy_btn_id = ui.make_persistent_id("dwell_voice_copy_phrase_btn");
+                                                    let copy_btn_hit = make_widget_accessible_and_activated(ui, &copy_btn, theme.accent);
+                                                    let copy_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, copy_btn_id, &copy_btn);
+                                                    if copy_btn_hit || copy_dwell {
+                                                        crate::automation::set_clipboard_text(&self.voice_guide_phrase);
+                                                        play_earcon(Earcon::Success);
+                                                    }
+                                                });
+                                            });
+
+                                        ui.add_space(6.0);
+
+                                        // Bouton d'enregistrement Click & Record
+                                        ui.horizontal(|ui| {
+                                            if !self.voice_is_recording_sample {
+                                                if sample_exists {
+                                                    // Bouton ➕ Ajouter un extrait vocal (Cumuler)
+                                                    let append_btn = ui.button(
+                                                        egui::RichText::new("➕ Ajouter un extrait vocal (Cumuler)")
+                                                            .strong()
+                                                            .color(theme.accent),
+                                                    ).on_hover_text("Enregistre un nouvel extrait audio et l'ajoute à votre voix de référence existante.");
+                                                    let append_btn_id = ui.make_persistent_id("dwell_voice_append_record_btn");
+                                                    let append_btn_hit = make_widget_accessible_and_activated(ui, &append_btn, theme.accent);
+                                                    let append_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, append_btn_id, &append_btn);
+
+                                                    if append_btn_hit || append_dwell {
+                                                        if self.is_recording {
+                                                            self.stop_recording();
+                                                        }
+                                                        self.stop_speaking();
+                                                        match crate::audio::record_voice_sample(16000) {
+                                                            Ok((stop_tx, result_rx)) => {
+                                                                self.voice_is_recording_sample = true;
+                                                                self.voice_record_append = true;
+                                                                self.voice_record_start = Some(Instant::now());
+                                                                self.voice_recorder_stop_tx = Some(stop_tx);
+                                                                self.voice_recorder_result_rx = Some(result_rx);
+                                                                self.voice_status_feedback = Some("Enregistrement du nouvel extrait... Lisez une nouvelle phrase.".to_string());
+                                                                play_earcon(Earcon::MicOpen);
+                                                            }
+                                                            Err(err) => {
+                                                                self.voice_status_feedback = Some(format!("Erreur micro : {err}"));
+                                                                play_earcon(Earcon::Error);
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // Bouton de réinitialisation
+                                                    let reset_btn = ui.button(
+                                                        egui::RichText::new("🔄 Réinitialiser")
+                                                            .color(egui::Color32::from_rgb(255, 140, 140)),
+                                                    ).on_hover_text("Réinitialise et ré-enregistre un nouvel extrait de zéro (écrase l'échantillon précédent).");
+                                                    let reset_btn_id = ui.make_persistent_id("dwell_voice_reset_record_btn");
+                                                    let reset_btn_hit = make_widget_accessible_and_activated(ui, &reset_btn, theme.accent);
+                                                    let reset_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, reset_btn_id, &reset_btn);
+
+                                                    if reset_btn_hit || reset_dwell {
+                                                        if self.is_recording {
+                                                            self.stop_recording();
+                                                        }
+                                                        self.stop_speaking();
+                                                        match crate::audio::record_voice_sample(16000) {
+                                                            Ok((stop_tx, result_rx)) => {
+                                                                self.voice_is_recording_sample = true;
+                                                                self.voice_record_append = false;
+                                                                self.voice_record_start = Some(Instant::now());
+                                                                self.voice_recorder_stop_tx = Some(stop_tx);
+                                                                self.voice_recorder_result_rx = Some(result_rx);
+                                                                self.voice_status_feedback = Some("Enregistrement en cours... Lisez la phrase ci-dessus.".to_string());
+                                                                play_earcon(Earcon::MicOpen);
+                                                            }
+                                                            Err(err) => {
+                                                                self.voice_status_feedback = Some(format!("Erreur micro : {err}"));
+                                                                play_earcon(Earcon::Error);
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    let rec_btn = ui.button(egui::RichText::new("🎙️ Enregistrer ma voix (3 à 10s)").strong().color(egui::Color32::WHITE));
+                                                let rec_btn_id = ui.make_persistent_id("dwell_voice_start_record_btn");
+                                                let rec_btn_hit = make_widget_accessible_and_activated(ui, &rec_btn, theme.accent);
+                                                let rec_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, rec_btn_id, &rec_btn);
+
+                                                if rec_btn_hit || rec_dwell {
+                                                    if self.is_recording {
+                                                        self.stop_recording();
+                                                    }
+                                                    self.stop_speaking();
+                                                    match crate::audio::record_voice_sample(16000) {
+                                                        Ok((stop_tx, result_rx)) => {
+                                                            self.voice_is_recording_sample = true;
+                                                            self.voice_record_append = false;
+                                                            self.voice_record_start = Some(Instant::now());
+                                                            self.voice_recorder_stop_tx = Some(stop_tx);
+                                                            self.voice_recorder_result_rx = Some(result_rx);
+                                                            self.voice_status_feedback = Some("Enregistrement en cours... Lisez la phrase ci-dessus.".to_string());
+                                                            play_earcon(Earcon::MicOpen);
+                                                        }
+                                                        Err(err) => {
+                                                            self.voice_status_feedback = Some(format!("Erreur micro : {err}"));
+                                                            play_earcon(Earcon::Error);
+                                                        }
+                                                    }
+                                                }
+                                                }
+                                            } else {
+                                                let elapsed = self.voice_record_start.map_or(0.0, |s| s.elapsed().as_secs_f32());
+                                                let pulse = ((ui.input(|i| i.time) * 4.0).sin().abs() * 0.4 + 0.6) as f32;
+                                                let red_dot = egui::Color32::from_rgb((255.0 * pulse) as u8, 40, 40);
+
+                                                ui.label(egui::RichText::new("●").size(14.0).color(red_dot));
+                                                let status_str = if self.voice_record_append {
+                                                    let projected = total_dur + elapsed;
+                                                    format!("Cumul en cours : +{:.1}s | Total cumulé : {:.1}s (max 15s)", elapsed, projected)
+                                                } else {
+                                                    format!("En cours : {:.1}s (max 15s)", elapsed)
+                                                };
+                                                ui.label(egui::RichText::new(status_str).size(11.5).strong().color(red_dot));
+
+                                                let stop_rec_btn = ui.button(egui::RichText::new("⏹️ Terminer l'enregistrement").strong().color(egui::Color32::WHITE));
+                                                let stop_rec_id = ui.make_persistent_id("dwell_voice_stop_record_btn");
+                                                let stop_rec_hit = make_widget_accessible_and_activated(ui, &stop_rec_btn, theme.accent);
+                                                let stop_rec_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, stop_rec_id, &stop_rec_btn);
+
+                                                if stop_rec_hit || stop_rec_dwell || elapsed >= 15.0 {
+                                                    if let Some(stop_tx) = self.voice_recorder_stop_tx.take() {
+                                                        let _ = stop_tx.send(());
+                                                    }
+                                                    play_earcon(Earcon::MicClose);
+                                                    if self.voice_record_append {
+                                                        self.voice_status_feedback = Some("Ingestion et cumul du nouvel extrait...".to_string());
+                                                    } else {
+                                                        self.voice_status_feedback = Some("Ingestion et analyse de l'échantillon...".to_string());
+                                                    }
+                                                }
+                                                ctx.request_repaint();
+                                            }
+
+                                            // Bouton écouter l'échantillon existant
+                                            if sample_exists && !self.voice_is_recording_sample {
+                                                let play_sample_btn = ui.button("▶ Écouter l'échantillon");
+                                                let play_sample_id = ui.make_persistent_id("dwell_voice_play_sample_btn");
+                                                let play_sample_hit = make_widget_accessible_and_activated(ui, &play_sample_btn, theme.accent);
+                                                let play_sample_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, play_sample_id, &play_sample_btn);
+
+                                                if play_sample_hit || play_sample_dwell {
+                                                    let p = if sample_path.is_file() {
+                                                        sample_path
+                                                    } else {
+                                                        std::path::Path::new(self.voice_reference_wav_input.trim())
+                                                    };
+                                                    if let Ok(bytes) = std::fs::read(p) {
+                                                        if let Some((mut samples, rate)) = crate::tts::decode_wav_to_samples(&bytes) {
+                                                        crate::tts::normalize_audio_samples(&mut samples, 0.92);
+                                                            if let Some(ref player) = self.voice_sample_player {
+                                                                player.play_samples(samples, rate);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        });
+
+                                        if sample_exists {
+                                            ui.add_space(4.0);
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new("✓ Échantillon vocal actif : models/voice_reference.wav")
+                                                        .size(10.5)
+                                                        .color(egui::Color32::from_rgb(100, 225, 130)),
+                                                );
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    ui.label(
+                                                        egui::RichText::new(format!("⏱️ Durée cumulée totale : {:.1}s", total_dur))
+                                                            .size(11.0)
+                                                            .strong()
+                                                            .color(theme.accent),
+                                                    );
+                                                });
+                                            });
+                                        }
+
+                                        // Champ de transcription de référence directement éditable
+                                        ui.add_space(6.0);
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("Transcription de référence (éditable) :")
+                                                    .size(11.0)
+                                                    .color(egui::Color32::WHITE)
+                                                    .strong(),
+                                            );
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if !self.voice_reference_text_input.trim().is_empty() {
+                                                    let clear_btn = ui.small_button("🗑 Effacer").on_hover_text("Effacer le texte de transcription");
+                                                    if make_widget_accessible_and_activated(ui, &clear_btn, theme.accent) {
+                                                        self.voice_reference_text_input.clear();
+                                                        let _ = write_env_var_to_file(".env", "VOICE_REFERENCE_TEXT", "");
+                                                        std::env::set_var("VOICE_REFERENCE_TEXT", "");
+                                                    }
+                                                }
+                                            });
+                                        });
+                                        ui.add_space(2.0);
+                                        let ref_input_id = egui::Id::NULL.with("voice_reference_text_input");
+                                        let ref_resp = render_accessible_input(
+                                            ui,
+                                            ref_input_id,
+                                            &mut self.voice_reference_text_input,
+                                            "Texte transcrit ou prononcé dans votre enregistrement de référence...",
+                                            true,
+                                            Some(ui.available_width()),
+                                            Some(46.0),
+                                            false,
+                                            theme,
+                                        );
+                                        if ref_resp.changed() {
+                                            let clean = self.voice_reference_text_input.trim();
+                                            let _ = write_env_var_to_file(".env", "VOICE_REFERENCE_TEXT", clean);
+                                            std::env::set_var("VOICE_REFERENCE_TEXT", clean);
+                                        }
+
+                                        if let Some(ref fb) = self.voice_status_feedback {
+                                            ui.add_space(4.0);
+                                            ui.label(egui::RichText::new(fb).size(10.5).color(theme.accent));
+                                        }
+
+                                        ui.add_space(6.0);
+                                        ui.separator();
+                                        ui.add_space(4.0);
+
+                                        // Informations moteur natif et serveur optionnel
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("Moteur natif Sherpa actif (temps réel local). URL serveur de repli (optionnel) :").size(10.5).color(theme.text_secondary));
+                                        });
+                                        render_accessible_input(
+                                            ui,
+                                            egui::Id::NULL.with("voice_clone_url_input"),
+                                            &mut self.voice_clone_url_input,
+                                            "http://127.0.0.1:8020/tts",
+                                            false,
+                                            Some(ui.available_width()),
+                                            None,
+                                            false,
+                                            theme,
+                                        );
+
+                                        let enter_in_clone_fields = ctx.memory(|m| {
+                                            m.has_focus(egui::Id::NULL.with("voice_clone_url_input"))
+                                        }) && ctx.input(|i| {
+                                            i.events.iter().any(|ev| match ev {
+                                                egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => true,
+                                                egui::Event::Text(t) if t == "\n" || t == "\r" => true,
+                                                _ => false,
+                                            })
+                                        });
+
+                                        ui.add_space(4.0);
+                                        ui.horizontal(|ui| {
+                                            let save_clone_btn = ui.button(egui::RichText::new("💾 Enregistrer et Activer la voix clonée").strong().color(theme.accent));
+                                            let save_clone_id = ui.make_persistent_id("dwell_voice_save_clone_btn");
+                                            let save_btn_hit = make_widget_accessible_and_activated(ui, &save_clone_btn, theme.accent);
+                                            let save_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, save_clone_id, &save_clone_btn);
+                                            if save_btn_hit || save_dwell || enter_in_clone_fields {
+                                                let url = self.voice_clone_url_input.trim();
+                                                let wav = self.voice_reference_wav_input.trim();
+                                                let text = self.voice_reference_text_input.trim();
+
+                                                let _ = write_env_var_to_file(".env", "VOICE_CLONE_URL", url);
+                                                std::env::set_var("VOICE_CLONE_URL", url);
+                                                let _ = write_env_var_to_file(".env", "VOICE_CLONE_GENDER", &self.voice_clone_gender);
+                                                std::env::set_var("VOICE_CLONE_GENDER", &self.voice_clone_gender);
+                                                if !wav.is_empty() {
+                                                    let _ = write_env_var_to_file(".env", "VOICE_REFERENCE_WAV", wav);
+                                                    std::env::set_var("VOICE_REFERENCE_WAV", wav);
+                                                }
+                                                if !text.is_empty() {
+                                                    let _ = write_env_var_to_file(".env", "VOICE_REFERENCE_TEXT", text);
+                                                    std::env::set_var("VOICE_REFERENCE_TEXT", text);
+                                                }
+
+                                                self.set_voice_gender_silent(VoiceProfile::Clone);
+                                                self.voice_status_feedback = Some("Paramètres enregistrés et profil vocal cloné activé.".to_string());
+                                                play_earcon(Earcon::Success);
+                                            }
+                                        });
+                                    });
+
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    let close_voice_btn = ui.button(t!("ui.btn_close"));
+                                    let close_voice_id = ui.make_persistent_id("dwell_close_voice_tab");
+                                    let is_close_key = make_widget_accessible_and_activated(ui, &close_voice_btn, theme.accent);
+                                    let is_close_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, close_voice_id, &close_voice_btn);
+                                    if is_close_key || is_close_dwell {
                                         self.show_api_key_modal = false;
                                     }
                                 });

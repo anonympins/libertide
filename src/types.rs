@@ -365,6 +365,7 @@ pub enum VoiceProfile {
     Paul,
     Sylvie,
     Jean,
+    Clone,
 }
 
 pub type VoiceGender = VoiceProfile;
@@ -380,6 +381,7 @@ impl VoiceProfile {
         Self::Paul,
         Self::Sylvie,
         Self::Jean,
+        Self::Clone,
     ];
 
     pub fn display_name(&self) -> &'static str {
@@ -390,6 +392,7 @@ impl VoiceProfile {
             Self::Paul => "Paul (Masculin posé)",
             Self::Sylvie => "Sylvie (Féminine canadienne)",
             Self::Jean => "Jean (Masculin dynamique)",
+            Self::Clone => "Voix clonée (XTTS / Local HTTP)",
         }
     }
 
@@ -401,6 +404,7 @@ impl VoiceProfile {
             Self::Paul => Self::Sylvie,
             Self::Sylvie => Self::Jean,
             Self::Jean => Self::Denise,
+            Self::Clone => Self::Denise,
         }
     }
 
@@ -412,6 +416,7 @@ impl VoiceProfile {
             Self::Paul => "paul",
             Self::Sylvie => "sylvie",
             Self::Jean => "jean",
+            Self::Clone => "clone",
         }
     }
 
@@ -423,6 +428,7 @@ impl VoiceProfile {
             "paul" => Some(Self::Paul),
             "sylvie" => Some(Self::Sylvie),
             "jean" => Some(Self::Jean),
+            "clone" | "cloned" | "xtts" | "f5" | "custom" => Some(Self::Clone),
             _ => None,
         }
     }
@@ -435,6 +441,7 @@ impl VoiceProfile {
             Self::Paul => "fr-FR-AlainNeural",
             Self::Sylvie => "fr-CA-SylvieNeural",
             Self::Jean => "fr-FR-JeanNeural",
+            Self::Clone => "fr-FR-DeniseNeural",
         }
     }
 }

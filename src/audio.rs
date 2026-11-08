@@ -223,11 +223,70 @@ pub struct WhisperEngine {
 
 impl WhisperEngine {
     pub fn load(model_path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let path_str = model_path.to_str().ok_or("Chemin du modèle introuvable")?;
+        let abs_path = if model_path.is_absolute() {
+            model_path.to_path_buf()
+        } else if let Ok(cwd) = std::env::current_dir() {
+            cwd.join(model_path)
+        } else {
+            model_path.to_path_buf()
+        };
+        
+        // Supprime le préfixe UNC '\\?\' non supporté par la CRT C fopen/fread
+        let clean_path = abs_path.to_string_lossy().replace(r"\\?\", "");
+        let path_buf = PathBuf::from(&clean_path);
+
+        println!("[Whisper Load] Début du chargement du modèle : {:?}", clean_path);
+
+        // Lecture intégrale du fichier en mémoire par Rust pour contourner les I/O C bas niveau (read.cpp)
+        let model_bytes = match std::fs::read(&path_buf) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                eprintln!("[Whisper Load] ERREUR : Impossible d'ouvrir le fichier modèle en lecture : {e}");
+                return Err(format!("Fichier introuvable ou inaccessible : {e}").into());
+            }
+        };
+
+        let file_len = model_bytes.len();
+        println!("[Whisper Load] Fichier modèle chargé en RAM (taille: {} octets / {:.1} Mo)", file_len, file_len as f64 / (1024.0 * 1024.0));
+        if file_len < 40_000_000 {
+            return Err(format!("Le fichier modèle Whisper est anormalement petit ({} octets)", file_len).into());
+        }
+
+        // Vérification du magic number GGML (0x67676d6c = "ggml", 0x67676d66 = "ggmf", etc.)
+        if file_len >= 4 {
+            let magic = &model_bytes[0..4];
+            if magic != b"ggml" && magic != b"ggmf" && magic != b"ggjt" && magic != b"GGUF" {
+                eprintln!("[Whisper Load] ATTENTION : Magic number inattendu dans l'en-tête : {:?} (ASCII: {:?})", magic, String::from_utf8_lossy(magic));
+            } else {
+                println!("[Whisper Load] En-tête GGML valide : {:?}", String::from_utf8_lossy(magic));
+            }
+        }
+
+        let use_gpu = std::env::var("WHISPER_USE_GPU")
+            .map(|v| v.trim() != "0" && !v.trim().eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
+
+        // 1. Tentative avec accélération GPU si demandée
+        if use_gpu {
+            println!("[Whisper Load] Tentative d'initialisation avec accélération GPU depuis le buffer mémoire...");
+            let mut params = WhisperContextParameters::default();
+            params.use_gpu(true);
+            println!("[Whisper Load] Appel de WhisperContext::new_from_buffer_with_params (GPU)...");
+            if let Ok(ctx) = WhisperContext::new_from_buffer_with_params(&model_bytes, params) {
+                println!("[Whisper Load] Succès du chargement WhisperContext sur GPU.");
+                return Ok(Self { ctx });
+            }
+            eprintln!("[Whisper Load] Avertissement : Échec initialisation GPU (backends/VRAM). Repli sécurisé sur CPU...");
+        }
+
+        // 2. Repli sécurisé sur CPU pour éviter tout crash de mémoire partagée
+        println!("[Whisper Load] Initialisation WhisperContext en mode CPU pur...");
         let mut params = WhisperContextParameters::default();
-        params.use_gpu(true);
-        let ctx = WhisperContext::new_with_params(path_str, params)
-            .map_err(|e| format!("Erreur initialisation whisper.cpp: {e}"))?;
+        params.use_gpu(false);
+        println!("[Whisper Load] Appel de WhisperContext::new_from_buffer_with_params (CPU)...");
+        let ctx = WhisperContext::new_from_buffer_with_params(&model_bytes, params)
+            .map_err(|e| format!("Erreur initialisation whisper.cpp (CPU): {e}"))?;
+        println!("[Whisper Load] Modèle Whisper chargé avec succès sur CPU.");
         Ok(Self { ctx })
     }
 
@@ -324,9 +383,11 @@ impl WhisperEngine {
 // ============================================================================
 
 pub fn find_whisper_model_file() -> Option<PathBuf> {
+    const MIN_WHISPER_SIZE: u64 = 40_000_000; // Au moins 40 Mo
+
     if let Ok(env_path) = std::env::var("WHISPER_MODEL_PATH") {
         let p = PathBuf::from(env_path.trim());
-        if p.is_file() {
+        if p.is_file() && p.metadata().map_or(0, |m| m.len()) > MIN_WHISPER_SIZE {
             return Some(p);
         }
     }
@@ -337,11 +398,11 @@ pub fn find_whisper_model_file() -> Option<PathBuf> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     for name in &model_names {
         let p1 = manifest_dir.join("models").join(name);
-        if p1.is_file() {
+        if p1.is_file() && p1.metadata().map_or(0, |m| m.len()) > MIN_WHISPER_SIZE {
             return Some(p1);
         }
         let p2 = manifest_dir.join(name);
-        if p2.is_file() {
+        if p2.is_file() && p2.metadata().map_or(0, |m| m.len()) > MIN_WHISPER_SIZE {
             return Some(p2);
         }
     }
@@ -353,11 +414,11 @@ pub fn find_whisper_model_file() -> Option<PathBuf> {
             if let Some(dir) = curr {
                 for name in &model_names {
                     let p1 = dir.join("models").join(name);
-                    if p1.is_file() {
+                    if p1.is_file() && p1.metadata().map_or(0, |m| m.len()) > MIN_WHISPER_SIZE {
                         return Some(p1);
                     }
                     let p2 = dir.join(name);
-                    if p2.is_file() {
+                    if p2.is_file() && p2.metadata().map_or(0, |m| m.len()) > MIN_WHISPER_SIZE {
                         return Some(p2);
                     }
                 }
@@ -375,11 +436,11 @@ pub fn find_whisper_model_file() -> Option<PathBuf> {
             if let Some(dir) = curr {
                 for name in &model_names {
                     let p1 = dir.join("models").join(name);
-                    if p1.is_file() {
+                    if p1.is_file() && p1.metadata().map_or(0, |m| m.len()) > MIN_WHISPER_SIZE {
                         return Some(p1);
                     }
                     let p2 = dir.join(name);
-                    if p2.is_file() {
+                    if p2.is_file() && p2.metadata().map_or(0, |m| m.len()) > MIN_WHISPER_SIZE {
                         return Some(p2);
                     }
                 }
@@ -425,8 +486,17 @@ fn ensure_model_downloaded(event_tx: &Sender<AgentEvent>) -> Result<PathBuf, Str
     let _ = std::fs::create_dir_all(&target_dir);
     let model_path = target_dir.join("ggml-base.bin");
 
-    if model_path.exists() {
+    if model_path.is_file() && model_path.metadata().map_or(0, |m| m.len()) > 50_000_000 {
         return Ok(model_path);
+    }
+
+    // Nettoie un éventuel fichier tronqué ou corrompu
+    if model_path.exists() {
+        let _ = std::fs::remove_file(&model_path);
+    }
+    let temp_path = target_dir.join("ggml-base.bin.tmp");
+    if temp_path.exists() {
+        let _ = std::fs::remove_file(&temp_path);
     }
 
     let url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
@@ -441,7 +511,12 @@ fn ensure_model_downloaded(event_tx: &Sender<AgentEvent>) -> Result<PathBuf, Str
         client.get(url).send().await?.bytes().await
     }).map_err(|e| format!("Échec téléchargement modèle GGML: {e}"))?;
 
-    std::fs::write(&model_path, &resp).map_err(|e| format!("Échec écriture modèle GGML: {e}"))?;
+    if resp.len() < 50_000_000 {
+        return Err("Fichier modèle téléchargé incomplet".to_string());
+    }
+
+    std::fs::write(&temp_path, &resp).map_err(|e| format!("Échec écriture modèle GGML: {e}"))?;
+    std::fs::rename(&temp_path, &model_path).map_err(|e| format!("Échec renommage modèle GGML: {e}"))?;
     Ok(model_path)
 }
 
@@ -509,11 +584,93 @@ fn build_input_stream(
 // 5. Worker Audio : chargement asynchrone et boucle de traitement VAD
 // ============================================================================
 
+static SHARED_WHISPER: Mutex<Option<Arc<Mutex<Option<WhisperEngine>>>>> = Mutex::new(None);
+
+/// Transcrit directement un tampon d'échantillons audio PCM 16 kHz via l'instance Whisper locale
+pub fn transcribe_audio_samples(samples: &[f32]) -> Option<String> {
+    let engine_arc = {
+        let lock = SHARED_WHISPER.lock().ok()?;
+        lock.as_ref().cloned()?
+    };
+    let mut whisper_guard = engine_arc.lock().ok()?;
+    let whisper = whisper_guard.as_mut()?;
+    whisper.transcribe(samples).ok()
+}
+
+/// Enregistreur dédié pour capturer un échantillon vocal de référence (Click & Record)
+pub fn record_voice_sample(
+    sample_rate_out: u32,
+) -> Result<(Sender<()>, std::sync::mpsc::Receiver<Vec<f32>>), String> {
+    let host = cpal::default_host();
+    let device = crate::devices::get_audio_input_device(&host)
+        .ok_or_else(|| "Aucun microphone disponible".to_string())?;
+
+    let config = device
+        .default_input_config()
+        .map_err(|e| format!("Erreur configuration micro: {e}"))?;
+
+    let sample_rate = config.sample_rate();
+    let channels = config.channels();
+    let sample_format = config.sample_format();
+    let stream_config: cpal::StreamConfig = config.into();
+    let (audio_tx, audio_rx) = channel::<Vec<f32>>();
+    let (stop_tx, stop_rx) = channel::<()>();
+    let (result_tx, result_rx) = channel::<Vec<f32>>();
+
+    let stream = build_input_stream(&device, &stream_config, sample_format, audio_tx)
+        .ok_or_else(|| "Format d'enregistrement non supporté".to_string())?;
+
+    stream.play().map_err(|e| format!("Échec lecture flux: {e}"))?;
+
+    std::thread::Builder::new()
+        .name("voice_sample_recorder".to_string())
+        .spawn(move || {
+            let _stream = stream;
+            let mut resampler = ContinuousResampler::new(sample_rate, channels, sample_rate_out);
+            let mut collected: Vec<f32> = Vec::with_capacity((sample_rate_out * 15) as usize);
+            let start = Instant::now();
+            const MAX_SECS: Duration = Duration::from_secs(60);
+
+            loop {
+                if stop_rx.try_recv().is_ok() || start.elapsed() >= MAX_SECS {
+                    break;
+                }
+                while let Ok(chunk) = audio_rx.try_recv() {
+                    resampler.push_interleaved_f32(&chunk);
+                }
+                let mut drain_buf = Vec::new();
+                resampler.drain_resampled(&mut drain_buf);
+                if !drain_buf.is_empty() {
+                    collected.extend_from_slice(&drain_buf);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+
+            while let Ok(chunk) = audio_rx.try_recv() {
+                resampler.push_interleaved_f32(&chunk);
+            }
+            let mut drain_buf = Vec::new();
+            resampler.drain_resampled(&mut drain_buf);
+            if !drain_buf.is_empty() {
+                collected.extend_from_slice(&drain_buf);
+            }
+
+            let _ = result_tx.send(collected);
+        })
+        .map_err(|e| format!("Échec lancement thread enregistreur: {e}"))?;
+
+    Ok((stop_tx, result_rx))
+}
+
 pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sender<AudioCommand> {
     let (cmd_tx, cmd_rx) = channel::<AudioCommand>();
     let whisper_instance: Arc<Mutex<Option<WhisperEngine>>> = Arc::new(Mutex::new(None));
     let is_model_ready = Arc::new(AtomicBool::new(false));
     let model_load_failed = Arc::new(AtomicBool::new(false));
+
+    if let Ok(mut g) = SHARED_WHISPER.lock() {
+        *g = Some(Arc::clone(&whisper_instance));
+    }
 
     // 1. Thread de chargement asynchrone : ne bloque pas l'affichage de l'interface
     {

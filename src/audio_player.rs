@@ -6,12 +6,15 @@ use std::thread;
 
 #[derive(Clone)]
 pub struct AudioPlayer {
-    sender: Sender<Vec<f32>>,
+    sender: Sender<(Vec<f32>, u32)>,
+    ring_buffer: Arc<Mutex<VecDeque<f32>>>,
 }
 
 impl AudioPlayer {
     pub fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let (tx, rx) = channel::<Vec<f32>>();
+        let (tx, rx) = channel::<(Vec<f32>, u32)>();
+        let ring_buffer: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let ring_buffer_clone = Arc::clone(&ring_buffer);
         let rx = Arc::new(Mutex::new(rx));
 
         thread::spawn(move || {
@@ -32,21 +35,49 @@ impl AudioPlayer {
                 }
             };
 
-            let sample_rate = default_config.sample_rate().0;
+            let sample_rate = default_config.sample_rate();
             let channels = default_config.channels() as usize;
 
-            let ring_buffer: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
             let buf_cb = Arc::clone(&ring_buffer);
 
             let err_fn = |err| eprintln!("[Audio CPAL] Erreur de flux : {err}");
 
-            let stream = match default_config.sample_format() {
+            let sample_format = default_config.sample_format();
+            let stream_config: cpal::StreamConfig = default_config.into();
+            let stream = match sample_format {
                 cpal::SampleFormat::F32 => device.build_output_stream(
-                    &default_config.into(),
+                    stream_config,
                     move |data: &mut [f32], _| {
                         let mut buf = buf_cb.lock().unwrap();
+                        let mut sum_sq = 0.0f32;
                         for sample in data.iter_mut() {
-                            *sample = buf.pop_front().unwrap_or(0.0);
+                            let s = buf.pop_front().unwrap_or(0.0);
+                            *sample = s;
+                            sum_sq += s * s;
+                        }
+                        if !data.is_empty() {
+                            let rms = (sum_sq / data.len() as f32).sqrt();
+                            let level = (rms * 4.5).clamp(0.0, 1.0);
+                            crate::set_tts_audio_level(level);
+                        }
+                    },
+                    err_fn,
+                    None,
+                ),
+                cpal::SampleFormat::I16 => device.build_output_stream(
+                    stream_config,
+                    move |data: &mut [i16], _| {
+                        let mut buf = buf_cb.lock().unwrap();
+                        let mut sum_sq = 0.0f32;
+                        for sample in data.iter_mut() {
+                            let s = buf.pop_front().unwrap_or(0.0);
+                            *sample = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                            sum_sq += s * s;
+                        }
+                        if !data.is_empty() {
+                            let rms = (sum_sq / data.len() as f32).sqrt();
+                            let level = (rms * 4.5).clamp(0.0, 1.0);
+                            crate::set_tts_audio_level(level);
                         }
                     },
                     err_fn,
@@ -71,21 +102,35 @@ impl AudioPlayer {
                 return;
             }
 
-            while let Ok(raw_samples) = rx.lock().unwrap().recv() {
+            while let Ok((raw_samples, src_rate)) = rx.lock().unwrap().recv() {
                 if raw_samples.is_empty() {
                     continue;
                 }
-                let converted = resample_audio(&raw_samples, 24000, sample_rate, channels);
+                let converted = resample_audio(&raw_samples, src_rate, sample_rate, channels);
                 let mut buf = ring_buffer.lock().unwrap();
                 buf.extend(converted);
             }
         });
 
-        Ok(Self { sender: tx })
+        Ok(Self {
+            sender: tx,
+            ring_buffer: ring_buffer_clone,
+        })
     }
 
-    pub fn play_samples(&self, samples: Vec<f32>) {
-        let _ = self.sender.send(samples);
+    pub fn play_samples(&self, samples: Vec<f32>, sample_rate: u32) {
+        let _ = self.sender.send((samples, sample_rate));
+    }
+
+    pub fn stop(&self) {
+        if let Ok(mut buf) = self.ring_buffer.lock() {
+            buf.clear();
+        }
+        crate::set_tts_audio_level(0.0);
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.ring_buffer.lock().map(|b| !b.is_empty()).unwrap_or(false)
     }
 }
 

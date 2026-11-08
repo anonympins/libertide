@@ -3,6 +3,41 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.7.4] - 2026-11-20
+
+### 🧬 Voice Cloning Engine & "Click & Record" Trainer (`tts.rs`, `app_settings.rs`, `main.rs`, `audio_player.rs`)
+- **Native Voice Cloning & HTTP Server Backends (`NativeVoiceCloneBackend`, `HttpVoiceCloneBackend`)**:
+  - Integrated a standalone local neural voice cloning backend powered by Sherpa-ONNX and VITS Piper (`vits-piper-fr_FR-siwis-medium` for female voice and `vits-piper-fr_FR-tom-medium` for male voice).
+  - Automated background downloading and extraction of ONNX models, tokens, and complete `espeak-ng-data.zip` phonetic dictionaries with C CRT assertion suppression.
+  - Cloned voice gender selection and calibration (`VOICE_CLONE_GENDER`: female / male) with hot reloading.
+  - Resilient composite synthesis pipeline: priority given to HTTP cloning servers (XTTS-v2 / F5-TTS / Kokoro), seamless fallback to local native Sherpa VITS engine, and transparent OS system fallback (SAPI / Desktop OneCore / Unix say).
+  - Automatic peak gain normalization (`normalize_audio_samples`) and 16-bit mono PCM WAV encoding.
+- **"Click & Record" Voice Trainer & Sample Stacking (`record_voice_sample`, `append_wav_file`)**:
+  - Direct recording of a reference voice sample (3 to 15 seconds) persisted to `models/voice_reference.wav` without manual file handling.
+  - Multi-sample stacking capability (`append_wav_file`) with prosodic separation silences (350 ms) to enrich the target voice profile.
+  - Integrated audio preview player (`voice_sample_player`) to listen to the calibrated reference sample.
+  - Instant automated transcription: Whisper transcribes recorded voice samples to automatically populate the reference text (`VOICE_REFERENCE_TEXT`).
+
+### ⌨️ Hardware Switch Stabilization & Function Keys F7 / F8 / F9 / F4 (`automation.rs`, `main.rs`)
+- **Reliable Global Interception via Win32 Low-Level Hook (`switch_keyboard_hook_proc`)**:
+  - Fixed and prioritized accessibility function keys and physical switches:
+    - `F7`: instant toggle for hover mode and switch access navigation (`ToggleSwitch`).
+    - `F8` & `Pause/Break`: instant toggle for voice dictation mode (`ToggleDictation`).
+    - `F9`: cyclic rotation across available voice profiles (`ToggleVoice`).
+    - `F4`: instant chat history wipe, TTS speech cutoff, and context memory reset (`Clear`).
+    - `Escape` / `Backspace`: action cancellation, hierarchical step-up (Element ➔ Zone ➔ Window), or emergency stop.
+  - Direct event dispatching through `SWITCH_KEY_QUEUE` without event leakage to background applications, even when an external text input field is focused.
+  - Accurate short-press (selection / click) and long-press (`SWITCH_LONG_PRESS_MS`, > 1,100 ms) differentiation for full navigation using a single physical switch.
+
+### 🗣️ Dedicated Voice Settings Tab & AI Training Phrase Generator (`app_settings.rs`, `theme.rs`, `main.rs`)
+- **Modularized into a Dedicated `SettingsTab::Voice` View**:
+  - Streamlined voice profile selection (Denise, Henri, Hortense, Paul, Sylvie, Jean, Cloned) and voice cloning tools into a focused tab.
+  - Live audio test field allowing arbitrary phrase input to audition narrator synthesis in real time.
+- **AI-Powered Training Phrase Generator (`generate_new_voice_guide_phrase`)**:
+  - *"✨ New phrase (AI)"* button prompting local or remote LLMs to dynamically generate phonetically balanced, natural, and diverse training sentences for voice calibration.
+
+---
+
 ## [0.7.3] - 2026-11-14
 
 ### 📺 Twitch Channel State & Stream Metadata (`twitch.rs`, `types.rs`, `overlay.rs`, `main.rs`)

@@ -5,6 +5,7 @@ use crate::fs_util::read_env_var_from_file;
 pub enum SettingsTab {
     LlmProvider,
     Accessibility,
+    Voice,
     Theme,
     Language,
     Macros,

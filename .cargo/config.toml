@@ -6,3 +6,5 @@ rustflags = ["-C", "target-cpu=apple-m1"]
 [env]
 CMAKE_BUILD_PARALLEL_LEVEL = "4"
 VERBOSE = "1"
+CMAKE_GENERATOR = "Ninja"
+CMAKE_TOOLCHAIN_FILE = { value = "cmake/windows-toolchain.cmake", relative = true }
