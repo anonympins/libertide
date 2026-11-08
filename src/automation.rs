@@ -43,7 +43,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow,
-    FindWindowW, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    DispatchMessageW, FindWindowW, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowRect,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, MSG, PostThreadMessageW,
+    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, HHOOK, WM_QUIT,
     GetGUIThreadInfo, GUITHREADINFO,
     PostMessageW, SendMessageW, SetForegroundWindow, ShowWindow,
     SW_RESTORE, WM_CLOSE,
@@ -1260,15 +1262,34 @@ static LAST_FOCUS_UPDATE: Mutex<Option<Instant>> = Mutex::new(None);
 pub static LAST_SCREEN_SUMMARY: Mutex<Option<String>> = Mutex::new(None);
 pub static IS_IMMERSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static IS_DICTATION_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static IS_CHAT_TAB_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static IMMERSION_SCREEN_HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
 pub const LIBERTIDE_EXTRA_INFO: usize = 0x4C494254; // 'LIBT'
 pub static IS_USER_TYPING: AtomicBool = AtomicBool::new(false);
 
 pub static SWITCH_HOOK_ENABLED: AtomicBool = AtomicBool::new(false);
+pub static IS_EXTERNAL_TEXT_INPUT_FOCUSED: AtomicBool = AtomicBool::new(false);
 pub static SWITCH_KEY_QUEUE: Mutex<Vec<crate::types::SwitchKeyEvent>> = Mutex::new(Vec::new());
 pub static NUMBER_KEY_QUEUE: Mutex<Vec<char>> = Mutex::new(Vec::new());
 pub static SWITCH_LONG_PRESS_MS: AtomicU64 = AtomicU64::new(1100);
 pub static SWITCH_DEBOUNCE_MS: AtomicU64 = AtomicU64::new(180);
+
+type RepaintCallback = Box<dyn Fn() + Send + Sync>;
+static REPAINT_CALLBACK: Mutex<Option<RepaintCallback>> = Mutex::new(None);
+
+pub fn set_repaint_callback<F: Fn() + Send + Sync + 'static>(f: F) {
+    if let Ok(mut lock) = REPAINT_CALLBACK.lock() {
+        *lock = Some(Box::new(f));
+    }
+}
+
+pub fn trigger_repaint() {
+    if let Ok(lock) = REPAINT_CALLBACK.lock() {
+        if let Some(ref cb) = *lock {
+            cb();
+        }
+    }
+}
 
 #[cfg(windows)]
 pub mod accessibility_keys {
@@ -1310,7 +1331,13 @@ pub fn reset_switch_keys() {
 }
 
 #[cfg(windows)]
-static KEYBOARD_HOOK_HANDLE: Mutex<Option<isize>> = Mutex::new(None);
+struct HookWorkerState {
+    hook_handle: isize,
+    thread_id: u32,
+}
+
+#[cfg(windows)]
+static HOOK_WORKER: Mutex<Option<HookWorkerState>> = Mutex::new(None);
 
 #[cfg(windows)]
 unsafe extern "system" fn switch_keyboard_hook_proc(
@@ -1319,15 +1346,14 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
     lparam: LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, GetForegroundWindow, GetWindowThreadProcessId, KBDLLHOOKSTRUCT, WM_KEYDOWN,
-        WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+        CallNextHookEx, KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     };
     use crate::types::SwitchKeyEvent;
 
     if code >= 0 {
         let fg = GetForegroundWindow();
         let mut fg_pid = 0u32;
-        let _ = GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+        let fg_tid = GetWindowThreadProcessId(fg, Some(&mut fg_pid));
         let is_libertide_fg = fg_pid == std::process::id();
         let kbd = *(lparam.0 as *const KBDLLHOOKSTRUCT);
 
@@ -1337,17 +1363,40 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
             return CallNextHookEx(None, code, wparam, lparam);
         }
 
-        // Si la fenêtre active est Libertide, laisser systématiquement la priorité aux événements
-        // système, à PowerToys (Keyboard Manager) et aux saisies de l'utilisateur dans l'interface (chat, etc.).
-        if is_libertide_fg {
-            return CallNextHookEx(None, code, wparam, lparam);
-        }
+        let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::Relaxed);
 
-        // Si l'utilisateur est en cours de saisie ou si l'événement provient d'un outil système/accessibilité
-        // externe comme PowerToys Keyboard Manager (LLKHF_INJECTED), ne jamais bloquer la touche.
+        // Détection universelle de saisie :
+        // - Soit l'utilisateur tape dans un champ de texte de Libertide (IS_USER_TYPING == true)
+        // - Soit le mode dictée/saisie est actif (IS_DICTATION_ACTIVE == true)
+        // - Soit le focus actif du système possède un curseur d'insertion texte clignotant (Caret Win32 / Edit control)
+        let is_external_text_input = if !is_libertide_fg && !fg.0.is_null() && fg_tid != 0 {
+            let mut gti = GUITHREADINFO::default();
+            gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+            if GetGUIThreadInfo(fg_tid, &mut gti).is_ok() {
+                let has_caret = !gti.hwndCaret.0.is_null() || (gti.flags.0 & 1) != 0;
+                let is_edit = if !gti.hwndFocus.0.is_null() {
+                    let mut class_buf = [0u16; 64];
+                    let len = GetClassNameW(gti.hwndFocus, &mut class_buf);
+                    if len > 0 {
+                        let c = String::from_utf16_lossy(&class_buf[..len as usize]).to_lowercase();
+                        c.contains("edit") || c.contains("richedit") || c.contains("scintilla") || c.contains("input")
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                has_caret || is_edit
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         let is_user_typing = IS_USER_TYPING.load(Ordering::Relaxed);
-        let is_injected = (kbd.flags.0 & 1) != 0; // LLKHF_INJECTED
-        if is_user_typing || is_injected {
+        let is_external_text_focused = IS_EXTERNAL_TEXT_INPUT_FOCUSED.load(Ordering::Relaxed);
+        if is_user_typing || is_dictation || is_external_text_input || is_external_text_focused {
             return CallNextHookEx(None, code, wparam, lparam);
         }
         let vk = kbd.vkCode;
@@ -1399,6 +1448,7 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                         if let Ok(mut nq) = NUMBER_KEY_QUEUE.lock() {
                             nq.push(digit);
                         }
+                        trigger_repaint();
                     }
                 } else if is_up {
                     if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
@@ -1463,6 +1513,7 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                             if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
                                 q.push(event);
                             }
+                            trigger_repaint();
                         }
                     }
             } else if is_up {
@@ -1488,6 +1539,7 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                                 q.push(SwitchKeyEvent::Select);
                             }
                         }
+                        trigger_repaint();
                 }
             }
             // Bloque et avale l'événement clavier : il n'atteindra jamais la fenêtre cible
@@ -1502,29 +1554,78 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
 
 #[cfg(windows)]
 pub fn install_switch_keyboard_hook() {
-    use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WH_KEYBOARD_LL};
-    let mut guard = KEYBOARD_HOOK_HANDLE.lock().unwrap();
-    if guard.is_none() {
-        unsafe {
-            if let Ok(hook) = SetWindowsHookExW(
-                WH_KEYBOARD_LL,
-                Some(switch_keyboard_hook_proc),
-                windows::Win32::Foundation::HINSTANCE(std::ptr::null_mut()),
-                0,
-            ) {
-                *guard = Some(hook.0 as isize);
+    let mut guard = HOOK_WORKER.lock().unwrap();
+    if guard.is_some() {
+        return;
+    }
+
+    let (init_tx, init_rx) = std::sync::mpsc::channel::<(isize, u32)>();
+
+    std::thread::Builder::new()
+        .name("win32_keyboard_hook_worker".to_string())
+        .spawn(move || {
+            use windows::Win32::Foundation::{HINSTANCE, HWND};
+
+            extern "system" {
+                fn GetCurrentThreadId() -> u32;
             }
+
+            let thread_id = unsafe { GetCurrentThreadId() };
+
+            let hook_res = unsafe {
+                SetWindowsHookExW(
+                    WH_KEYBOARD_LL,
+                    Some(switch_keyboard_hook_proc),
+                    HINSTANCE(std::ptr::null_mut()),
+                    0,
+                )
+            };
+
+            match hook_res {
+                Ok(hook) => {
+                    let hook_raw = hook.0 as isize;
+                    let _ = init_tx.send((hook_raw, thread_id));
+
+                    // Boucle de messages Win32 dédiée pour pomper les notifications WH_KEYBOARD_LL
+                    let mut msg = MSG::default();
+                    unsafe {
+                        while GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0).as_bool() {
+                            let _ = TranslateMessage(&msg);
+                            DispatchMessageW(&msg);
+                        }
+                        let _ = UnhookWindowsHookEx(hook);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[Hook Worker] Échec installation WH_KEYBOARD_LL: {:?}", e);
+                    let _ = init_tx.send((0, thread_id));
+                }
+            }
+        })
+        .expect("Échec du lancement du worker de hook clavier Win32");
+
+    if let Ok((hook_raw, thread_id)) = init_rx.recv() {
+        if hook_raw != 0 {
+            *guard = Some(HookWorkerState {
+                hook_handle: hook_raw,
+                thread_id,
+            });
         }
     }
 }
 
 #[cfg(windows)]
 pub fn uninstall_switch_keyboard_hook() {
-    use windows::Win32::UI::WindowsAndMessaging::{UnhookWindowsHookEx, HHOOK};
-    let mut guard = KEYBOARD_HOOK_HANDLE.lock().unwrap();
-    if let Some(raw) = guard.take() {
+    let mut guard = HOOK_WORKER.lock().unwrap();
+    if let Some(state) = guard.take() {
         unsafe {
-            let _ = UnhookWindowsHookEx(HHOOK(raw as _));
+            let _ = UnhookWindowsHookEx(HHOOK(state.hook_handle as _));
+            let _ = PostThreadMessageW(
+                state.thread_id,
+                WM_QUIT,
+                windows::Win32::Foundation::WPARAM(0),
+                windows::Win32::Foundation::LPARAM(0),
+            );
         }
     }
 }
@@ -1561,6 +1662,15 @@ pub fn update_last_external_focus() {
         if let Ok(mut lock) = LAST_EXTERNAL_HWND.lock() {
             *lock = Some(fg.0 as isize);
         }
+
+        // Détection universelle (Win32 + UIA) pour les navigateurs (Chrome/Edge/Firefox) et éditeurs
+        let is_text_focused = if crate::ui::has_focused_text_input(fg) {
+            true
+        } else {
+            false
+        };
+        IS_EXTERNAL_TEXT_INPUT_FOCUSED.store(is_text_focused, Ordering::Relaxed);
+
         let mut gti = GUITHREADINFO::default();
         gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
         if unsafe { GetGUIThreadInfo(fg_thread_id, &mut gti).is_ok() } && !gti.hwndFocus.0.is_null() {
@@ -2948,6 +3058,51 @@ pub fn format_url_for_navigation(raw_url: &str) -> String {
         // 5. Repli : terme de recherche vers Google
         format!("https://www.google.com/search?q={}", urlencoding_simple(trimmed))
     }
+}
+
+/// Ouvre de manière intelligente et asynchrone une URL dans le navigateur
+/// (amène la fenêtre au premier plan et ouvre un nouvel onglet si le navigateur existe déjà,
+/// sinon lance le navigateur avec l'URL ou appelle le navigateur par défaut du système).
+pub fn open_browser_smart(url: &str) {
+    let url = url.to_string();
+    std::thread::spawn(move || {
+        let formatted = format_url_for_navigation(&url);
+        #[cfg(windows)]
+        {
+            let user_windows = list_user_windows();
+            if let Some(hwnd) = find_best_browser_window(&user_windows, None) {
+                if !is_window_hung(hwnd) {
+                    force_foreground_window(hwnd);
+                    restore_if_iconic(hwnd);
+                    open_browser_new_tab(hwnd, &formatted);
+                    return;
+                }
+            }
+            if launch_browser_new_window(&formatted).is_none() {
+                let _ = open_path_with_default_app(&formatted);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let user_windows = list_user_windows();
+            if let Some(target) = find_best_browser_window(&user_windows, None) {
+                force_foreground_window(&target);
+                open_browser_new_tab(&target, &formatted);
+            } else {
+                let _ = open_path_with_default_app(&formatted);
+            }
+        }
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        {
+            let user_windows = list_user_windows();
+            if let Some(target) = find_best_browser_window(&user_windows, None) {
+                force_foreground_window(&target);
+                open_browser_new_tab(&target, &formatted);
+            } else {
+                let _ = open_path_with_default_app(&formatted);
+            }
+        }
+    });
 }
 
 #[cfg(windows)]

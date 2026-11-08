@@ -324,6 +324,7 @@ pub enum CommandTag {
     ClickElementOrButton,
     TextInputOrDictation,
     AppManagement,
+    FocusWindow,
     WindowManagementOrImmersion,
     ScreenReadingOrSummary,
     FloatingCardOrForm,
@@ -337,6 +338,7 @@ pub enum CommandTag {
     RadioAndMusicStream,
     TravelAndFlightBooking,
     BrowserTabNavigation,
+    TwitchStreamAndChat,
     NavigateInWebpage,
     WebpageAnalysis,
     EcommerceAndShopping,
@@ -368,6 +370,7 @@ impl CommandTag {
         Self::ClickElementOrButton,
         Self::TextInputOrDictation,
         Self::AppManagement,
+        Self::FocusWindow,
         Self::WindowManagementOrImmersion,
         Self::ScreenReadingOrSummary,
         Self::FloatingCardOrForm,
@@ -381,6 +384,7 @@ impl CommandTag {
         Self::RadioAndMusicStream,
         Self::TravelAndFlightBooking,
         Self::BrowserTabNavigation,
+        Self::TwitchStreamAndChat,
         Self::NavigateInWebpage,
         Self::WebpageAnalysis,
         Self::EcommerceAndShopping,
@@ -412,6 +416,7 @@ impl CommandTag {
             Self::ClickElementOrButton => "CLICK_ELEMENT_OR_BUTTON",
             Self::TextInputOrDictation => "TEXT_INPUT_OR_DICTATION",
             Self::AppManagement => "APP_MANAGEMENT",
+            Self::FocusWindow => "FOCUS_WINDOW",
             Self::WindowManagementOrImmersion => "WINDOW_MANAGEMENT_OR_IMMERSION",
             Self::ScreenReadingOrSummary => "SCREEN_READING_OR_SUMMARY",
             Self::FloatingCardOrForm => "FLOATING_CARD_OR_FORM",
@@ -425,6 +430,7 @@ impl CommandTag {
             Self::RadioAndMusicStream => "RADIO_AND_MUSIC_STREAM",
             Self::TravelAndFlightBooking => "TRAVEL_AND_FLIGHT_BOOKING",
             Self::BrowserTabNavigation => "BROWSER_TAB_NAVIGATION",
+            Self::TwitchStreamAndChat => "TWITCH_STREAM_AND_CHAT",
             Self::NavigateInWebpage => "NAVIGATE_IN_WEBPAGE",
             Self::WebpageAnalysis => "WEBPAGE_ANALYSIS",
             Self::EcommerceAndShopping => "ECOMMERCE_AND_SHOPPING",
@@ -449,7 +455,7 @@ impl CommandTag {
 
     pub fn description(&self) -> &'static str {
         match self {
-            Self::ScheduleTask => "Planification temporelle, minuteurs, rappels, timers, alarmes et commandes différées (ex: 'rappelle-moi dans 5 minutes', 'minuteur 10 min', 'annule les timers'). Actions : schedule_prompt, schedule_prompts, cancel_scheduled_tasks.",
+            Self::ScheduleTask => "Planification temporelle, délais futurs et récurrences : À SÉLECTIONNER DÈS QU'IL Y A UN DÉLAI FUTUR (ex: 'dans 2 min', 'dans 10 secondes', 'dans 1h', 'in 5 minutes'), une fréquence ou répétition (ex: 'toutes les heures', 'chaque heure', 'toutes les 15 minutes', 'every 30m'), ou les termes minuteur, minuterie, timer, alarme, rappel, chronomètre, cronjob. Même si une autre action est demandée (ex: 'dans 2 min ouvre Chrome' -> SCHEDULE_TASK), ce tag doit être inclus pour différer l'action.",
             Self::WebNavigateOrSearch => "Recherche d'information sur Internet, météo, navigation sur sites web, recherche Google et saisie d'URLs. Actions : navigate_to_url, open_search_browser, navigate_back, navigate_forward.",
             Self::AudioSettings => "Gestion des périphériques audio (haut-parleur, casque, mélangeur de volume, panneau son). Actions : accessibility_shortcut: action_center, open_settings.",
             Self::SetVolumeOrMuteUnMute => "Réglage du volume sonore de l'ordinateur (ex: 'mets le son', 'baisse d'un cran', 'volume à fond'). Action : set_volume.",
@@ -457,6 +463,7 @@ impl CommandTag {
             Self::ClickElementOrButton => "Interactivité graphique directe : clics sur boutons, liens, menus, cases à cocher, onglets ou badges numérotés #N à l'écran. Actions : click_element, click_button, click_numbered_target, focus_element, scroll.",
             Self::TextInputOrDictation => "Saisie de texte au clavier, remplissage de formulaires, barres de recherche, remplacement ou effacement de champ. Actions : write_text, replace_field_text, clear_text, focus_element.",
             Self::AppManagement => "Démarrage ou fermeture d'applications locales (ex: 'ouvre le bloc-notes', 'ferme Chrome', 'lance la calculatrice'). Actions : open_app, close_app, open_search.",
+            Self::FocusWindow => "Changer de fenêtre active, basculer ou donner le focus à une autre fenêtre ou application déjà ouverte (ex: 'mets Chrome en premier plan', 'bascule sur la fenêtre Bloc-notes', 'focus Discord', 'passe sur VS Code'). Action : focus_window.",
             Self::WindowManagementOrImmersion => "Organisation de l'espace de travail, redimensionnement, déplacement, disposition en mosaïque ou mode immersion fenêtrée. Actions : arrange_window, tile_windows, activate_immersion, focus_window.",
             Self::ScreenReadingOrSummary => "Lecture et résumé du contenu textuel de l'écran ou d'un fichier ouvert dans un éditeur (ex: 'de quoi parle la page ?', 'résume le document'). Actions : read_editor_content, show_floating_card, scroll.",
             Self::FloatingCardOrForm => "Affichage et fermeture de fenêtres volantes transparentes (fiches d'information Markdown, formulaires de critères, tableaux de données). Actions : show_floating_card, close_floating_card.",
@@ -470,6 +477,7 @@ impl CommandTag {
             Self::RadioAndMusicStream => "Écoute de stations radio en direct (France Inter, RTL, etc.), webradios, playlists ou morceaux de musique sur le web. Actions : navigate_to_url, click_button/click_element (lecture/direct), set_volume.",
             Self::TravelAndFlightBooking => "Recherche et comparatifs de vols d'avion, horaires de voyage, formulaire de critères de transport. Actions : show_floating_card (formulaire/tableau), navigate_to_url.",
             Self::BrowserTabNavigation => "Gestion des onglets du navigateur : sélection d'un onglet ouvert, nouvel onglet, fermeture d'onglet (Ctrl+W). Actions : click_element sur onglet, accessibility_shortcut: close_tab/reopen_tab.",
+            Self::TwitchStreamAndChat => "Accès à la plateforme Twitch, visionnage de streams en direct, sélection ou recherche de chaînes Twitch, bascule vers le chat Twitch et envoi de messages. Actions : open_twitch_chat, switch_tab, navigate_to_url.",
             Self::NavigateInWebpage => "Exploration en profondeur d'une page web ouverte : acceptation obligatoire des bannières cookies, fermeture des popups, navigation via Google Search. Actions : click_element, click_button, scroll, navigate_back.",
             Self::WebpageAnalysis => "Analyse, lecture et synthèse approfondie du contenu textuel, des articles, documents ou données d'une page web active ou d'un site affiché à l'écran (ex: 'analyse la page', 'de quoi parle ce site ?', 'résume cet article', 'lis la page web'). Actions : show_floating_card (markdown/table), scroll, click_element.",
             Self::EcommerceAndShopping => "Achats en ligne, consultation de panier, comparatif de prix et passation de commande (avec arrêt obligatoire avant paiement). Actions : navigate_to_url, click_button, show_floating_card (table).",
@@ -505,6 +513,40 @@ pub fn all_command_tags_prompt_list() -> String {
 /// Filtrage rapide des cas évidents (bruit pur, signal de micro, impulsions système)
 pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<CommandTag> {
     let lower = query.to_lowercase();
+
+    if lower.contains("twitch")
+        || lower.contains("streamer")
+        || lower.contains("stream twitch")
+        || lower.contains("chat twitch")
+        || lower.contains("live twitch")
+    {
+        return vec![CommandTag::TwitchStreamAndChat];
+    }
+
+    // Détection immédiate des tâches planifiées, rappels, timers et chronomètres
+    if lower.contains("minuteur")
+        || lower.contains("minuterie")
+        || lower.contains("timer")
+        || lower.contains("timers")
+        || lower.contains("rappel")
+        || lower.contains("rappelle-moi")
+        || lower.contains("rappelle moi")
+        || lower.contains("alarme")
+        || lower.contains("alarmes")
+        || lower.contains("compte à rebours")
+        || lower.contains("compte a rebours")
+        || lower.contains("countdown")
+        || lower.contains("remind me")
+        || lower.contains("reminder")
+        || lower.contains("schedule")
+        || lower.contains("cron")
+        || (lower.contains("dans ") && (lower.contains(" minute") || lower.contains(" seconde") || lower.contains(" heure") || lower.contains(" min") || lower.contains(" sec")))
+        || (lower.contains("in ") && (lower.contains(" minute") || lower.contains(" second") || lower.contains(" hour") || lower.contains(" min") || lower.contains(" sec")))
+        || (lower.contains("toutes les ") && (lower.contains(" minute") || lower.contains(" heure")))
+        || (lower.contains("every ") && (lower.contains(" minute") || lower.contains(" hour")))
+    {
+        return vec![CommandTag::ScheduleTask];
+    }
 
     // Détection immédiate d'analyse de page web ou d'écran
     if lower.contains("analyse la page")
@@ -636,6 +678,60 @@ pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<Comma
         return vec![CommandTag::SetVolumeOrMuteUnMute, CommandTag::AudioSettings];
     }
 
+    // Détection d'échec d'action / résilience (nécessité de refocus et reprise de contrôle)
+    if lower.contains("échec d'action")
+        || lower.contains("echec d'action")
+        || lower.contains("résilience agent")
+        || lower.contains("resilience agent")
+        || lower.contains("undo automatique")
+        || lower.contains("aucun élément")
+        || lower.contains("aucun element")
+        || lower.contains("aucun lien")
+        || lower.contains("non accessible")
+        || lower.contains("pas accessible")
+        || lower.contains("n'a pas fonctionné")
+        || lower.contains("pas fonctionné")
+        || lower.contains("n a pas fonctionne")
+    {
+        return vec![CommandTag::FocusWindow, CommandTag::ClickElementOrButton];
+    }
+
+    // Détection de changement ou focus de fenêtre
+    if lower.contains("focus la fenêtre")
+        || lower.contains("focus la fenetre")
+        || lower.contains("focus fenêtre")
+        || lower.contains("focus fenetre")
+        || lower.contains("focus window")
+        || lower.contains("change de fenêtre")
+        || lower.contains("change de fenetre")
+        || lower.contains("changer de fenêtre")
+        || lower.contains("changer de fenetre")
+        || lower.contains("bascule sur la fenêtre")
+        || lower.contains("bascule sur la fenetre")
+        || lower.contains("basculer sur la fenêtre")
+        || lower.contains("basculer sur la fenetre")
+        || lower.contains("passe sur la fenêtre")
+        || lower.contains("passe sur la fenetre")
+        || lower.contains("passer sur la fenêtre")
+        || lower.contains("passer sur la fenetre")
+        || lower.contains("mets en premier plan")
+        || lower.contains("mettre en premier plan")
+        || lower.contains("au premier plan")
+        || lower.contains("affiche la fenêtre")
+        || lower.contains("affiche la fenetre")
+        || lower.contains("activer la fenêtre")
+        || lower.contains("refocus")
+        || lower.contains("fenêtre cachée")
+        || lower.contains("fenetre cachee")
+        || lower.contains("fenêtre masquée")
+        || lower.contains("fenetre masquee")
+        || lower.contains("en arrière-plan")
+        || lower.contains("en arriere-plan")
+        || lower.contains("en arrière plan")
+    {
+        return vec![CommandTag::FocusWindow];
+    }
+
     // Détection directe des impulsions du compagnon proactif
     if lower.contains("[compagnon proactif") {
         if lower.contains("careandcomfort") {
@@ -733,6 +829,24 @@ pub fn build_routed_system_prompt(tags: &[CommandTag], lang_name: &str) -> Strin
         }
         if !effective_tags.contains(&CommandTag::ScreenReadingOrSummary) {
             effective_tags.push(CommandTag::ScreenReadingOrSummary);
+        }
+        if !effective_tags.contains(&CommandTag::FocusWindow) {
+            effective_tags.push(CommandTag::FocusWindow);
+        }
+    }
+    if effective_tags.contains(&CommandTag::ClickElementOrButton) {
+        if !effective_tags.contains(&CommandTag::FocusWindow) {
+            effective_tags.push(CommandTag::FocusWindow);
+        }
+    }
+    if effective_tags.contains(&CommandTag::TextInputOrDictation) {
+        if !effective_tags.contains(&CommandTag::FocusWindow) {
+            effective_tags.push(CommandTag::FocusWindow);
+        }
+    }
+    if effective_tags.contains(&CommandTag::AppManagement) {
+        if !effective_tags.contains(&CommandTag::FocusWindow) {
+            effective_tags.push(CommandTag::FocusWindow);
         }
     }
     if effective_tags.contains(&CommandTag::RadioAndMusicStream) {
@@ -903,6 +1017,15 @@ STRUCTURE STRICTE DU TABLEAU "actions" :
 
 RÉTRO-ANALYSE COGNITIVE & ARRÊT STRICT SUR OBJECTIF (SELF-CHECK DE COMPLÉTION) :
 - Compare systématiquement : [État actuel de l'écran] vs [Demande initiale de l'utilisateur].
+- FENÊTRE MASQUÉE, RECUPÉRATION ET REFOCUS (RÈGLE DE RÉSILIENCE OBLIGATOIRE) :
+  Si une action précédente a échoué ou si le contrôle visé (bouton, lien, champ de saisie) appartient à une fenêtre cachée ou recouverte par la fenêtre active en cours :
+  -> INTERDICTION FORMELLE de retenter le clic ou la frappe aveuglément à travers la fenêtre supérieure !
+  -> Émets EN PRIORITÉ {{"action": "focus_window", "title": "Titre exact de la fenêtre cible"}} avec "next_passes" > 0 pour la ramener au tout premier plan.
+  -> ÉCHEC DE CLIC OU ÉLÉMENT INTROUVABLE ("Aucun élément/lien correspondant trouvé") :
+     * C'est le signe que le navigateur n'a pas le focus ou que le libellé visé est trop verbeux.
+     * Règle 1 : Ramène le navigateur au premier plan via {{"action": "focus_window", "title": "Chrome"}} (ou Edge / Firefox), ou renseigne le champ "window".
+     * Règle 2 : Vise TOUJOURS un libellé court et épuré (ex: "Radio France" au lieu de "Radio France | Écoutez en ligne vos radios").
+  -> Ce n'est qu'à la passe suivante, une fois la fenêtre cible bien visible et active au premier plan, que tu exécutes l'interaction (clic, texte, scroll).
 - SI LA CIBLE EST ATTEINTE (page de films/vidéos affichée, vidéo en lecture, formulaire validé, texte saisi, information demandée lisible à l'écran) :
   -> ARRÊT STRICT ET IMMÉDIAT : renvoie impérativement "actions": [] et "next_passes": 0.
   -> INTERDICTION FORMELLE DE SUR-AGIR : Ne clique JAMAIS au hasard, ne défile pas indéfiniment et ne clique pas sur des recommandations secondaires, publicités ou menus inutiles une fois sur la destination demandée.
@@ -926,7 +1049,10 @@ Règles de syntaxe JSON strictes :
             CommandTag::WebNavigateOrSearch => {
                 prompt.push_str(r#"
 Règles NAVIGATION WEB & RECHERCHE :
-- POINT DE DÉPART OBLIGATOIRE SUR GOOGLE SEARCH : Pour toute recherche d'information, météo (ex: météo Paris, prévisions), actualité ou service, le point de départ DOIT TOUJOURS ÊTRE une recherche Google via "navigate_to_url" ("https://www.google.com/search?q=termes+de+recherche"). INTERDICTION FORMELLE d'aller directement sur une URL présumée ou codée en dur (INTERDIT d'ouvrir directement meteofrance.com ou un site arbitraire : passe obligatoirement par Google Search d'abord).
+- EXTRACTION DE L'INTENTION RÉELLE ET REFORMULATION (ANTI MOT-À-MOT) :
+  Ne copie JAMAIS mot-à-mot la phrase brute, les verbes d'injonction ou les formules de politesse de l'utilisateur dans l'URL de recherche (INTERDICTION FORMELLE d'inclure "cherche-moi", "trouve-moi", "peux-tu", "je voudrais savoir", "s'il te plaît", etc.).
+  Extrais et condense UNIQUEMENT le sujet réel et les mots-clés essentiels et pertinents (ex: si l'utilisateur dit "peux-tu me trouver la météo qu'il fera demain à Lyon s'il te plaît ?", cherche "meteo lyon demain" ; s'il dit "comment réparer un robinet qui goutte dans la cuisine", cherche "reparer robinet qui goutte").
+- POINT DE DÉPART OBLIGATOIRE SUR GOOGLE SEARCH : Pour toute recherche d'information, météo (ex: météo Paris, prévisions), actualité ou service, le point de départ DOIT TOUJOURS ÊTRE une recherche Google via "navigate_to_url" ("https://www.google.com/search?q=mots+cles+du+sujet+reel"). INTERDICTION FORMELLE d'aller directement sur une URL présumée ou codée en dur (INTERDIT d'ouvrir directement meteofrance.com ou un site arbitraire : passe obligatoirement par Google Search d'abord).
 - RECHERCHE IMMÉDIATE SANS CONSEIL : Si l'utilisateur demande une recherche (météo, film, vidéo, information), INTERDICTION de répondre par du texte passif. Émets IMMÉDIATEMENT {"action": "navigate_to_url", "url": "https://www.google.com/search?q=...", "target": "new_tab"} avec "next_passes": 5.
 - INTERDICTION de fermer la fenêtre active (pas de "close_app" ni clic croix) pour chercher sur le web.
 - Accepte systématiquement les bannières cookies Google ("Tout accepter").
@@ -947,6 +1073,8 @@ Règles ANALYSE DE PAGE WEB (TAG WEBPAGE_ANALYSIS) :
             CommandTag::NavigateInWebpage => {
                 prompt.push_str(r#"
 Règles NAVIGATION DANS LA PAGE WEB (TAG NAVIGATE_IN_WEBPAGE) :
+- FENÊTRE DU NAVIGATEUR EN ARRIÈRE-PLAN OU MASQUÉE : Si le navigateur web est recouvert ou caché par une autre application (ou par Libertide), ou si un clic a renvoyé "Aucun élément/lien correspondant trouvé", fais d'abord {"action": "focus_window", "title": "Nom/titre du navigateur (Chrome, Edge, Firefox)"} pour le replacer au premier plan avant d'interagir.
+- LIBELLÉS COURTS ET ÉPURÉS : Vise le libellé textuel le plus concis du lien ou résultat (ex: "Radio France" et JAMAIS "Radio France | Écoutez en ligne vos radios").
 - RÉFÉRENTIEL GOOGLE SEARCH : La page de résultats Google Search est le référentiel de départ. Tu dois tester et analyser les différents résultats fournis par Google.
 - Si Google affiche un encart météo / widget informatif direct en haut de page, lis-le et restitue la météo immédiatement dans "narration" en clôturant ("actions": [], "next_passes": 0).
 - Si une consultation détaillée est demandée ou nécessaire, clique sur le premier site de résultats pertinent (ex: premier lien de météo) via "click_element". Si ce site ne convient pas ou est bloqué, fais "navigate_back" pour tester le résultat suivant dans Google.
@@ -962,8 +1090,15 @@ Règles NAVIGATION DANS LA PAGE WEB (TAG NAVIGATE_IN_WEBPAGE) :
                 prompt.push_str(r#"
 Règles CLICS ET CIBLAGE :
 - UN SEUL CLIC PAR PASSE : 1 seule action "click_element", "click_button" ou "click_numbered_target". Interdiction d'enchaîner deux clics dans la même passe.
-- Pour cliquer sur un lien ou texte interactif : {"action": "click_element", "target_name": "Libellé visible exact"}.
-- Pour cliquer sur un bouton : {"action": "click_button", "button_name": "Libellé visible exact"} (ex: {"action": "click_button", "button_name": "Se connecter avec Google"}, SANS le mot "Bouton").
+- CONTRÔLE SUR FENÊTRE EN ARRIÈRE-PLAN OU RECOUVERTE :
+  Si l'élément ou bouton visé fait partie d'une fenêtre qui n'est pas celle au premier plan (ou qui est couverte/masquée par la fenêtre en cours) :
+  Émets IMMÉDIATEMENT {"action": "focus_window", "title": "Titre exact de la fenêtre"} pour amener la bonne fenêtre au premier plan avant d'effectuer le clic.
+- CIBLAGE PAR LIBELLÉ COURT & PRÉCIS (ANTI-TITRES À RALLONGE) :
+  * Ne recopie JAMAIS les titres longs composés avec des séparateurs (' | ', ' - ', ' — ') ou des slogans.
+  * Exemple : pour "Radio France | Écoutez en ligne vos radios", écris STRICTEMENT "Radio France".
+  * Pour un bouton d'acceptation de cookies, écris "Tout accepter" ou "Accepter".
+- Pour cliquer sur un lien ou texte interactif : {"action": "click_element", "target_name": "Libellé court visible", "window": "Titre optionnel de la fenêtre"}.
+- Pour cliquer sur un bouton : {"action": "click_button", "button_name": "Libellé visible exact", "window": "Titre optionnel de la fenêtre"} (ex: {"action": "click_button", "button_name": "Se connecter avec Google"}, SANS le mot "Bouton").
 - Pour cliquer sur un numéro de badge : {"action": "click_numbered_target", "index": N}.
 - "focus_element" : place le focus sur un contrôle sans forcément le valider.
 - "scroll" : fait défiler la vue pour révéler des contrôles cachés ("direction": "down"|"up"|"bottom"|"top", "amount": 1..2).
@@ -973,6 +1108,7 @@ Règles CLICS ET CIBLAGE :
             CommandTag::TextInputOrDictation => {
                 prompt.push_str(r#"
 Règles SAISIE TEXTE & FORMULAIRES :
+- FENÊTRE CIBLE AU PREMIER PLAN : Avant de saisir du texte ("write_text" ou "replace_field_text"), assure-toi que la fenêtre contenant le champ cible est active. Si elle est en arrière-plan ou masquée, émets d'abord {"action": "focus_window", "title": "Titre exact de la fenêtre"}.
 - Pour saisir : "write_text" avec "target": "nom_champ", "press_enter": true/false.
 - Pour remplacer : "replace_field_text" avec "target": "nom_champ", "text": "...".
 - Pour effacer : "clear_text".
@@ -999,6 +1135,18 @@ Règles APPLICATIONS :
 - Distinction : "open_search" = recherche locale Windows/OS (Win+S). "open_search_browser" = recherche web.
 "#);
             }
+            CommandTag::FocusWindow => {
+                prompt.push_str(r#"
+Règles FOCUS ET BASCULEMENT DE FENÊTRE (TAG FOCUS_WINDOW) :
+- FENÊTRES COUVERTES, CACHÉES OU ÉCHEC D'ACTION :
+  Si un contrôle d'une fenêtre cible n'a pas pu être atteint ou si la fenêtre souhaitée est cachée par la fenêtre active en cours, utilise impérativement "focus_window" pour la faire passer au premier plan.
+- L'utilisateur demande d'activer, basculer ou donner le focus à une fenêtre ou application déjà ouverte (ex: "mets Chrome en premier plan", "va sur la fenêtre Discord", "focus le bloc-notes").
+- Consulte la liste des fenêtres ouvertes dans [État actuel de l'écran].
+- Émets l'action "focus_window" avec le titre ou nom exact de la cible : {"action": "focus_window", "title": "Titre exact de la fenêtre"}.
+- INTERDICTION FORMELLE d'utiliser "open_app" ou de relancer le logiciel si sa fenêtre est déjà présente à l'écran.
+- Dès que la fenêtre est activée ou si elle est déjà au premier plan, arrête la boucle avec "actions": [], "next_passes": 0.
+"#);
+            }
             CommandTag::WindowManagementOrImmersion => {
                 prompt.push_str(r#"
 Règles FENÊTRES & IMMERSION :
@@ -1020,8 +1168,9 @@ Règles LECTURE & RÉSUMÉ D'ÉCRAN :
             CommandTag::ScheduleTask => {
                 prompt.push_str(r#"
 Règles TÂCHES DIFFÉRÉES & TIMERS :
-- Planifier une tâche : action "schedule_prompt" avec "delay_seconds" (secondes : 1 min = 60, 5 min = 300, 10 min = 600, 1h = 3600) et "prompt" (la consigne textuelle à exécuter au terme du délai).
-  Exemple : {"action": "schedule_prompt", "delay_seconds": 300, "prompt": "Rappelle-moi d'éteindre le four"}
+- Planifier une tâche : action "schedule_prompt" avec "delay_seconds" (secondes : 1 min = 60, 5 min = 300, 10 min = 600, 1h = 3600), "prompt" (la consigne textuelle) et "label" (intitulé court du rappel, ex: "Éteindre le four").
+  Exemple : {"action": "schedule_prompt", "delay_seconds": 300, "prompt": "Rappelle-moi d'éteindre le four", "label": "Éteindre le four"}
+- Planifier un cronjob récurrent : action "schedule_cron" avec "cron" (ex: "every 30m", "@hourly", "@daily", "*/15 * * * *"), "prompt" et "label" optionnel.
 - Planifier plusieurs tâches échelonnées : action "schedule_prompts" avec "tasks": [{"delay_seconds": 60, "prompt": "..."}, {"delay_seconds": 300, "prompt": "..."}].
 - Annuler les timers / tâches différées : action "cancel_scheduled_tasks". Utilise-la immédiatement si l'utilisateur demande d'annuler ou d'arrêter des rappels/timers.
 - La "narration" doit confirmer explicitement le délai programmé et l'action différée dans la langue de l'utilisateur ({lang_name}).
@@ -1087,7 +1236,8 @@ Règles ACCESSIBILITÉ COGNITIVE & FALC (FACILE À LIRE ET À COMPRENDRE) :
                 prompt.push_str(r#"
 Règles STRATÉGIE RADIO & STREAMING AUDIO :
 - Étape 1 : Ouvre immédiatement le flux radio ou la page officielle via "navigate_to_url" (ex: "https://www.radiofrance.fr/franceinter" ou recherche Google directe "https://www.google.com/search?q=écouter+france+inter+en+direct").
-- Étape 2 (Bannière cookies) : Dès l'arrivée, clique systématiquement sur le bouton d'acceptation ("Tout accepter", "Accepter").
+- Étape 2 (Bannière cookies & Focus) : Si le navigateur n'est pas actif ou si le clic précédent a échoué, remets-le au premier plan avec {"action": "focus_window", "title": "Chrome"} (ou le nom du navigateur détecté). Dès l'arrivée, clique systématiquement sur le bouton d'acceptation ("Tout accepter", "Accepter").
+- Étape 3 (Ciblage court) : Pour cliquer sur le résultat de recherche, utilise UNIQUEMENT le nom court de la station ou du site (ex: "Radio France" ou "France Inter", SURTOUT PAS le titre complet avec pipes "Radio France | Écoutez...").
 - Étape 3 (Lancement audio) : Cherche et clique sur le bouton de lecture en direct ("Écouter le direct", "Direct", "Play", "Lecture") ou sur l'élément [@audio:...] / [@video:...].
 - Étape 4 (Anti-terminal) : N'ouvre JAMAIS de console pour le son. Règle le volume avec "set_volume" ou "accessibility_shortcut": "space".
 - Étape 5 (Clôture) : Dès que le flux audio démarre, ARRÊTE les passes ("actions": [], "next_passes": 0) et confirme oralement la station en cours dans "narration".
@@ -1112,10 +1262,20 @@ Règles GESTION ET RECHERCHE D'ONGLETS DU NAVIGATEUR :
 - Pour rouvrir le dernier onglet fermé : "accessibility_shortcut": "reopen_tab" (Ctrl+Shift+T).
 "#);
             }
+            CommandTag::TwitchStreamAndChat => {
+                prompt.push_str(r#"
+Règles TWITCH STREAM & CHAT :
+- Pour ouvrir le chat d'une chaîne Twitch et/ou son live : utilise l'action {"action": "open_twitch_chat", "channel": "nom_chaine", "open_stream": true|false}.
+  * Si l'utilisateur souhaite regarder le stream ou accéder au live web : mets "open_stream": true.
+  * Si l'utilisateur souhaite rejoindre le chat ou envoyer un message : mets "open_stream": false.
+  * L'application bascule automatiquement sur l'onglet Chat Twitch où les messages sont lus à voix haute en direct.
+- Pour basculer manuellement d'onglet : {"action": "switch_tab", "tab": "chat"|"assistance"}.
+"#);
+            }
             CommandTag::EcommerceAndShopping => {
                 prompt.push_str(r#"
 Règles STRATÉGIE E-COMMERCE & ACHATS EN LIGNE :
-- Étape 1 (Recherche produit) : Ouvre le site marchand ou comparateur via "navigate_to_url" vers le produit ou via recherche Google.
+- Étape 1 (Recherche produit) : Isole la désignation exacte de l'article recherché sans les formules conversationnelles ("je voudrais acheter...", "cherche le meilleur prix pour..."). Ouvre le site marchand ou comparateur via "navigate_to_url" vers le produit ou via recherche Google.
 - Étape 2 (Validation cookies) : Clique immédiatement sur "Tout accepter" pour dégager la vue.
 - Étape 3 (Analyse & Comparatif) : Extrais les caractéristiques clés, prix, frais de port et disponibilité. Si plusieurs offres sont présentes, projette un tableau comparatif via "show_floating_card" (card_type: "table", id: "comparatif_achats").
 - Étape 4 (Ajout panier & Consultation) : Clique sur "Ajouter au panier", puis "Voir le panier" / "Commander".
@@ -1155,6 +1315,7 @@ Règles GESTION DE FICHIERS & EXPLORATEUR :
             CommandTag::VideoAndEntertainment => {
                 prompt.push_str(r#"
 Règles VIDÉOS, FILMS, SÉRIES & DIVERTISSEMENT :
+- RECHERCHE CIBLÉE SUR LE CONTENU RÉEL : Ne copie JAMAIS la phrase brute ou les ordres oraux ("mets-moi une vidéo de...", "trouve le concert de..."). Isole strictement le nom de l'artiste, du morceau ou du sujet pour la requête YouTube (ex: "Jul dernier clip", "documentaire volcan").
 - CHOIX AUTONOME EN CAS DE CONSIGNE OUVERTE : Si l'utilisateur ne précise pas le sujet ou dit "choisis une vidéo", "mets une vidéo", "mets quelque chose" : INTERDICTION ABSOLUE de demander des précisions ou de refuser de choisir. CHOISIS IMMÉDIATEMENT toi-même un thème captivant et universel (ex: "documentaire nature 4K", "musique lofi relaxante", "court métrage animation", "reportage science") et lance directement la recherche YouTube correspondante via navigate_to_url.
 - Étape 1 : Ouvre la plateforme vidéo demandée (YouTube, Netflix, Arte, streaming) via "navigate_to_url" (ex: "https://www.youtube.com/results?search_query=...").
 - Étape 2 : Valide immédiatement les bandeaux de consentement ou cookies ("Tout accepter").
@@ -1310,8 +1471,8 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
                 prompt.push_str("- {\"action\": \"scroll\", \"direction\": \"down\", \"amount\": 1}\n");
             }
             CommandTag::ClickElementOrButton => {
-                prompt.push_str("- {\"action\": \"click_element\", \"target_name\": \"Libellé du lien ou élément\"}\n");
-                prompt.push_str("- {\"action\": \"click_button\", \"button_name\": \"Libellé du bouton\"}\n");
+                prompt.push_str("- {\"action\": \"click_element\", \"target_name\": \"Libellé court du lien ou élément\", \"window\": \"Titre optionnel de la fenêtre\"}\n");
+                prompt.push_str("- {\"action\": \"click_button\", \"button_name\": \"Libellé du bouton\", \"window\": \"Titre optionnel de la fenêtre\"}\n");
                 prompt.push_str("- {\"action\": \"click_numbered_target\", \"index\": 1}\n");
                 prompt.push_str("- {\"action\": \"focus_element\", \"target_name\": \"nom\"}\n");
                 prompt.push_str("- {\"action\": \"scroll\", \"direction\": \"down\"|\"up\", \"amount\": 1}\n");
@@ -1332,6 +1493,9 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
                 prompt.push_str("- {\"action\": \"close_app\", \"name\": \"nom_application\"}\n");
                 prompt.push_str("- {\"action\": \"open_search\"}\n");
             }
+            CommandTag::FocusWindow => {
+                prompt.push_str("- {\"action\": \"focus_window\", \"title\": \"Titre ou nom exact de la fenêtre\"}\n");
+            }
             CommandTag::WindowManagementOrImmersion => {
                 prompt.push_str("- {\"action\": \"arrange_window\", \"title\": \"...\", \"position\": \"left\"|\"right\"|\"maximize\"}\n");
                 prompt.push_str("- {\"action\": \"tile_windows\", \"layout\": \"split_horizontal\"|\"grid\", \"windows\": [...]}\n");
@@ -1344,8 +1508,10 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
                 prompt.push_str("- {\"action\": \"scroll\", \"direction\": \"down\"|\"up\", \"amount\": 1}\n");
             }
             CommandTag::ScheduleTask => {
-                prompt.push_str("- {\"action\": \"schedule_prompt\", \"delay_seconds\": 300, \"prompt\": \"consigne à exécuter\"}\n");
+                prompt.push_str("- {\"action\": \"schedule_prompt\", \"delay_seconds\": 300, \"prompt\": \"consigne à exécuter\", \"label\": \"Nom du rappel\"}\n");
+                prompt.push_str("- {\"action\": \"schedule_cron\", \"cron\": \"every 30m\", \"prompt\": \"consigne\", \"label\": \"Nom\"}\n");
                 prompt.push_str("- {\"action\": \"schedule_prompts\", \"tasks\": [{\"delay_seconds\": 60, \"prompt\": \"...\"}]}\n");
+                prompt.push_str("- {\"action\": \"cancel_scheduled_task\", \"id\": 1}\n");
                 prompt.push_str("- {\"action\": \"cancel_scheduled_tasks\"}\n");
             }
             CommandTag::FloatingCardOrForm => {
@@ -1387,6 +1553,10 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
             CommandTag::BrowserTabNavigation => {
                 prompt.push_str("- {\"action\": \"click_element\", \"target_name\": \"Nom de l'onglet ouvert\"}\n");
                 prompt.push_str("- {\"action\": \"accessibility_shortcut\", \"shortcut\": \"close_tab\"|\"reopen_tab\"}\n");
+            }
+            CommandTag::TwitchStreamAndChat => {
+                prompt.push_str("- {\"action\": \"open_twitch_chat\", \"channel\": \"nom_chaine\", \"open_stream\": true|false}\n");
+                prompt.push_str("- {\"action\": \"switch_tab\", \"tab\": \"chat\"|\"assistance\"}\n");
             }
             CommandTag::EcommerceAndShopping => {
                 prompt.push_str("- {\"action\": \"click_button\", \"button_name\": \"Ajouter au panier\"}\n");
@@ -1460,6 +1630,8 @@ fn action_param_field_for(action: &str) -> &'static str {
         "accessibility_shortcut" => "shortcut",
         "set_volume" => "command",
         "show_floating_card" => "title",
+        "open_twitch_chat" => "channel",
+        "switch_tab" => "tab",
         "close_floating_card" => "id",
         _ => "target_name",
     }
@@ -2315,14 +2487,16 @@ impl LocalLlamaEngine {
                 let clean = crate::tts::sanitize_for_tts(&sentence);
                 if !clean.trim().is_empty() {
                     if let Some(tts) = tts_tx {
-                        let normalized = clean.trim().to_lowercase();
-                        let mut last = LAST_SPOKEN_NARRATION.lock().unwrap_or_else(|e| e.into_inner());
-                        if !last.contains(&normalized) {
-                            if !last.is_empty() {
-                                last.push(' ');
+                        if !crate::automation::IS_CHAT_TAB_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+                            let normalized = clean.trim().to_lowercase();
+                            let mut last = LAST_SPOKEN_NARRATION.lock().unwrap_or_else(|e| e.into_inner());
+                            if !last.contains(&normalized) {
+                                if !last.is_empty() {
+                                    last.push(' ');
+                                }
+                                last.push_str(&normalized);
+                                let _ = tts.send(TtsCommand::Enqueue(clean));
                             }
-                            last.push_str(&normalized);
-                            let _ = tts.send(TtsCommand::Enqueue(clean));
                         }
                     }
                     if let Some(evt) = event_tx {
@@ -2341,14 +2515,16 @@ impl LocalLlamaEngine {
             let clean = crate::tts::sanitize_for_tts(&remaining);
             if !clean.trim().is_empty() {
                 if let Some(tts) = tts_tx {
-                    let normalized = clean.trim().to_lowercase();
-                    let mut last = LAST_SPOKEN_NARRATION.lock().unwrap_or_else(|e| e.into_inner());
-                    if !last.contains(&normalized) {
-                        if !last.is_empty() {
-                            last.push(' ');
+                    if !crate::automation::IS_CHAT_TAB_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+                        let normalized = clean.trim().to_lowercase();
+                        let mut last = LAST_SPOKEN_NARRATION.lock().unwrap_or_else(|e| e.into_inner());
+                        if !last.contains(&normalized) {
+                            if !last.is_empty() {
+                                last.push(' ');
+                            }
+                            last.push_str(&normalized);
+                            let _ = tts.send(TtsCommand::Enqueue(clean));
                         }
-                        last.push_str(&normalized);
-                        let _ = tts.send(TtsCommand::Enqueue(clean));
                     }
                 }
                 if let Some(evt) = event_tx {
@@ -2437,7 +2613,7 @@ impl LocalLlamaEngine {
     pub fn classify_intent(&self, user_query: &str, screen_hint: Option<&str>) -> Vec<CommandTag> {
         let clean = user_query.trim();
         if clean.is_empty() {
-            return vec![CommandTag::GeneralChitChat];
+            return vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch];
         }
 
         let mut fast_tags = fast_classify_intent(clean, screen_hint);
@@ -2492,7 +2668,7 @@ impl LocalLlamaEngine {
 pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<CommandTag> {
     let clean = query.trim();
     if clean.is_empty() {
-        vec![CommandTag::GeneralChitChat]
+        vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch]
     } else {
         let fast = fast_classify_intent(clean, screen_hint);
         if !fast.is_empty() {
@@ -2501,19 +2677,23 @@ pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<Command
             if let Some(ref engine) = *lock {
                 let tags = engine.classify_intent(clean, screen_hint);
                 if tags.is_empty() {
-                    vec![CommandTag::GeneralChitChat]
+                    vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch]
                 } else {
                     tags
                 }
             } else if clean.to_lowercase().contains("page") || clean.to_lowercase().contains("site") || clean.to_lowercase().contains("écran") || clean.to_lowercase().contains("ecran") {
                 vec![CommandTag::WebpageAnalysis, CommandTag::ScreenReadingOrSummary]
+            } else if clean.to_lowercase().contains("fenêtre") || clean.to_lowercase().contains("fenetre") {
+                vec![CommandTag::FocusWindow, CommandTag::WindowManagementOrImmersion]
+        } else if clean.to_lowercase().contains("minuteur") || clean.to_lowercase().contains("rappel") || clean.to_lowercase().contains("timer") || clean.to_lowercase().contains("alarme") {
+            vec![CommandTag::ScheduleTask]
             } else if clean.ends_with('?') {
                 vec![CommandTag::KnowledgeAndQuestions]
             } else {
-                vec![CommandTag::GeneralChitChat]
+                vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch]
             }
         } else {
-            vec![CommandTag::GeneralChitChat]
+            vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch]
         }
     }
 }
@@ -2638,7 +2818,7 @@ pub fn run_local_llama_completion(
         } else {
             let classified = engine.classify_intent(clean_goal, Some(clean_query));
             if classified.is_empty() {
-                vec![CommandTag::GeneralChitChat]
+                vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch]
             } else {
                 classified
             }

@@ -118,6 +118,8 @@ pub struct OverlayApp {
     current_twitch_channel: String,
     twitch_search_query: String,
     twitch_search_results: Vec<TwitchChannelItem>,
+    twitch_filter: TwitchFilter,
+    auto_scroll_to_bottom: bool,
     position_initialized: bool,
     floating_cards: Vec<FloatingCard>,
     window_pos: Option<egui::Pos2>,
@@ -161,6 +163,7 @@ pub struct OverlayApp {
     detected_microphones: Vec<String>,
     selected_microphone: String,
     detected_pointing_devices: Vec<crate::devices::PointingDevice>,
+    pending_twitch_speech: Option<String>,
 }
 
 impl OverlayApp {
@@ -246,6 +249,15 @@ impl OverlayApp {
         let (targets_request_tx, targets_request_rx) = channel::<TargetsScanRequest>();
         let (targets_result_tx, targets_result_rx) = channel::<TargetsScanResult>();
         spawn_targets_worker(targets_request_rx, targets_result_tx);
+
+        #[cfg(windows)]
+        {
+            let ctx_clone = cc.egui_ctx.clone();
+            crate::automation::set_repaint_callback(move || {
+                ctx_clone.request_repaint();
+            });
+        }
+
         let macros = load_macros();
         let long_press_ms = std::env::var("SWITCH_LONG_PRESS_MS")
             .ok()
@@ -365,6 +377,8 @@ impl OverlayApp {
             current_twitch_channel: initial_twitch_channel,
             twitch_search_query: String::new(),
             twitch_search_results: Vec::new(),
+            twitch_filter: TwitchFilter::All,
+            auto_scroll_to_bottom: true,
             position_initialized: false,
             floating_cards: Vec::new(),
             window_pos: None,
@@ -372,7 +386,7 @@ impl OverlayApp {
             drag_offset: None,
             current_win_w: 560.0,
             chat_height: 70.0,
-            current_win_h: 196.0,
+            current_win_h: 280.0,
             is_hidden: false,
             mouse_passthrough: false,
             is_streaming_narration: false,
@@ -399,6 +413,7 @@ impl OverlayApp {
             detected_microphones,
             selected_microphone,
             detected_pointing_devices,
+            pending_twitch_speech: None,
         };
         app.sync_modal_inputs_for_provider(llm_config.provider);
         update_open_floating_cards(&app.floating_cards);
@@ -451,6 +466,7 @@ impl OverlayApp {
     }
 
     pub fn stop_speaking(&mut self) {
+        self.pending_twitch_speech = None;
         self.is_streaming_narration = false;
         let _ = self.tts_sender.send(TtsCommand::Stop);
         set_tts_audio_level(0.0);
@@ -712,7 +728,6 @@ impl OverlayApp {
                 self.is_hidden = false;
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             if let Some(pos) = self.window_pos {
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
             }
@@ -720,7 +735,7 @@ impl OverlayApp {
             {
                 unsafe {
                     use windows::core::w;
-                    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE};
+                    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SetForegroundWindow, SW_RESTORE};
                     let overlay = FindWindowW(None, w!("Libertide overlay")).unwrap_or(windows::Win32::Foundation::HWND(std::ptr::null_mut()));
                     if !overlay.0.is_null() {
                         let _ = ShowWindow(overlay, SW_RESTORE);
@@ -784,7 +799,18 @@ impl eframe::App for OverlayApp {
 
         ctx.set_zoom_factor(self.zoom_factor);
 
+        IS_CHAT_TAB_ACTIVE.store(self.active_tab == ActiveTab::Chat, Ordering::Relaxed);
+
         update_last_external_focus();
+
+        // Détection universelle de saisie : tout TextEdit actif dans egui libère les touches
+        let is_typing = ctx.egui_wants_keyboard_input()
+            || ctx.memory(|m| m.focused().is_some())
+            || self.show_api_key_modal
+            || crate::automation::IS_USER_TYPING.load(Ordering::Relaxed)
+            || crate::automation::IS_EXTERNAL_TEXT_INPUT_FOCUSED.load(Ordering::Relaxed)
+            || self.dictation_mode;
+        crate::automation::IS_USER_TYPING.store(is_typing, Ordering::Relaxed);
 
         self.dictation_mode = IS_DICTATION_ACTIVE.load(Ordering::SeqCst);
 
@@ -929,8 +955,8 @@ impl eframe::App for OverlayApp {
                     }
                 }
                 AgentEvent::NarrationStart => {
-                    self.restore_window_if_minimized(&ctx);
                     self.is_streaming_narration = true;
+                    self.auto_scroll_to_bottom = true;
                     self.chat_history.push(ChatEntry {
                         role: ChatRole::Agent,
                         text: String::new(),
@@ -940,7 +966,7 @@ impl eframe::App for OverlayApp {
                     });
                 }
                 AgentEvent::NarrationChunk(chunk) => {
-                    self.restore_window_if_minimized(&ctx);
+                    self.auto_scroll_to_bottom = true;
                     if self.is_streaming_narration {
                         if let Some(last) = self.chat_history.last_mut() {
                             if matches!(last.role, ChatRole::Agent) {
@@ -970,8 +996,8 @@ impl eframe::App for OverlayApp {
                     }
                 }
                 AgentEvent::ReplaceNarration { text, quick_suggestions } => {
-                    self.restore_window_if_minimized(&ctx);
                     let was_streaming = self.is_streaming_narration;
+                    self.auto_scroll_to_bottom = true;
                     self.is_streaming_narration = false;
 
                     if text.trim().is_empty() && quick_suggestions.is_empty() {
@@ -985,7 +1011,7 @@ impl eframe::App for OverlayApp {
                                 }
                             }
                         }
-                        if self.auto_read_suggestions && self.auto_read_agent_messages {
+                        if self.auto_read_suggestions && self.auto_read_agent_messages && self.active_tab == ActiveTab::Assistance {
                             if let Some(sug_speech) = format_suggestions_for_speech(&quick_suggestions) {
                                 if !sanitize_for_tts(&sug_speech).trim().is_empty() {
                                     self.status = AgentStatus::Speaking;
@@ -1006,7 +1032,7 @@ impl eframe::App for OverlayApp {
                                 screen_size_kb: None,
                             });
                         }
-                        if self.auto_read_suggestions && self.auto_read_agent_messages {
+                        if self.auto_read_suggestions && self.auto_read_agent_messages && self.active_tab == ActiveTab::Assistance {
                             if let Some(sug_speech) = format_suggestions_for_speech(&quick_suggestions) {
                                 if !sanitize_for_tts(&sug_speech).trim().is_empty() {
                                     self.status = AgentStatus::Speaking;
@@ -1033,9 +1059,11 @@ impl eframe::App for OverlayApp {
                             (false, Some(sug_speech)) => sug_speech,
                             (false, None) => String::new(),
                         };
-                        if !sanitize_for_tts(&full_speech).trim().is_empty() {
-                            self.status = AgentStatus::Speaking;
-                            let _ = self.tts_sender.send(TtsCommand::Speak(full_speech));
+                        if self.active_tab == ActiveTab::Assistance {
+                            if !sanitize_for_tts(&full_speech).trim().is_empty() {
+                                self.status = AgentStatus::Speaking;
+                                let _ = self.tts_sender.send(TtsCommand::Speak(full_speech));
+                            }
                         }
                         self.chat_history.push(ChatEntry {
                             role: ChatRole::Agent,
@@ -1045,6 +1073,22 @@ impl eframe::App for OverlayApp {
                             screen_size_kb: None,
                         });
                     }
+                }
+                AgentEvent::ReminderTriggered { label, prompt: _ } => {
+                    self.is_hidden = false;
+                    self.restore_window_if_minimized(&ctx);
+                    let reminder_display = format!("⏰ **Rappel :** {label}");
+                    self.chat_history.push(ChatEntry {
+                        role: ChatRole::Agent,
+                        text: reminder_display,
+                        timestamp: current_time_str(),
+                        quick_suggestions: vec![
+                            QuickSuggestionItem::Text("Merci !".to_string()),
+                            QuickSuggestionItem::Text("Rappelle-moi dans 5 minutes".to_string()),
+                        ],
+                        screen_size_kb: None,
+                    });
+                    ctx.request_repaint();
                 }
                 AgentEvent::SilentNarration(full_text) => {
                     self.chat_history.push(ChatEntry {
@@ -1454,6 +1498,14 @@ impl eframe::App for OverlayApp {
                             quick_suggestions: Vec::new(),
                             screen_size_kb: None,
                         });
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: feedback.to_string(),
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(feedback.to_string()));
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx, false);
                         }
@@ -1554,6 +1606,13 @@ impl eframe::App for OverlayApp {
                     }
                 }
                 AgentEvent::TtsFinished => {
+                    if self.active_tab == ActiveTab::Chat {
+                        if let Some(recent_speech) = self.pending_twitch_speech.take() {
+                            self.status = AgentStatus::Speaking;
+                            let _ = self.tts_sender.send(TtsCommand::Speak(recent_speech));
+                            continue;
+                        }
+                    }
                     if self.continuous_mode
                         && !crate::audio::is_live_subtitles_active()
                         && self.status != AgentStatus::EmergencyStopped
@@ -1584,9 +1643,17 @@ impl eframe::App for OverlayApp {
                     ctx.request_repaint();
                 }
                 AgentEvent::TwitchChatReceived(twitch_msg) => {
-                    self.restore_window_if_minimized(&ctx);
-                    let speech = format!("{} : {}", twitch_msg.author, twitch_msg.text);
-                    let _ = self.tts_sender.send(TtsCommand::Enqueue(speech));
+                    self.auto_scroll_to_bottom = true;
+                    if self.active_tab == ActiveTab::Chat {
+                        let speech = format!("{} : {}", twitch_msg.author, twitch_msg.text);
+                        if self.status == AgentStatus::Speaking {
+                            self.pending_twitch_speech = Some(speech);
+                        } else {
+                            self.pending_twitch_speech = None;
+                            self.status = AgentStatus::Speaking;
+                            let _ = self.tts_sender.send(TtsCommand::Speak(speech));
+                        }
+                    }
                     self.twitch_messages.push(twitch_msg);
                     if self.twitch_messages.len() > 300 {
                         self.twitch_messages.drain(0..self.twitch_messages.len() - 300);
@@ -1594,6 +1661,25 @@ impl eframe::App for OverlayApp {
                 }
                 AgentEvent::TwitchSearchResults(results) => {
                     self.twitch_search_results = results;
+                }
+                AgentEvent::OpenTwitchChannel { channel, open_stream } => {
+                    self.stop_speaking();
+                    self.active_tab = ActiveTab::Chat;
+                    let clean = channel.trim().trim_start_matches('#').to_lowercase();
+                    if !clean.is_empty() {
+                        self.current_twitch_channel = clean.clone();
+                        let _ = self.twitch_channel_sender.send(clean.clone());
+                        self.twitch_messages.clear();
+                        self.twitch_search_results.clear();
+                        if open_stream {
+                            open_browser_smart(&format!("https://twitch.tv/{}", clean));
+                        }
+                    }
+                }
+                AgentEvent::SwitchTab(tab) => {
+                    self.pending_twitch_speech = None;
+                    self.stop_speaking();
+                    self.active_tab = tab;
                 }
                 AgentEvent::RequestIgnored => {
                     if let Some(last) = self.chat_history.last() {
@@ -1752,18 +1838,7 @@ impl eframe::App for OverlayApp {
             }
         }
 
-        let is_typing = ctx.egui_wants_keyboard_input()
-            || ctx.memory(|m| {
-                m.focused().is_some()
-                    || m.has_focus(egui::Id::NULL.with("prompt_input_text"))
-                    || m.has_focus(egui::Id::NULL.with("api_key_input_field"))
-                    || m.has_focus(egui::Id::NULL.with("model_input_field"))
-                    || m.has_focus(egui::Id::NULL.with("macro_shortcut_input"))
-                    || m.has_focus(egui::Id::NULL.with("macro_text_input"))
-            });
-        crate::automation::IS_USER_TYPING.store(is_typing, Ordering::Relaxed);
-
-        // Gestion de la touche Échap globale et locale
+        // Récupération des événements prioritaires envoyés par le hook bas niveau Win32
         let mut hook_events = Vec::new();
         if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
             hook_events.append(&mut *q);
@@ -1775,34 +1850,17 @@ impl eframe::App for OverlayApp {
         }
 
         if !is_typing && self.switch_access_mode {
-            let mut egui_digit_pressed = false;
-            for (k, c) in [
-                (egui::Key::Num0, '0'), (egui::Key::Num1, '1'), (egui::Key::Num2, '2'),
-                (egui::Key::Num3, '3'), (egui::Key::Num4, '4'), (egui::Key::Num5, '5'),
-                (egui::Key::Num6, '6'), (egui::Key::Num7, '7'), (egui::Key::Num8, '8'),
-                (egui::Key::Num9, '9'),
-            ] {
-                if ctx.input(|i| i.key_pressed(k)) {
-                    hook_digits.push(c);
-                    egui_digit_pressed = true;
-                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, k));
-                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, k));
-                }
-            }
-
-            if !egui_digit_pressed {
-                ctx.input(|i| {
-                    for ev in &i.events {
-                        if let egui::Event::Text(ref text) = ev {
-                            for ch in text.chars() {
-                                if ch.is_ascii_digit() {
-                                    hook_digits.push(ch);
-                                }
+            ctx.input(|i| {
+                for ev in &i.events {
+                    if let egui::Event::Text(ref text) = ev {
+                        for ch in text.chars() {
+                            if ch.is_ascii_digit() {
+                                hook_digits.push(ch);
                             }
                         }
                     }
-                });
-            }
+                }
+            });
         }
 
         if hook_events.contains(&SwitchKeyEvent::ToggleDictation) {
@@ -1811,12 +1869,15 @@ impl eframe::App for OverlayApp {
             } else {
                 self.enter_dictation_mode();
             }
+            ctx.request_repaint();
         }
         if hook_events.contains(&SwitchKeyEvent::ToggleSwitch) {
             self.toggle_switch_access_mode(None);
+            ctx.request_repaint();
         }
         if hook_events.contains(&SwitchKeyEvent::ToggleVoice) {
             self.set_voice_gender(self.voice_gender.next());
+            ctx.request_repaint();
         }
         if hook_events.contains(&SwitchKeyEvent::Clear) {
             let _ = self.command_sender.send(AgentCommand::ClearHistory);
@@ -1831,6 +1892,7 @@ impl eframe::App for OverlayApp {
             });
             self.live_transcript.clear();
             self.stop_speaking();
+            ctx.request_repaint();
         }
 
         #[cfg(windows)]
@@ -1840,7 +1902,9 @@ impl eframe::App for OverlayApp {
         let hook_escape_hit = hook_events.contains(&SwitchKeyEvent::Escape)
             || (hook_events.contains(&SwitchKeyEvent::Back) && self.numbered_input_buffer.is_empty());
 
-        let egui_backspace_hit = ctx.input(|i| i.key_pressed(egui::Key::Backspace));
+        let egui_backspace_hit = ctx.input(|i| {
+            i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::Backspace, pressed: true, .. }))
+        });
         let backspace_hit = (egui_backspace_hit && !is_typing) || hook_events.contains(&SwitchKeyEvent::Back);
 
         // Si le buffer contient des chiffres, Backspace efface le dernier chiffre sans quitter l'élément
@@ -1850,7 +1914,9 @@ impl eframe::App for OverlayApp {
             ctx.request_repaint();
         }
 
-        let egui_escape_hit = ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        let egui_escape_hit = ctx.input(|i| {
+            i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::Escape, pressed: true, .. }))
+        })
             || (egui_backspace_hit && !is_typing && self.numbered_input_buffer.is_empty());
         let escape_triggered = (egui_escape_hit || hook_escape_hit || global_escape_hit)
             && self.last_switch_input.elapsed() >= Duration::from_millis(200);
@@ -2098,15 +2164,34 @@ impl eframe::App for OverlayApp {
         // Gestion du Switch Access & Survol : défilement séquentiel périodique et validation sur Entrée / Espace
         if self.switch_access_mode && !is_typing {
             let is_shift = ctx.input(|i| i.modifiers.shift);
-            let egui_enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
-            let egui_space = ctx.input(|i| i.key_pressed(egui::Key::Space));
-            let egui_tab = ctx.input(|i| i.key_pressed(egui::Key::Tab));
-            let egui_nav_next = ctx.input(|i| {
-                i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::ArrowDown)
-            }) || (egui_tab && !is_shift);
-            let egui_nav_prev = ctx.input(|i| {
-                i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::ArrowUp)
-            }) || (egui_tab && is_shift);
+            let (egui_enter, egui_space, egui_tab, egui_nav_next, egui_nav_prev) = ctx.input(|i| {
+                let mut enter = false;
+                let mut space = false;
+                let mut tab = false;
+                let mut next = false;
+                let mut prev = false;
+                for ev in &i.events {
+                    match ev {
+                        egui::Event::Key { key, pressed: true, repeat: false, .. } => match key {
+                            egui::Key::Enter => enter = true,
+                            egui::Key::Space => space = true,
+                            egui::Key::Tab => tab = true,
+                            egui::Key::ArrowRight | egui::Key::ArrowDown => next = true,
+                            egui::Key::ArrowLeft | egui::Key::ArrowUp => prev = true,
+                            _ => {}
+                        },
+                        egui::Event::Text(ref text) => {
+                            if text == "\n" || text == "\r" {
+                                enter = true;
+                            } else if text == " " {
+                                space = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                (enter, space, tab, next || (tab && !is_shift), prev || (tab && is_shift))
+            });
 
             let hook_enter_or_space = hook_events.contains(&SwitchKeyEvent::Select);
             let hook_nav_next = hook_events.contains(&SwitchKeyEvent::Next);
@@ -2134,7 +2219,8 @@ impl eframe::App for OverlayApp {
             }
 
             // --- Ingestion des chiffres reçus (hook global pavé numérique ou egui) ---
-            if !hook_digits.is_empty() {
+            // N'ingérer les chiffres pour le ciblage que si l'utilisateur n'est pas dans un champ texte
+            if !is_typing && !hook_digits.is_empty() {
                 if self.status == AgentStatus::Speaking {
                     self.stop_speaking();
                 }
@@ -2220,7 +2306,7 @@ impl eframe::App for OverlayApp {
                             ctx.request_repaint();
                         }
 
-                        if switch_input_hit || ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                        if switch_input_hit {
                             self.last_switch_input = Instant::now();
                             self.switch_auto_scroll = false;
                             self.hover_controls_speech_enabled = false;
@@ -2496,6 +2582,7 @@ impl eframe::App for OverlayApp {
                             } else if cur_target.role == "champ de saisie" || cur_target.role == "zone de texte" {
                                 let click_x = cur_target.click_x;
                                 let click_y = cur_target.click_y;
+                                crate::automation::IS_EXTERNAL_TEXT_INPUT_FOCUSED.store(true, Ordering::SeqCst);
                                 let target_name = if !cur_target.name.is_empty() { cur_target.name.clone() } else { cur_target.role.clone() };
                                 let host_window_id = cur_target.window_id.or(self.switch_active_window_id);
 
@@ -2910,16 +2997,17 @@ impl eframe::App for OverlayApp {
                                 #[cfg(windows)]
                                 {
                                     let hwnd = windows::Win32::Foundation::HWND(hovered_win.id as _);
-                                    if !is_window_hung(hwnd) {
-                                        force_foreground_window(hwnd);
-                                        restore_if_iconic(hwnd);
+                                    focus_and_isolate_window(hwnd);
+                                    let mut r = windows::Win32::Foundation::RECT::default();
+                                    if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut r).is_ok() } {
+                                        draw_screen_orange_border([r.left, r.top, r.right, r.bottom]);
+                                    } else {
+                                        draw_screen_orange_border(hovered_win.rect);
                                     }
-                                    draw_screen_orange_border(hovered_win.rect);
                                 }
                                 #[cfg(not(windows))]
                                 {
-                                    force_foreground_window(&hovered_win.title);
-                                    restore_if_iconic(&hovered_win.title);
+                                    focus_and_isolate_window(&hovered_win.title);
                                 }
                                 // Rafraîchissement direct de l'OCR et des badges de la nouvelle fenêtre survolée
                                 self.refresh_numbered_targets_for_window(hovered_win.id);
@@ -3099,8 +3187,15 @@ impl eframe::App for OverlayApp {
             }
         }
 
-        // Raccourci clavier 'R' pour basculer le micro (désactivé si l'utilisateur est en train de taper du texte)
-        if !self.is_hidden && !is_typing && ctx.input(|i| i.key_pressed(egui::Key::R)) {
+        // Raccourci clavier 'R' pour basculer le micro via Event::Text & Event::Key
+        let r_pressed = !self.is_hidden && !is_typing && ctx.input(|i| {
+            i.events.iter().any(|ev| match ev {
+                egui::Event::Key { key: egui::Key::R, pressed: true, .. } => true,
+                egui::Event::Text(t) => t.eq_ignore_ascii_case("r"),
+                _ => false,
+            })
+        });
+        if r_pressed {
             self.toggle_recording(&ctx);
         }
 
@@ -3114,6 +3209,10 @@ impl eframe::App for OverlayApp {
 
         let time = ctx.input(|i| i.time);
         ctx.request_repaint_after(Duration::from_millis(16));
+
+        if !crate::scheduler::get_active_scheduled_tasks().is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(1000));
+        }
 
         if self.is_hidden {
             self.sync_switch_access_overlays();
@@ -3155,6 +3254,9 @@ impl eframe::App for OverlayApp {
                             tab_assist.clicked()
                         };
                         if assist_activated || is_assist_key_hit {
+                            if self.active_tab != ActiveTab::Assistance {
+                                self.stop_speaking();
+                            }
                             self.active_tab = ActiveTab::Assistance;
                         }
                         let chat_title = if self.twitch_messages.is_empty() {
@@ -3172,7 +3274,13 @@ impl eframe::App for OverlayApp {
                             tab_chat.clicked()
                         };
                         if chat_activated || is_chat_key_hit {
+                            if self.active_tab != ActiveTab::Chat {
+                                self.stop_speaking();
+                            }
                             self.active_tab = ActiveTab::Chat;
+                            if self.twitch_search_results.is_empty() {
+                                let _ = self.command_sender.send(AgentCommand::SearchTwitch(String::new()));
+                            }
                         }
                         tab_bar_max_x = tab_assist.rect.max.x.max(tab_chat.rect.max.x);
 
@@ -3275,7 +3383,13 @@ impl eframe::App for OverlayApp {
                                     egui::StrokeKind::Outside,
                                 );
                             }
-                            let is_avatar_key_hit = avatar_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
+                            let is_avatar_key_hit = avatar_resp.has_focus() && ui.input(|i| {
+                                i.events.iter().any(|ev| match ev {
+                                    egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                    egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                    _ => false,
+                                })
+                            });
                             if self.status == AgentStatus::Speaking {
                                 if avatar_resp.hovered() {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -3437,24 +3551,40 @@ impl eframe::App for OverlayApp {
                                         let input_id = egui::Id::NULL.with("prompt_input_text");
                                         let is_input_focused = ctx.memory(|m| m.has_focus(input_id));
                                         let is_modal_open = self.show_api_key_modal;
-                                        let is_other_typing = ctx.memory(|m| {
-                                            m.has_focus(egui::Id::NULL.with("api_key_input_field"))
-                                                || m.has_focus(egui::Id::NULL.with("model_input_field"))
-                                        });
+                                        let is_other_typing = ctx.egui_wants_keyboard_input() && !is_input_focused;
 
-                                        // Autocomplétion de la première suggestion via la touche Tab
-                                        if let Some(top_sug) = self.input_suggestions.first() {
-                                            if is_input_focused && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
+                                        // Dépouillement des événements clavier de la file egui (support des overriders / remappeurs)
+                                        let mut enter_from_events = false;
+                                        let mut tab_from_events = false;
+                                        if is_input_focused && !is_modal_open && !is_other_typing {
+                                            ctx.input(|i| {
+                                                for ev in &i.events {
+                                                    match ev {
+                                                        egui::Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. } if !modifiers.shift => {
+                                                            enter_from_events = true;
+                                                        }
+                                                        egui::Event::Key { key: egui::Key::Tab, pressed: true, .. } => {
+                                                            tab_from_events = true;
+                                                        }
+                                                        egui::Event::Text(ref text) if text == "\n" || text == "\r" => {
+                                                            enter_from_events = true;
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            });
+                                        }
+
+                                        // Autocomplétion de la première suggestion via Tab
+                                        if tab_from_events {
+                                            if let Some(top_sug) = self.input_suggestions.first() {
                                                 autocomplete_input_to = Some(t!("ui.open_app_cmd", app = top_sug).to_string());
                                                 ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
                                             }
                                         }
 
-                                        // Interception de la touche Entrée (sans Shift) AVANT que TextEdit n'insère un saut de ligne
-                                        let enter_pressed_before = is_input_focused
-                                            && !is_modal_open
-                                            && !is_other_typing
-                                            && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                                        // Interception de la touche Entrée avant TextEdit
+                                        let enter_pressed_before = enter_from_events;
 
                                         if enter_pressed_before {
                                             enter_hit = true;
@@ -3468,9 +3598,12 @@ impl eframe::App for OverlayApp {
                                         }
 
                                         let paste_hit = ctx.input(|i| {
-                                            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
-                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::V))
-                                                || (i.modifiers.shift && i.key_pressed(egui::Key::Insert))
+                                            i.events.iter().any(|e| match e {
+                                                egui::Event::Paste(_) => true,
+                                                egui::Event::Key { key: egui::Key::V, pressed: true, modifiers, .. } if modifiers.ctrl || modifiers.command => true,
+                                                egui::Event::Key { key: egui::Key::Insert, pressed: true, modifiers, .. } if modifiers.shift => true,
+                                                _ => false,
+                                            })
                                         });
 
                                         let mut pending_paste_fallback: Option<String> = None;
@@ -3515,17 +3648,26 @@ impl eframe::App for OverlayApp {
                                         }
 
                                         let prev_text = self.input_text.clone();
-                                        let response = ui.add_sized(
-                                            [edit_width, 54.0],
-                                            egui::TextEdit::multiline(&mut self.input_text)
-                                                .desired_rows(3)
-                                                .id(input_id)
-                                                .hint_text(if self.is_recording {
-                                                    t!("ui.prompt_hint_listening")
-                                                } else {
-                                                    t!("ui.prompt_hint_idle")
-                                                }),
+                                        let hint = if self.is_recording {
+                                            t!("ui.prompt_hint_listening").to_string()
+                                        } else {
+                                            t!("ui.prompt_hint_idle").to_string()
+                                        };
+                                        let response = render_accessible_input(
+                                            ui,
+                                            input_id,
+                                            &mut self.input_text,
+                                            &hint,
+                                            true,
+                                            Some(edit_width),
+                                            Some(54.0),
+                                            false,
+                                            &theme,
                                         );
+
+                                        if response.has_focus() {
+                                            crate::automation::IS_USER_TYPING.store(true, Ordering::Relaxed);
+                                        }
 
                                         if let Some(pasted) = pending_paste_fallback {
                                             if self.input_text == prev_text {
@@ -3568,8 +3710,11 @@ impl eframe::App for OverlayApp {
                                         });
 
                                         let copy_hit = ctx.input(|i| {
-                                            i.events.iter().any(|e| matches!(e, egui::Event::Copy))
-                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
+                                            i.events.iter().any(|e| match e {
+                                                egui::Event::Copy => true,
+                                                egui::Event::Key { key: egui::Key::C, pressed: true, modifiers, .. } if modifiers.ctrl || modifiers.command => true,
+                                                _ => false,
+                                            })
                                         });
                                         if (response.has_focus() || is_input_focused) && copy_hit && !self.input_text.is_empty() {
                                             set_clipboard_text(&self.input_text);
@@ -3578,8 +3723,11 @@ impl eframe::App for OverlayApp {
                                         }
 
                                         let cut_hit = ctx.input(|i| {
-                                            i.events.iter().any(|e| matches!(e, egui::Event::Cut))
-                                                || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::X))
+                                            i.events.iter().any(|e| match e {
+                                                egui::Event::Cut => true,
+                                                egui::Event::Key { key: egui::Key::X, pressed: true, modifiers, .. } if modifiers.ctrl || modifiers.command => true,
+                                                _ => false,
+                                            })
                                         });
                                         if (response.has_focus() || is_input_focused) && cut_hit && !self.input_text.is_empty() {
                                             set_clipboard_text(&self.input_text);
@@ -3590,6 +3738,17 @@ impl eframe::App for OverlayApp {
 
                                         if response.changed() {
                                             self.stop_speaking();
+                                        }
+
+                                        // Validation immédiate sur appui Entrée dans le TextEdit sans Shift
+                                        let shift_down = ctx.input(|i| i.modifiers.shift);
+                                        if response.has_focus() && !shift_down {
+                                            if self.input_text.ends_with('\n') || self.input_text.ends_with('\r') {
+                                                while self.input_text.ends_with('\n') || self.input_text.ends_with('\r') {
+                                                    self.input_text.pop();
+                                                }
+                                                enter_hit = true;
+                                            }
                                         }
 
                                         if let Some(completed) = autocomplete_input_to {
@@ -3610,6 +3769,7 @@ impl eframe::App for OverlayApp {
                                             self.input_suggestions.clear();
                                             self.last_suggestion_query.clear();
                                             self.live_transcript.clear();
+                                            self.auto_scroll_to_bottom = true;
                                             self.chat_history.push(ChatEntry {
                                                 role: ChatRole::User,
                                                 text: prompt.clone(),
@@ -3622,8 +3782,13 @@ impl eframe::App for OverlayApp {
                                         }
 
                                         if !enter_hit && !is_modal_open && !is_other_typing {
-                                            enter_hit = response.has_focus()
-                                                && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                                            enter_hit = enter_from_events || (response.has_focus() && ctx.input(|i| {
+                                                i.events.iter().any(|e| match e {
+                                                    egui::Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. } if !modifiers.shift => true,
+                                                    egui::Event::Text(t) if t == "\n" || t == "\r" => true,
+                                                    _ => false,
+                                                })
+                                            }));
                                             if enter_hit {
                                                 ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                                                 while self.input_text.ends_with('\n') || self.input_text.ends_with('\r') {
@@ -3653,7 +3818,13 @@ impl eframe::App for OverlayApp {
                                             Some(egui::Color32::from_rgb(0, 165, 245)),
                                         );
                                         let (analyze_dwell, _) = self.dwell_state.update(analyze_id, analyze_resp.hovered());
-                                        let is_analyze_key = analyze_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
+                                        let is_analyze_key = analyze_resp.has_focus() && ui.input(|i| {
+                                            i.events.iter().any(|ev| match ev {
+                                                egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                                egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                                _ => false,
+                                            })
+                                        });
                                         let analyze_btn_hit = analyze_resp.clicked() || analyze_dwell || is_analyze_key;
                                         let enter_with_text = enter_hit && !self.input_text.trim().is_empty();
 
@@ -3666,6 +3837,7 @@ impl eframe::App for OverlayApp {
                                             self.continuous_mode = true;
                                             self.input_suggestions.clear();
                                             self.last_suggestion_query.clear();
+                                            self.auto_scroll_to_bottom = true;
                                             let typed_raw = std::mem::take(&mut self.input_text).trim().to_string();
                                             let prompt_raw = if analyze_btn_hit && typed_raw.is_empty() {
                                                 t!("commands.analyze_screen_prompt").to_string()
@@ -3773,6 +3945,14 @@ impl eframe::App for OverlayApp {
                                                     quick_suggestions: Vec::new(),
                                                     screen_size_kb: None,
                                                 });
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: feedback.to_string(),
+                            timestamp: current_time_str(),
+                            quick_suggestions: Vec::new(),
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(feedback.to_string()));
                                                 self.status = AgentStatus::Idle;
                                                 return;
                                             }
@@ -3856,7 +4036,13 @@ impl eframe::App for OverlayApp {
                                             None,
                                         );
                                         let (mic_dwell, _) = self.dwell_state.update(mic_id, mic_resp.hovered());
-                                        let is_mic_key = mic_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
+                                        let is_mic_key = mic_resp.has_focus() && ui.input(|i| {
+                                            i.events.iter().any(|ev| match ev {
+                                                egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                                egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                                _ => false,
+                                            })
+                                        });
                                         if mic_resp.clicked() || mic_dwell || is_mic_key {
                                             self.toggle_recording(ui.ctx());
                                         }
@@ -3876,7 +4062,13 @@ impl eframe::App for OverlayApp {
                                             None,
                                         );
                                         let (dict_dwell, _) = self.dwell_state.update(dict_id, dict_resp.hovered());
-                                        let is_dict_key = dict_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
+                                        let is_dict_key = dict_resp.has_focus() && ui.input(|i| {
+                                            i.events.iter().any(|ev| match ev {
+                                                egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                                egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                                _ => false,
+                                            })
+                                        });
                                         if dict_resp.clicked() || dict_dwell || is_dict_key {
                                             if self.dictation_mode {
                                                 self.exit_dictation_mode();
@@ -3900,7 +4092,13 @@ impl eframe::App for OverlayApp {
                                             None,
                                         );
                                         let (switch_dwell, _) = self.dwell_state.update(switch_id, switch_resp.hovered());
-                                        let is_switch_key = switch_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
+                                        let is_switch_key = switch_resp.has_focus() && ui.input(|i| {
+                                            i.events.iter().any(|ev| match ev {
+                                                egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                                egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                                _ => false,
+                                            })
+                                        });
                                         if switch_resp.clicked() || switch_dwell || is_switch_key {
                                             self.toggle_switch_access_mode(None);
                                         }
@@ -3919,7 +4117,13 @@ impl eframe::App for OverlayApp {
                                             None,
                                         );
                                         let (settings_dwell, _) = self.dwell_state.update(settings_id, settings_resp.hovered());
-                                        let is_settings_key = settings_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
+                                        let is_settings_key = settings_resp.has_focus() && ui.input(|i| {
+                                            i.events.iter().any(|ev| match ev {
+                                                egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                                egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                                _ => false,
+                                            })
+                                        });
                                         if settings_resp.clicked() || settings_dwell || is_settings_key {
                                             self.settings_tab = SettingsTab::LlmProvider;
                                             self.show_api_key_modal = true;
@@ -3942,7 +4146,13 @@ impl eframe::App for OverlayApp {
                                             None,
                                         );
                                         let (clear_dwell, _) = self.dwell_state.update(clear_id, clear_resp.hovered());
-                                        let is_clear_key = clear_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
+                                        let is_clear_key = clear_resp.has_focus() && ui.input(|i| {
+                                            i.events.iter().any(|ev| match ev {
+                                                egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                                egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                                _ => false,
+                                            })
+                                        });
                                         if clear_resp.clicked() || clear_dwell || is_clear_key {
                                             let _ = self.command_sender.send(AgentCommand::ClearHistory);
                                             self.chat_history.clear();
@@ -3975,14 +4185,28 @@ impl eframe::App for OverlayApp {
                 );
 
                 ui.scope_builder(egui::UiBuilder::new().max_rect(messages_rect), |ui| {
+                    ui.set_clip_rect(messages_rect);
                     match self.active_tab {
                         ActiveTab::Assistance => {
-                            let max_scroll_h = (messages_rect.height()).max(20.0);
+                            // Encadré accessible des rappels & minuteurs en cours
+                            if let Some(reminder_feedback) = draw_active_reminders_box(ui, &theme, &mut self.dwell_state) {
+                                self.chat_history.push(ChatEntry {
+                                    role: ChatRole::Agent,
+                                    text: reminder_feedback.clone(),
+                                    timestamp: current_time_str(),
+                                    quick_suggestions: Vec::new(),
+                                    screen_size_kb: None,
+                                });
+                                let _ = self.tts_sender.send(TtsCommand::Speak(reminder_feedback));
+                            }
+                            ui.add_space(2.0);
+
+                            let max_scroll_h = (messages_rect.height()).max(30.0);
                             let scroll_out = egui::ScrollArea::vertical()
                                 .id_salt("assistance_chat_scroll")
                                 .stick_to_bottom(true)
                                 .max_height(max_scroll_h)
-                                .auto_shrink([false, true])
+                                .auto_shrink([false, false])
                                 .show(ui, |ui| {
                                     let last_user_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::User);
                                     let last_agent_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::Agent);
@@ -4112,8 +4336,11 @@ impl eframe::App for OverlayApp {
 
                                             // Copie au clavier Ctrl+C dès que le message a le focus clavier (ou au survol sans focus actif ailleurs)
                                             let copy_msg_hit = ctx.input(|i| {
-                                                i.events.iter().any(|e| matches!(e, egui::Event::Copy))
-                                                    || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
+                                                i.events.iter().any(|e| match e {
+                                                    egui::Event::Copy => true,
+                                                    egui::Event::Key { key: egui::Key::C, pressed: true, modifiers, .. } if modifiers.ctrl || modifiers.command => true,
+                                                    _ => false,
+                                                })
                                             });
                                             let should_copy = effective_focused
                                                 || (interact_resp.hovered() && ui.memory(|m| m.focused().is_none()));
@@ -4286,7 +4513,14 @@ impl eframe::App for OverlayApp {
                                     if request_stop_speaking {
                                         self.stop_speaking();
                                     }
+
+                                    if self.auto_scroll_to_bottom || self.is_streaming_narration || is_speaking {
+                                        ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+                                    }
                                 });
+                            if self.auto_scroll_to_bottom {
+                                self.auto_scroll_to_bottom = false;
+                            }
                             computed_chat_h = (scroll_out.content_size.y + 44.0).clamp(min_chat_h, max_chat_h);
                         }
                         ActiveTab::Chat => {
@@ -4298,61 +4532,142 @@ impl eframe::App for OverlayApp {
                                             .size(11.0)
                                             .color(egui::Color32::from_rgb(170, 185, 205)),
                                     );
-                                    ui.hyperlink_to(
-                                        egui::RichText::new(format!("#{}", self.current_twitch_channel))
-                                            .size(11.0)
-                                            .color(egui::Color32::from_rgb(0, 195, 255))
-                                            .underline(),
-                                        format!("https://twitch.tv/{}", self.current_twitch_channel),
-                                    );
+                                    let ch_link = ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!("#{}", self.current_twitch_channel))
+                                                .size(11.0)
+                                                .color(egui::Color32::from_rgb(0, 195, 255))
+                                                .underline(),
+                                        )
+                                        .sense(egui::Sense::click()),
+                                    ).on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    if ch_link.clicked() {
+                                        open_browser_smart(&format!("https://twitch.tv/{}", self.current_twitch_channel));
+                                    }
                                     ui.separator();
                                 }
 
-                                let search_edit = ui.add_sized(
-                                    [110.0, 18.0],
-                                    egui::TextEdit::singleline(&mut self.twitch_search_query)
-                                        .hint_text(t!("ui.twitch_search_hint")),
+                                let search_id = egui::Id::NULL.with("twitch_search_query_input");
+                                let search_hint = t!("ui.twitch_search_hint").to_string();
+                                let search_edit = render_accessible_input(
+                                    ui,
+                                    search_id,
+                                    &mut self.twitch_search_query,
+                                    &search_hint,
+                                    false,
+                                    Some(110.0),
+                                    Some(18.0),
+                                    false,
+                                    &theme,
                                 );
-                                let enter_pressed = search_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                if (ui.small_button("🔍").clicked() || enter_pressed) && !self.twitch_search_query.trim().is_empty() {
+                                let enter_pressed = search_edit.lost_focus() && ui.input(|i| {
+                                    i.events.iter().any(|e| match e {
+                                        egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => true,
+                                        egui::Event::Text(t) if t == "\n" || t == "\r" => true,
+                                        _ => false,
+                                    })
+                                });
+                                if ui.small_button("🔍").clicked() || enter_pressed {
                                     let _ = self.command_sender.send(AgentCommand::SearchTwitch(
                                         self.twitch_search_query.trim().to_string(),
                                     ));
                                 }
-                            });
-
-                            if !self.twitch_search_results.is_empty() {
-                                ui.add_space(2.0);
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(t!("ui.twitch_results_label"))
-                                            .size(10.5)
-                                            .color(egui::Color32::from_rgb(255, 215, 120)),
-                                    );
-                                    let mut selected_channel = None;
-                                    for ch in &self.twitch_search_results {
-                                        if ui.small_button(format!("▶ {}", ch.display_name)).on_hover_text(t!("ui.twitch_join_tooltip")).clicked() {
-                                            selected_channel = Some(ch.login.clone());
-                                        }
-                                        if ui.small_button("↗").on_hover_text(t!("ui.twitch_open_tooltip")).clicked() {
-                                            ui.ctx().open_url(egui::OpenUrl::new_tab(format!("https://twitch.tv/{}", ch.login)));
-                                        }
-                                    }
-                                    if let Some(ch) = selected_channel {
-                                        self.current_twitch_channel = ch.clone();
-                                        let _ = self.twitch_channel_sender.send(ch);
-                                        self.twitch_messages.clear();
+                                if !self.twitch_search_results.is_empty() {
+                                    if ui.small_button("✕").on_hover_text(t!("ui.btn_close")).clicked() {
                                         self.twitch_search_results.clear();
                                     }
-                                });
+                                }
+                            });
+
+                            let mut search_viewport_h = 0.0;
+                            if !self.twitch_search_results.is_empty() {
+                                ui.add_space(3.0);
+                                let live_count = self.twitch_search_results.iter().filter(|c| c.is_live).count();
+                                let total_count = self.twitch_search_results.len();
+
+                                draw_twitch_filter_bar(ui, &mut self.twitch_filter, live_count, total_count, &theme);
+                                ui.add_space(2.0);
+
+                                let max_search_h = if self.twitch_messages.is_empty() {
+                                    (messages_rect.height() - 65.0).max(60.0)
+                                } else {
+                                    ((messages_rect.height() - 75.0) * 0.45).clamp(55.0, 130.0)
+                                };
+
+                                let mut selected_channel = None;
+                                let search_scroll = egui::ScrollArea::vertical()
+                                    .id_salt("twitch_search_results_scroll")
+                                    .max_height(max_search_h)
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        let btn_w = 24.0;
+                                        let spacing = 4.0;
+                                        let total_row_w = ui.available_width();
+                                        let item_w = (total_row_w - btn_w - spacing).max(80.0);
+
+                                        for ch in self.twitch_search_results.iter().filter(|c| self.twitch_filter.matches(c)) {
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = spacing;
+                                                let resp = draw_twitch_channel_search_item(ui, ch, &theme, item_w);
+                                                if resp.clicked() {
+                                                    selected_channel = Some(ch.login.clone());
+                                                }
+                                                if ui.add_sized([btn_w, 28.0], egui::Button::new("↗")).on_hover_text(t!("ui.twitch_open_tooltip")).clicked() {
+                                                    open_browser_smart(&format!("https://twitch.tv/{}", ch.login));
+                                                }
+                                            });
+                                            ui.add_space(1.0);
+                                        }
+                                    });
+
+                                search_viewport_h = search_scroll.content_size.y.min(max_search_h) + 36.0;
+
+                                if let Some(ch) = selected_channel {
+                                    self.current_twitch_channel = ch.clone();
+                                    let _ = self.twitch_channel_sender.send(ch);
+                                    self.twitch_messages.clear();
+                                    self.twitch_search_results.clear();
+                                }
                             }
                             ui.separator();
-                            let max_chat_scroll_h = (messages_rect.height() - 28.0).max(20.0);
+
+                            // En-tête du canal avec bouton pour rejoindre sur Twitch
+                            let mut channel_header_h = 0.0;
+                            if !self.current_twitch_channel.is_empty() {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("💬 Chat #{}", self.current_twitch_channel))
+                                            .size(11.0)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(169, 112, 255)),
+                                    );
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        let join_btn = ui.add(
+                                            egui::Button::new(
+                                                egui::RichText::new("🌐 Rejoindre sur Twitch")
+                                                    .size(10.5)
+                                                    .strong()
+                                                    .color(egui::Color32::from_rgb(220, 245, 255)),
+                                            )
+                                            .fill(egui::Color32::from_rgba_unmultiplied(145, 70, 255, 60))
+                                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(145, 70, 255)))
+                                            .corner_radius(egui::CornerRadius::same(6)),
+                                        ).on_hover_text(format!("Ouvrir le stream de {} sur Twitch dans le navigateur", self.current_twitch_channel));
+                                        if join_btn.clicked() {
+                                            open_browser_smart(&format!("https://twitch.tv/{}", self.current_twitch_channel));
+                                        }
+                                    });
+                                });
+                                ui.add_space(2.0);
+                                channel_header_h = 24.0;
+                            }
+
+                            let max_chat_scroll_h = (messages_rect.height() - 28.0 - search_viewport_h - channel_header_h).max(30.0);
                             let scroll_out = egui::ScrollArea::vertical()
                                 .id_salt("twitch_chat_scroll")
                                 .stick_to_bottom(true)
                                 .max_height(max_chat_scroll_h)
-                                .auto_shrink([false, true])
+                                .auto_shrink([false, false])
                                 .show(ui, |ui| {
                                     if self.twitch_messages.is_empty() {
                                         ui.label(
@@ -4406,8 +4721,11 @@ impl eframe::App for OverlayApp {
                                             }
                                             let effective_t_focused = is_t_focused || resp.has_focus();
                                             let copy_t_hit = ctx.input(|i| {
-                                                i.events.iter().any(|e| matches!(e, egui::Event::Copy))
-                                                    || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::C))
+                                                i.events.iter().any(|e| match e {
+                                                    egui::Event::Copy => true,
+                                                    egui::Event::Key { key: egui::Key::C, pressed: true, modifiers, .. } if modifiers.ctrl || modifiers.command => true,
+                                                    _ => false,
+                                                })
                                             });
                                             if (effective_t_focused || resp.hovered()) && copy_t_hit {
                                                 let text = format!("{}: {}", msg.author, msg.text);
@@ -4437,9 +4755,16 @@ impl eframe::App for OverlayApp {
                                                 ctx.request_repaint();
                                             }
                                         }
+
+                                    if self.auto_scroll_to_bottom {
+                                        ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+                                    }
                                     }
                                 });
-                            computed_chat_h = (scroll_out.content_size.y + 72.0).clamp(min_chat_h, max_chat_h);
+                            if self.auto_scroll_to_bottom {
+                                self.auto_scroll_to_bottom = false;
+                            }
+                            computed_chat_h = (scroll_out.content_size.y + search_viewport_h + 72.0).clamp(min_chat_h, max_chat_h);
                         }
                     }
                 });
@@ -4643,6 +4968,13 @@ impl eframe::App for OverlayApp {
                 }
             });
     }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        #[cfg(windows)]
+        {
+            crate::automation::uninstall_switch_keyboard_hook();
+        }
+    }
 }
 
 fn fix_startup_working_directory() {
@@ -4671,19 +5003,15 @@ fn spawn_event_wake_watcher(
             while let Ok(event) = incoming_rx.recv() {
                 let should_wake = matches!(
                     event,
-                    AgentEvent::NarrationStart
-                        | AgentEvent::ReplaceNarration { .. }
-                        | AgentEvent::TwitchChatReceived(_)
-                        | AgentEvent::VoicePromptReady(_)
+                    AgentEvent::VoicePromptReady(_)
+                        | AgentEvent::ReminderTriggered { .. }
                 );
 
                 if should_wake {
                     #[cfg(windows)]
                     unsafe {
                         use windows::core::w;
-                        use windows::Win32::UI::WindowsAndMessaging::{
-                            FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
-                        };
+                        use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SetForegroundWindow, SW_RESTORE};
                         let overlay = FindWindowW(None, w!("Libertide overlay"))
                             .unwrap_or(windows::Win32::Foundation::HWND(std::ptr::null_mut()));
                         if !overlay.0.is_null() {
@@ -4721,8 +5049,8 @@ fn run_overlay_gui(
         .with_transparent(true)
         .with_always_on_top()
         .with_resizable(true)
-        .with_min_inner_size([380.0, 158.0])
-        .with_inner_size([560.0, 196.0]);
+        .with_min_inner_size([380.0, 264.0])
+        .with_inner_size([560.0, 280.0]);
 
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../public/favicon-256x256.png")) {
         viewport = viewport.with_icon(Arc::new(icon));

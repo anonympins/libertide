@@ -457,6 +457,29 @@ pub struct TwitchChannelItem {
     pub login: String,
     pub display_name: String,
     pub profile_image_url: Option<String>,
+    #[serde(default)]
+    pub is_live: bool,
+    #[serde(default)]
+    pub viewers_count: Option<u32>,
+    #[serde(default)]
+    pub stream_title: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TwitchFilter {
+    #[default]
+    All,
+    LiveOnly,
+}
+
+impl TwitchFilter {
+    #[inline]
+    pub fn matches(&self, item: &TwitchChannelItem) -> bool {
+        match self {
+            Self::All => true,
+            Self::LiveOnly => item.is_live,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -515,12 +538,21 @@ pub enum AgentEvent {
         text: String,
         spectrum: [f32; 16],
     },
+    OpenTwitchChannel {
+        channel: String,
+        open_stream: bool
+    },
+    SwitchTab(ActiveTab),
     LiveSubtitlesClosed,
     NavigationZonesReady {
         window_id: isize,
         window_title: String,
         summary: String,
         zones: Vec<NavigationZone>,
+    },
+    ReminderTriggered {
+        label: String,
+        prompt: String,
     },
 }
 
@@ -756,11 +788,26 @@ pub enum AgentAction {
         delay_seconds: u64,
         #[serde(default, alias = "instruction", alias = "command", alias = "text")]
         prompt: String,
+        #[serde(default, alias = "name", alias = "title")]
+        label: Option<String>,
     },
     #[serde(alias = "schedule_tasks", alias = "delayed_prompts")]
     SchedulePrompts {
         #[serde(default, alias = "prompts", alias = "scheduled_tasks", alias = "items")]
         tasks: Vec<ScheduledTaskItem>,
+    },
+    #[serde(alias = "schedule_cron", alias = "cron", alias = "cronjob")]
+    ScheduleCron {
+        #[serde(default, alias = "expression", alias = "spec", alias = "schedule")]
+        cron: String,
+        #[serde(default, alias = "instruction", alias = "command", alias = "text")]
+        prompt: String,
+        #[serde(default, alias = "name", alias = "title")]
+        label: Option<String>,
+    },
+    #[serde(alias = "cancel_task", alias = "cancel_reminder", alias = "supprimer_rappel")]
+    CancelScheduledTask {
+        id: u64,
     },
     #[serde(alias = "cancel_scheduled_prompts", alias = "clear_scheduled_tasks", alias = "cancel_timers", alias = "annuler_differe")]
     CancelScheduledTasks,
@@ -807,6 +854,16 @@ pub enum AgentAction {
     NextNumberedChunk,
     #[serde(alias = "prev_badges", alias = "badges_precedents")]
     PreviousNumberedChunk,
+    #[serde(alias = "open_twitch", alias = "twitch_chat", alias = "twitch")]
+    OpenTwitchChat {
+        channel: String,
+        #[serde(default)]
+        open_stream: Option<bool>,
+    },
+    #[serde(alias = "change_tab", alias = "select_tab")]
+    SwitchTab {
+        tab: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -882,8 +939,16 @@ impl QuickSuggestionItem {
                 AgentAction::SetReasoningPasses { passes, .. } => {
                     Some(format!("Ajuster à {passes} passes"))
                 }
-                AgentAction::SchedulePrompt { delay_seconds, prompt } => {
-                    Some(format!("Différer ({delay_seconds}s) : {prompt}"))
+                AgentAction::SchedulePrompt { delay_seconds, prompt, label } => {
+                    let title = label.as_deref().unwrap_or(prompt);
+                    Some(format!("Différer ({delay_seconds}s) : {title}"))
+                }
+                AgentAction::ScheduleCron { cron, prompt, label } => {
+                    let title = label.as_deref().unwrap_or(prompt);
+                    Some(format!("Cron ({cron}) : {title}"))
+                }
+                AgentAction::CancelScheduledTask { id } => {
+                    Some(format!("Annuler le rappel #{id}"))
                 }
                 AgentAction::SchedulePrompts { tasks } => {
                     Some(format!("Planifier {} tâche(s) différée(s)", tasks.len()))
@@ -908,6 +973,8 @@ impl QuickSuggestionItem {
                         Some("Désactiver les sous-titres".to_string())
                     }
                 }
+                AgentAction::OpenTwitchChat { channel, .. } => Some(format!("Ouvrir le chat #{channel}")),
+                AgentAction::SwitchTab { tab } => Some(format!("Basculer vers l'onglet {tab}")),
                 _ => None,
             },
         }

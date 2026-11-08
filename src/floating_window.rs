@@ -861,10 +861,18 @@ impl FloatingCard {
                                                             .strong(),
                                                     );
                                                     ui.add_space(1.0);
-                                                    let edit = egui::TextEdit::singleline(value)
-                                                        .hint_text(placeholder.as_str())
-                                                        .desired_width(ui.available_width());
-                                                    ui.add(edit);
+                                                    let field_input_id = egui::Id::NULL.with(format!("form_field_{}_{}", card_id, field.id));
+                                                    crate::overlay::render_accessible_input(
+                                                        ui,
+                                                        field_input_id,
+                                                        value,
+                                                        placeholder.as_str(),
+                                                        false,
+                                                        Some(ui.available_width()),
+                                                        None,
+                                                        false,
+                                                        theme,
+                                                    );
                                                 }
                                                 FormFieldType::NumberSlider { min, max, step, value, unit } => {
                                                     ui.horizontal(|ui| {

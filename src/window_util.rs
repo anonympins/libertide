@@ -13,6 +13,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, GetWindowTextLengthW, GetWindowTextW, IsIconic, IsWindowVisible,
     SetForegroundWindow, SetWindowPos, ShowWindow, SystemParametersInfoW, SM_CXSCREEN,
     SM_CYSCREEN, SPI_GETWORKAREA, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE, SW_RESTORE,
+    SW_SHOWMINNOACTIVE,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
@@ -1820,6 +1821,84 @@ pub fn launch_browser_new_window(url: &str) -> Option<HWND> {
         }
     }
     None
+}
+
+/// Met la fenêtre cible au premier plan et la maximise, tout en minimisant les autres fenêtres pour un confort visuel optimal
+#[cfg(windows)]
+pub fn focus_and_isolate_window(target: HWND) {
+    if target.0.is_null() || is_window_hung(target) {
+        return;
+    }
+
+    let overlay_hwnd = unsafe {
+        FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()))
+    };
+    let current_pid = std::process::id();
+
+    let user_wins = list_user_windows();
+    for (h, title) in user_wins {
+        if h == target || h.0.is_null() || h == overlay_hwnd {
+            continue;
+        }
+        let (pid, _) = get_window_process_info(h);
+        if pid == current_pid {
+            continue;
+        }
+        let t_low = title.to_lowercase();
+        if t_low.contains("libertide") || t_low.contains("program manager") || t_low.contains("notification") {
+            continue;
+        }
+
+        unsafe {
+            if !IsIconic(h).as_bool() {
+                let _ = ShowWindow(h, SW_SHOWMINNOACTIVE);
+            }
+        }
+    }
+
+    unsafe {
+        let _ = ShowWindow(target, SW_MAXIMIZE);
+    }
+    crate::automation::force_foreground_window(target);
+}
+
+#[cfg(not(windows))]
+pub fn focus_and_isolate_window(target: impl crate::automation::AsWindowTarget) {
+    let t = target.to_window_target();
+    crate::automation::force_foreground_window(&t);
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            r#"tell application "System Events"
+                set frontProc to (first process whose name contains "{t}")
+                tell frontProc
+                    set value of attribute "AXFullScreen" of front window to true
+                end tell
+            end tell"#
+        );
+        let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let user_wins = list_user_windows();
+        for (win_id, title) in user_wins {
+            if title.to_lowercase().contains(&t.to_lowercase()) || win_id == t {
+                continue;
+            }
+            let _ = std::process::Command::new("xdotool")
+                .args(["windowminimize", &win_id])
+                .status();
+        }
+        if t.starts_with("0x") || t.starts_with("0X") {
+            let _ = std::process::Command::new("wmctrl")
+                .args(["-i", "-r", &t, "-b", "add,maximized_vert,maximized_horz"])
+                .status();
+        } else {
+            let _ = std::process::Command::new("wmctrl")
+                .args(["-r", &t, "-b", "add,maximized_vert,maximized_horz"])
+                .status();
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

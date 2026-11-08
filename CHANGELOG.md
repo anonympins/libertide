@@ -3,6 +3,55 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.7.3] - 2026-11-14
+
+### 📺 Twitch Channel State & Stream Metadata (`twitch.rs`, `types.rs`, `overlay.rs`, `main.rs`)
+- **Advanced Stream Audience & Title Inspection (`check_channels_live_details`)**:
+  - Enriched Twitch GraphQL queries (`gql.twitch.tv`) to simultaneously query live broadcast status (`is_live`), exact viewer count (`viewers_count`), stream title (`stream_title`), and broadcast settings.
+  - Added `stream_title` support to `TwitchChannelItem` with dual-line rendering in channel search cards.
+  - **Logarithmic Activity Color Gradient (`twitch_live_activity_colors`)**:
+    - Normalized color scale across audience size (from 1 to 50,000+ viewers): soft mint green, vivid neon green, electric cyan, golden amber, coral orange, up to magenta/violet for high-traffic broadcasts.
+    - Dynamic pulsing glow halo (`halo_radius`, `halo_color`) around the live status indicator dot.
+  - **Seamless Stream Navigation**:
+    - Added direct *"🌐 Join on Twitch"* action button in the active chat header to launch the live stream in the default browser.
+    - Added optional `open_stream: bool` parameter to `AgentAction::OpenTwitchChat`.
+
+### 🪟 Window Detection, Refocus & Resilience (`commands.rs`, `agent_backend.rs`, `local_llm.rs`)
+- **Native `focus_window` Action by PID and Title**:
+  - Extended `AgentAction::FocusWindow` to target windows by title (`title`) or process ID (`pid`).
+  - Native Win32 foreground handling chaining `AttachThreadInput`, `BringWindowToTop`, `SetForegroundWindow`, and foreground unlocking (`LockSetForegroundWindow` / `AllowSetForegroundWindow`) without altering cursor location or text selection.
+- **Semantic Intent Routing & Occlusion Resilience (`CommandTag::FocusWindow`)**:
+  - Introduced `FocusWindow` command tag in the LLM intent taxonomy (detecting window switching requests like *"bring to front"*, *"focus window"*, *"switch to"*).
+  - **Blind Click Guardrail**: If the agent detects that target controls reside on an occluded or background window, blind clicking is prevented and an explicit `focus_window` action is issued first with `next_passes > 0`.
+  - Automated rollback triggering (`undo_last_system_action`) when an action execution report flags an unreachable target or hung window.
+
+### ⏰ Advanced Scheduler & Ethical Proactive Companion (`scheduler.rs`, `types.rs`, `overlay.rs`, `main.rs`)
+- **Recurring Scheduling with Cron Expressions (`schedule_cron`, `next_cron_delay`)**:
+  - Added support for periodic and cron expressions (`@hourly`, `@daily`, `@weekly`, `every 30m`, `every 2h`, `*/15 * * * *`).
+  - Dynamic deadline recalculation following each trigger without timing drift.
+  - Granular task removal by ID (`CancelScheduledTask { id }` / `cancel_scheduled_task_by_id`).
+- **Heuristic Reminder Labeling (`generate_task_label`)**:
+  - Automatic syntactic cleanup of prompt formulas (*"Remind me to..."*, *"Timer for..."*) to generate concise labels for UI displays and voice announcements.
+- **Active Timers & Reminders Dashboard (`draw_active_reminders_box`)**:
+  - Interactive card in the Assistance tab displaying running timers and cronjobs, task labels, real-time progress bars, dynamic countdowns, and quick-cancel buttons with Click & Dwell support.
+- **Proactive Companion Loop (`spawn_proactive_companion_loop`)**:
+  - Background thread delivering periodic wellness check-ins (~22 minutes with natural ±3 min jitter) cycling through 5 focus themes:
+    - `CareAndComfort`: hydration, posture, and eye rest suggestions.
+    - `KnowledgeAndQuestions`: science, history, and technology curiosities.
+    - `EmotionalSupportAndEmpathy`: empathetic daily check-ins.
+    - `RadioAndMusicStream`: ambient audio suggestions and calm breaks.
+    - `ChattyAndEthicalCompanion`: lighthearted and positive reflections.
+  - Strict user activity awareness: automatic loop suspension if the user is typing, in dictation mode, under emergency stop, or if the agent is already busy.
+
+### 🧠 Expanded LLM Taxonomy & Web Synthesis (`local_llm.rs`, `types.rs`)
+- **Expanded to 42 Specialized CommandTags**:
+  - Added semantic tags: `WebpageAnalysis`, `KnowledgeAndQuestions`, `ClarificationRequired`, `UnintelligibleOrNoise`, `CorrectionOrDisagreement`, `AgentIdentityAndCapabilities`, `EmotionalSupportAndEmpathy`, and `ChattyAndEthicalCompanion`.
+- **Dedicated Webpage Content Analysis (`WebpageAnalysis`)**:
+  - Instant heuristic classification of page reading and summarization requests (*"analyze the page"*, *"what is this site about"*, *"summarize this article"*).
+  - Automatic extraction of DOM text content projected directly into floating Markdown cards (`show_floating_card`).
+
+---
+
 ## [0.7.2] - 2026-11-07
 
 ### ♿ Cumulative Accessibility Profiles & Voice Selector Migration (`app_settings.rs`, `main.rs`, `locales/`)

@@ -220,6 +220,7 @@ impl OverlayApp {
                 ui::click_element(target.click_x, target.click_y, None, None);
             }
             if target.role == "champ de saisie" || target.role == "zone de texte" {
+                crate::automation::IS_EXTERNAL_TEXT_INPUT_FOCUSED.store(true, Ordering::SeqCst);
                 self.dictation_mode = true;
                 IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
                 self.continuous_mode = true;
@@ -380,14 +381,17 @@ impl OverlayApp {
         #[cfg(windows)]
         {
             let target_hwnd = windows::Win32::Foundation::HWND(window_id as _);
-            force_foreground_window(target_hwnd);
-            restore_if_iconic(target_hwnd);
-            draw_screen_orange_border(win_rect);
+            focus_and_isolate_window(target_hwnd);
+            let mut r = windows::Win32::Foundation::RECT::default();
+            if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(target_hwnd, &mut r).is_ok() } {
+                draw_screen_orange_border([r.left, r.top, r.right, r.bottom]);
+            } else {
+                draw_screen_orange_border(win_rect);
+            }
         }
         #[cfg(not(windows))]
         {
-            force_foreground_window(win_title);
-            restore_if_iconic(win_title);
+            focus_and_isolate_window(win_title);
         }
 
         let (summary, zones) = if let Some(cached) = self.window_analysis_cache.get(&window_id).cloned() {
