@@ -11,7 +11,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_TARGET_DIR: "target"
-  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
   CMAKE_POLICY_VERSION_MINIMUM: "3.30"
 
 jobs:
@@ -73,6 +72,16 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      - name: Configure library search paths for Sherpa & ONNX Runtime
+        run: |
+          # Run a cargo check first so sherpa-rs-sys downloads and extracts native binaries
+          cargo check --release --features vulkan || true
+          SHERPA_LIB_DIR=$(find "$HOME/.cache/sherpa-rs" -type d -name "lib" 2>/dev/null | head -n 1)
+          if [ -n "$SHERPA_LIB_DIR" ]; then
+            echo "LIBRARY_PATH=$SHERPA_LIB_DIR:${LIBRARY_PATH:-}" >> $GITHUB_ENV
+            echo "LD_LIBRARY_PATH=$SHERPA_LIB_DIR:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
+          fi
+
       - name: Run tests (release profile)
         run: cargo test --release --features vulkan
 
@@ -84,6 +93,10 @@ jobs:
           mkdir -p dist
           BIN=$(find target/release -maxdepth 1 -type f -executable ! -name "*.so" ! -name "*.d" | head -n 1)
           cp "$BIN" dist/libertide
+          SHERPA_LIB_DIR=$(find "$HOME/.cache/sherpa-rs" -type d -name "lib" 2>/dev/null | head -n 1)
+          if [ -n "$SHERPA_LIB_DIR" ]; then
+            cp -d "$SHERPA_LIB_DIR"/*.so* dist/ 2>/dev/null || true
+          fi
           [ -f README.md ] && cp README.md dist/
           [ -f LICENSE ] && cp LICENSE dist/
           tar -czvf libertide-linux-x64.tar.gz -C dist .
