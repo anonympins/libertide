@@ -1523,10 +1523,9 @@ impl SystemTtsBackend for UnixTtsBackend {
         pending_cmd: &mut Option<TtsCommand>,
         sentence_queue: &mut VecDeque<String>,
     ) -> bool {
-        #[cfg(target_os = "macos")]
-        let is_clone_male = self.current_gender == VoiceGender::Clone && std::env::var("VOICE_CLONE_GENDER")
-            .map_or(false, |g| g.trim().eq_ignore_ascii_case("male") || g.trim().eq_ignore_ascii_case("homme"));
+        let is_clone_male = self.current_gender == VoiceGender::Clone && get_voice_clone_gender() == "male";
 
+        #[cfg(target_os = "macos")]
         let mut child_proc = {
             let macos_voice = match self.current_gender {
                 VoiceGender::Denise | VoiceGender::Hortense | VoiceGender::Sylvie => "Amelie",
@@ -1541,9 +1540,6 @@ impl SystemTtsBackend for UnixTtsBackend {
         };
 
         #[cfg(not(target_os = "macos"))]
-        let is_clone_male = self.current_gender == VoiceGender::Clone && std::env::var("VOICE_CLONE_GENDER")
-            .map_or(false, |g| g.trim().eq_ignore_ascii_case("male") || g.trim().eq_ignore_ascii_case("homme"));
-
         let mut child_proc = {
             let (spd_voice, espeak_voice) = match self.current_gender {
                 VoiceGender::Denise => ("female1", "fr+f2"),
