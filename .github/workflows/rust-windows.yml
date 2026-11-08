@@ -13,6 +13,7 @@ env:
   CARGO_TARGET_DIR: "C:\\t"
   CMAKE_GENERATOR: "Ninja"
   CMAKE_POLICY_VERSION_MINIMUM: "3.30"
+  CMAKE_TOOLCHAIN_FILE: "${{ github.workspace }}\\cmake\\windows-toolchain.cmake"
 
 jobs:
   build-windows:
