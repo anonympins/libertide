@@ -76,6 +76,7 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
         FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()))
     };
     let current_pid = std::process::id();
+    let wa = get_desktop_work_area();
 
     let mut candidates = Vec::new();
 
@@ -88,11 +89,7 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
             continue;
         }
 
-        unsafe {
-            if IsIconic(hwnd).as_bool() {
-                continue;
-            }
-        }
+        let is_minimized = unsafe { IsIconic(hwnd).as_bool() };
 
         let t_clean = title.trim();
         let t_lower = t_clean.to_lowercase();
@@ -116,26 +113,31 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
             continue;
         }
 
-        let mut r = RECT::default();
-        let rect_ok = unsafe { GetWindowRect(hwnd, &mut r).is_ok() };
-        if !rect_ok {
-            continue;
-        }
-        let width = r.right - r.left;
-        let height = r.bottom - r.top;
-        if width < 120 || height < 80 {
-            continue;
-        }
+        let rect = if is_minimized {
+            [wa.left, wa.top, wa.right, wa.bottom]
+        } else {
+            let mut r = RECT::default();
+            let rect_ok = unsafe { GetWindowRect(hwnd, &mut r).is_ok() };
+            if !rect_ok {
+                continue;
+            }
+            let width = r.right - r.left;
+            let height = r.bottom - r.top;
+            if width < 120 || height < 80 {
+                continue;
+            }
+            [r.left, r.top, r.right, r.bottom]
+        };
 
-        let click_x = r.left + (width / 2);
-        let click_y = (r.top + 30).min(r.bottom - 10);
+        let click_x = rect[0] + ((rect[2] - rect[0]) / 2);
+        let click_y = (rect[1] + 30).min(rect[3] - 10);
 
         candidates.push(SwitchWindowTarget {
             id: hwnd.0 as isize,
             title: t_clean.to_string(),
             click_x,
             click_y,
-            rect: [r.left, r.top, r.right, r.bottom],
+            rect,
         });
     }
 
