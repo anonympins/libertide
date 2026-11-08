@@ -1442,7 +1442,12 @@ pub fn spawn_agent_backend(
                                     initial_screen_hint.push_str(&format!("Fenêtre active: \"{}\"\n", title));
                                 }
                                 if let Some(ref sum) = last_summary_hint {
-                                    let truncated = if sum.len() > 600 { &sum[..600] } else { sum };
+                                    let safe_limit = sum.char_indices()
+                                        .map(|(idx, _)| idx)
+                                        .take_while(|&idx| idx <= 600)
+                                        .last()
+                                        .unwrap_or(0);
+                                    let truncated = &sum[..safe_limit];
                                     initial_screen_hint.push_str(truncated);
                                 }
                                 let detected_tags = local_llm::resolve_query_tags(clean_prompt, Some(&initial_screen_hint));
