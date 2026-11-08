@@ -1363,42 +1363,6 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
             return CallNextHookEx(None, code, wparam, lparam);
         }
 
-        let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::Relaxed);
-
-        // Détection universelle de saisie :
-        // - Soit l'utilisateur tape dans un champ de texte de Libertide (IS_USER_TYPING == true)
-        // - Soit le mode dictée/saisie est actif (IS_DICTATION_ACTIVE == true)
-        // - Soit le focus actif du système possède un curseur d'insertion texte clignotant (Caret Win32 / Edit control)
-        let is_external_text_input = if !is_libertide_fg && !fg.0.is_null() && fg_tid != 0 {
-            let mut gti = GUITHREADINFO::default();
-            gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
-            if GetGUIThreadInfo(fg_tid, &mut gti).is_ok() {
-                let has_caret = !gti.hwndCaret.0.is_null() || (gti.flags.0 & 1) != 0;
-                let is_edit = if !gti.hwndFocus.0.is_null() {
-                    let mut class_buf = [0u16; 64];
-                    let len = GetClassNameW(gti.hwndFocus, &mut class_buf);
-                    if len > 0 {
-                        let c = String::from_utf16_lossy(&class_buf[..len as usize]).to_lowercase();
-                        c.contains("edit") || c.contains("richedit") || c.contains("scintilla") || c.contains("input")
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-                has_caret || is_edit
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        let is_user_typing = IS_USER_TYPING.load(Ordering::Relaxed);
-        let is_external_text_focused = IS_EXTERNAL_TEXT_INPUT_FOCUSED.load(Ordering::Relaxed);
-        if is_user_typing || is_dictation || is_external_text_input || is_external_text_focused {
-            return CallNextHookEx(None, code, wparam, lparam);
-        }
         let vk = kbd.vkCode;
         let is_down = wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize;
         let is_up = wparam.0 == WM_KEYUP as usize || wparam.0 == WM_SYSKEYUP as usize;
@@ -1407,6 +1371,72 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         let is_ctrl = (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x11) as u16 & 0x8000) != 0;
         let is_alt = (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x12) as u16 & 0x8000) != 0;
         let is_switch_hook_on = SWITCH_HOOK_ENABLED.load(Ordering::Relaxed);
+        let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::Relaxed);
+
+        // 1. Raccourcis globaux prioritaires Libertide (F7 = Survol, F8/Pause = Dictée, F9 = Voix, F4 = Vider, Échap = Annuler/Sortir)
+        // Ces touches doivent être interceptées immédiatement, qu'un champ texte externe soit focalisé ou non.
+        let global_action_event = match vk {
+            0x76 if !is_ctrl && !is_alt => Some(SwitchKeyEvent::ToggleSwitch),             // F7 -> Toggle Survol / Badges
+            (0x77 | 0x13) if !is_ctrl && !is_alt => Some(SwitchKeyEvent::ToggleDictation), // F8 ou Pause -> Toggle Dictée
+            0x78 if !is_ctrl && !is_alt => Some(SwitchKeyEvent::ToggleVoice),              // F9 -> Toggle Voix
+            0x73 if !is_ctrl && !is_alt => Some(SwitchKeyEvent::Clear),                    // F4 -> Effacer / Trash
+            0x1B if (is_dictation || is_switch_hook_on) && !is_ctrl && !is_alt => Some(SwitchKeyEvent::Escape), // Échap
+            _ => None,
+        };
+
+        if let Some(event) = global_action_event {
+            let vk_idx = (vk as usize) & 0xFF;
+            let now = Instant::now();
+            if is_down {
+                let mut already_down = false;
+                if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
+                    already_down = keys[vk_idx];
+                    if already_down {
+                        if let Ok(times) = HOOK_KEYS_DOWN_TIME.lock() {
+                            if let Some(t) = times[vk_idx] {
+                                if now.duration_since(t) > Duration::from_millis(500) {
+                                    already_down = false;
+                                }
+                            } else {
+                                already_down = false;
+                            }
+                        }
+                    }
+                    keys[vk_idx] = true;
+                }
+                if !already_down {
+                    if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+                        times[vk_idx] = Some(now);
+                    }
+                    if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                        q.push(event);
+                    }
+                    trigger_repaint();
+                }
+            } else if is_up {
+                if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
+                    keys[vk_idx] = false;
+                }
+                if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+                    times[vk_idx] = None;
+                }
+            }
+            if is_down || is_up {
+                return windows::Win32::Foundation::LRESULT(1);
+            }
+        }
+
+        // 2. Si l'utilisateur est en cours de dictée ou tape dans un champ de texte Libertide,
+        // laisser passer les frappes courantes (lettres, chiffres, ponctuation) vers l'application active.
+        let is_user_typing = IS_USER_TYPING.load(Ordering::Relaxed);
+        if is_dictation || is_user_typing {
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
+
+        // 3. Si le mode survol / contacteur n'est pas activé, laisser passer les touches de navigation standard.
+        if !is_switch_hook_on {
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
 
         #[cfg(windows)]
         {
@@ -1465,20 +1495,15 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         }
 
         let switch_event = match vk {
-            0x76 => Some(SwitchKeyEvent::ToggleSwitch),             // F7 -> Toggle Survol
-            0x77 | 0x13 => Some(SwitchKeyEvent::ToggleDictation),  // F8 ou Pause -> Toggle Dictée
-            0x78 => Some(SwitchKeyEvent::ToggleVoice),              // F9 -> Toggle Voix
-            0x73 => Some(SwitchKeyEvent::Clear),                    // F4 -> Effacer / Trash
-            0x09 if is_switch_hook_on => Some(if is_shift { SwitchKeyEvent::Prev } else { SwitchKeyEvent::Next }), // Tab / Shift+Tab
+            0x09 => Some(if is_shift { SwitchKeyEvent::Prev } else { SwitchKeyEvent::Next }), // Tab / Shift+Tab
             // Précédent : Flèche Gauche (0x25), Flèche Haut (0x26)
-            0x25 | 0x26 if is_switch_hook_on => Some(SwitchKeyEvent::Prev),
+            0x25 | 0x26 => Some(SwitchKeyEvent::Prev),
             // Suivant : Flèche Droite (0x27), Flèche Bas (0x28)
-            0x27 | 0x28 if is_switch_hook_on => Some(SwitchKeyEvent::Next),
+            0x27 | 0x28 => Some(SwitchKeyEvent::Next),
             // Sélection : Entrée, Espace
-            0x0D | 0x20 if is_switch_hook_on => Some(SwitchKeyEvent::Select),
+            0x0D | 0x20 => Some(SwitchKeyEvent::Select),
             // Retour / Sortie : Backspace (Retour arrière)
-            0x08 if is_switch_hook_on => Some(SwitchKeyEvent::Back),
-            0x1B if is_switch_hook_on => Some(SwitchKeyEvent::Escape),
+            0x08 => Some(SwitchKeyEvent::Back),
             _ => None,
         };
 

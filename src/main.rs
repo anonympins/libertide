@@ -803,13 +803,19 @@ impl eframe::App for OverlayApp {
 
         update_last_external_focus();
 
-        // Détection universelle de saisie : tout TextEdit actif dans egui libère les touches
+        // Détection de saisie dans l'UI Libertide : seul un TextEdit de Libertide actif libère les touches
+        let is_egui_text_focused = ctx.memory(|m| {
+            m.has_focus(egui::Id::NULL.with("prompt_input_text"))
+                || m.has_focus(egui::Id::NULL.with("api_key_input_field"))
+                || m.has_focus(egui::Id::NULL.with("model_input_field"))
+                || m.has_focus(egui::Id::NULL.with("endpoint_input_field"))
+                || m.has_focus(egui::Id::NULL.with("macro_shortcut_input"))
+                || m.has_focus(egui::Id::NULL.with("macro_text_input"))
+                || m.has_focus(egui::Id::NULL.with("twitch_search_query_input"))
+        });
         let is_typing = ctx.egui_wants_keyboard_input()
-            || ctx.memory(|m| m.focused().is_some())
             || self.show_api_key_modal
-            || crate::automation::IS_USER_TYPING.load(Ordering::Relaxed)
-            || crate::automation::IS_EXTERNAL_TEXT_INPUT_FOCUSED.load(Ordering::Relaxed)
-            || self.dictation_mode;
+            || is_egui_text_focused;
         crate::automation::IS_USER_TYPING.store(is_typing, Ordering::Relaxed);
 
         self.dictation_mode = IS_DICTATION_ACTIVE.load(Ordering::SeqCst);
@@ -1863,7 +1869,15 @@ impl eframe::App for OverlayApp {
             });
         }
 
-        if hook_events.contains(&SwitchKeyEvent::ToggleDictation) {
+        let egui_f7 = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F7));
+        let egui_f8 = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F8));
+        let egui_f9 = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F9));
+        let egui_f4 = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F4));
+
+        if (egui_f8 || hook_events.contains(&SwitchKeyEvent::ToggleDictation))
+            && self.last_switch_input.elapsed() >= Duration::from_millis(200)
+        {
+            self.last_switch_input = Instant::now();
             if self.dictation_mode {
                 self.exit_dictation_mode();
             } else {
@@ -1871,15 +1885,24 @@ impl eframe::App for OverlayApp {
             }
             ctx.request_repaint();
         }
-        if hook_events.contains(&SwitchKeyEvent::ToggleSwitch) {
+        if (egui_f7 || hook_events.contains(&SwitchKeyEvent::ToggleSwitch))
+            && self.last_switch_input.elapsed() >= Duration::from_millis(200)
+        {
+            self.last_switch_input = Instant::now();
             self.toggle_switch_access_mode(None);
             ctx.request_repaint();
         }
-        if hook_events.contains(&SwitchKeyEvent::ToggleVoice) {
+        if (egui_f9 || hook_events.contains(&SwitchKeyEvent::ToggleVoice))
+            && self.last_switch_input.elapsed() >= Duration::from_millis(200)
+        {
+            self.last_switch_input = Instant::now();
             self.set_voice_gender(self.voice_gender.next());
             ctx.request_repaint();
         }
-        if hook_events.contains(&SwitchKeyEvent::Clear) {
+        if (egui_f4 || hook_events.contains(&SwitchKeyEvent::Clear))
+            && self.last_switch_input.elapsed() >= Duration::from_millis(200)
+        {
+            self.last_switch_input = Instant::now();
             let _ = self.command_sender.send(AgentCommand::ClearHistory);
             self.chat_history.clear();
             self.window_analysis_cache.clear();
