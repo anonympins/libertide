@@ -58,11 +58,31 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
+            ~\AppData\Local\sherpa-rs\
             C:/t/
           key: ${{ runner.os }}-x86_64-pc-windows-msvc-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-x86_64-pc-windows-msvc-cargo-
             ${{ runner.os }}-cargo-
+
+      - name: Configure library search paths for Sherpa & ONNX Runtime
+        shell: pwsh
+        run: |
+          $sherpaLib = Get-ChildItem -Path "$env:LOCALAPPDATA\sherpa-rs" -Recurse -Directory -Filter "lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $sherpaLib -or -not (Test-Path "$($sherpaLib.FullName)\cargs.lib")) {
+            Write-Host "Sherpa libraries missing from runner. Rebuilding sherpa-rs-sys..."
+            cargo clean -p sherpa-rs-sys -p sherpa-rs --target x86_64-pc-windows-msvc
+            cargo build --release -p sherpa-rs-sys --target x86_64-pc-windows-msvc
+            $sherpaLib = Get-ChildItem -Path "$env:LOCALAPPDATA\sherpa-rs" -Recurse -Directory -Filter "lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          if ($sherpaLib) {
+            Write-Host "Sherpa libraries found in: $($sherpaLib.FullName)"
+            "LIB=$env:LIB;$($sherpaLib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+            "$($sherpaLib.FullName)" | Out-File -FilePath $env:GITHUB_PATH -Append
+          } else {
+            Write-Error "Unable to locate sherpa-rs native library directory!"
+            exit 1
+          }
 
       - name: Run tests (release profile)
         run: cargo test --release --target x86_64-pc-windows-msvc --features vulkan
@@ -75,6 +95,10 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist
           Copy-Item "C:/t/x86_64-pc-windows-msvc/release/libertide.exe" dist/
+          $sherpaLib = Get-ChildItem -Path "$env:LOCALAPPDATA\sherpa-rs" -Recurse -Directory -Filter "lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($sherpaLib) {
+            Copy-Item "$($sherpaLib.FullName)\*.dll" dist/ -ErrorAction SilentlyContinue
+          }
           if (Test-Path README.md) { Copy-Item README.md dist/ }
           if (Test-Path LICENSE) { Copy-Item LICENSE dist/ }
           Compress-Archive -Path dist/* -DestinationPath "libertide-windows-x64.zip"
