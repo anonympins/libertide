@@ -232,7 +232,17 @@ unsafe fn find_and_apply_voice(
         VoiceGender::Paul => (&["paul", "henri", "claude"], false),
         VoiceGender::Sylvie => (&["sylvie", "harmonie", "denise"], true),
         VoiceGender::Jean => (&["jean", "mathieu", "henri", "paul"], false),
-        VoiceGender::Clone => (&["denise", "henri"], true),
+        VoiceGender::Clone => {
+            let is_male = std::env::var("VOICE_CLONE_GENDER")
+                .ok()
+                .or_else(|| read_env_var_from_file(".env", "VOICE_CLONE_GENDER"))
+                .map_or(false, |g| g.trim().eq_ignore_ascii_case("male") || g.trim().eq_ignore_ascii_case("homme"));
+            if is_male {
+                (&["henri", "paul", "claude"], false)
+            } else {
+                (&["denise", "hortense", "julie"], true)
+            }
+        }
     };
 
     // Recherche dans les voix modernes OneCore (où se trouvent Denise & Henri)
@@ -458,6 +468,35 @@ pub fn decode_wav_to_samples(bytes: &[u8]) -> Option<(Vec<f32>, u32)> {
     Some((samples, sample_rate))
 }
 
+/// Normalise le gain des échantillons audio en supprimant l'offset continu et en montant la crête à `target_peak`
+pub fn normalize_audio_samples(samples: &mut [f32], target_peak: f32) {
+    if samples.is_empty() {
+        return;
+    }
+    let mean: f32 = samples.iter().sum::<f32>() / samples.len() as f32;
+    for s in samples.iter_mut() {
+        *s -= mean;
+    }
+    let max_peak = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+    if max_peak > 0.001 {
+        let gain = (target_peak / max_peak).min(12.0); // Jusqu'à +21 dB de boost automatique
+        for s in samples.iter_mut() {
+            *s = (*s * gain).clamp(-1.0, 1.0);
+        }
+    }
+}
+
+/// Retourne le genre configuré pour la voix clonée ("female" ou "male")
+pub fn get_voice_clone_gender() -> String {
+    std::env::var("VOICE_CLONE_GENDER")
+        .ok()
+        .or_else(|| read_env_var_from_file(".env", "VOICE_CLONE_GENDER"))
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| s == "male" || s == "female" || s == "homme" || s == "femme")
+        .map(|s| if s == "male" || s == "homme" { "male".to_string() } else { "female".to_string() })
+        .unwrap_or_else(|| "female".to_string())
+}
+
 /// Encode une séquence d'échantillons audio normalisés [-1.0, 1.0] en flux binaire WAV PCM 16-bit mono
 pub fn encode_samples_to_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     let num_channels: u16 = 1;
@@ -497,7 +536,9 @@ pub fn save_wav_file(path: &std::path::Path, samples: &[f32], sample_rate: u32) 
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let bytes = encode_samples_to_wav(samples, sample_rate);
+    let mut norm = samples.to_vec();
+    normalize_audio_samples(&mut norm, 0.92);
+    let bytes = encode_samples_to_wav(&norm, sample_rate);
     std::fs::write(path, bytes)
 }
 
@@ -517,6 +558,7 @@ pub fn append_wav_file(path: &std::path::Path, new_samples: &[f32], sample_rate:
         }
     }
     all_samples.extend_from_slice(new_samples);
+    normalize_audio_samples(&mut all_samples, 0.92);
     let total_count = all_samples.len();
     let total_dur = total_count as f32 / sample_rate as f32;
     save_wav_file(path, &all_samples, sample_rate)?;
@@ -573,7 +615,22 @@ pub fn find_espeak_ng_data(base_dir: &Path) -> Option<PathBuf> {
         return Some(direct);
     }
 
-    // 2. Recherche récursive dans les sous-répertoires (jusqu'à 3 niveaux)
+    // 2. Recherche dans le dossier parent et partage des données entre genres
+    if let Some(parent) = base_dir.parent() {
+        if is_valid_espeak_dir(parent) {
+            return Some(parent.to_path_buf());
+        }
+        let p_direct = parent.join("espeak-ng-data");
+        if is_valid_espeak_dir(&p_direct) {
+            return Some(p_direct);
+        }
+    }
+    let fallback = Path::new("models").join("voice-clone").join("espeak-ng-data");
+    if is_valid_espeak_dir(&fallback) {
+        return Some(fallback);
+    }
+
+    // 3. Recherche récursive dans les sous-répertoires (jusqu'à 3 niveaux)
     fn scan_recursive(dir: &Path, depth: usize) -> Option<PathBuf> {
         if depth > 3 {
             return None;
@@ -642,16 +699,23 @@ pub fn find_voice_clone_files(base_dir: &Path) -> (Option<PathBuf>, Option<PathB
     (model, tokens, data)
 }
 
-/// Télécharge et extrait automatiquement le modèle de voix clonée local s'il n'est pas déjà présent
 pub fn ensure_voice_clone_model(model_dir: &Path) -> Result<(), String> {
+    let gender = get_voice_clone_gender();
+    ensure_voice_clone_model_for_gender(model_dir, &gender)
+}
+
+/// Télécharge et extrait automatiquement le modèle de voix clonée pour le genre spécifié ("female" ou "male")
+pub fn ensure_voice_clone_model_for_gender(model_dir: &Path, gender: &str) -> Result<(), String> {
     let (model, tokens, data) = find_voice_clone_files(model_dir);
     if model.is_some() && tokens.is_some() && data.is_some() {
         return Ok(());
     }
 
     let _ = std::fs::create_dir_all(model_dir);
+    let is_male = gender.eq_ignore_ascii_case("male") || gender.eq_ignore_ascii_case("homme");
     println!(
-        "[TTS Clone] Modèle local manquant dans '{}' : initialisation du téléchargement automatique...",
+        "[TTS Clone] Modèle local ({}) manquant dans '{}' : initialisation du téléchargement...",
+        if is_male { "homme" } else { "femme" },
         model_dir.display()
     );
 
@@ -671,6 +735,11 @@ pub fn ensure_voice_clone_model(model_dir: &Path) -> Result<(), String> {
 
     let candidate_urls: Vec<String> = if let Some(u) = custom_url {
         vec![u]
+    } else if is_male {
+        vec![
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-fr_FR-tom-medium.tar.bz2".to_string(),
+            "https://huggingface.co/csukuangfj/vits-piper-fr_FR-tom-medium/resolve/main/vits-piper-fr_FR-tom-medium.tar.bz2".to_string(),
+        ]
     } else {
         vec![
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-fr_FR-siwis-medium.tar.bz2".to_string(),
@@ -741,8 +810,13 @@ pub fn ensure_voice_clone_model(model_dir: &Path) -> Result<(), String> {
 
     if !downloaded {
         println!("[TTS Clone] Téléchargement direct des fichiers séparés (model.onnx + tokens.txt)...");
-        let onnx_url = "https://huggingface.co/csukuangfj/vits-piper-fr_FR-siwis-medium/resolve/main/fr_FR-siwis-medium.onnx";
-        let tokens_url = "https://huggingface.co/csukuangfj/vits-piper-fr_FR-siwis-medium/resolve/main/tokens.txt";
+        let (onnx_url, tokens_url) = if is_male {
+            ("https://huggingface.co/csukuangfj/vits-piper-fr_FR-tom-medium/resolve/main/fr_FR-tom-medium.onnx",
+             "https://huggingface.co/csukuangfj/vits-piper-fr_FR-tom-medium/resolve/main/tokens.txt")
+        } else {
+            ("https://huggingface.co/csukuangfj/vits-piper-fr_FR-siwis-medium/resolve/main/fr_FR-siwis-medium.onnx",
+             "https://huggingface.co/csukuangfj/vits-piper-fr_FR-siwis-medium/resolve/main/tokens.txt")
+        };
 
         let dest_onnx = model_dir.join("model.onnx");
         let dest_tokens = model_dir.join("tokens.txt");
@@ -840,6 +914,7 @@ pub fn ensure_voice_clone_model(model_dir: &Path) -> Result<(), String> {
 pub struct NativeVoiceCloneBackend {
     player: AudioPlayer,
     reference_wav_path: Option<String>,
+    gender: String,
     model_dir: PathBuf,
     #[cfg(feature = "sherpa")]
     tts_engine: Option<sherpa_rs::tts::VitsTts>,
@@ -933,10 +1008,11 @@ impl NativeVoiceCloneBackend {
 
     pub fn new() -> Option<Self> {
         let player = AudioPlayer::new().ok()?;
-        let model_dir = PathBuf::from("models").join("voice-clone");
+        let gender = get_voice_clone_gender();
+        let model_dir = PathBuf::from("models").join("voice-clone").join(&gender);
 
         // Téléchargement automatique si aucun modèle ONNX n'est présent
-        let _ = ensure_voice_clone_model(&model_dir);
+        let _ = ensure_voice_clone_model_for_gender(&model_dir, &gender);
 
         let reference_wav_path = std::env::var("VOICE_REFERENCE_WAV")
             .ok()
@@ -960,6 +1036,7 @@ impl NativeVoiceCloneBackend {
         Some(Self {
             player,
             reference_wav_path,
+            gender,
             model_dir,
             #[cfg(feature = "sherpa")]
             tts_engine,
@@ -969,6 +1046,16 @@ impl NativeVoiceCloneBackend {
     pub fn synthesize(&mut self, text: &str) -> Result<(Vec<f32>, u32), String> {
         #[cfg(feature = "sherpa")]
         {
+            let cur_gender = get_voice_clone_gender();
+            if self.gender != cur_gender {
+                self.gender = cur_gender.clone();
+                self.model_dir = PathBuf::from("models").join("voice-clone").join(&self.gender);
+                let _ = ensure_voice_clone_model_for_gender(&self.model_dir, &self.gender);
+                self.tts_engine = Self::create_engine(&self.model_dir);
+            } else if self.tts_engine.is_none() {
+                let _ = ensure_voice_clone_model_for_gender(&self.model_dir, &self.gender);
+                self.tts_engine = Self::create_engine(&self.model_dir);
+            }
             if self.tts_engine.is_none() {
                 let _ = ensure_voice_clone_model(&self.model_dir);
                 self.tts_engine = Self::create_engine(&self.model_dir);
@@ -1115,22 +1202,69 @@ impl HttpVoiceCloneBackend {
     }
 
     pub fn synthesize(&self, text: &str) -> Result<(Vec<f32>, u32), String> {
+        let endpoint = std::env::var("VOICE_CLONE_URL")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "VOICE_CLONE_URL"))
+            .or_else(|| std::env::var("TTS_CLONE_URL").ok())
+            .or_else(|| read_env_var_from_file(".env", "TTS_CLONE_URL"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.endpoint.clone());
+
+        let cur_speaker_wav = std::env::var("VOICE_REFERENCE_WAV")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "VOICE_REFERENCE_WAV"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                for cand in &["models/voice_reference.wav", "speaker.wav", "models/speaker.wav", "voice.wav"] {
+                    if std::path::Path::new(cand).exists() {
+                        return Some(cand.to_string());
+                    }
+                }
+                None
+            })
+            .map(|p| {
+                let path = std::path::Path::new(&p);
+                if path.is_relative() {
+                    if let Ok(cwd) = std::env::current_dir() {
+                        return cwd.join(path).to_string_lossy().to_string();
+                    }
+                }
+                p
+            })
+            .or_else(|| self.speaker_wav.clone());
+
         let ref_text = std::env::var("VOICE_REFERENCE_TEXT")
             .ok()
             .or_else(|| read_env_var_from_file(".env", "VOICE_REFERENCE_TEXT"))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
+        let is_clone_male = std::env::var("VOICE_CLONE_GENDER")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "VOICE_CLONE_GENDER"))
+            .map_or(false, |g| g.trim().eq_ignore_ascii_case("male") || g.trim().eq_ignore_ascii_case("homme"));
+        let gender_str = if is_clone_male { "male" } else { "female" };
+
         let mut body = serde_json::json!({
             "text": text,
             "language": "fr",
-            "speaker_wav": self.speaker_wav,
+            "gender": gender_str,
+            "speaker_wav": cur_speaker_wav,
+            "reference_wav": cur_speaker_wav,
+            "ref_audio": cur_speaker_wav,
+            "reference_audio": cur_speaker_wav,
+            "temperature": 0.65,
+            "repetition_penalty": 2.0,
+            "speed": 1.0,
         });
 
         if let Some(ref rt) = ref_text {
             body["speaker_text"] = serde_json::json!(rt);
             body["reference_text"] = serde_json::json!(rt);
             body["prompt_text"] = serde_json::json!(rt);
+            body["ref_text"] = serde_json::json!(rt);
         }
 
         let endpoint = self.endpoint.clone();
@@ -1150,7 +1284,12 @@ impl HttpVoiceCloneBackend {
             res.bytes().await.map_err(|e| format!("Lecture réponse audio: {e}"))
         })?;
 
-        decode_wav_to_samples(&bytes).ok_or_else(|| "Échec décodage WAV de la voix clonée".to_string())
+        if let Some((mut samples, rate)) = decode_wav_to_samples(&bytes) {
+            normalize_audio_samples(&mut samples, 0.92);
+            Ok((samples, rate))
+        } else {
+            Err("Échec décodage WAV de la voix clonée".to_string())
+        }
     }
 
     pub fn stop(&self) {
@@ -1385,10 +1524,14 @@ impl SystemTtsBackend for UnixTtsBackend {
         sentence_queue: &mut VecDeque<String>,
     ) -> bool {
         #[cfg(target_os = "macos")]
+        let is_clone_male = self.current_gender == VoiceGender::Clone && std::env::var("VOICE_CLONE_GENDER")
+            .map_or(false, |g| g.trim().eq_ignore_ascii_case("male") || g.trim().eq_ignore_ascii_case("homme"));
+
         let mut child_proc = {
             let macos_voice = match self.current_gender {
-                VoiceGender::Denise | VoiceGender::Hortense | VoiceGender::Sylvie | VoiceGender::Clone => "Amelie",
+                VoiceGender::Denise | VoiceGender::Hortense | VoiceGender::Sylvie => "Amelie",
                 VoiceGender::Henri | VoiceGender::Paul | VoiceGender::Jean => "Thomas",
+                VoiceGender::Clone => if is_clone_male { "Thomas" } else { "Amelie" },
             };
             std::process::Command::new("say")
                 .args(["-v", macos_voice, sentence])
@@ -1398,14 +1541,18 @@ impl SystemTtsBackend for UnixTtsBackend {
         };
 
         #[cfg(not(target_os = "macos"))]
+        let is_clone_male = self.current_gender == VoiceGender::Clone && std::env::var("VOICE_CLONE_GENDER")
+            .map_or(false, |g| g.trim().eq_ignore_ascii_case("male") || g.trim().eq_ignore_ascii_case("homme"));
+
         let mut child_proc = {
             let (spd_voice, espeak_voice) = match self.current_gender {
-                VoiceGender::Denise | VoiceGender::Clone => ("female1", "fr+f2"),
+                VoiceGender::Denise => ("female1", "fr+f2"),
                 VoiceGender::Henri => ("male1", "fr+m2"),
                 VoiceGender::Hortense => ("female2", "fr+f4"),
                 VoiceGender::Paul => ("male2", "fr+m1"),
                 VoiceGender::Sylvie => ("female3", "fr-ca+f2"),
                 VoiceGender::Jean => ("male3", "fr+m3"),
+                VoiceGender::Clone => if is_clone_male { ("male1", "fr+m2") } else { ("female1", "fr+f2") },
             };
 
             std::process::Command::new("spd-say")
@@ -1462,12 +1609,8 @@ impl SystemTtsBackend for CompositeTtsBackend {
     fn set_gender(&mut self, gender: VoiceGender) {
         self.current_gender = gender;
         if gender == VoiceGender::Clone {
-            if self.native_clone_backend.is_none() {
-                self.native_clone_backend = NativeVoiceCloneBackend::new();
-            }
-            if self.clone_backend.is_none() {
-                self.clone_backend = HttpVoiceCloneBackend::new();
-            }
+            self.native_clone_backend = NativeVoiceCloneBackend::new();
+            self.clone_backend = HttpVoiceCloneBackend::new();
         }
         if let Some(ref mut sys) = self.system_backend {
             sys.set_gender(gender);
@@ -1501,28 +1644,28 @@ impl SystemTtsBackend for CompositeTtsBackend {
 
         if self.current_gender == VoiceGender::Clone || force_clone {
             // Initialisation paresseuse si nécessaire
-            if self.native_clone_backend.is_none() {
-                self.native_clone_backend = NativeVoiceCloneBackend::new();
-            }
             if self.clone_backend.is_none() {
                 self.clone_backend = HttpVoiceCloneBackend::new();
             }
-
-            // 1. Essai du moteur natif Sherpa en Rust en priorité absolue
-            if let Some(ref mut nat) = self.native_clone_backend {
-                if let Ok(interrupted) = nat.speak_sentence(sentence, rx, pending_cmd, sentence_queue) {
-                    println!("[TTS] Voix synthétisée via le moteur local Sherpa VITS.");
-                    return interrupted;
-                }
+            if self.native_clone_backend.is_none() {
+                self.native_clone_backend = NativeVoiceCloneBackend::new();
             }
 
-            // 2. Repli sur le service HTTP local si disponible
+            // 1. Essai en priorité absolue du moteur de clonage appliquant l'échantillon vocal
             if let Some(ref mut clone) = self.clone_backend {
                 match clone.speak_sentence(sentence, rx, pending_cmd, sentence_queue) {
                     Ok(interrupted) => return interrupted,
                     Err(err) => {
-                        eprintln!("[TTS Clone] Serveur distant injoignable ({err}). Repli sur la voix système (Denise).");
+                        eprintln!("[TTS Clone] Serveur de clonage injoignable ({err}). Repli sur le moteur local.");
                     }
+                }
+            }
+
+            // 2. Repli sur le moteur local natif
+            if let Some(ref mut nat) = self.native_clone_backend {
+                if let Ok(interrupted) = nat.speak_sentence(sentence, rx, pending_cmd, sentence_queue) {
+                    println!("[TTS] Voix synthétisée via le moteur local Sherpa VITS.");
+                    return interrupted;
                 }
             }
         }

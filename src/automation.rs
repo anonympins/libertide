@@ -43,7 +43,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow,
-    DispatchMessageW, FindWindowW, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindowRect,
+    DispatchMessageW, FindWindowW, GetForegroundWindow, GetMessageW, GetWindowRect,
     GetWindowTextW, GetWindowThreadProcessId, IsIconic, MSG, PostThreadMessageW,
     SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, HHOOK, WM_QUIT,
     GetGUIThreadInfo, GUITHREADINFO,
@@ -1353,8 +1353,6 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
     if code >= 0 {
         let fg = GetForegroundWindow();
         let mut fg_pid = 0u32;
-        let fg_tid = GetWindowThreadProcessId(fg, Some(&mut fg_pid));
-        let is_libertide_fg = fg_pid == std::process::id();
         let kbd = *(lparam.0 as *const KBDLLHOOKSTRUCT);
 
         // Seules les frappes simulées par Libertide lui-même (marquées avec LIBERTIDE_EXTRA_INFO)
@@ -1377,7 +1375,7 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         // Ces touches doivent être interceptées immédiatement, qu'un champ texte externe soit focalisé ou non.
         let global_action_event = match vk {
             0x76 if !is_ctrl && !is_alt => Some(SwitchKeyEvent::ToggleSwitch),             // F7 -> Toggle Survol / Badges
-            (0x77 | 0x13) if !is_ctrl && !is_alt => Some(SwitchKeyEvent::ToggleDictation), // F8 ou Pause -> Toggle Dictée
+            0x77 | 0x13 if !is_ctrl && !is_alt => Some(SwitchKeyEvent::ToggleDictation), // F8 ou Pause -> Toggle Dictée
             0x78 if !is_ctrl && !is_alt => Some(SwitchKeyEvent::ToggleVoice),              // F9 -> Toggle Voix
             0x73 if !is_ctrl && !is_alt => Some(SwitchKeyEvent::Clear),                    // F4 -> Effacer / Trash
             0x1B if (is_dictation || is_switch_hook_on) && !is_ctrl && !is_alt => Some(SwitchKeyEvent::Escape), // Échap

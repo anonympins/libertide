@@ -18,6 +18,46 @@ use crate::types::{AgentEvent, DisabilityPreset, LlmProvider, TtsCommand, VoiceP
 use crate::OverlayApp;
 
 impl OverlayApp {
+    pub fn set_voice_clone_gender(&mut self, gender: &str) {
+        let clean = if gender.trim().eq_ignore_ascii_case("male") || gender.trim().eq_ignore_ascii_case("homme") {
+            "male"
+        } else {
+            "female"
+        };
+        self.voice_clone_gender = clean.to_string();
+        std::env::set_var("VOICE_CLONE_GENDER", clean);
+        let _ = write_env_var_to_file(".env", "VOICE_CLONE_GENDER", clean);
+
+        let gender_label = if clean == "male" { "homme" } else { "femme" };
+        self.voice_status_feedback = Some(format!("Genre configuré : {gender_label}. Chargement du modèle de voix..."));
+        play_earcon(Earcon::Navigation);
+
+        let tts_tx = self.tts_sender.clone();
+        let event_tx = self.event_sender.clone();
+        let is_clone_active = self.voice_gender == VoiceProfile::Clone;
+        let clean_string = clean.to_string();
+
+        std::thread::spawn(move || {
+            let model_dir = std::path::PathBuf::from("models").join("voice-clone").join(&clean_string);
+            match crate::tts::ensure_voice_clone_model_for_gender(&model_dir, &clean_string) {
+                Ok(()) => {
+                    let _ = tts_tx.send(TtsCommand::SetGender(VoiceProfile::Clone));
+                    let _ = event_tx.send(AgentEvent::SilentNarration(format!(
+                        "Modèle vocal cloné ({}) chargé avec succès.",
+                        if clean_string == "male" { "homme" } else { "femme" }
+                    )));
+                }
+                Err(e) => {
+                    eprintln!("[TTS Clone] Erreur chargement modèle {clean_string}: {e}");
+                }
+            }
+        });
+
+        if is_clone_active {
+            let _ = self.tts_sender.send(TtsCommand::SetGender(VoiceProfile::Clone));
+        }
+    }
+
     pub fn generate_new_voice_guide_phrase(&mut self) {
         if self.voice_guide_generating {
             return;
@@ -44,15 +84,19 @@ impl OverlayApp {
             ];
 
             let fallback_choice = {
-                let idx = (Instant::now().elapsed().as_nanos() as usize) % FALLBACKS.len();
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                let idx = ((nanos ^ (nanos >> 16)) as usize) % FALLBACKS.len();
                 format!("« {} »", FALLBACKS[idx])
             };
 
             let prompt = format!(
                 "Tu es un linguiste expert en phonétique ({sys_lang}) et en synthèse vocale.\n\
-                 Génère une unique phrase naturelle, expressive, riche en sonorités variées (voyelles et consonnes), idéale pour servir d'échantillon d'apprentissage vocal.\n\
+                 Génère une unique phrase en {sys_lang}, naturelle, expressive, riche en sonorités variées (voyelles et consonnes), idéale pour servir d'échantillon d'apprentissage vocal.\n\
                  Longueur : entre 12 et 22 mots.\n\
-                 RÈGLE STRICTE : Donne UNIQUEMENT la phrase en {sys_lang}, sans guillemets, sans explications, sans puces ni mise en forme."
+                 Réponds STRICTEMENT avec un objet JSON au format : {{\"phrase\": \"la phrase ici\"}}"
             );
 
             let result: Result<String, String> = if config.provider == LlmProvider::Local {
@@ -69,7 +113,7 @@ impl OverlayApp {
                             .map_err(|e| e.to_string())?;
                         let messages = vec![crate::types::ChatMessage {
                             role: "user".to_string(),
-                            content: "Donne-moi une nouvelle phrase d'entraînement vocal variée.".to_string(),
+                            content: "Génère une nouvelle phrase d'entraînement vocal variée au format JSON.".to_string(),
                         }];
 
                         let resp = crate::agent_backend::send_llm_chat_completion(
@@ -88,8 +132,23 @@ impl OverlayApp {
 
             let final_phrase = match result {
                 Ok(text) if !text.trim().is_empty() => {
-                    let cleaned = text.trim().trim_matches(['"', '«', '»', '`', '\'', '*', ' ']).trim();
-                    format!("« {cleaned} »")
+                    let extracted = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                        val.get("phrase").and_then(|v| v.as_str()).unwrap_or(&text).to_string()
+                    } else if let (Some(s), Some(e)) = (text.find('{'), text.rfind('}')) {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text[s..=e]) {
+                            val.get("phrase").and_then(|v| v.as_str()).unwrap_or(&text).to_string()
+                        } else {
+                            text
+                        }
+                    } else {
+                        text
+                    };
+                    let cleaned = extracted.trim().trim_matches(['"', '«', '»', '`', '\'', '*', ' ', '{', '}']).trim();
+                    if !cleaned.is_empty() {
+                        format!("« {cleaned} »")
+                    } else {
+                        fallback_choice
+                    }
                 }
                 _ => fallback_choice,
             };
@@ -1119,7 +1178,10 @@ impl OverlayApp {
                                                     VoiceProfile::Paul => ("🎩", "Paul"),
                                                     VoiceProfile::Sylvie => ("🍁", "Sylvie (CA)"),
                                                     VoiceProfile::Jean => ("⚡", "Jean"),
-                                                    VoiceProfile::Clone => ("🧬", "Voix clonée"),
+                                                    VoiceProfile::Clone => {
+                                                        let g = if self.voice_clone_gender == "male" { "Masculine" } else { "Féminine" };
+                                                        ("🧬", if g == "Masculine" { "Voix clonée (Masculine)" } else { "Voix clonée (Féminine)" })
+                                                    }
                                                 };
                                                 let btn_text = format!("{icon} {label}");
                                                 let resp = ui.selectable_label(is_selected, btn_text);
@@ -1210,10 +1272,21 @@ impl OverlayApp {
 
                                 // Dépouillement asynchrone de la phrase guide générée par le LLM
                                 if let Some(ref rx) = self.voice_guide_rx {
-                                    if let Ok(phrase) = rx.try_recv() {
-                                        self.voice_guide_phrase = phrase;
-                                        self.voice_guide_generating = false;
-                                        self.voice_guide_rx = None;
+                                    match rx.try_recv() {
+                                        Ok(phrase) => {
+                                            self.voice_guide_phrase = phrase;
+                                            self.voice_guide_generating = false;
+                                            self.voice_guide_rx = None;
+                                            ctx.request_repaint();
+                                        }
+                                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                            self.voice_guide_generating = false;
+                                            self.voice_guide_rx = None;
+                                            ctx.request_repaint();
+                                        }
+                                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                            ctx.request_repaint_after(Duration::from_millis(80));
+                                        }
                                     }
                                 }
 
@@ -1268,7 +1341,7 @@ impl OverlayApp {
                                                     }
                                                 }
 
-                                                self.set_voice_gender(VoiceProfile::Clone);
+                                                self.set_voice_gender_silent(VoiceProfile::Clone);
                                                 if self.voice_record_append {
                                                     self.voice_status_feedback = Some(format!("Extrait ajouté avec succès ! Durée cumulée totale : {:.1}s.", saved_dur));
                                                 } else {
@@ -1299,6 +1372,46 @@ impl OverlayApp {
                                     .corner_radius(egui::CornerRadius::same(8))
                                     .inner_margin(egui::Margin::symmetric(10, 8))
                                     .show(ui, |ui| {
+                                        // Sélecteur de genre pour la voix clonée
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("Genre de la voix clonée :")
+                                                    .size(11.0)
+                                                    .color(egui::Color32::WHITE)
+                                                    .strong(),
+                                            );
+                                            let is_female = self.voice_clone_gender != "male";
+                                            let female_btn = ui.selectable_label(
+                                                is_female,
+                                                egui::RichText::new("👩 Femme (Féminin)")
+                                                    .size(11.0)
+                                                    .color(if is_female { theme.accent } else { theme.text_secondary }),
+                                            ).on_hover_text("Calibre et télécharge le modèle neuronal sur une voix féminine.");
+                                            let female_btn_id = ui.make_persistent_id("dwell_voice_clone_gender_female");
+                                            let is_female_hit = make_widget_accessible_and_activated(ui, &female_btn, theme.accent);
+                                            let is_female_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, female_btn_id, &female_btn);
+                                            if (is_female_hit || is_female_dwell) && !is_female {
+                                                self.set_voice_clone_gender("female");
+                                            }
+
+                                            let is_male = self.voice_clone_gender == "male";
+                                            let male_btn = ui.selectable_label(
+                                                is_male,
+                                                egui::RichText::new("👨 Homme (Masculin)")
+                                                    .size(11.0)
+                                                    .color(if is_male { theme.accent } else { theme.text_secondary }),
+                                            ).on_hover_text("Calibre et télécharge le modèle neuronal sur une voix masculine.");
+                                            let male_btn_id = ui.make_persistent_id("dwell_voice_clone_gender_male");
+                                            let is_male_hit = make_widget_accessible_and_activated(ui, &male_btn, theme.accent);
+                                            let is_male_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, male_btn_id, &male_btn);
+                                            if (is_male_hit || is_male_dwell) && !is_male {
+                                                self.set_voice_clone_gender("male");
+                                            }
+                                        });
+                                        ui.add_space(4.0);
+                                        ui.separator();
+                                        ui.add_space(4.0);
+
                                         // Phrase guide
                                         ui.horizontal(|ui| {
                                             ui.label(egui::RichText::new("Phrase recommandée à lire à voix haute :").size(10.5).color(theme.text_secondary));
@@ -1316,6 +1429,7 @@ impl OverlayApp {
                                                 if (gen_btn_hit || gen_dwell) && !self.voice_guide_generating {
                                                     self.generate_new_voice_guide_phrase();
                                                     play_earcon(Earcon::Navigation);
+                                                    ctx.request_repaint();
                                                 }
                                             });
                                         });
@@ -1369,6 +1483,10 @@ impl OverlayApp {
                                                     let append_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, append_btn_id, &append_btn);
 
                                                     if append_btn_hit || append_dwell {
+                                                        if self.is_recording {
+                                                            self.stop_recording();
+                                                        }
+                                                        self.stop_speaking();
                                                         match crate::audio::record_voice_sample(16000) {
                                                             Ok((stop_tx, result_rx)) => {
                                                                 self.voice_is_recording_sample = true;
@@ -1396,6 +1514,10 @@ impl OverlayApp {
                                                     let reset_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, reset_btn_id, &reset_btn);
 
                                                     if reset_btn_hit || reset_dwell {
+                                                        if self.is_recording {
+                                                            self.stop_recording();
+                                                        }
+                                                        self.stop_speaking();
                                                         match crate::audio::record_voice_sample(16000) {
                                                             Ok((stop_tx, result_rx)) => {
                                                                 self.voice_is_recording_sample = true;
@@ -1419,6 +1541,10 @@ impl OverlayApp {
                                                 let rec_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, rec_btn_id, &rec_btn);
 
                                                 if rec_btn_hit || rec_dwell {
+                                                    if self.is_recording {
+                                                        self.stop_recording();
+                                                    }
+                                                    self.stop_speaking();
                                                     match crate::audio::record_voice_sample(16000) {
                                                         Ok((stop_tx, result_rx)) => {
                                                             self.voice_is_recording_sample = true;
@@ -1483,7 +1609,8 @@ impl OverlayApp {
                                                         std::path::Path::new(self.voice_reference_wav_input.trim())
                                                     };
                                                     if let Ok(bytes) = std::fs::read(p) {
-                                                        if let Some((samples, rate)) = crate::tts::decode_wav_to_samples(&bytes) {
+                                                        if let Some((mut samples, rate)) = crate::tts::decode_wav_to_samples(&bytes) {
+                                                        crate::tts::normalize_audio_samples(&mut samples, 0.92);
                                                             if let Some(ref player) = self.voice_sample_player {
                                                                 player.play_samples(samples, rate);
                                                             }
@@ -1599,6 +1726,8 @@ impl OverlayApp {
 
                                                 let _ = write_env_var_to_file(".env", "VOICE_CLONE_URL", url);
                                                 std::env::set_var("VOICE_CLONE_URL", url);
+                                                let _ = write_env_var_to_file(".env", "VOICE_CLONE_GENDER", &self.voice_clone_gender);
+                                                std::env::set_var("VOICE_CLONE_GENDER", &self.voice_clone_gender);
                                                 if !wav.is_empty() {
                                                     let _ = write_env_var_to_file(".env", "VOICE_REFERENCE_WAV", wav);
                                                     std::env::set_var("VOICE_REFERENCE_WAV", wav);
@@ -1608,7 +1737,7 @@ impl OverlayApp {
                                                     std::env::set_var("VOICE_REFERENCE_TEXT", text);
                                                 }
 
-                                                self.set_voice_gender(VoiceProfile::Clone);
+                                                self.set_voice_gender_silent(VoiceProfile::Clone);
                                                 self.voice_status_feedback = Some("Paramètres enregistrés et profil vocal cloné activé.".to_string());
                                                 play_earcon(Earcon::Success);
                                             }

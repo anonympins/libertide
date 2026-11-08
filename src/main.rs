@@ -80,6 +80,7 @@ pub struct OverlayApp {
     voice_recorder_result_rx: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
     voice_sample_player: Option<crate::audio_player::AudioPlayer>,
     voice_sample_duration_secs: f32,
+    voice_clone_gender: String,
     voice_guide_phrase: String,
     voice_guide_generating: bool,
     voice_guide_rx: Option<std::sync::mpsc::Receiver<String>>,
@@ -374,6 +375,13 @@ impl OverlayApp {
             voice_recorder_result_rx: None,
             voice_sample_player: crate::audio_player::AudioPlayer::new().ok(),
             voice_sample_duration_secs: 0.0,
+            voice_clone_gender: std::env::var("VOICE_CLONE_GENDER")
+                .ok()
+                .or_else(|| read_env_var_from_file(".env", "VOICE_CLONE_GENDER"))
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| s == "male" || s == "female" || s == "homme" || s == "femme")
+                .map(|s| if s == "male" || s == "homme" { "male".to_string() } else { "female".to_string() })
+                .unwrap_or_else(|| "female".to_string()),
             voice_guide_phrase: "« Bonjour, je configure ma voix personnalisée dans Libertide. Ce court extrait audio sert de référence pour le modèle de clonage vocal. »".to_string(),
             voice_guide_generating: false,
             voice_guide_rx: None,
@@ -490,11 +498,15 @@ impl OverlayApp {
         );
     }
 
-    pub fn set_voice_gender(&mut self, gender: VoiceGender) {
+    pub fn set_voice_gender_silent(&mut self, gender: VoiceGender) {
         self.voice_gender = gender;
         let _ = self.tts_sender.send(TtsCommand::SetGender(gender));
         std::env::set_var("VOICE_PROFILE", gender.to_key_str());
         let _ = write_env_var_to_file(".env", "VOICE_PROFILE", gender.to_key_str());
+    }
+
+    pub fn set_voice_gender(&mut self, gender: VoiceGender) {
+        self.set_voice_gender_silent(gender);
         let confirmation = match gender {
             VoiceProfile::Denise => t!("speech.voice_denise").to_string(),
             VoiceProfile::Henri => t!("speech.voice_henri").to_string(),
@@ -797,7 +809,7 @@ impl OverlayApp {
     }
 
     fn start_recording(&mut self, _ctx: &egui::Context, play_sound: bool) {
-        if self.status == AgentStatus::EmergencyStopped {
+        if self.status == AgentStatus::EmergencyStopped || self.voice_is_recording_sample {
             return;
         }
         self.stop_speaking();
@@ -826,6 +838,9 @@ impl OverlayApp {
     }
 
     fn toggle_recording(&mut self, ctx: &egui::Context) {
+        if self.voice_is_recording_sample {
+            return;
+        }
         if self.is_recording {
             self.stop_recording(); // This will trigger prompt processing if text is present
         } else {
@@ -999,6 +1014,7 @@ impl eframe::App for OverlayApp {
                                 && !crate::audio::is_live_subtitles_active()
                                 && self.whisper_ready
                                 && !self.show_api_key_modal
+                                && !self.voice_is_recording_sample
                                 && self.status != AgentStatus::EmergencyStopped
                                 && (!self.is_hidden || self.switch_access_mode)
                                 && !AGENT_BUSY.load(Ordering::SeqCst)
@@ -1159,6 +1175,9 @@ impl eframe::App for OverlayApp {
                     });
                 }
                 AgentEvent::TranscriptionPartial(text) => {
+                    if self.voice_is_recording_sample {
+                        continue;
+                    }
                     let is_status_msg = text == "Écoute de votre voix..." || text == "Transcription locale en cours...";
                     if !is_status_msg && !text.trim().is_empty() && !self.switch_access_mode {
                         self.stop_speaking();
@@ -1168,6 +1187,9 @@ impl eframe::App for OverlayApp {
                     }
                 }
                 AgentEvent::VoicePromptReady(prompt) => {
+                    if self.voice_is_recording_sample {
+                        continue;
+                    }
                     self.is_recording = false;
                     self.live_transcript.clear();
                     let is_user_typing = ctx.memory(|m| m.has_focus(egui::Id::NULL.with("prompt_input_text")))
@@ -1684,6 +1706,7 @@ impl eframe::App for OverlayApp {
                         && !crate::audio::is_live_subtitles_active()
                         && self.status != AgentStatus::EmergencyStopped
                         && !self.show_api_key_modal
+                        && !self.voice_is_recording_sample
                         && !AGENT_BUSY.load(Ordering::SeqCst)
                         && self.whisper_ready
                     {
@@ -1702,6 +1725,7 @@ impl eframe::App for OverlayApp {
                         && self.status != AgentStatus::EmergencyStopped
                         && self.status != AgentStatus::Speaking
                         && !self.show_api_key_modal
+                        && !self.voice_is_recording_sample
                         && !AGENT_BUSY.load(Ordering::SeqCst)
                         && !is_user_typing
                     {
@@ -4214,6 +4238,9 @@ impl eframe::App for OverlayApp {
                                             self.sync_modal_inputs_for_provider(self.llm_config.provider);
                                             self.api_key_error = None;
                                             self.stop_speaking();
+                                            if self.is_recording {
+                                                self.stop_recording();
+                                            }
                                         }
 
                                         // 6. Bouton Effacer
