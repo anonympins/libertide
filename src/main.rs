@@ -160,7 +160,7 @@ pub struct OverlayApp {
     selected_provider_modal: LlmProvider,
     api_key_error: Option<String>,
 
-    local_download_progress: Option<(f32, f32, f32, f32)>,
+    active_download: Option<ActiveDownloadState>,
 
     // Suggestions d'applications en direct (PATH & Levenshtein)
     input_suggestions: Vec<String>,
@@ -455,7 +455,7 @@ impl OverlayApp {
             selected_provider_modal: llm_config.provider,
             show_api_key_plain: false,
             api_key_error: None,
-            local_download_progress: None,
+            active_download: None,
             input_suggestions: Vec::new(),
             last_suggestion_query: String::new(),
             macros,
@@ -1023,11 +1023,26 @@ impl eframe::App for OverlayApp {
         // Dépouillement des événements asynchrones
         while let Ok(event) = self.event_receiver.try_recv() {
             match event {
-                AgentEvent::DownloadProgress { percent, downloaded_mb, total_mb, speed_mb_s } => {
+                AgentEvent::DownloadProgress { label, percent, downloaded_mb, total_mb, speed_mb_s } => {
                     if percent >= 100.0 {
-                        self.local_download_progress = None;
+                        if let Some(prev) = self.active_download.take() {
+                            self.chat_history.push(ChatEntry {
+                                role: ChatRole::Agent,
+                                text: format!("✅ Téléchargement terminé : **{}** ({:.1} Mo). Prêt à l'emploi.", prev.label, prev.total_mb),
+                                timestamp: current_time_str(),
+                                quick_suggestions: Vec::new(),
+                                screen_size_kb: None,
+                            });
+                            play_earcon(Earcon::Success);
+                        }
                     } else {
-                        self.local_download_progress = Some((percent, downloaded_mb, total_mb, speed_mb_s));
+                        self.active_download = Some(ActiveDownloadState {
+                            label,
+                            percent,
+                            downloaded_mb,
+                            total_mb,
+                            speed_mb_s,
+                        });
                     }
                     ctx.request_repaint();
                 }
@@ -4391,6 +4406,12 @@ impl eframe::App for OverlayApp {
                     ui.set_clip_rect(messages_rect);
                     match self.active_tab {
                         ActiveTab::Assistance => {
+                            // Encadré accessible des téléchargements en cours (Whisper, LLM local, Voix)
+                            if let Some(ref dl) = self.active_download {
+                                draw_active_download_box(ui, &theme, &dl.label, dl.percent, dl.downloaded_mb, dl.total_mb, dl.speed_mb_s);
+                                ui.add_space(3.0);
+                            }
+
                             // Encadré accessible des rappels & minuteurs en cours
                             if let Some(reminder_feedback) = draw_active_reminders_box(ui, &theme, &mut self.dwell_state) {
                                 self.chat_history.push(ChatEntry {

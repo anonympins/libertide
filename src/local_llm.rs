@@ -2185,6 +2185,7 @@ pub fn ensure_llama_model_downloaded_for_preset(
     let event_tx_clone = event_tx.clone();
     let hf_url = preset.hf_url.to_string();
     let temp_path_thread = temp_path.clone();
+    let preset_name = preset.name.to_string();
 
     let download_handle = std::thread::spawn(move || -> Result<(), String> {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -2246,6 +2247,7 @@ pub fn ensure_llama_model_downloaded_for_preset(
                     };
 
                     let _ = event_tx_clone.send(AgentEvent::DownloadProgress {
+                        label: format!("Modèle LLM local ({})", preset_name),
                         percent,
                         downloaded_mb: downloaded_mb as f32,
                         total_mb: total_mb as f32,
@@ -2257,6 +2259,7 @@ pub fn ensure_llama_model_downloaded_for_preset(
             file.flush().await.map_err(|e| e.to_string())?;
             println!();
             let _ = event_tx_clone.send(AgentEvent::DownloadProgress {
+                label: format!("Modèle LLM local ({})", preset_name),
                 percent: 100.0,
                 downloaded_mb: (downloaded as f64 / (1024.0 * 1024.0)) as f32,
                 total_mb: (downloaded as f64 / (1024.0 * 1024.0)) as f32,

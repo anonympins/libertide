@@ -244,6 +244,72 @@ pub fn draw_active_reminders_box(
     feedback_msg
 }
 
+/// Affiche un encadré accessible indiquant un téléchargement de modèle ou ressource en cours
+pub fn draw_active_download_box(
+    ui: &mut egui::Ui,
+    theme: &ThemeColors,
+    label: &str,
+    percent: f32,
+    downloaded_mb: f32,
+    total_mb: f32,
+    speed_mb_s: f32,
+) {
+    egui::Frame::new()
+        .fill(theme.control_bg)
+        .stroke(egui::Stroke::new(1.2, theme.accent))
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("📥 Téléchargement en cours")
+                        .size(11.5)
+                        .color(theme.accent)
+                        .strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if speed_mb_s > 0.0 {
+                        ui.label(
+                            egui::RichText::new(format!("{speed_mb_s:.1} Mo/s"))
+                                .size(11.0)
+                                .color(theme.text_secondary),
+                        );
+                    }
+                });
+            });
+
+            ui.add_space(2.0);
+
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(label)
+                        .size(12.0)
+                        .color(theme.text_primary)
+                        .strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let progress_text = if total_mb > 0.0 {
+                        format!("{downloaded_mb:.1} / {total_mb:.1} Mo ({percent:.0}%)")
+                    } else {
+                        format!("{downloaded_mb:.1} Mo")
+                    };
+                    ui.label(
+                        egui::RichText::new(progress_text)
+                            .size(11.0)
+                            .color(theme.text_user)
+                            .strong(),
+                    );
+                });
+            });
+
+            ui.add_space(4.0);
+            let bar = egui::ProgressBar::new((percent / 100.0).clamp(0.0, 1.0))
+                .desired_height(14.0)
+                .animate(true);
+            ui.add(bar);
+        });
+}
+
 /// Surcouche d'entrée texte universelle pour egui : garantit la prise en compte des événements
 /// clavier de Windows (PowerToys KeyMapper, touches mortes, copier/coller, focus accessible)
 pub fn render_accessible_input(

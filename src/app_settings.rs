@@ -682,8 +682,8 @@ impl OverlayApp {
 
                                             ui.add_space(6.0);
                                             let active_installed = local_llm::is_preset_downloaded(active_preset);
-                                            if let Some((percent, downloaded_mb, total_mb, speed_mb_s)) = self.local_download_progress {
-                                                ui.add(egui::ProgressBar::new(percent / 100.0).text(format!("{percent:.1} % ({downloaded_mb:.1} / {total_mb:.1} Mo - {speed_mb_s:.1} Mo/s)")).animate(true));
+                                            if let Some(ref dl) = self.active_download {
+                                                ui.add(egui::ProgressBar::new(dl.percent / 100.0).text(format!("{} - {:.1} % ({:.1} / {:.1} Mo - {:.1} Mo/s)", dl.label, dl.percent, dl.downloaded_mb, dl.total_mb, dl.speed_mb_s)).animate(true));
                                             } else if !active_installed {
                                                 let event_tx_clone = self.event_sender.clone();
                                                 let p = *active_preset;
