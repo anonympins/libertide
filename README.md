@@ -60,14 +60,15 @@ Designed for users with single-movement abilities (micro-switch, puff-and-sip, s
 - **100% On-Device Dictation (Whisper)**: Speak letters, emails, or code naturally. Real-time speech transcription runs locally via `whisper.cpp`—voice data never leaves your computer.
 - **100% Offline Local LLM Engine (`llama-cpp-2` & GGUF)**: Run reasoning entirely on-device with zero network latency, zero API costs, and absolute data confidentiality. Includes native Windows **GPU hardware acceleration (Vulkan)** with automatic graceful fallback to multi-threaded CPU inference.
   - **Integrated Quantized Presets (`Q4_K_M`)**:
-    - **Qwen 2.5 0.5B Instruct** (~398 MB) : Sub-1B ultra-lightweight and reactive for low-spec setups.
-    - **Llama 3.2 1B Instruct** (~770 MB) : Excellent balance between speed and reasoning.
-    - **Qwen 2.5 1.5B Instruct** (~986 MB) : High precision in French and multilingual tasks.
+    - **Qwen 2.5 1.5B Instruct** (~986 MB) : High precision in French and multilingual instruction-following (default).
+    - **Llama 3.2 1B Instruct** (~770 MB) : Ultra-lightweight and responsive for modest hardware configurations.
     - **Llama 3.2 3B Instruct** (~2.0 GB) : Extended contextual reasoning and instruction-following.
-    - **Qwen 2.5 3B Instruct** (~1.9 GB) : Deep reasoning with complex tool/action planning.
+    - **Qwen 2.5 3B Instruct** (~1.9 GB) : Multi-turn structured action reasoning.
+    - **Qwen 2.5 7B Instruct** (~4.7 GB) : Deep autonomous planning and complex DOM manipulation.
+    - **Meta-Llama 3.1 8B Instruct** (~4.9 GB) : State-of-the-art accuracy and instruction fidelity.
   - **Real-Time Streaming TTS**: Stream-parses JSON output token-by-token to narrate responses immediately without waiting for inference completion.
 - **Autonomous Multi-Pass Reasoning**: Powered by leading cloud LLMs (DeepSeek, Claude, GPT-4o, Mistral, Groq, GLM) or the local offline models, Libertide plans and chains multi-step actions across iterative reasoning passes.
-- **Safety & Undo Stack**: Every simulated interaction (keystrokes, tab opens, navigation) is recorded in an undo stack. Say *"Undo"* or press `Escape` to rollback.
+- **Safety, Occlusion Resilience & Undo Stack**: Every simulated interaction is recorded in an undo stack. If target elements reside on an occluded or background window, blind clicking is prevented and native foreground focus (`focus_window`) is issued automatically. Say *"Undo"* or press `Escape` to rollback.
 
 ### 4. 🪟 Interactive Floating Cards & Live Subtitles
 Complex information is extracted and projected into accessible floating window cards:
@@ -75,12 +76,21 @@ Complex information is extracted and projected into accessible floating window c
 - **Interactive Forms**: Flight searches, hotel finders, and filter tools rendered with high-contrast sliders, dropdowns, and checkboxes.
 - **Comparison Tables**: Sortable product, travel, or specification tables with one-click copy and actionable links (`[link="action:..."]`).
 - **Markdown Syntheses**: Clean article and document summaries with interactive action buttons.
+- **Webpage Content Analysis (`WebpageAnalysis`)**: Direct extraction and summarization of the active webpage's DOM body projected cleanly into floating cards.
 
-### 5. 🛡️ Removal of Web Obstacles & Transaction Safety
+### 5. ⏰ Advanced Scheduler, Timers & Proactive Companion
+- **Recurring Cron & Delay Scheduling**: Set natural one-time reminders (*"Remind me in 15 minutes"*) or recurring cron jobs (`@hourly`, `every 30m`, `*/15 * * * *`).
+- **Active Timers Dashboard**: Visual progress bars, real-time countdown clocks, and quick-cancel buttons with Click & Dwell support directly inside the Assistance panel.
+- **Ethical Proactive Companion**: Periodic background check-ins (~22 minutes with natural timing jitter) cycling through posture/hydration advice (`CareAndComfort`), curiosities (`KnowledgeAndQuestions`), empathy (`EmotionalSupportAndEmpathy`), and ambient music (`RadioAndMusicStream`). Automatically suspends when the user is typing, dictating, or in emergency mode.
+
+### 6. 📺 Twitch Live Stream State & Interactive Chat
+- **Live Metadata & Viewer Counter**: Real-time stream detection showing live status, viewer count with a logarithmic activity color gradient (mint, cyan, amber, coral, magenta), and current broadcast titles.
+- **One-Click Stream Joining**: Direct *"🌐 Join on Twitch"* action in the active chat header to watch broadcasts in your default browser.
+
+### 7. 🛡️ Removal of Web Obstacles & Transaction Safety
 - **Automatic Barrier Dismissal**: Automatically detects and dismisses invasive cookie consent banners and push notification prompts.
 - **Protected Payment Guardrail**: The agent can search products, compare prices, and manage shopping carts, but **strictly stops before checkout/payment screens**, requiring explicit user confirmation.
 
-### 6. 👁️ Universal OCR Fallback
 - **Zero Accessibility Dead-Ends**: Works seamlessly on legacy software, Java Swing apps, canvas elements, games, or remote desktops where OS accessibility APIs (UIA, AX, AT-SPI) lack metadata.
 - **Instant Actionability**: An embedded high-speed OCR engine detects textual and button areas, assigning them clickable badges and hover narrations.
 
@@ -130,6 +140,14 @@ The interface adapts dynamically to your eyesight:
 ### ⏱️ 5. Reminders and deferred commands
 - *"Remind me to take my medication in 30 minutes"*
 - *"In 10 minutes close the browser"*
+- *"Rappelle-moi de boire de l'eau toutes les heures"* / *"Every 30m"*
+
+### 📺 6. Twitch streams & Live Chat
+- *"Ouvre le chat Twitch de kamet0"*
+- Look at live status, viewer count and stream title, or click *"🌐 Join on Twitch"* to watch.
+
+### 🌿 7. Proactive Companion wellness thoughts
+- Say *"Active les pensées"* / *"Désactive les pensées"* to toggle gentle periodic wellness and posture check-ins.
 
 ---
 
@@ -170,11 +188,12 @@ To process natural language commands, configure your preferred LLM provider:
 3. Choose your provider:
    - **Cloud Providers**: **DeepSeek**, **OpenAI**, **Anthropic**, **Mistral**, **Groq**, or **GLM** (paste your API key).
    - **100% Local & Free (Zero API Key)**: Choose **Local** and select your preferred on-device model from the presets:
-     - *Qwen 2.5 0.5B Instruct* (~398 MB)
+     - *Qwen 2.5 1.5B Instruct* (~986 MB) [Default]
      - *Llama 3.2 1B Instruct* (~770 MB)
-     - *Qwen 2.5 1.5B Instruct* (~986 MB)
+     - *Qwen 2.5 3B Instruct* (~1.9 GB)
      - *Llama 3.2 3B Instruct* (~2.0 GB)
-     - *Qwen 2.5 3B Instruct* (~1.9 GB)  
+     - *Qwen 2.5 7B Instruct* (~4.7 GB)
+     - *Meta-Llama 3.1 8B Instruct* (~4.9 GB)  
      Click **⬇ Télécharger** to download the model with real-time speed/progress monitoring and resume support.
 
 *(On the first speech-recognition session, the lightweight local Whisper model downloads automatically in the background).*
@@ -223,13 +242,15 @@ Libertide understands English, French, and most modern languages:
 | Category | What you can say out loud |
 | :--- | :--- |
 | **Interface Control** | *"Hide"* • *"Show up"* • *"Emergency stop"* • *"Stop"* |
+| **Window Focus** | *"Focus Chrome"* • *"Mets le bloc-notes au premier plan"* • *"Passe sur VS Code"* |
 | **Live Subtitles** | *"Active les sous-titres"* • *"Arrête les sous-titres"* • *"Start subtitles"* • *"Stop subtitles"* |
 | **Pointing & Clicking Help** | *"Hover mode"* • *"Numbers"* / *"Badges"* • *"Click 3"* • *"Switch mode"* |
 | **Display & Themes** | *"Zoom in"* • *"Zoom out"* • *"Reset zoom"* • *"High contrast"* • *"Next theme"* • *"Passer en anglais / français"* |
 | **Dictation & Writing** | *"Dictation mode"* • *"New line"* • *"Delete word"* • *"Stop dictation"* |
-| **Reading & Summaries** | *"Summarize this page"* • *"What is this video about?"* • *"Read this text"* |
+| **Reading & Summaries** | *"Summarize this page"* • *"Analyse la page"* • *"What is this video about?"* • *"Read this text"* |
 | **Workspace & Comfort** | *"Tile windows side by side"* • *"Mute sound"* • *"Close tab"* |
-| **Reminders & Timers** | *"Remind me to take my medicine in 20 minutes"* |
+| **Reminders & Cron** | *"Remind me to take my medicine in 20 minutes"* • *"Rappelle-moi toutes les heures"* • *"Annule les rappels"* |
+| **Proactive Wellness** | *"Active les pensées"* • *"Désactive les pensées"* |
 
 ---
 
