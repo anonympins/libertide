@@ -653,6 +653,24 @@ pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<Comma
         return vec![CommandTag::SetVolumeOrMuteUnMute, CommandTag::AudioSettings];
     }
 
+    // Détection d'échec d'action / résilience (nécessité de refocus et reprise de contrôle)
+    if lower.contains("échec d'action")
+        || lower.contains("echec d'action")
+        || lower.contains("résilience agent")
+        || lower.contains("resilience agent")
+        || lower.contains("undo automatique")
+        || lower.contains("aucun élément")
+        || lower.contains("aucun element")
+        || lower.contains("aucun lien")
+        || lower.contains("non accessible")
+        || lower.contains("pas accessible")
+        || lower.contains("n'a pas fonctionné")
+        || lower.contains("pas fonctionné")
+        || lower.contains("n a pas fonctionne")
+    {
+        return vec![CommandTag::FocusWindow, CommandTag::ClickElementOrButton];
+    }
+
     // Détection de changement ou focus de fenêtre
     if lower.contains("focus la fenêtre")
         || lower.contains("focus la fenetre")
@@ -677,6 +695,14 @@ pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<Comma
         || lower.contains("affiche la fenêtre")
         || lower.contains("affiche la fenetre")
         || lower.contains("activer la fenêtre")
+        || lower.contains("refocus")
+        || lower.contains("fenêtre cachée")
+        || lower.contains("fenetre cachee")
+        || lower.contains("fenêtre masquée")
+        || lower.contains("fenetre masquee")
+        || lower.contains("en arrière-plan")
+        || lower.contains("en arriere-plan")
+        || lower.contains("en arrière plan")
     {
         return vec![CommandTag::FocusWindow];
     }
@@ -778,6 +804,24 @@ pub fn build_routed_system_prompt(tags: &[CommandTag], lang_name: &str) -> Strin
         }
         if !effective_tags.contains(&CommandTag::ScreenReadingOrSummary) {
             effective_tags.push(CommandTag::ScreenReadingOrSummary);
+        }
+        if !effective_tags.contains(&CommandTag::FocusWindow) {
+            effective_tags.push(CommandTag::FocusWindow);
+        }
+    }
+    if effective_tags.contains(&CommandTag::ClickElementOrButton) {
+        if !effective_tags.contains(&CommandTag::FocusWindow) {
+            effective_tags.push(CommandTag::FocusWindow);
+        }
+    }
+    if effective_tags.contains(&CommandTag::TextInputOrDictation) {
+        if !effective_tags.contains(&CommandTag::FocusWindow) {
+            effective_tags.push(CommandTag::FocusWindow);
+        }
+    }
+    if effective_tags.contains(&CommandTag::AppManagement) {
+        if !effective_tags.contains(&CommandTag::FocusWindow) {
+            effective_tags.push(CommandTag::FocusWindow);
         }
     }
     if effective_tags.contains(&CommandTag::RadioAndMusicStream) {
@@ -948,6 +992,15 @@ STRUCTURE STRICTE DU TABLEAU "actions" :
 
 RÉTRO-ANALYSE COGNITIVE & ARRÊT STRICT SUR OBJECTIF (SELF-CHECK DE COMPLÉTION) :
 - Compare systématiquement : [État actuel de l'écran] vs [Demande initiale de l'utilisateur].
+- FENÊTRE MASQUÉE, RECUPÉRATION ET REFOCUS (RÈGLE DE RÉSILIENCE OBLIGATOIRE) :
+  Si une action précédente a échoué ou si le contrôle visé (bouton, lien, champ de saisie) appartient à une fenêtre cachée ou recouverte par la fenêtre active en cours :
+  -> INTERDICTION FORMELLE de retenter le clic ou la frappe aveuglément à travers la fenêtre supérieure !
+  -> Émets EN PRIORITÉ {{"action": "focus_window", "title": "Titre exact de la fenêtre cible"}} avec "next_passes" > 0 pour la ramener au tout premier plan.
+  -> ÉCHEC DE CLIC OU ÉLÉMENT INTROUVABLE ("Aucun élément/lien correspondant trouvé") :
+     * C'est le signe que le navigateur n'a pas le focus ou que le libellé visé est trop verbeux.
+     * Règle 1 : Ramène le navigateur au premier plan via {{"action": "focus_window", "title": "Chrome"}} (ou Edge / Firefox), ou renseigne le champ "window".
+     * Règle 2 : Vise TOUJOURS un libellé court et épuré (ex: "Radio France" au lieu de "Radio France | Écoutez en ligne vos radios").
+  -> Ce n'est qu'à la passe suivante, une fois la fenêtre cible bien visible et active au premier plan, que tu exécutes l'interaction (clic, texte, scroll).
 - SI LA CIBLE EST ATTEINTE (page de films/vidéos affichée, vidéo en lecture, formulaire validé, texte saisi, information demandée lisible à l'écran) :
   -> ARRÊT STRICT ET IMMÉDIAT : renvoie impérativement "actions": [] et "next_passes": 0.
   -> INTERDICTION FORMELLE DE SUR-AGIR : Ne clique JAMAIS au hasard, ne défile pas indéfiniment et ne clique pas sur des recommandations secondaires, publicités ou menus inutiles une fois sur la destination demandée.
@@ -971,7 +1024,10 @@ Règles de syntaxe JSON strictes :
             CommandTag::WebNavigateOrSearch => {
                 prompt.push_str(r#"
 Règles NAVIGATION WEB & RECHERCHE :
-- POINT DE DÉPART OBLIGATOIRE SUR GOOGLE SEARCH : Pour toute recherche d'information, météo (ex: météo Paris, prévisions), actualité ou service, le point de départ DOIT TOUJOURS ÊTRE une recherche Google via "navigate_to_url" ("https://www.google.com/search?q=termes+de+recherche"). INTERDICTION FORMELLE d'aller directement sur une URL présumée ou codée en dur (INTERDIT d'ouvrir directement meteofrance.com ou un site arbitraire : passe obligatoirement par Google Search d'abord).
+- EXTRACTION DE L'INTENTION RÉELLE ET REFORMULATION (ANTI MOT-À-MOT) :
+  Ne copie JAMAIS mot-à-mot la phrase brute, les verbes d'injonction ou les formules de politesse de l'utilisateur dans l'URL de recherche (INTERDICTION FORMELLE d'inclure "cherche-moi", "trouve-moi", "peux-tu", "je voudrais savoir", "s'il te plaît", etc.).
+  Extrais et condense UNIQUEMENT le sujet réel et les mots-clés essentiels et pertinents (ex: si l'utilisateur dit "peux-tu me trouver la météo qu'il fera demain à Lyon s'il te plaît ?", cherche "meteo lyon demain" ; s'il dit "comment réparer un robinet qui goutte dans la cuisine", cherche "reparer robinet qui goutte").
+- POINT DE DÉPART OBLIGATOIRE SUR GOOGLE SEARCH : Pour toute recherche d'information, météo (ex: météo Paris, prévisions), actualité ou service, le point de départ DOIT TOUJOURS ÊTRE une recherche Google via "navigate_to_url" ("https://www.google.com/search?q=mots+cles+du+sujet+reel"). INTERDICTION FORMELLE d'aller directement sur une URL présumée ou codée en dur (INTERDIT d'ouvrir directement meteofrance.com ou un site arbitraire : passe obligatoirement par Google Search d'abord).
 - RECHERCHE IMMÉDIATE SANS CONSEIL : Si l'utilisateur demande une recherche (météo, film, vidéo, information), INTERDICTION de répondre par du texte passif. Émets IMMÉDIATEMENT {"action": "navigate_to_url", "url": "https://www.google.com/search?q=...", "target": "new_tab"} avec "next_passes": 5.
 - INTERDICTION de fermer la fenêtre active (pas de "close_app" ni clic croix) pour chercher sur le web.
 - Accepte systématiquement les bannières cookies Google ("Tout accepter").
@@ -992,6 +1048,8 @@ Règles ANALYSE DE PAGE WEB (TAG WEBPAGE_ANALYSIS) :
             CommandTag::NavigateInWebpage => {
                 prompt.push_str(r#"
 Règles NAVIGATION DANS LA PAGE WEB (TAG NAVIGATE_IN_WEBPAGE) :
+- FENÊTRE DU NAVIGATEUR EN ARRIÈRE-PLAN OU MASQUÉE : Si le navigateur web est recouvert ou caché par une autre application (ou par Libertide), ou si un clic a renvoyé "Aucun élément/lien correspondant trouvé", fais d'abord {"action": "focus_window", "title": "Nom/titre du navigateur (Chrome, Edge, Firefox)"} pour le replacer au premier plan avant d'interagir.
+- LIBELLÉS COURTS ET ÉPURÉS : Vise le libellé textuel le plus concis du lien ou résultat (ex: "Radio France" et JAMAIS "Radio France | Écoutez en ligne vos radios").
 - RÉFÉRENTIEL GOOGLE SEARCH : La page de résultats Google Search est le référentiel de départ. Tu dois tester et analyser les différents résultats fournis par Google.
 - Si Google affiche un encart météo / widget informatif direct en haut de page, lis-le et restitue la météo immédiatement dans "narration" en clôturant ("actions": [], "next_passes": 0).
 - Si une consultation détaillée est demandée ou nécessaire, clique sur le premier site de résultats pertinent (ex: premier lien de météo) via "click_element". Si ce site ne convient pas ou est bloqué, fais "navigate_back" pour tester le résultat suivant dans Google.
@@ -1007,8 +1065,15 @@ Règles NAVIGATION DANS LA PAGE WEB (TAG NAVIGATE_IN_WEBPAGE) :
                 prompt.push_str(r#"
 Règles CLICS ET CIBLAGE :
 - UN SEUL CLIC PAR PASSE : 1 seule action "click_element", "click_button" ou "click_numbered_target". Interdiction d'enchaîner deux clics dans la même passe.
-- Pour cliquer sur un lien ou texte interactif : {"action": "click_element", "target_name": "Libellé visible exact"}.
-- Pour cliquer sur un bouton : {"action": "click_button", "button_name": "Libellé visible exact"} (ex: {"action": "click_button", "button_name": "Se connecter avec Google"}, SANS le mot "Bouton").
+- CONTRÔLE SUR FENÊTRE EN ARRIÈRE-PLAN OU RECOUVERTE :
+  Si l'élément ou bouton visé fait partie d'une fenêtre qui n'est pas celle au premier plan (ou qui est couverte/masquée par la fenêtre en cours) :
+  Émets IMMÉDIATEMENT {"action": "focus_window", "title": "Titre exact de la fenêtre"} pour amener la bonne fenêtre au premier plan avant d'effectuer le clic.
+- CIBLAGE PAR LIBELLÉ COURT & PRÉCIS (ANTI-TITRES À RALLONGE) :
+  * Ne recopie JAMAIS les titres longs composés avec des séparateurs (' | ', ' - ', ' — ') ou des slogans.
+  * Exemple : pour "Radio France | Écoutez en ligne vos radios", écris STRICTEMENT "Radio France".
+  * Pour un bouton d'acceptation de cookies, écris "Tout accepter" ou "Accepter".
+- Pour cliquer sur un lien ou texte interactif : {"action": "click_element", "target_name": "Libellé court visible", "window": "Titre optionnel de la fenêtre"}.
+- Pour cliquer sur un bouton : {"action": "click_button", "button_name": "Libellé visible exact", "window": "Titre optionnel de la fenêtre"} (ex: {"action": "click_button", "button_name": "Se connecter avec Google"}, SANS le mot "Bouton").
 - Pour cliquer sur un numéro de badge : {"action": "click_numbered_target", "index": N}.
 - "focus_element" : place le focus sur un contrôle sans forcément le valider.
 - "scroll" : fait défiler la vue pour révéler des contrôles cachés ("direction": "down"|"up"|"bottom"|"top", "amount": 1..2).
@@ -1018,6 +1083,7 @@ Règles CLICS ET CIBLAGE :
             CommandTag::TextInputOrDictation => {
                 prompt.push_str(r#"
 Règles SAISIE TEXTE & FORMULAIRES :
+- FENÊTRE CIBLE AU PREMIER PLAN : Avant de saisir du texte ("write_text" ou "replace_field_text"), assure-toi que la fenêtre contenant le champ cible est active. Si elle est en arrière-plan ou masquée, émets d'abord {"action": "focus_window", "title": "Titre exact de la fenêtre"}.
 - Pour saisir : "write_text" avec "target": "nom_champ", "press_enter": true/false.
 - Pour remplacer : "replace_field_text" avec "target": "nom_champ", "text": "...".
 - Pour effacer : "clear_text".
@@ -1047,6 +1113,8 @@ Règles APPLICATIONS :
             CommandTag::FocusWindow => {
                 prompt.push_str(r#"
 Règles FOCUS ET BASCULEMENT DE FENÊTRE (TAG FOCUS_WINDOW) :
+- FENÊTRES COUVERTES, CACHÉES OU ÉCHEC D'ACTION :
+  Si un contrôle d'une fenêtre cible n'a pas pu être atteint ou si la fenêtre souhaitée est cachée par la fenêtre active en cours, utilise impérativement "focus_window" pour la faire passer au premier plan.
 - L'utilisateur demande d'activer, basculer ou donner le focus à une fenêtre ou application déjà ouverte (ex: "mets Chrome en premier plan", "va sur la fenêtre Discord", "focus le bloc-notes").
 - Consulte la liste des fenêtres ouvertes dans [État actuel de l'écran].
 - Émets l'action "focus_window" avec le titre ou nom exact de la cible : {"action": "focus_window", "title": "Titre exact de la fenêtre"}.
@@ -1142,7 +1210,8 @@ Règles ACCESSIBILITÉ COGNITIVE & FALC (FACILE À LIRE ET À COMPRENDRE) :
                 prompt.push_str(r#"
 Règles STRATÉGIE RADIO & STREAMING AUDIO :
 - Étape 1 : Ouvre immédiatement le flux radio ou la page officielle via "navigate_to_url" (ex: "https://www.radiofrance.fr/franceinter" ou recherche Google directe "https://www.google.com/search?q=écouter+france+inter+en+direct").
-- Étape 2 (Bannière cookies) : Dès l'arrivée, clique systématiquement sur le bouton d'acceptation ("Tout accepter", "Accepter").
+- Étape 2 (Bannière cookies & Focus) : Si le navigateur n'est pas actif ou si le clic précédent a échoué, remets-le au premier plan avec {"action": "focus_window", "title": "Chrome"} (ou le nom du navigateur détecté). Dès l'arrivée, clique systématiquement sur le bouton d'acceptation ("Tout accepter", "Accepter").
+- Étape 3 (Ciblage court) : Pour cliquer sur le résultat de recherche, utilise UNIQUEMENT le nom court de la station ou du site (ex: "Radio France" ou "France Inter", SURTOUT PAS le titre complet avec pipes "Radio France | Écoutez...").
 - Étape 3 (Lancement audio) : Cherche et clique sur le bouton de lecture en direct ("Écouter le direct", "Direct", "Play", "Lecture") ou sur l'élément [@audio:...] / [@video:...].
 - Étape 4 (Anti-terminal) : N'ouvre JAMAIS de console pour le son. Règle le volume avec "set_volume" ou "accessibility_shortcut": "space".
 - Étape 5 (Clôture) : Dès que le flux audio démarre, ARRÊTE les passes ("actions": [], "next_passes": 0) et confirme oralement la station en cours dans "narration".
@@ -1180,7 +1249,7 @@ Règles TWITCH STREAM & CHAT :
             CommandTag::EcommerceAndShopping => {
                 prompt.push_str(r#"
 Règles STRATÉGIE E-COMMERCE & ACHATS EN LIGNE :
-- Étape 1 (Recherche produit) : Ouvre le site marchand ou comparateur via "navigate_to_url" vers le produit ou via recherche Google.
+- Étape 1 (Recherche produit) : Isole la désignation exacte de l'article recherché sans les formules conversationnelles ("je voudrais acheter...", "cherche le meilleur prix pour..."). Ouvre le site marchand ou comparateur via "navigate_to_url" vers le produit ou via recherche Google.
 - Étape 2 (Validation cookies) : Clique immédiatement sur "Tout accepter" pour dégager la vue.
 - Étape 3 (Analyse & Comparatif) : Extrais les caractéristiques clés, prix, frais de port et disponibilité. Si plusieurs offres sont présentes, projette un tableau comparatif via "show_floating_card" (card_type: "table", id: "comparatif_achats").
 - Étape 4 (Ajout panier & Consultation) : Clique sur "Ajouter au panier", puis "Voir le panier" / "Commander".
@@ -1220,6 +1289,7 @@ Règles GESTION DE FICHIERS & EXPLORATEUR :
             CommandTag::VideoAndEntertainment => {
                 prompt.push_str(r#"
 Règles VIDÉOS, FILMS, SÉRIES & DIVERTISSEMENT :
+- RECHERCHE CIBLÉE SUR LE CONTENU RÉEL : Ne copie JAMAIS la phrase brute ou les ordres oraux ("mets-moi une vidéo de...", "trouve le concert de..."). Isole strictement le nom de l'artiste, du morceau ou du sujet pour la requête YouTube (ex: "Jul dernier clip", "documentaire volcan").
 - CHOIX AUTONOME EN CAS DE CONSIGNE OUVERTE : Si l'utilisateur ne précise pas le sujet ou dit "choisis une vidéo", "mets une vidéo", "mets quelque chose" : INTERDICTION ABSOLUE de demander des précisions ou de refuser de choisir. CHOISIS IMMÉDIATEMENT toi-même un thème captivant et universel (ex: "documentaire nature 4K", "musique lofi relaxante", "court métrage animation", "reportage science") et lance directement la recherche YouTube correspondante via navigate_to_url.
 - Étape 1 : Ouvre la plateforme vidéo demandée (YouTube, Netflix, Arte, streaming) via "navigate_to_url" (ex: "https://www.youtube.com/results?search_query=...").
 - Étape 2 : Valide immédiatement les bandeaux de consentement ou cookies ("Tout accepter").
@@ -1375,8 +1445,8 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
                 prompt.push_str("- {\"action\": \"scroll\", \"direction\": \"down\", \"amount\": 1}\n");
             }
             CommandTag::ClickElementOrButton => {
-                prompt.push_str("- {\"action\": \"click_element\", \"target_name\": \"Libellé du lien ou élément\"}\n");
-                prompt.push_str("- {\"action\": \"click_button\", \"button_name\": \"Libellé du bouton\"}\n");
+                prompt.push_str("- {\"action\": \"click_element\", \"target_name\": \"Libellé court du lien ou élément\", \"window\": \"Titre optionnel de la fenêtre\"}\n");
+                prompt.push_str("- {\"action\": \"click_button\", \"button_name\": \"Libellé du bouton\", \"window\": \"Titre optionnel de la fenêtre\"}\n");
                 prompt.push_str("- {\"action\": \"click_numbered_target\", \"index\": 1}\n");
                 prompt.push_str("- {\"action\": \"focus_element\", \"target_name\": \"nom\"}\n");
                 prompt.push_str("- {\"action\": \"scroll\", \"direction\": \"down\"|\"up\", \"amount\": 1}\n");
