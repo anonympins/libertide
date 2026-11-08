@@ -457,6 +457,27 @@ pub struct TwitchChannelItem {
     pub login: String,
     pub display_name: String,
     pub profile_image_url: Option<String>,
+    #[serde(default)]
+    pub is_live: bool,
+    #[serde(default)]
+    pub viewers_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TwitchFilter {
+    #[default]
+    All,
+    LiveOnly,
+}
+
+impl TwitchFilter {
+    #[inline]
+    pub fn matches(&self, item: &TwitchChannelItem) -> bool {
+        match self {
+            Self::All => true,
+            Self::LiveOnly => item.is_live,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -515,6 +536,11 @@ pub enum AgentEvent {
         text: String,
         spectrum: [f32; 16],
     },
+    OpenTwitchChannel {
+        channel: String,
+        open_stream: bool
+    },
+    SwitchTab(ActiveTab),
     LiveSubtitlesClosed,
     NavigationZonesReady {
         window_id: isize,
@@ -807,6 +833,16 @@ pub enum AgentAction {
     NextNumberedChunk,
     #[serde(alias = "prev_badges", alias = "badges_precedents")]
     PreviousNumberedChunk,
+    #[serde(alias = "open_twitch", alias = "twitch_chat", alias = "twitch")]
+    OpenTwitchChat {
+        channel: String,
+        #[serde(default)]
+        open_stream: Option<bool>,
+    },
+    #[serde(alias = "change_tab", alias = "select_tab")]
+    SwitchTab {
+        tab: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -908,6 +944,8 @@ impl QuickSuggestionItem {
                         Some("Désactiver les sous-titres".to_string())
                     }
                 }
+                AgentAction::OpenTwitchChat { channel, .. } => Some(format!("Ouvrir le chat #{channel}")),
+                AgentAction::SwitchTab { tab } => Some(format!("Basculer vers l'onglet {tab}")),
                 _ => None,
             },
         }

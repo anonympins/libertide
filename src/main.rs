@@ -118,6 +118,8 @@ pub struct OverlayApp {
     current_twitch_channel: String,
     twitch_search_query: String,
     twitch_search_results: Vec<TwitchChannelItem>,
+    twitch_filter: TwitchFilter,
+    auto_scroll_to_bottom: bool,
     position_initialized: bool,
     floating_cards: Vec<FloatingCard>,
     window_pos: Option<egui::Pos2>,
@@ -161,6 +163,7 @@ pub struct OverlayApp {
     detected_microphones: Vec<String>,
     selected_microphone: String,
     detected_pointing_devices: Vec<crate::devices::PointingDevice>,
+    pending_twitch_speech: Option<String>,
 }
 
 impl OverlayApp {
@@ -365,6 +368,8 @@ impl OverlayApp {
             current_twitch_channel: initial_twitch_channel,
             twitch_search_query: String::new(),
             twitch_search_results: Vec::new(),
+            twitch_filter: TwitchFilter::All,
+            auto_scroll_to_bottom: true,
             position_initialized: false,
             floating_cards: Vec::new(),
             window_pos: None,
@@ -372,7 +377,7 @@ impl OverlayApp {
             drag_offset: None,
             current_win_w: 560.0,
             chat_height: 70.0,
-            current_win_h: 196.0,
+            current_win_h: 280.0,
             is_hidden: false,
             mouse_passthrough: false,
             is_streaming_narration: false,
@@ -399,6 +404,7 @@ impl OverlayApp {
             detected_microphones,
             selected_microphone,
             detected_pointing_devices,
+            pending_twitch_speech: None,
         };
         app.sync_modal_inputs_for_provider(llm_config.provider);
         update_open_floating_cards(&app.floating_cards);
@@ -451,6 +457,7 @@ impl OverlayApp {
     }
 
     pub fn stop_speaking(&mut self) {
+        self.pending_twitch_speech = None;
         self.is_streaming_narration = false;
         let _ = self.tts_sender.send(TtsCommand::Stop);
         set_tts_audio_level(0.0);
@@ -694,6 +701,10 @@ impl OverlayApp {
     }
 
     pub fn restore_window_if_minimized(&mut self, ctx: &egui::Context) {
+        if AGENT_BUSY.load(Ordering::Relaxed) {
+            return;
+        }
+
         let mut is_min = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
         #[cfg(windows)]
         {
@@ -712,7 +723,6 @@ impl OverlayApp {
                 self.is_hidden = false;
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             if let Some(pos) = self.window_pos {
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
             }
@@ -720,11 +730,10 @@ impl OverlayApp {
             {
                 unsafe {
                     use windows::core::w;
-                    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE};
+                    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_RESTORE};
                     let overlay = FindWindowW(None, w!("Libertide overlay")).unwrap_or(windows::Win32::Foundation::HWND(std::ptr::null_mut()));
                     if !overlay.0.is_null() {
                         let _ = ShowWindow(overlay, SW_RESTORE);
-                        let _ = SetForegroundWindow(overlay);
                     }
                 }
             }
@@ -783,6 +792,8 @@ impl eframe::App for OverlayApp {
         let ctx = ui.ctx().clone();
 
         ctx.set_zoom_factor(self.zoom_factor);
+
+        IS_CHAT_TAB_ACTIVE.store(self.active_tab == ActiveTab::Chat, Ordering::Relaxed);
 
         update_last_external_focus();
 
@@ -929,8 +940,8 @@ impl eframe::App for OverlayApp {
                     }
                 }
                 AgentEvent::NarrationStart => {
-                    self.restore_window_if_minimized(&ctx);
                     self.is_streaming_narration = true;
+                    self.auto_scroll_to_bottom = true;
                     self.chat_history.push(ChatEntry {
                         role: ChatRole::Agent,
                         text: String::new(),
@@ -940,7 +951,7 @@ impl eframe::App for OverlayApp {
                     });
                 }
                 AgentEvent::NarrationChunk(chunk) => {
-                    self.restore_window_if_minimized(&ctx);
+                    self.auto_scroll_to_bottom = true;
                     if self.is_streaming_narration {
                         if let Some(last) = self.chat_history.last_mut() {
                             if matches!(last.role, ChatRole::Agent) {
@@ -970,8 +981,8 @@ impl eframe::App for OverlayApp {
                     }
                 }
                 AgentEvent::ReplaceNarration { text, quick_suggestions } => {
-                    self.restore_window_if_minimized(&ctx);
                     let was_streaming = self.is_streaming_narration;
+                    self.auto_scroll_to_bottom = true;
                     self.is_streaming_narration = false;
 
                     if text.trim().is_empty() && quick_suggestions.is_empty() {
@@ -985,7 +996,7 @@ impl eframe::App for OverlayApp {
                                 }
                             }
                         }
-                        if self.auto_read_suggestions && self.auto_read_agent_messages {
+                        if self.auto_read_suggestions && self.auto_read_agent_messages && self.active_tab == ActiveTab::Assistance {
                             if let Some(sug_speech) = format_suggestions_for_speech(&quick_suggestions) {
                                 if !sanitize_for_tts(&sug_speech).trim().is_empty() {
                                     self.status = AgentStatus::Speaking;
@@ -1006,7 +1017,7 @@ impl eframe::App for OverlayApp {
                                 screen_size_kb: None,
                             });
                         }
-                        if self.auto_read_suggestions && self.auto_read_agent_messages {
+                        if self.auto_read_suggestions && self.auto_read_agent_messages && self.active_tab == ActiveTab::Assistance {
                             if let Some(sug_speech) = format_suggestions_for_speech(&quick_suggestions) {
                                 if !sanitize_for_tts(&sug_speech).trim().is_empty() {
                                     self.status = AgentStatus::Speaking;
@@ -1033,9 +1044,11 @@ impl eframe::App for OverlayApp {
                             (false, Some(sug_speech)) => sug_speech,
                             (false, None) => String::new(),
                         };
-                        if !sanitize_for_tts(&full_speech).trim().is_empty() {
-                            self.status = AgentStatus::Speaking;
-                            let _ = self.tts_sender.send(TtsCommand::Speak(full_speech));
+                        if self.active_tab == ActiveTab::Assistance {
+                            if !sanitize_for_tts(&full_speech).trim().is_empty() {
+                                self.status = AgentStatus::Speaking;
+                                let _ = self.tts_sender.send(TtsCommand::Speak(full_speech));
+                            }
                         }
                         self.chat_history.push(ChatEntry {
                             role: ChatRole::Agent,
@@ -1554,6 +1567,13 @@ impl eframe::App for OverlayApp {
                     }
                 }
                 AgentEvent::TtsFinished => {
+                    if self.active_tab == ActiveTab::Chat {
+                        if let Some(recent_speech) = self.pending_twitch_speech.take() {
+                            self.status = AgentStatus::Speaking;
+                            let _ = self.tts_sender.send(TtsCommand::Speak(recent_speech));
+                            continue;
+                        }
+                    }
                     if self.continuous_mode
                         && !crate::audio::is_live_subtitles_active()
                         && self.status != AgentStatus::EmergencyStopped
@@ -1584,9 +1604,17 @@ impl eframe::App for OverlayApp {
                     ctx.request_repaint();
                 }
                 AgentEvent::TwitchChatReceived(twitch_msg) => {
-                    self.restore_window_if_minimized(&ctx);
-                    let speech = format!("{} : {}", twitch_msg.author, twitch_msg.text);
-                    let _ = self.tts_sender.send(TtsCommand::Enqueue(speech));
+                    self.auto_scroll_to_bottom = true;
+                    if self.active_tab == ActiveTab::Chat {
+                        let speech = format!("{} : {}", twitch_msg.author, twitch_msg.text);
+                        if self.status == AgentStatus::Speaking {
+                            self.pending_twitch_speech = Some(speech);
+                        } else {
+                            self.pending_twitch_speech = None;
+                            self.status = AgentStatus::Speaking;
+                            let _ = self.tts_sender.send(TtsCommand::Speak(speech));
+                        }
+                    }
                     self.twitch_messages.push(twitch_msg);
                     if self.twitch_messages.len() > 300 {
                         self.twitch_messages.drain(0..self.twitch_messages.len() - 300);
@@ -1594,6 +1622,25 @@ impl eframe::App for OverlayApp {
                 }
                 AgentEvent::TwitchSearchResults(results) => {
                     self.twitch_search_results = results;
+                }
+                AgentEvent::OpenTwitchChannel { channel, open_stream } => {
+                    self.stop_speaking();
+                    self.active_tab = ActiveTab::Chat;
+                    let clean = channel.trim().trim_start_matches('#').to_lowercase();
+                    if !clean.is_empty() {
+                        self.current_twitch_channel = clean.clone();
+                        let _ = self.twitch_channel_sender.send(clean.clone());
+                        self.twitch_messages.clear();
+                        self.twitch_search_results.clear();
+                        if open_stream {
+                            open_browser_smart(&format!("https://twitch.tv/{}", clean));
+                        }
+                    }
+                }
+                AgentEvent::SwitchTab(tab) => {
+                    self.pending_twitch_speech = None;
+                    self.stop_speaking();
+                    self.active_tab = tab;
                 }
                 AgentEvent::RequestIgnored => {
                     if let Some(last) = self.chat_history.last() {
@@ -3155,6 +3202,9 @@ impl eframe::App for OverlayApp {
                             tab_assist.clicked()
                         };
                         if assist_activated || is_assist_key_hit {
+                            if self.active_tab != ActiveTab::Assistance {
+                                self.stop_speaking();
+                            }
                             self.active_tab = ActiveTab::Assistance;
                         }
                         let chat_title = if self.twitch_messages.is_empty() {
@@ -3172,7 +3222,13 @@ impl eframe::App for OverlayApp {
                             tab_chat.clicked()
                         };
                         if chat_activated || is_chat_key_hit {
+                            if self.active_tab != ActiveTab::Chat {
+                                self.stop_speaking();
+                            }
                             self.active_tab = ActiveTab::Chat;
+                            if self.twitch_search_results.is_empty() {
+                                let _ = self.command_sender.send(AgentCommand::SearchTwitch(String::new()));
+                            }
                         }
                         tab_bar_max_x = tab_assist.rect.max.x.max(tab_chat.rect.max.x);
 
@@ -3610,6 +3666,7 @@ impl eframe::App for OverlayApp {
                                             self.input_suggestions.clear();
                                             self.last_suggestion_query.clear();
                                             self.live_transcript.clear();
+                                            self.auto_scroll_to_bottom = true;
                                             self.chat_history.push(ChatEntry {
                                                 role: ChatRole::User,
                                                 text: prompt.clone(),
@@ -3666,6 +3723,7 @@ impl eframe::App for OverlayApp {
                                             self.continuous_mode = true;
                                             self.input_suggestions.clear();
                                             self.last_suggestion_query.clear();
+                                            self.auto_scroll_to_bottom = true;
                                             let typed_raw = std::mem::take(&mut self.input_text).trim().to_string();
                                             let prompt_raw = if analyze_btn_hit && typed_raw.is_empty() {
                                                 t!("commands.analyze_screen_prompt").to_string()
@@ -3975,14 +4033,15 @@ impl eframe::App for OverlayApp {
                 );
 
                 ui.scope_builder(egui::UiBuilder::new().max_rect(messages_rect), |ui| {
+                    ui.set_clip_rect(messages_rect);
                     match self.active_tab {
                         ActiveTab::Assistance => {
-                            let max_scroll_h = (messages_rect.height()).max(20.0);
+                            let max_scroll_h = (messages_rect.height()).max(30.0);
                             let scroll_out = egui::ScrollArea::vertical()
                                 .id_salt("assistance_chat_scroll")
                                 .stick_to_bottom(true)
                                 .max_height(max_scroll_h)
-                                .auto_shrink([false, true])
+                                .auto_shrink([false, false])
                                 .show(ui, |ui| {
                                     let last_user_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::User);
                                     let last_agent_idx = self.chat_history.iter().rposition(|e| e.role == ChatRole::Agent);
@@ -4286,7 +4345,14 @@ impl eframe::App for OverlayApp {
                                     if request_stop_speaking {
                                         self.stop_speaking();
                                     }
+
+                                    if self.auto_scroll_to_bottom || self.is_streaming_narration || is_speaking {
+                                        ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+                                    }
                                 });
+                            if self.auto_scroll_to_bottom {
+                                self.auto_scroll_to_bottom = false;
+                            }
                             computed_chat_h = (scroll_out.content_size.y + 44.0).clamp(min_chat_h, max_chat_h);
                         }
                         ActiveTab::Chat => {
@@ -4298,13 +4364,18 @@ impl eframe::App for OverlayApp {
                                             .size(11.0)
                                             .color(egui::Color32::from_rgb(170, 185, 205)),
                                     );
-                                    ui.hyperlink_to(
-                                        egui::RichText::new(format!("#{}", self.current_twitch_channel))
-                                            .size(11.0)
-                                            .color(egui::Color32::from_rgb(0, 195, 255))
-                                            .underline(),
-                                        format!("https://twitch.tv/{}", self.current_twitch_channel),
-                                    );
+                                    let ch_link = ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!("#{}", self.current_twitch_channel))
+                                                .size(11.0)
+                                                .color(egui::Color32::from_rgb(0, 195, 255))
+                                                .underline(),
+                                        )
+                                        .sense(egui::Sense::click()),
+                                    ).on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    if ch_link.clicked() {
+                                        open_browser_smart(&format!("https://twitch.tv/{}", self.current_twitch_channel));
+                                    }
                                     ui.separator();
                                 }
 
@@ -4314,45 +4385,75 @@ impl eframe::App for OverlayApp {
                                         .hint_text(t!("ui.twitch_search_hint")),
                                 );
                                 let enter_pressed = search_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                if (ui.small_button("🔍").clicked() || enter_pressed) && !self.twitch_search_query.trim().is_empty() {
+                                if ui.small_button("🔍").clicked() || enter_pressed {
                                     let _ = self.command_sender.send(AgentCommand::SearchTwitch(
                                         self.twitch_search_query.trim().to_string(),
                                     ));
                                 }
-                            });
-
-                            if !self.twitch_search_results.is_empty() {
-                                ui.add_space(2.0);
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(t!("ui.twitch_results_label"))
-                                            .size(10.5)
-                                            .color(egui::Color32::from_rgb(255, 215, 120)),
-                                    );
-                                    let mut selected_channel = None;
-                                    for ch in &self.twitch_search_results {
-                                        if ui.small_button(format!("▶ {}", ch.display_name)).on_hover_text(t!("ui.twitch_join_tooltip")).clicked() {
-                                            selected_channel = Some(ch.login.clone());
-                                        }
-                                        if ui.small_button("↗").on_hover_text(t!("ui.twitch_open_tooltip")).clicked() {
-                                            ui.ctx().open_url(egui::OpenUrl::new_tab(format!("https://twitch.tv/{}", ch.login)));
-                                        }
-                                    }
-                                    if let Some(ch) = selected_channel {
-                                        self.current_twitch_channel = ch.clone();
-                                        let _ = self.twitch_channel_sender.send(ch);
-                                        self.twitch_messages.clear();
+                                if !self.twitch_search_results.is_empty() {
+                                    if ui.small_button("✕").on_hover_text(t!("ui.btn_close")).clicked() {
                                         self.twitch_search_results.clear();
                                     }
-                                });
+                                }
+                            });
+
+                            let mut search_viewport_h = 0.0;
+                            if !self.twitch_search_results.is_empty() {
+                                ui.add_space(3.0);
+                                let live_count = self.twitch_search_results.iter().filter(|c| c.is_live).count();
+                                let total_count = self.twitch_search_results.len();
+
+                                draw_twitch_filter_bar(ui, &mut self.twitch_filter, live_count, total_count, &theme);
+                                ui.add_space(2.0);
+
+                                let max_search_h = if self.twitch_messages.is_empty() {
+                                    (messages_rect.height() - 65.0).max(60.0)
+                                } else {
+                                    ((messages_rect.height() - 75.0) * 0.45).clamp(55.0, 130.0)
+                                };
+
+                                let mut selected_channel = None;
+                                let search_scroll = egui::ScrollArea::vertical()
+                                    .id_salt("twitch_search_results_scroll")
+                                    .max_height(max_search_h)
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        let btn_w = 24.0;
+                                        let spacing = 4.0;
+                                        let total_row_w = ui.available_width();
+                                        let item_w = (total_row_w - btn_w - spacing).max(80.0);
+
+                                        for ch in self.twitch_search_results.iter().filter(|c| self.twitch_filter.matches(c)) {
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = spacing;
+                                                let resp = draw_twitch_channel_search_item(ui, ch, &theme, item_w);
+                                                if resp.clicked() {
+                                                    selected_channel = Some(ch.login.clone());
+                                                }
+                                                if ui.add_sized([btn_w, 28.0], egui::Button::new("↗")).on_hover_text(t!("ui.twitch_open_tooltip")).clicked() {
+                                                    open_browser_smart(&format!("https://twitch.tv/{}", ch.login));
+                                                }
+                                            });
+                                            ui.add_space(1.0);
+                                        }
+                                    });
+
+                                search_viewport_h = search_scroll.content_size.y.min(max_search_h) + 36.0;
+
+                                if let Some(ch) = selected_channel {
+                                    self.current_twitch_channel = ch.clone();
+                                    let _ = self.twitch_channel_sender.send(ch);
+                                    self.twitch_messages.clear();
+                                    self.twitch_search_results.clear();
+                                }
                             }
                             ui.separator();
-                            let max_chat_scroll_h = (messages_rect.height() - 28.0).max(20.0);
+                            let max_chat_scroll_h = (messages_rect.height() - 28.0 - search_viewport_h).max(30.0);
                             let scroll_out = egui::ScrollArea::vertical()
                                 .id_salt("twitch_chat_scroll")
                                 .stick_to_bottom(true)
                                 .max_height(max_chat_scroll_h)
-                                .auto_shrink([false, true])
+                                .auto_shrink([false, false])
                                 .show(ui, |ui| {
                                     if self.twitch_messages.is_empty() {
                                         ui.label(
@@ -4437,9 +4538,16 @@ impl eframe::App for OverlayApp {
                                                 ctx.request_repaint();
                                             }
                                         }
+
+                                    if self.auto_scroll_to_bottom {
+                                        ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+                                    }
                                     }
                                 });
-                            computed_chat_h = (scroll_out.content_size.y + 72.0).clamp(min_chat_h, max_chat_h);
+                            if self.auto_scroll_to_bottom {
+                                self.auto_scroll_to_bottom = false;
+                            }
+                            computed_chat_h = (scroll_out.content_size.y + search_viewport_h + 72.0).clamp(min_chat_h, max_chat_h);
                         }
                     }
                 });
@@ -4669,31 +4777,25 @@ fn spawn_event_wake_watcher(
         .name("event_wake_watcher".to_string())
         .spawn(move || {
             while let Ok(event) = incoming_rx.recv() {
-                let should_wake = matches!(
+                let is_busy = AGENT_BUSY.load(Ordering::Relaxed);
+                let should_wake = !is_busy && matches!(
                     event,
-                    AgentEvent::NarrationStart
-                        | AgentEvent::ReplaceNarration { .. }
-                        | AgentEvent::TwitchChatReceived(_)
-                        | AgentEvent::VoicePromptReady(_)
+                    AgentEvent::VoicePromptReady(_)
                 );
 
                 if should_wake {
                     #[cfg(windows)]
                     unsafe {
                         use windows::core::w;
-                        use windows::Win32::UI::WindowsAndMessaging::{
-                            FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
-                        };
+                        use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_RESTORE};
                         let overlay = FindWindowW(None, w!("Libertide overlay"))
                             .unwrap_or(windows::Win32::Foundation::HWND(std::ptr::null_mut()));
                         if !overlay.0.is_null() {
                             let _ = ShowWindow(overlay, SW_RESTORE);
-                            let _ = SetForegroundWindow(overlay);
                         }
                     }
 
                     egui_ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     egui_ctx.request_repaint();
                 }
 
@@ -4721,8 +4823,8 @@ fn run_overlay_gui(
         .with_transparent(true)
         .with_always_on_top()
         .with_resizable(true)
-        .with_min_inner_size([380.0, 158.0])
-        .with_inner_size([560.0, 196.0]);
+        .with_min_inner_size([380.0, 264.0])
+        .with_inner_size([560.0, 280.0]);
 
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../public/favicon-256x256.png")) {
         viewport = viewport.with_icon(Arc::new(icon));

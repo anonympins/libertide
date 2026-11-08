@@ -1260,6 +1260,7 @@ static LAST_FOCUS_UPDATE: Mutex<Option<Instant>> = Mutex::new(None);
 pub static LAST_SCREEN_SUMMARY: Mutex<Option<String>> = Mutex::new(None);
 pub static IS_IMMERSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static IS_DICTATION_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static IS_CHAT_TAB_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static IMMERSION_SCREEN_HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
 pub const LIBERTIDE_EXTRA_INFO: usize = 0x4C494254; // 'LIBT'
 pub static IS_USER_TYPING: AtomicBool = AtomicBool::new(false);
@@ -2948,6 +2949,51 @@ pub fn format_url_for_navigation(raw_url: &str) -> String {
         // 5. Repli : terme de recherche vers Google
         format!("https://www.google.com/search?q={}", urlencoding_simple(trimmed))
     }
+}
+
+/// Ouvre de manière intelligente et asynchrone une URL dans le navigateur
+/// (amène la fenêtre au premier plan et ouvre un nouvel onglet si le navigateur existe déjà,
+/// sinon lance le navigateur avec l'URL ou appelle le navigateur par défaut du système).
+pub fn open_browser_smart(url: &str) {
+    let url = url.to_string();
+    std::thread::spawn(move || {
+        let formatted = format_url_for_navigation(&url);
+        #[cfg(windows)]
+        {
+            let user_windows = list_user_windows();
+            if let Some(hwnd) = find_best_browser_window(&user_windows, None) {
+                if !is_window_hung(hwnd) {
+                    force_foreground_window(hwnd);
+                    restore_if_iconic(hwnd);
+                    open_browser_new_tab(hwnd, &formatted);
+                    return;
+                }
+            }
+            if launch_browser_new_window(&formatted).is_none() {
+                let _ = open_path_with_default_app(&formatted);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let user_windows = list_user_windows();
+            if let Some(target) = find_best_browser_window(&user_windows, None) {
+                force_foreground_window(&target);
+                open_browser_new_tab(&target, &formatted);
+            } else {
+                let _ = open_path_with_default_app(&formatted);
+            }
+        }
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        {
+            let user_windows = list_user_windows();
+            if let Some(target) = find_best_browser_window(&user_windows, None) {
+                force_foreground_window(&target);
+                open_browser_new_tab(&target, &formatted);
+            } else {
+                let _ = open_path_with_default_app(&formatted);
+            }
+        }
+    });
 }
 
 #[cfg(windows)]

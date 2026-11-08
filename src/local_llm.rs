@@ -337,6 +337,7 @@ pub enum CommandTag {
     RadioAndMusicStream,
     TravelAndFlightBooking,
     BrowserTabNavigation,
+    TwitchStreamAndChat,
     NavigateInWebpage,
     WebpageAnalysis,
     EcommerceAndShopping,
@@ -381,6 +382,7 @@ impl CommandTag {
         Self::RadioAndMusicStream,
         Self::TravelAndFlightBooking,
         Self::BrowserTabNavigation,
+        Self::TwitchStreamAndChat,
         Self::NavigateInWebpage,
         Self::WebpageAnalysis,
         Self::EcommerceAndShopping,
@@ -425,6 +427,7 @@ impl CommandTag {
             Self::RadioAndMusicStream => "RADIO_AND_MUSIC_STREAM",
             Self::TravelAndFlightBooking => "TRAVEL_AND_FLIGHT_BOOKING",
             Self::BrowserTabNavigation => "BROWSER_TAB_NAVIGATION",
+            Self::TwitchStreamAndChat => "TWITCH_STREAM_AND_CHAT",
             Self::NavigateInWebpage => "NAVIGATE_IN_WEBPAGE",
             Self::WebpageAnalysis => "WEBPAGE_ANALYSIS",
             Self::EcommerceAndShopping => "ECOMMERCE_AND_SHOPPING",
@@ -470,6 +473,7 @@ impl CommandTag {
             Self::RadioAndMusicStream => "Écoute de stations radio en direct (France Inter, RTL, etc.), webradios, playlists ou morceaux de musique sur le web. Actions : navigate_to_url, click_button/click_element (lecture/direct), set_volume.",
             Self::TravelAndFlightBooking => "Recherche et comparatifs de vols d'avion, horaires de voyage, formulaire de critères de transport. Actions : show_floating_card (formulaire/tableau), navigate_to_url.",
             Self::BrowserTabNavigation => "Gestion des onglets du navigateur : sélection d'un onglet ouvert, nouvel onglet, fermeture d'onglet (Ctrl+W). Actions : click_element sur onglet, accessibility_shortcut: close_tab/reopen_tab.",
+            Self::TwitchStreamAndChat => "Accès à la plateforme Twitch, visionnage de streams en direct, sélection ou recherche de chaînes Twitch, bascule vers le chat Twitch et envoi de messages. Actions : open_twitch_chat, switch_tab, navigate_to_url.",
             Self::NavigateInWebpage => "Exploration en profondeur d'une page web ouverte : acceptation obligatoire des bannières cookies, fermeture des popups, navigation via Google Search. Actions : click_element, click_button, scroll, navigate_back.",
             Self::WebpageAnalysis => "Analyse, lecture et synthèse approfondie du contenu textuel, des articles, documents ou données d'une page web active ou d'un site affiché à l'écran (ex: 'analyse la page', 'de quoi parle ce site ?', 'résume cet article', 'lis la page web'). Actions : show_floating_card (markdown/table), scroll, click_element.",
             Self::EcommerceAndShopping => "Achats en ligne, consultation de panier, comparatif de prix et passation de commande (avec arrêt obligatoire avant paiement). Actions : navigate_to_url, click_button, show_floating_card (table).",
@@ -505,6 +509,15 @@ pub fn all_command_tags_prompt_list() -> String {
 /// Filtrage rapide des cas évidents (bruit pur, signal de micro, impulsions système)
 pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<CommandTag> {
     let lower = query.to_lowercase();
+
+    if lower.contains("twitch")
+        || lower.contains("streamer")
+        || lower.contains("stream twitch")
+        || lower.contains("chat twitch")
+        || lower.contains("live twitch")
+    {
+        return vec![CommandTag::TwitchStreamAndChat];
+    }
 
     // Détection immédiate d'analyse de page web ou d'écran
     if lower.contains("analyse la page")
@@ -1112,6 +1125,16 @@ Règles GESTION ET RECHERCHE D'ONGLETS DU NAVIGATEUR :
 - Pour rouvrir le dernier onglet fermé : "accessibility_shortcut": "reopen_tab" (Ctrl+Shift+T).
 "#);
             }
+            CommandTag::TwitchStreamAndChat => {
+                prompt.push_str(r#"
+Règles TWITCH STREAM & CHAT :
+- Pour ouvrir le chat d'une chaîne Twitch et/ou son live : utilise l'action {"action": "open_twitch_chat", "channel": "nom_chaine", "open_stream": true|false}.
+  * Si l'utilisateur souhaite regarder le stream ou accéder au live web : mets "open_stream": true.
+  * Si l'utilisateur souhaite rejoindre le chat ou envoyer un message : mets "open_stream": false.
+  * L'application bascule automatiquement sur l'onglet Chat Twitch où les messages sont lus à voix haute en direct.
+- Pour basculer manuellement d'onglet : {"action": "switch_tab", "tab": "chat"|"assistance"}.
+"#);
+            }
             CommandTag::EcommerceAndShopping => {
                 prompt.push_str(r#"
 Règles STRATÉGIE E-COMMERCE & ACHATS EN LIGNE :
@@ -1388,6 +1411,10 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
                 prompt.push_str("- {\"action\": \"click_element\", \"target_name\": \"Nom de l'onglet ouvert\"}\n");
                 prompt.push_str("- {\"action\": \"accessibility_shortcut\", \"shortcut\": \"close_tab\"|\"reopen_tab\"}\n");
             }
+            CommandTag::TwitchStreamAndChat => {
+                prompt.push_str("- {\"action\": \"open_twitch_chat\", \"channel\": \"nom_chaine\", \"open_stream\": true|false}\n");
+                prompt.push_str("- {\"action\": \"switch_tab\", \"tab\": \"chat\"|\"assistance\"}\n");
+            }
             CommandTag::EcommerceAndShopping => {
                 prompt.push_str("- {\"action\": \"click_button\", \"button_name\": \"Ajouter au panier\"}\n");
                 prompt.push_str("- {\"action\": \"click_element\", \"target_name\": \"Voir le panier\"}\n");
@@ -1460,6 +1487,8 @@ fn action_param_field_for(action: &str) -> &'static str {
         "accessibility_shortcut" => "shortcut",
         "set_volume" => "command",
         "show_floating_card" => "title",
+        "open_twitch_chat" => "channel",
+        "switch_tab" => "tab",
         "close_floating_card" => "id",
         _ => "target_name",
     }
@@ -2315,14 +2344,16 @@ impl LocalLlamaEngine {
                 let clean = crate::tts::sanitize_for_tts(&sentence);
                 if !clean.trim().is_empty() {
                     if let Some(tts) = tts_tx {
-                        let normalized = clean.trim().to_lowercase();
-                        let mut last = LAST_SPOKEN_NARRATION.lock().unwrap_or_else(|e| e.into_inner());
-                        if !last.contains(&normalized) {
-                            if !last.is_empty() {
-                                last.push(' ');
+                        if !crate::automation::IS_CHAT_TAB_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+                            let normalized = clean.trim().to_lowercase();
+                            let mut last = LAST_SPOKEN_NARRATION.lock().unwrap_or_else(|e| e.into_inner());
+                            if !last.contains(&normalized) {
+                                if !last.is_empty() {
+                                    last.push(' ');
+                                }
+                                last.push_str(&normalized);
+                                let _ = tts.send(TtsCommand::Enqueue(clean));
                             }
-                            last.push_str(&normalized);
-                            let _ = tts.send(TtsCommand::Enqueue(clean));
                         }
                     }
                     if let Some(evt) = event_tx {
@@ -2341,14 +2372,16 @@ impl LocalLlamaEngine {
             let clean = crate::tts::sanitize_for_tts(&remaining);
             if !clean.trim().is_empty() {
                 if let Some(tts) = tts_tx {
-                    let normalized = clean.trim().to_lowercase();
-                    let mut last = LAST_SPOKEN_NARRATION.lock().unwrap_or_else(|e| e.into_inner());
-                    if !last.contains(&normalized) {
-                        if !last.is_empty() {
-                            last.push(' ');
+                    if !crate::automation::IS_CHAT_TAB_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+                        let normalized = clean.trim().to_lowercase();
+                        let mut last = LAST_SPOKEN_NARRATION.lock().unwrap_or_else(|e| e.into_inner());
+                        if !last.contains(&normalized) {
+                            if !last.is_empty() {
+                                last.push(' ');
+                            }
+                            last.push_str(&normalized);
+                            let _ = tts.send(TtsCommand::Enqueue(clean));
                         }
-                        last.push_str(&normalized);
-                        let _ = tts.send(TtsCommand::Enqueue(clean));
                     }
                 }
                 if let Some(evt) = event_tx {

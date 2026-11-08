@@ -440,6 +440,273 @@ pub fn draw_avatar(
     painter.circle_filled(center, base_radius * (0.18 + 0.06 * activity_level), egui::Color32::WHITE);
 }
 
+/// Calcule dynamiquement les couleurs et le halo d'activité Twitch selon l'état et l'audience
+pub fn twitch_live_activity_colors(
+    is_live: bool,
+    viewers_count: Option<u32>,
+) -> (egui::Color32, egui::Color32, f32) {
+    if !is_live {
+        // Hors-ligne : gris mat discret (#787878)
+        return (
+            egui::Color32::from_rgb(120, 120, 120),
+            egui::Color32::TRANSPARENT,
+            0.0,
+        );
+    }
+
+    let count = viewers_count.unwrap_or(1).max(1) as f64;
+    // Échelle logarithmique normalisée de 1 à 50 000 spectateurs (log10(50_000) ≈ 4.699)
+    let max_log = 50_000.0_f64.log10();
+    let t = (count.log10() / max_log).clamp(0.0, 1.0) as f32;
+
+    // Paliers de couleur :
+    // t=0.00 (~1-20 p.)   : Vert menthe doux   (46, 204, 113)
+    // t=0.35 (~50 p.)     : Vert néon vif       (0, 235, 130)
+    // t=0.60 (~500 p.)    : Cyan azur électrique(0, 215, 255)
+    // t=0.80 (~4 000 p.)  : Ambre doré          (255, 205, 35)
+    // t=0.92 (~20 000 p.) : Orange corail       (255, 95, 40)
+    // t=1.00 (50 000+ p.) : Magenta / Violet    (225, 65, 255)
+    let lerp = |a: (f32, f32, f32), b: (f32, f32, f32), factor: f32| -> (u8, u8, u8) {
+        let f = factor.clamp(0.0, 1.0);
+        (
+            (a.0 + (b.0 - a.0) * f).round() as u8,
+            (a.1 + (b.1 - a.1) * f).round() as u8,
+            (a.2 + (b.2 - a.2) * f).round() as u8,
+        )
+    };
+
+    let (r, g, b) = if t <= 0.35 {
+        lerp((46.0, 204.0, 113.0), (0.0, 235.0, 130.0), t / 0.35)
+    } else if t <= 0.60 {
+        lerp((0.0, 235.0, 130.0), (0.0, 215.0, 255.0), (t - 0.35) / 0.25)
+    } else if t <= 0.80 {
+        lerp((0.0, 215.0, 255.0), (255.0, 205.0, 35.0), (t - 0.60) / 0.20)
+    } else if t <= 0.92 {
+        lerp((255.0, 205.0, 35.0), (255.0, 95.0, 40.0), (t - 0.80) / 0.12)
+    } else {
+        lerp((255.0, 95.0, 40.0), (225.0, 65.0, 255.0), (t - 0.92) / 0.08)
+    };
+    let dot_color = egui::Color32::from_rgb(r, g, b);
+
+    let halo_alpha = (32.0 + t * 75.0).clamp(32.0, 110.0) as u8;
+    let halo_color = egui::Color32::from_rgba_unmultiplied(r, g, b, halo_alpha);
+    let halo_radius = 4.5 + t * 4.0;
+
+    (dot_color, halo_color, halo_radius)
+}
+
+/// Dessine une pastille d'état Twitch (rond vert si live / ouvert, gris si hors-ligne)
+pub fn draw_channel_status_badge(
+    ui: &mut egui::Ui,
+    channel_name: &str,
+    is_live: bool,
+    viewers_count: Option<u32>,
+    theme: &ThemeColors,
+) -> egui::Response {
+    let (dot_color, halo_color, halo_radius) = twitch_live_activity_colors(is_live, viewers_count);
+    ui.horizontal(|ui| {
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+
+        // Halo lumineux animé/étendu si le streamer est en direct
+        if is_live && halo_radius > 0.0 {
+            ui.painter().circle_filled(
+                rect.center(),
+                halo_radius,
+                halo_color,
+            );
+        }
+        ui.painter().circle_filled(rect.center(), 4.0, dot_color);
+
+        let label_color = if is_live {
+            dot_color
+        } else {
+            theme.text_secondary
+        };
+
+        ui.label(
+            egui::RichText::new(channel_name)
+                .color(label_color)
+                .size(12.0)
+                .strong(),
+        );
+
+        if is_live {
+            ui.label(
+                egui::RichText::new("LIVE")
+                    .color(dot_color)
+                    .size(9.0)
+                    .strong(),
+            );
+        }
+
+        let tooltip = if is_live {
+            match viewers_count {
+                Some(v) => format!("{}: en direct ({} spectateurs)", channel_name, v),
+                None => format!("{}: en direct (ouvert)", channel_name),
+            }
+        } else {
+            format!("{}: hors-ligne", channel_name)
+        };
+        response.on_hover_text(tooltip)
+    }).inner
+}
+
+/// Affiche une rangée de statuts pour plusieurs chaînes Twitch (ex: 2 streamers)
+pub fn draw_channels_status_row(
+    ui: &mut egui::Ui,
+    statuses: &[(String, bool)],
+    theme: &ThemeColors,
+) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        for (channel, is_live) in statuses {
+            draw_channel_status_badge(ui, channel, *is_live, None, theme);
+        }
+    });
+}
+
+/// Dessine une ligne de résultat de recherche Twitch avec statut visuel (rond vert/gris) et compteur de spectateurs
+pub fn draw_twitch_channel_search_item(
+    ui: &mut egui::Ui,
+    item: &TwitchChannelItem,
+    theme: &ThemeColors,
+    width: f32,
+) -> egui::Response {
+    let row_height = 32.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, row_height), egui::Sense::click());
+
+    let bg_color = if response.hovered() {
+        theme.tab_active_bg
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, egui::CornerRadius::same(5), bg_color);
+
+    let (dot_color, halo_color, halo_radius) = twitch_live_activity_colors(item.is_live, item.viewers_count);
+
+    let dot_center = egui::pos2(rect.min.x + 14.0, rect.center().y);
+    if item.is_live && halo_radius > 0.0 {
+        ui.painter().circle_filled(
+            dot_center,
+            halo_radius,
+            halo_color,
+        );
+    }
+    ui.painter().circle_filled(dot_center, 4.0, dot_color);
+
+    let status_text = if item.is_live {
+        match item.viewers_count {
+            Some(v) if v >= 1000 => format!("LIVE · {:.1}k", v as f32 / 1000.0),
+            Some(v) => format!("LIVE · {v}"),
+            None => "LIVE".to_string(),
+        }
+    } else {
+        "Hors-ligne".to_string()
+    };
+
+    // Statut aligné à droite (LIVE en vert ou Hors-ligne en gris)
+    let status_color = if item.is_live {
+        dot_color
+    } else {
+        egui::Color32::from_gray(130)
+    };
+    let status_pos = egui::pos2(rect.max.x - 8.0, rect.center().y);
+    ui.painter().text(
+        status_pos,
+        egui::Align2::RIGHT_CENTER,
+        &status_text,
+        egui::FontId::proportional(11.0),
+        status_color,
+    );
+
+    // Nom d'affichage et login avec largeur bornée pour ne pas déborder sur le statut
+    let title_color = if item.is_live {
+        dot_color
+    } else {
+        theme.text_secondary
+    };
+    let display_title = if item.display_name.eq_ignore_ascii_case(&item.login) {
+        item.display_name.clone()
+    } else {
+        format!("{} (@{})", item.display_name, item.login)
+    };
+
+    let status_reserved_w = 85.0;
+    let max_title_w = (rect.width() - 32.0 - status_reserved_w).max(40.0);
+    let max_chars = ((max_title_w / 7.2) as usize).max(4);
+    let display_title = if display_title.chars().count() > max_chars {
+        let mut s: String = display_title.chars().take(max_chars.saturating_sub(1)).collect();
+        s.push('…');
+        s
+    } else {
+        display_title
+    };
+
+    let title_pos = egui::pos2(rect.min.x + 28.0, rect.center().y);
+    let title_clip_rect = egui::Rect::from_min_max(
+        rect.min,
+        egui::pos2(rect.max.x - status_reserved_w, rect.max.y),
+    );
+    ui.painter().with_clip_rect(title_clip_rect).text(
+        title_pos,
+        egui::Align2::LEFT_CENTER,
+        display_title,
+        egui::FontId::proportional(13.0),
+        title_color,
+    );
+
+    let tooltip = if item.is_live {
+        format!("{} est en direct !", item.display_name)
+    } else {
+        format!("{} est hors-ligne", item.display_name)
+    };
+    response.on_hover_text(tooltip)
+}
+
+/// Affiche une barre ergonomique de filtrage Twitch (Tous / En direct)
+pub fn draw_twitch_filter_bar(
+    ui: &mut egui::Ui,
+    current_filter: &mut TwitchFilter,
+    live_count: usize,
+    total_count: usize,
+    theme: &ThemeColors,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+
+        let items = [
+            (TwitchFilter::All, format!("Tous ({total_count})"), false),
+            (TwitchFilter::LiveOnly, format!("En direct ({live_count})"), true),
+        ];
+
+        for (filter_val, label, has_live_dot) in items {
+            let is_active = *current_filter == filter_val;
+            let (bg, border_color, text_color) = if is_active {
+                (theme.tab_active_bg, theme.accent, theme.text_primary)
+            } else {
+                (theme.tab_inactive_bg, theme.border_subtle, theme.text_secondary)
+            };
+
+            let prefix = if has_live_dot { "● " } else { "" };
+            let text = egui::RichText::new(format!("{prefix}{label}"))
+                .size(11.5)
+                .color(if is_active && has_live_dot { egui::Color32::from_rgb(0, 230, 118) } else { text_color });
+
+            let button = egui::Button::new(text)
+                .fill(bg)
+                .stroke(egui::Stroke::new(1.0, border_color))
+                .corner_radius(egui::CornerRadius::same(12));
+
+            if ui.add(button).clicked() && !is_active {
+                *current_filter = filter_val;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
 pub fn draw_mini_equalizer(ui: &mut egui::Ui, time: f64, status: AgentStatus, smoothed_audio_level: f32, theme: &ThemeColors) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 12.0), egui::Sense::hover());
     let painter = ui.painter();
@@ -1831,8 +2098,23 @@ pub fn compute_and_sync_overlay_geometry(
     show_api_key_modal: bool,
     is_maximized: bool,
 ) -> OverlayLayout {
-    let min_win_w = 380.0f32.min(work_area.w);
-    let min_win_h = 196.0f32.min(work_area.h);
+    let padding: f32 = 2.0;
+    let control_h: f32 = if has_suggestions { 174.0 } else { 148.0 };
+    let header_h: f32 = 36.0;
+    let min_messages_h: f32 = 74.0;
+    let min_chat_h: f32 = header_h + min_messages_h; // 110.0 px minimum garanti pour la zone principale
+
+    let min_win_w = if show_api_key_modal {
+        420.0f32.min(work_area.w)
+    } else {
+        380.0f32.min(work_area.w)
+    };
+    let computed_min_win_h = (padding + min_chat_h + padding + control_h + padding).min(work_area.h);
+    let min_win_h = if show_api_key_modal {
+        490.0f32.min(work_area.h)
+    } else {
+        computed_min_win_h
+    };
     ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(min_win_w, min_win_h)));
 
     let inner_rect_opt = ctx.input(|i| i.viewport().inner_rect);
@@ -1844,18 +2126,21 @@ pub fn compute_and_sync_overlay_geometry(
     } else {
         *current_win_w
     };
-    let win_w = raw_win_w.clamp(min_win_w, work_area.w);
+    let win_w = if show_api_key_modal {
+        raw_win_w.max(min_win_w).min(work_area.w)
+    } else {
+        raw_win_w.clamp(min_win_w, work_area.w)
+    };
     *current_win_w = win_w;
+    *current_win_h = (*current_win_h).max(min_win_h);
 
-    let padding: f32 = 2.0;
-    let control_h: f32 = if has_suggestions { 162.0 } else { 136.0 };
-
-    let min_chat_h: f32 = 50.0;
     let max_chat_h = (work_area.h - control_h - 40.0).clamp(min_chat_h, 560.0);
     let current_chat_h = chat_height.clamp(min_chat_h, max_chat_h);
 
+    // Hauteur min-content du panneau de configuration (bornée strictement par l'écran)
+    let modal_min_content_h = 490.0f32;
     let modal_target_h = if show_api_key_modal {
-        (work_area.h * 0.94).round().clamp(min_win_h, work_area.h)
+        modal_min_content_h.clamp(min_win_h, work_area.h)
     } else {
         min_win_h
     };
@@ -1864,10 +2149,15 @@ pub fn compute_and_sync_overlay_geometry(
     } else {
         (padding + current_chat_h + padding + control_h + padding)
             .min(work_area.h)
+            .max(min_win_h)
             .round()
     };
     let active_win_h = if *position_initialized && !is_minimized {
-        inner_rect_opt.map_or(*current_win_h, |r| r.height().max(min_win_h))
+        if show_api_key_modal {
+            modal_target_h
+        } else {
+            inner_rect_opt.map_or(*current_win_h, |r| r.height().max(min_win_h)).max(min_win_h)
+        }
     } else {
         target_win_h
     };

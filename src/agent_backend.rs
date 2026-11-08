@@ -866,6 +866,21 @@ pub async fn call_llm_prompt(
                 AgentAction::PreviousNumberedChunk => {
                     let _ = event_tx.send(AgentEvent::PreviousNumberedChunk);
                 }
+                AgentAction::OpenTwitchChat { channel, open_stream } => {
+                    let _ = event_tx.send(AgentEvent::OpenTwitchChannel {
+                        channel: channel.clone(),
+                        open_stream: open_stream.unwrap_or(false),
+                    });
+                }
+                AgentAction::SwitchTab { tab } => {
+                    let t_lower = tab.trim().to_lowercase();
+                    let target = if t_lower.contains("chat") || t_lower.contains("twitch") {
+                        ActiveTab::Chat
+                    } else {
+                        ActiveTab::Assistance
+                    };
+                    let _ = event_tx.send(AgentEvent::SwitchTab(target));
+                }
                 _ => {}
             }
         }

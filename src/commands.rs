@@ -2475,6 +2475,13 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     feedback.push("Sous-titres en direct désactivés.".to_string());
                 }
             }
+            AgentAction::OpenTwitchChat { channel, open_stream } => {
+                let stream_note = if open_stream.unwrap_or(false) { " avec ouverture du live web" } else { "" };
+                feedback.push(format!("Redirection vers le chat Twitch de #{channel}{stream_note}."));
+            }
+            AgentAction::SwitchTab { tab } => {
+                feedback.push(format!("Bascule d'onglet vers {tab}."));
+            }
         }
     }
 
@@ -3018,6 +3025,12 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                     crate::floating_window::stop_live_subtitles();
                     feedback.push("Sous-titres désactivés.".to_string());
                 }
+            }
+            AgentAction::OpenTwitchChat { channel, open_stream } => {
+                feedback.push(format!("Redirection vers le chat Twitch #{channel}."));
+            }
+            AgentAction::SwitchTab { tab } => {
+                feedback.push(format!("Bascule vers l'onglet {tab}."));
             }
             _ => {}
         }
