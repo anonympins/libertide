@@ -31,7 +31,6 @@ jobs:
             build-essential \
             cmake \
             pkg-config \
-            mold \
             libasound2-dev \
             libxkbcommon-dev \
             libx11-xcb-dev \
@@ -67,6 +66,7 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
+            ~/.cache/sherpa-rs/
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
@@ -74,13 +74,32 @@ jobs:
 
       - name: Configure library search paths for Sherpa & ONNX Runtime
         run: |
-          # Run a cargo check first so sherpa-rs-sys downloads and extracts native binaries
-          cargo check --release --features vulkan || true
+          # If the cache restored target/ without ~/.cache/sherpa-rs, force sherpa-rs-sys to re-run build.rs
           SHERPA_LIB_DIR=$(find "$HOME/.cache/sherpa-rs" -type d -name "lib" 2>/dev/null | head -n 1)
-          if [ -n "$SHERPA_LIB_DIR" ]; then
-            echo "LIBRARY_PATH=$SHERPA_LIB_DIR:${LIBRARY_PATH:-}" >> $GITHUB_ENV
-            echo "LD_LIBRARY_PATH=$SHERPA_LIB_DIR:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
+          if [ -z "$SHERPA_LIB_DIR" ] || [ ! -f "$SHERPA_LIB_DIR/libsherpa-onnx-c-api.so" ]; then
+            echo "Sherpa libraries missing from runner. Rebuilding sherpa-rs-sys..."
+            cargo clean -p sherpa-rs-sys -p sherpa-rs
+            cargo build --release -p sherpa-rs-sys
+            SHERPA_LIB_DIR=$(find "$HOME/.cache/sherpa-rs" -type d -name "lib" 2>/dev/null | head -n 1)
           fi
+
+          if [ -z "$SHERPA_LIB_DIR" ]; then
+            echo "::error::Unable to locate sherpa-rs native library directory!"
+            exit 1
+          fi
+
+          echo "Sherpa libraries found in: $SHERPA_LIB_DIR"
+
+          # Ensure unversioned soname symlink exists for onnxruntime
+          if [ ! -f "$SHERPA_LIB_DIR/libonnxruntime.so" ]; then
+            ORT_TARGET=$(find "$SHERPA_LIB_DIR" -maxdepth 1 -name "libonnxruntime.so*" | head -n 1)
+            if [ -n "$ORT_TARGET" ]; then
+              ln -sf "$(basename "$ORT_TARGET")" "$SHERPA_LIB_DIR/libonnxruntime.so"
+            fi
+          fi
+
+          echo "LIBRARY_PATH=$SHERPA_LIB_DIR:${LIBRARY_PATH:-}" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$SHERPA_LIB_DIR:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
 
       - name: Run tests (release profile)
         run: cargo test --release --features vulkan
