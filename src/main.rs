@@ -971,7 +971,8 @@ impl eframe::App for OverlayApp {
         #[cfg(windows)]
         {
             // Gestion ergonomique des boutons auxiliaires trackball (VK_XBUTTON1, VK_XBUTTON2, VK_MBUTTON)
-            if self.last_trackball_input.elapsed() >= Duration::from_millis(250) {
+            if self.last_trackball_input.elapsed() >= Duration::from_millis(250)
+                && self.last_switch_input.elapsed() >= Duration::from_millis(250) {
                 let xbutton1 = unsafe { (GetAsyncKeyState(0x05) as u16 & 0x8000) != 0 }; // Trackball Bouton 4
                 let xbutton2 = unsafe { (GetAsyncKeyState(0x06) as u16 & 0x8000) != 0 }; // Trackball Bouton 5
                 let mbutton  = unsafe { (GetAsyncKeyState(0x04) as u16 & 0x8000) != 0 }; // Molette / Clic central
@@ -2061,6 +2062,7 @@ impl eframe::App for OverlayApp {
             && self.last_switch_input.elapsed() >= Duration::from_millis(200)
         {
             self.last_switch_input = Instant::now();
+            self.last_trackball_input = Instant::now();
             if self.dictation_mode {
                 self.exit_dictation_mode();
             } else {
@@ -2072,6 +2074,7 @@ impl eframe::App for OverlayApp {
             && self.last_switch_input.elapsed() >= Duration::from_millis(200)
         {
             self.last_switch_input = Instant::now();
+            self.last_trackball_input = Instant::now();
             self.toggle_switch_access_mode(None);
             ctx.request_repaint();
         }
@@ -2079,6 +2082,7 @@ impl eframe::App for OverlayApp {
             && self.last_switch_input.elapsed() >= Duration::from_millis(200)
         {
             self.last_switch_input = Instant::now();
+            self.last_trackball_input = Instant::now();
             self.set_voice_gender(self.voice_gender.next());
             ctx.request_repaint();
         }
@@ -2086,6 +2090,7 @@ impl eframe::App for OverlayApp {
             && self.last_switch_input.elapsed() >= Duration::from_millis(200)
         {
             self.last_switch_input = Instant::now();
+            self.last_trackball_input = Instant::now();
             let _ = self.command_sender.send(AgentCommand::ClearHistory);
             self.chat_history.clear();
             self.window_analysis_cache.clear();
@@ -2102,7 +2107,7 @@ impl eframe::App for OverlayApp {
         }
 
         #[cfg(windows)]
-        let global_escape_hit = unsafe { (GetAsyncKeyState(0x1B) as u16 & 0x8000) != 0 };
+        let global_escape_hit = false; // Géré de façon prioritaire et compatible avec les remappages par hook_escape_hit
         #[cfg(not(windows))]
         let global_escape_hit = false;
         let hook_escape_hit = hook_events.contains(&SwitchKeyEvent::Escape)

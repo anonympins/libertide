@@ -297,6 +297,7 @@
     "bank_arcade": "👾 8-Bit Arcade",
     "echo": "Écho",
     "beat_looper": "🥁 Beat Looper",
+    "quantize_4_4": "🔒 Garde-fou 4/4",
     "switch_btn_idle": "🔘 CONTACTEUR UNIQUE (Maintenir pour déformer le son / Espace / Entrée)",
     "morphing_active": "🔥 Déformation active : Pitch +%{pitch} demi-tons | Wah %{wah}%",
     "bpm": "BPM :",

@@ -294,6 +294,7 @@
     "bank_arcade": "👾 8-Bit Arcade",
     "echo": "Eco",
     "beat_looper": "🥁 Beat Looper",
+    "quantize_4_4": "🔒 Blocco 4/4",
     "switch_btn_idle": "🔘 SENSORE SINGOLO (Tieni premuto per deformare il suono / Spazio / Invio)",
     "morphing_active": "🔥 Deformazione attiva: Pitch +%{pitch} semitoni | Wah %{wah}%",
     "bpm": "BPM:",

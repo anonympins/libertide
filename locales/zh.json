@@ -294,6 +294,7 @@
     "bank_arcade": "👾 8位街机",
     "echo": "回声",
     "beat_looper": "🥁 循环鼓点",
+    "quantize_4_4": "🔒 4/4节拍守卫",
     "switch_btn_idle": "🔘 单开关控制（长按以调制音效 / 空格 / 回车）",
     "morphing_active": "🔥 声音调制中: 音高 +%{pitch} 半音 | 哇音 %{wah}%",
     "bpm": "BPM：",

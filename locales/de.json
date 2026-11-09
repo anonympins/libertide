@@ -297,6 +297,7 @@
     "bank_arcade": "👾 8-Bit-Arcade",
     "echo": "Echo",
     "beat_looper": "🥁 Beat Looper",
+    "quantize_4_4": "🔒 4/4-Taktsperre",
     "switch_btn_idle": "🔘 EINZELTASTER (Gedrückt halten zur Klangverformung / Leertaste / Eingabe)",
     "morphing_active": "🔥 Klangverformung: Pitch +%{pitch} Halbtöne | Wah %{wah}%",
     "bpm": "BPM:",

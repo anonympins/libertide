@@ -1276,6 +1276,15 @@ pub static NUMBER_KEY_QUEUE: Mutex<Vec<char>> = Mutex::new(Vec::new());
 pub static SWITCH_LONG_PRESS_MS: AtomicU64 = AtomicU64::new(1100);
 pub static SWITCH_DEBOUNCE_MS: AtomicU64 = AtomicU64::new(180);
 
+#[cfg(windows)]
+static TRACKED_CTRL: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static TRACKED_SHIFT: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static TRACKED_ALT: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static TRACKED_WIN: AtomicBool = AtomicBool::new(false);
+
 type RepaintCallback = Box<dyn Fn() + Send + Sync>;
 static REPAINT_CALLBACK: Mutex<Option<RepaintCallback>> = Mutex::new(None);
 
@@ -1352,35 +1361,80 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
     };
     use crate::types::SwitchKeyEvent;
 
+    extern "system" {
+        fn MapVirtualKeyW(uCode: u32, uMapType: u32) -> u32;
+    }
+
     if code >= 0 {
-        let fg = GetForegroundWindow();
-        let mut fg_pid = 0u32;
         let kbd = *(lparam.0 as *const KBDLLHOOKSTRUCT);
 
-        // Seules les frappes simulées par Libertide lui-même (marquées avec LIBERTIDE_EXTRA_INFO)
-        // sont ignorées pour ne pas boucler sur ses propres simulations de touches (hotkeys, frappe Unicode).
+        // Les frappes simulées par Libertide lui-même (marquées avec LIBERTIDE_EXTRA_INFO)
+        // sont transmises directement pour ne pas boucler.
         if kbd.dwExtraInfo == LIBERTIDE_EXTRA_INFO {
             return CallNextHookEx(None, code, wparam, lparam);
         }
 
-        let vk = kbd.vkCode;
         let is_down = wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize;
         let is_up = wparam.0 == WM_KEYUP as usize || wparam.0 == WM_SYSKEYUP as usize;
 
-        let is_shift = (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x10) as u16 & 0x8000) != 0;
-        let is_ctrl = (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x11) as u16 & 0x8000) != 0;
-        let is_alt = (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x12) as u16 & 0x8000) != 0;
+        // Résolution du Virtual Key Code à partir du ScanCode si le remappeur émet en scan code pur
+        let mut vk = kbd.vkCode;
+        if vk == 0 && kbd.scanCode != 0 {
+            vk = MapVirtualKeyW(kbd.scanCode, 1 /* MAPVK_VSC_TO_VK */);
+        }
+
+        // Suivi logique des touches modificatrices
+        match vk {
+            0x11 | 0xA2 | 0xA3 => TRACKED_CTRL.store(is_down, Ordering::Relaxed),
+            0x10 | 0xA0 | 0xA1 => TRACKED_SHIFT.store(is_down, Ordering::Relaxed),
+            0x12 | 0xA4 | 0xA5 => TRACKED_ALT.store(is_down, Ordering::Relaxed),
+            0x5B | 0x5C => TRACKED_WIN.store(is_down, Ordering::Relaxed),
+            _ => {}
+        }
+
+        let is_injected = (kbd.flags.0 & 0x10) != 0; // LLKHF_INJECTED
+        // PowerToys Keyboard Manager utilise dwExtraInfo = 1 (KEYBOARDMANAGER_INJECTED_FLAG) ou 2 (KEYBOARDMANAGER_SHORTCUT_FLAG)
+        let is_powertoys = kbd.dwExtraInfo == 0x1 || kbd.dwExtraInfo == 0x2;
+
+        // Appel préalable des hooks suivants dans la chaîne (ex: PowerToys Keyboard Manager).
+        // Si un gestionnaire de remappage a consommé et remappé la touche physique, il renvoie un code non nul.
+        let downstream_res = CallNextHookEx(None, code, wparam, lparam);
+        if !is_injected && !is_powertoys && downstream_res.0 != 0 {
+            // Un remappeur (ex: PowerToys) a consommé cette touche physique pour la réinjecter remappée.
+            return downstream_res;
+        }
+
+        // Évaluation des modificateurs : pour les touches injectées par un remappeur (PowerToys / AHK),
+        // on ne laisse pas les touches physiques maintenues (ex: Ctrl/Alt du raccourci déclencheur) fausser la touche réémise.
+        let is_alt = (kbd.flags.0 & 0x20) != 0; // LLKHF_ALTDOWN
+        let is_ctrl = if is_powertoys {
+            false
+        } else if is_injected {
+            TRACKED_CTRL.load(Ordering::Relaxed)
+        } else {
+            TRACKED_CTRL.load(Ordering::Relaxed)
+                || (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x11) as u16 & 0x8000) != 0
+        };
+        let is_shift = if is_powertoys {
+            false
+        } else if is_injected {
+            TRACKED_SHIFT.load(Ordering::Relaxed)
+        } else {
+            TRACKED_SHIFT.load(Ordering::Relaxed)
+                || (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x10) as u16 & 0x8000) != 0
+        };
+
         let is_switch_hook_on = SWITCH_HOOK_ENABLED.load(Ordering::Relaxed);
         let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::Relaxed);
 
         // 1. Raccourcis globaux prioritaires Libertide (F7 = Survol, F8/Pause = Dictée, F9 = Voix, F4 = Vider, Échap = Annuler/Sortir)
         // Ces touches doivent être interceptées immédiatement, qu'un champ texte externe soit focalisé ou non.
         let global_action_event = match vk {
-            0x76 if !is_ctrl && !is_alt => Some(SwitchKeyEvent::ToggleSwitch),             // F7 -> Toggle Survol / Badges
-            0x77 | 0x13 if !is_ctrl && !is_alt => Some(SwitchKeyEvent::ToggleDictation), // F8 ou Pause -> Toggle Dictée
-            0x78 if !is_ctrl && !is_alt => Some(SwitchKeyEvent::ToggleVoice),              // F9 -> Toggle Voix
-            0x73 if !is_ctrl && !is_alt => Some(SwitchKeyEvent::Clear),                    // F4 -> Effacer / Trash
-            0x1B if (is_dictation || is_switch_hook_on) && !is_ctrl && !is_alt => Some(SwitchKeyEvent::Escape), // Échap
+            0x76 if (!is_ctrl && !is_alt) || is_powertoys => Some(SwitchKeyEvent::ToggleSwitch),             // F7 -> Toggle Survol / Badges
+            0x77 | 0x13 if (!is_ctrl && !is_alt) || is_powertoys => Some(SwitchKeyEvent::ToggleDictation), // F8 ou Pause -> Toggle Dictée
+            0x78 if (!is_ctrl && !is_alt) || is_powertoys => Some(SwitchKeyEvent::ToggleVoice),              // F9 -> Toggle Voix
+            0x73 if (!is_ctrl && !is_alt) || is_powertoys => Some(SwitchKeyEvent::Clear),                    // F4 -> Effacer / Trash
+            0x1B if (is_dictation || is_switch_hook_on) && ((!is_ctrl && !is_alt) || is_powertoys) => Some(SwitchKeyEvent::Escape), // Échap
             _ => None,
         };
 
@@ -1430,12 +1484,12 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         // laisser passer les frappes courantes (lettres, chiffres, ponctuation) vers l'application active.
         let is_user_typing = IS_USER_TYPING.load(Ordering::Relaxed);
         if is_dictation || is_user_typing {
-            return CallNextHookEx(None, code, wparam, lparam);
+            return downstream_res;
         }
 
         // 3. Si le mode survol / contacteur n'est pas activé, laisser passer les touches de navigation standard.
         if !is_switch_hook_on {
-            return CallNextHookEx(None, code, wparam, lparam);
+            return downstream_res;
         }
 
         #[cfg(windows)]
@@ -1449,7 +1503,7 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         }
 
         // Interception globale du pavé numérique (0x60..=0x69) et des touches chiffres (0x30..=0x39) en mode survol
-        if is_switch_hook_on && !is_ctrl && !is_alt {
+        if is_switch_hook_on && ((!is_ctrl && !is_alt) || is_powertoys) {
             let digit_char = match vk {
                 0x60..=0x69 => Some((b'0' + (vk as u8 - 0x60)) as char),
                 0x30..=0x39 => Some((b'0' + (vk as u8 - 0x30)) as char),

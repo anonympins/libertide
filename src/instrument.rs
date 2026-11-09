@@ -433,12 +433,17 @@ pub struct InstrumentState {
     pub wah_cutoff: f32,
     pub pitch_bend: f32,
     pub echo_enabled: bool,
+    pub quantize_4_4: bool,
     pub press_start: Option<Instant>,
+    pub held_pad_index: Option<usize>,
+    pub last_repeat_tick: Instant,
+    pub last_pad_trigger: [Instant; 8],
     pub pad_glow: [f32; 8],
 }
 
 impl Default for InstrumentState {
     fn default() -> Self {
+        let past = Instant::now() - Duration::from_secs(10);
         Self {
             bank: SoundBank::ElectroBeat,
             bpm: 105,
@@ -452,7 +457,11 @@ impl Default for InstrumentState {
             wah_cutoff: 0.5,
             pitch_bend: 0.0,
             echo_enabled: true,
+            quantize_4_4: true,
             press_start: None,
+            held_pad_index: None,
+            last_repeat_tick: past,
+            last_pad_trigger: [past; 8],
             pad_glow: [0.0; 8],
         }
     }
@@ -463,28 +472,47 @@ pub static INSTRUMENT_STATE: Mutex<Option<InstrumentState>> = Mutex::new(None);
 impl InstrumentState {
     pub fn trigger_pad(&mut self, pad_idx: usize, hold_secs: f32) {
         let pad = pad_idx % 8;
+        let now = Instant::now();
+
+        // Garde-fou rythmique 4/4 : anti-mitraillette (rejet des doubles frappes involontaires / tremblements)
+        if self.quantize_4_4 && hold_secs <= 0.05 {
+            let sixteenth_secs = (60.0 / self.bpm as f32) / 4.0;
+            let min_interval = Duration::from_secs_f32(sixteenth_secs.clamp(0.08, 0.35));
+            if now.duration_since(self.last_pad_trigger[pad]) < min_interval {
+                return;
+            }
+        }
+        self.last_pad_trigger[pad] = now;
         self.pad_glow[pad] = 1.0;
 
-        let hold_bend = (hold_secs * 4.0).clamp(0.0, 7.0);
+        // Le pitch bend et la déformation Wah ne se déclenchent qu'après un maintien soutenu (> 1.2s)
+        let (hold_bend, wah_boost, effective_hold) = if hold_secs > 1.2 {
+            let diff = (hold_secs - 1.2).min(3.0);
+            let bend = (diff * 1.5).clamp(0.0, 5.0);
+            let wah = (diff * 0.25).clamp(0.0, 0.4);
+            (bend, wah, diff)
+        } else {
+            (0.0, 0.0, 0.0)
+        };
         let total_bend_semitones = self.pitch_bend + hold_bend;
         let pitch_mult = (2.0f32).powf(total_bend_semitones / 12.0);
-        let cutoff = (self.wah_cutoff + hold_secs * 0.8).clamp(0.0, 1.0);
+        let cutoff = (self.wah_cutoff + wah_boost).clamp(0.0, 1.0);
 
         let mut samples = match self.bank {
             SoundBank::ElectroBeat => match pad {
-                0 => synth_kick(pitch_mult, 1.0 + hold_secs),
+                0 => synth_kick(pitch_mult, 1.0 + effective_hold * 0.3),
                 1 => synth_snare(pitch_mult, cutoff),
-                2 => synth_hihat(hold_secs > 0.15, cutoff),
-                3 => synth_clap(1.0 + hold_secs * 2.0),
-                4 => synth_note(65.41 * pitch_mult, 0.4 + hold_secs * 0.8, pitch_mult, cutoff, true),
-                5 => synth_note(261.63 * pitch_mult, 0.35 + hold_secs * 0.6, pitch_mult, cutoff, false),
-                6 => synth_note(392.00 * pitch_mult, 0.35 + hold_secs * 0.6, pitch_mult, cutoff, false),
+                2 => synth_hihat(effective_hold > 0.2, cutoff),
+                3 => synth_clap(1.0 + effective_hold * 0.5),
+                4 => synth_note(65.41 * pitch_mult, 0.4 + effective_hold * 0.3, pitch_mult, cutoff, true),
+                5 => synth_note(261.63 * pitch_mult, 0.35 + effective_hold * 0.3, pitch_mult, cutoff, false),
+                6 => synth_note(392.00 * pitch_mult, 0.35 + effective_hold * 0.3, pitch_mult, cutoff, false),
                 _ => synth_arcade(2),
             },
             SoundBank::ZenMeditation => {
                 let pentatonic_freqs = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 130.81, 659.25];
                 if pad == 6 {
-                    synth_note(130.81 * pitch_mult, 1.2 + hold_secs, pitch_mult, cutoff, true)
+                    synth_note(130.81 * pitch_mult, 1.2 + effective_hold * 0.3, pitch_mult, cutoff, true)
                 } else {
                     synth_zen_bell(pentatonic_freqs[pad] * pitch_mult, cutoff)
                 }
@@ -517,16 +545,18 @@ impl InstrumentState {
             *glow = (*glow * 0.82).max(0.0);
         }
 
-        if self.single_switch_mode && self.auto_scan {
-            let scan_interval = Duration::from_millis(((60.0 / self.bpm as f32) * 1000.0) as u64);
+        // Balayage automatique : pause si l'utilisateur maintient une touche ou le contacteur
+        if self.single_switch_mode && self.auto_scan && self.press_start.is_none() {
+            let scan_interval = Duration::from_secs_f32(60.0 / self.bpm as f32);
             if now.duration_since(self.last_scan_tick) >= scan_interval {
                 self.last_scan_tick = now;
                 self.active_pad_index = (self.active_pad_index + 1) % 8;
             }
         }
 
+        // Accompagnement rythmique en 4/4 régulier
         if self.auto_beat {
-            let beat_interval = Duration::from_millis(((60.0 / self.bpm as f32) * 500.0) as u64);
+            let beat_interval = Duration::from_secs_f32(60.0 / self.bpm as f32);
             if now.duration_since(self.last_beat_tick) >= beat_interval {
                 self.last_beat_tick = now;
                 self.beat_step = (self.beat_step + 1) % 4;
@@ -539,6 +569,33 @@ impl InstrumentState {
             }
         }
     }
+}
+
+fn key_to_pad(key: egui::Key, active_pad_index: usize) -> Option<usize> {
+    match key {
+        egui::Key::Space | egui::Key::Enter => Some(active_pad_index),
+        egui::Key::Num1 | egui::Key::A | egui::Key::Q => Some(0),
+        egui::Key::Num2 | egui::Key::Z | egui::Key::W => Some(1),
+        egui::Key::Num3 | egui::Key::E => Some(2),
+        egui::Key::Num4 | egui::Key::R => Some(3),
+        egui::Key::Num5 | egui::Key::T => Some(4),
+        egui::Key::Num6 | egui::Key::Y => Some(5),
+        egui::Key::Num7 | egui::Key::U => Some(6),
+        egui::Key::Num8 | egui::Key::I => Some(7),
+        _ => None,
+    }
+}
+
+fn is_any_pad_key_down(i: &egui::InputState) -> bool {
+    let keys = [
+        egui::Key::Space, egui::Key::Enter,
+        egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4,
+        egui::Key::Num5, egui::Key::Num6, egui::Key::Num7, egui::Key::Num8,
+        egui::Key::A, egui::Key::Z, egui::Key::E, egui::Key::R,
+        egui::Key::T, egui::Key::Y, egui::Key::U, egui::Key::I,
+        egui::Key::Q, egui::Key::W,
+    ];
+    keys.iter().any(|&k| i.key_down(k))
 }
 
 pub fn render_instrument_view(ui: &mut egui::Ui, dwell_state: &mut DwellState, theme: &ThemeColors) {
@@ -566,42 +623,32 @@ pub fn render_instrument_view(ui: &mut egui::Ui, dwell_state: &mut DwellState, t
     ];
 
     let pad_labels = localized_pad_labels(state.bank, &lang);
-    let mut single_switch_hit = false;
 
-    let mut triggered_pad = None;
+    // Gestion des entrées clavier avec anti-mitraillette (filtrage strict des répétitions OS)
+    let mut key_pressed_pad = None;
+    let mut key_released = false;
+
     ui.input(|i| {
-        if i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter) {
-            single_switch_hit = true;
-        }
-        let num_keys = [
-            egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4,
-            egui::Key::Num5, egui::Key::Num6, egui::Key::Num7, egui::Key::Num8,
-        ];
-        for (idx, &k) in num_keys.iter().enumerate() {
-            if i.key_pressed(k) {
-                triggered_pad = Some(idx);
+        for ev in &i.events {
+            match ev {
+                egui::Event::Key { key, pressed: true, repeat, .. } => {
+                    if !*repeat {
+                        if let Some(pad) = key_to_pad(*key, state.active_pad_index) {
+                            key_pressed_pad = Some(pad);
+                        }
+                    }
+                }
+                egui::Event::Key { key, pressed: false, .. } => {
+                    if key_to_pad(*key, state.active_pad_index).is_some() {
+                        key_released = true;
+                    }
+                }
+                _ => {}
             }
         }
-        // Support universel QWERTY & AZERTY
-        if i.key_pressed(egui::Key::A) || i.key_pressed(egui::Key::Q) {
-            triggered_pad = Some(0);
-        } else if i.key_pressed(egui::Key::Z) || i.key_pressed(egui::Key::W) {
-            triggered_pad = Some(1);
-        } else if i.key_pressed(egui::Key::E) { triggered_pad = Some(2); }
-        else if i.key_pressed(egui::Key::R) { triggered_pad = Some(3); }
-        else if i.key_pressed(egui::Key::T) { triggered_pad = Some(4); }
-        else if i.key_pressed(egui::Key::Y) { triggered_pad = Some(5); }
-        else if i.key_pressed(egui::Key::U) { triggered_pad = Some(6); }
-        else if i.key_pressed(egui::Key::I) { triggered_pad = Some(7); }
     });
 
-    if single_switch_hit {
-        triggered_pad = Some(state.active_pad_index);
-    }
-
-    if let Some(pad) = triggered_pad {
-        state.trigger_pad(pad, 0.0);
-    }
+    let now = Instant::now();
 
     // 1. Barre supérieure
     ui.horizontal(|ui| {
@@ -614,6 +661,7 @@ pub fn render_instrument_view(ui: &mut egui::Ui, dwell_state: &mut DwellState, t
         if b3.clicked() { state.bank = SoundBank::RetroArcade; }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.checkbox(&mut state.quantize_4_4, t!("instrument.quantize_4_4"));
             ui.checkbox(&mut state.echo_enabled, t!("instrument.echo"));
             ui.checkbox(&mut state.auto_beat, t!("instrument.beat_looper"));
         });
@@ -627,6 +675,7 @@ pub fn render_instrument_view(ui: &mut egui::Ui, dwell_state: &mut DwellState, t
     let total_w = ui.available_width();
     let pad_w = ((total_w - 3.0 * 8.0) / 4.0).max(65.0);
     let pad_h = 75.0;
+    let mut direct_pad_down = None;
 
     for row in 0..2 {
         ui.horizontal(|ui| {
@@ -654,7 +703,7 @@ pub fn render_instrument_view(ui: &mut egui::Ui, dwell_state: &mut DwellState, t
                     egui::Stroke::new(1.2, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 80))
                 };
 
-                let (rect, resp) = ui.allocate_exact_size(egui::vec2(pad_w, pad_h), egui::Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(pad_w, pad_h), egui::Sense::click_and_drag());
                 let p = ui.painter();
                 p.rect(rect, egui::CornerRadius::same(10), fill_color, stroke, egui::StrokeKind::Inside);
 
@@ -662,10 +711,13 @@ pub fn render_instrument_view(ui: &mut egui::Ui, dwell_state: &mut DwellState, t
                 p.text(egui::pos2(rect.center().x, rect.min.y + 38.0), egui::Align2::CENTER_CENTER, subtitle, egui::FontId::proportional(11.0), egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220));
                 p.text(egui::pos2(rect.center().x, rect.max.y - 12.0), egui::Align2::CENTER_CENTER, shortcut, egui::FontId::proportional(10.0), egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180));
 
+                if resp.is_pointer_button_down_on() {
+                    direct_pad_down = Some(idx);
+                }
+
                 let pad_dwell_id = ui.make_persistent_id(format!("dwell_pad_{idx}"));
-                if resp.clicked() || apply_dwell_to_response(ui, dwell_state, pad_dwell_id, &resp) {
-                    state.trigger_pad(idx, 0.0);
-                    state.active_pad_index = idx;
+                if apply_dwell_to_response(ui, dwell_state, pad_dwell_id, &resp) {
+                    key_pressed_pad = Some(idx);
                 }
             }
         });
@@ -674,37 +726,84 @@ pub fn render_instrument_view(ui: &mut egui::Ui, dwell_state: &mut DwellState, t
 
     ui.add_space(4.0);
 
-    // 3. Bouton géant de contacteur unique
+    // 3. Bouton géant de contacteur unique avec répétition cadencée en rythme 4/4
     let switch_bar_w = ui.available_width();
     let (bar_rect, bar_resp) = ui.allocate_exact_size(egui::vec2(switch_bar_w, 48.0), egui::Sense::drag());
 
-    let is_holding = bar_resp.is_pointer_button_down_on();
-    let now = Instant::now();
-    if is_holding {
-        if state.press_start.is_none() {
+    let is_bar_down = bar_resp.is_pointer_button_down_on();
+    let is_keyboard_down = ui.input(|i| is_any_pad_key_down(i));
+    let is_holding = direct_pad_down.is_some() || is_bar_down || (is_keyboard_down && !key_released);
+
+    // Déclenchement initial (nouveau touché de pad, nouvelle touche clavier ou contacteur)
+    if let Some(pad) = key_pressed_pad {
+        state.active_pad_index = pad;
+        state.held_pad_index = Some(pad);
+        state.press_start = Some(now);
+        state.last_repeat_tick = now;
+        state.trigger_pad(pad, 0.0);
+    } else if let Some(pad) = direct_pad_down {
+        if state.held_pad_index != Some(pad) || state.press_start.is_none() {
+            state.active_pad_index = pad;
+            state.held_pad_index = Some(pad);
             state.press_start = Some(now);
-            state.trigger_pad(state.active_pad_index, 0.0);
+            state.last_repeat_tick = now;
+            state.trigger_pad(pad, 0.0);
         }
-    } else if let Some(start) = state.press_start.take() {
-        let dur = start.elapsed().as_secs_f32();
-        if dur > 0.08 {
-            state.trigger_pad(state.active_pad_index, dur);
+    } else if is_bar_down && state.press_start.is_none() {
+        state.held_pad_index = Some(state.active_pad_index);
+        state.press_start = Some(now);
+        state.last_repeat_tick = now;
+        state.trigger_pad(state.active_pad_index, 0.0);
+    }
+
+    // Répétition rythmée tant que la touche / le contacteur est maintenu (croche calée sur le BPM 4/4)
+    if is_holding && state.press_start.is_some() {
+        let pad = state.held_pad_index.unwrap_or(state.active_pad_index);
+        let hold_dur = state.press_start.map_or(0.0, |s| s.elapsed().as_secs_f32());
+        let repeat_interval_secs = (60.0 / state.bpm.max(40) as f32) * 0.5;
+        let repeat_interval = Duration::from_secs_f32(repeat_interval_secs);
+
+        if now.duration_since(state.last_repeat_tick) >= repeat_interval {
+            if now.duration_since(state.last_repeat_tick) > repeat_interval * 2 {
+                state.last_repeat_tick = now;
+            } else {
+                state.last_repeat_tick += repeat_interval;
+            }
+            state.trigger_pad(pad, hold_dur);
         }
+        ui.ctx().request_repaint();
+    } else {
+        state.press_start = None;
+        state.held_pad_index = None;
     }
 
     let hold_dur = state.press_start.map_or(0.0, |s| s.elapsed().as_secs_f32());
     let p = ui.painter();
     let bar_color = if is_holding {
-        egui::Color32::from_rgb(0, 210, 255)
+        if hold_dur > 1.2 {
+            egui::Color32::from_rgb(255, 130, 0)
+        } else {
+            egui::Color32::from_rgb(0, 210, 255)
+        }
     } else {
         theme.tab_active_bg
     };
     p.rect(bar_rect, egui::CornerRadius::same(8), bar_color, egui::Stroke::new(2.0, theme.accent), egui::StrokeKind::Inside);
 
-    let bar_text = if hold_dur > 0.05 {
-        let semitones = (hold_dur * 4.0).min(7.0);
-        let wah = (state.wah_cutoff * 100.0).min(100.0);
+    let bar_text = if hold_dur > 1.2 {
+        let diff = (hold_dur - 1.2).min(3.0);
+        let semitones = (diff * 1.5).min(5.0);
+        let wah = ((state.wah_cutoff + (diff * 0.25).min(0.4)) * 100.0).min(100.0);
         t!("instrument.morphing_active", pitch = format!("{semitones:.1}"), wah = format!("{wah:.0}")).to_string()
+    } else if hold_dur > 0.06 {
+        match lang.as_str() {
+            "fr" => format!("🔁 Répétition 4/4 en cours ({:.1}s) | Maintenir > 1.2s pour moduler", hold_dur),
+            "es" => format!("🔁 Repetición 4/4 activa ({:.1}s) | Mantener > 1.2s para modular", hold_dur),
+            "de" => format!("🔁 4/4-Rhythmuswiederholung ({:.1}s) | Halten > 1.2s für Modulation", hold_dur),
+            "it" => format!("🔁 Ripetizione 4/4 in corso ({:.1}s) | Tieni premuto > 1.2s per modulare", hold_dur),
+            "pt" => format!("🔁 Repetição 4/4 ativa ({:.1}s) | Segurar > 1.2s para modular", hold_dur),
+            _ => format!("🔁 4/4 Rhythm repeat ({:.1}s) | Hold > 1.2s to morph", hold_dur),
+        }
     } else {
         t!("instrument.switch_btn_idle").to_string()
     };

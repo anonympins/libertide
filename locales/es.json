@@ -297,6 +297,7 @@
     "bank_arcade": "👾 Arcade 8-Bit",
     "echo": "Eco",
     "beat_looper": "🥁 Beat Looper",
+    "quantize_4_4": "🔒 Guardia 4/4",
     "switch_btn_idle": "🔘 CONMUTADOR ÚNICO (Mantener presionado para modular / Espacio / Entrar)",
     "morphing_active": "🔥 Modulación activa: Tono +%{pitch} semitonos | Wah %{wah}%",
     "bpm": "BPM:",

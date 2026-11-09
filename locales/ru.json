@@ -294,6 +294,7 @@
     "bank_arcade": "👾 8-Бит Аркада",
     "echo": "Эхо",
     "beat_looper": "🥁 Beat Looper",
+    "quantize_4_4": "🔒 Ритм 4/4",
     "switch_btn_idle": "🔘 ОДИНОЧНЫЙ ПЕРЕКЛЮЧАТЕЛЬ (Удерживайте для модуляции / Пробел / Enter)",
     "morphing_active": "🔥 Модуляция: Питч +%{pitch} полутонов | Вау %{wah}%",
     "bpm": "BPM:",
