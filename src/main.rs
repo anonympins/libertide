@@ -2363,10 +2363,18 @@ impl eframe::App for OverlayApp {
             let hook_nav_next = hook_events.contains(&SwitchKeyEvent::Next);
             let hook_nav_prev = hook_events.contains(&SwitchKeyEvent::Prev);
 
+            // Temporisation du balayage automatique pour contacteur unique (Auto-Scan ~1.8s)
+            let auto_scan_interval = Duration::from_millis(1800);
+            let auto_scan_tick = !self.hover_physical_mouse_moved
+                && !self.dictation_mode
+                && self.status != AgentStatus::Speaking
+                && self.last_switch_input.elapsed() >= Duration::from_millis(600)
+                && self.switch_last_tick.elapsed() >= auto_scan_interval;
+
             let mut switch_input_hit = (egui_enter || egui_space || hook_enter_or_space)
                 && self.last_switch_input.elapsed() >= Duration::from_millis(180);
 
-            let nav_next_hit = (egui_nav_next || hook_nav_next)
+            let nav_next_hit = (egui_nav_next || hook_nav_next || auto_scan_tick)
                 && self.last_switch_input.elapsed() >= Duration::from_millis(150);
             let nav_prev_hit = (egui_nav_prev || hook_nav_prev)
                 && self.last_switch_input.elapsed() >= Duration::from_millis(150);
