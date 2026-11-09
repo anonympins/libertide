@@ -439,6 +439,7 @@ pub struct InstrumentState {
     pub last_repeat_tick: Instant,
     pub last_pad_trigger: [Instant; 8],
     pub pad_glow: [f32; 8],
+    pub last_interaction_tick: Instant,
 }
 
 impl Default for InstrumentState {
@@ -463,6 +464,7 @@ impl Default for InstrumentState {
             last_repeat_tick: past,
             last_pad_trigger: [past; 8],
             pad_glow: [0.0; 8],
+            last_interaction_tick: past,
         }
     }
 }
@@ -484,6 +486,7 @@ impl InstrumentState {
         }
         self.last_pad_trigger[pad] = now;
         self.pad_glow[pad] = 1.0;
+        self.last_interaction_tick = now;
 
         // Le pitch bend et la déformation Wah ne se déclenchent qu'après un maintien soutenu (> 1.2s)
         let (hold_bend, wah_boost, effective_hold) = if hold_secs > 1.2 {
@@ -545,12 +548,23 @@ impl InstrumentState {
             *glow = (*glow * 0.82).max(0.0);
         }
 
-        // Balayage automatique : pause si l'utilisateur maintient une touche ou le contacteur
-        if self.single_switch_mode && self.auto_scan && self.press_start.is_none() {
-            let scan_interval = Duration::from_secs_f32(60.0 / self.bpm as f32);
-            if now.duration_since(self.last_scan_tick) >= scan_interval {
+        // Balayage automatique : ne défile que si l'utilisateur n'appuie plus pendant au moins 4 temps
+        if self.single_switch_mode && self.auto_scan {
+            if self.press_start.is_some() {
+                self.last_interaction_tick = now;
                 self.last_scan_tick = now;
-                self.active_pad_index = (self.active_pad_index + 1) % 8;
+            } else {
+                let beat_secs = 60.0 / self.bpm as f32;
+                let idle_delay = Duration::from_secs_f32(beat_secs * 4.0);
+                if now.duration_since(self.last_interaction_tick) >= idle_delay {
+                    let scan_interval = Duration::from_secs_f32(beat_secs);
+                    if now.duration_since(self.last_scan_tick) >= scan_interval {
+                        self.last_scan_tick = now;
+                        self.active_pad_index = (self.active_pad_index + 1) % 8;
+                    }
+                } else {
+                    self.last_scan_tick = now;
+                }
             }
         }
 
