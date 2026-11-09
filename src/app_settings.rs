@@ -922,6 +922,14 @@ impl OverlayApp {
                                                         self.select_exclusive_disability_preset(preset, ctx);
                                                         play_earcon(Earcon::Success);
                                                     }
+                                            ui.add_space(4.0);
+                                            let open_inst_btn = ui.small_button("🎵 Ouvrir la Boîte à Rythme & Instrument adapté")
+                                                .on_hover_text("Ouvre le mini-jeu musical adapté au contacteur unique.");
+                                            if make_widget_accessible_and_activated(ui, &open_inst_btn, theme.accent) {
+                                                self.open_instrument_card();
+                                                self.show_api_key_modal = false;
+                                                play_earcon(Earcon::Success);
+                                            }
                                                 });
                                             });
                                             ui.add_space(2.0);
@@ -933,6 +941,14 @@ impl OverlayApp {
                                             if make_widget_accessible_and_activated(ui, &reset_all_btn, theme.accent) {
                                                 self.active_disability_presets.clear();
                                                 self.apply_active_disability_presets(ctx);
+                                                play_earcon(Earcon::Success);
+                                            }
+                                            ui.add_space(4.0);
+                                            let open_inst_btn = ui.small_button("🎵 Ouvrir la Boîte à Rythme & Instrument adapté")
+                                                .on_hover_text("Ouvre le mini-jeu musical adapté au contacteur unique.");
+                                            if make_widget_accessible_and_activated(ui, &open_inst_btn, theme.accent) {
+                                                self.open_instrument_card();
+                                                self.show_api_key_modal = false;
                                                 play_earcon(Earcon::Success);
                                             }
                                         });

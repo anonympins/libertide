@@ -29,6 +29,7 @@ mod ocr;
 mod devices;
 mod local_llm;
 mod agent_backend;
+mod instrument;
 pub use agent_backend::*;
 pub use locale::*;
 
@@ -476,6 +477,22 @@ impl OverlayApp {
         app.sync_modal_inputs_for_provider(llm_config.provider);
         update_open_floating_cards(&app.floating_cards);
         app
+    }
+
+    pub fn open_instrument_card(&mut self) {
+        let title = "🎵 Boîte à Rythme & Instrument Adapté".to_string();
+        let card = FloatingCard::new("instrument_toy", title, FloatingContentType::Instrument);
+        if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == "instrument_toy") {
+            existing.open = true;
+        } else {
+            self.floating_cards.push(card);
+        }
+        update_open_floating_cards(&self.floating_cards);
+        play_earcon(Earcon::Success);
+    }
+
+    pub fn is_instrument_open(&self) -> bool {
+        self.floating_cards.iter().any(|c| c.id == "instrument_toy" && c.open)
     }
 
     fn draw_avatar(&self, ui: &mut egui::Ui, center: egui::Pos2, base_radius: f32, time: f64) {
@@ -1386,6 +1403,26 @@ impl eframe::App for OverlayApp {
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx, false);
                         }
+                        return;
+                    }
+
+                    if norm_prompt.contains("boite a rythme")
+                        || norm_prompt.contains("boîte à rythme")
+                        || norm_prompt.contains("instrument")
+                        || norm_prompt.contains("mini jeu")
+                        || norm_prompt.contains("minijeu")
+                        || norm_prompt.contains("joue de la musique")
+                    {
+                        self.open_instrument_card();
+                        let msg = "Boîte à rythme et instrument adapté ouverts. Utilisez votre contacteur ou vos touches pour jouer !".to_string();
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: msg.clone(),
+                            timestamp: current_time_str(),
+                            quick_suggestions: vec![QuickSuggestionItem::Text("Fermer l'instrument".to_string())],
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(msg));
                         return;
                     }
 
@@ -4270,7 +4307,34 @@ impl eframe::App for OverlayApp {
                                             self.toggle_recording(ui.ctx());
                                         }
 
-                                        // 3. Bouton Dictée
+                                        // 3. Bouton Rythme (si profil handicap moteur/contacteur actif) ou Dictée standard
+                                        let is_motor_switch = self.active_disability_presets.contains(&DisabilityPreset::MotorSwitch);
+                                        if is_motor_switch {
+                                            let rhythm_id = ui.make_persistent_id("dwell_btn_rhythm");
+                                            let rhythm_prog = self.dwell_state.get_progress(rhythm_id);
+                                            let is_open = self.is_instrument_open();
+                                            let rhythm_resp = render_accessible_icon_button(
+                                                ui,
+                                                "🎵",
+                                                "Rythme",
+                                                "Boîte à rythme & Instrument sonore adapté (Contacteur unique / Multi-touches)",
+                                                is_open,
+                                                rhythm_prog,
+                                                Some(egui::Color32::from_rgb(180, 70, 240)),
+                                                Some(egui::Color32::from_rgb(205, 95, 255)),
+                                            );
+                                            let (rhythm_dwell, _) = self.dwell_state.update(rhythm_id, rhythm_resp.hovered());
+                                            let is_rhythm_key = rhythm_resp.has_focus() && ui.input(|i| {
+                                                i.events.iter().any(|ev| match ev {
+                                                    egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                                    egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                                    _ => false,
+                                                })
+                                            });
+                                            if rhythm_resp.clicked() || rhythm_dwell || is_rhythm_key {
+                                                self.open_instrument_card();
+                                            }
+                                        } else {
                                         let dict_id = ui.make_persistent_id("dwell_btn_dict");
                                         let dict_prog = self.dwell_state.get_progress(dict_id);
                                         let dict_sub = if self.dictation_mode { t!("ui.btn_dictation_active").to_string() } else { t!("ui.btn_dictation").to_string() };
@@ -4298,6 +4362,7 @@ impl eframe::App for OverlayApp {
                                             } else {
                                                 self.enter_dictation_mode();
                                             }
+                                        }
                                         }
 
                                         // 4. Bouton Survol (Switch Access)

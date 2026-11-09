@@ -86,6 +86,9 @@ pub fn update_open_floating_cards(cards: &[FloatingCard]) {
                         let win = target_window.as_deref().unwrap_or("Audio loopback");
                         ("subtitles", format!("Window: {win} | Text: {text}"))
                     }
+                    FloatingContentType::Instrument => {
+                        ("instrument", "Boîte à rythme & Instrument musical adapté".to_string())
+                    }
                     FloatingContentType::Form { fields, .. } => {
                         let f_summary = fields.iter().map(|f| f.label.clone()).collect::<Vec<_>>().join(", ");
                         ("form", format!("Fields: {}", f_summary))
@@ -185,6 +188,7 @@ pub enum FloatingContentType {
         #[serde(default)]
         history: Vec<String>,
     },
+    Instrument,
 }
 
 fn default_submit_label() -> String {
@@ -408,6 +412,9 @@ impl FloatingCard {
                     history: Vec::new(),
                 }
             }
+            "instrument" | "rhythm" | "drum_machine" | "boite_a_rythme" | "musique" => {
+                FloatingContentType::Instrument
+            }
             _ => {
                 let text = if let Some(s) = data.as_str() {
                     s.to_string()
@@ -526,6 +533,11 @@ impl FloatingCard {
                     speech.push_str(text);
                 }
             }
+            FloatingContentType::Instrument => {
+                speech.push_str("Boîte à rythme et instrument musical adapté pour contacteur unique. \
+                Vous pouvez appuyer sur votre contacteur, la touche Espace ou Entrée pour déclencher des sons rythmés. \
+                Maintenez le contacteur enfoncé pour déformer le son avec un effet wah-wah et pitch bend.");
+            }
         }
         speech
     }
@@ -542,6 +554,7 @@ impl FloatingCard {
             FloatingContentType::Stats { .. } => "📈",
             FloatingContentType::Markdown { .. } => "📄",
             FloatingContentType::Subtitles { .. } => "🎙️",
+            FloatingContentType::Instrument => "🎵",
         };
         let viewport_title = format!("{icon_prefix} {}", self.title);
 
@@ -550,6 +563,7 @@ impl FloatingCard {
             FloatingContentType::Form { .. } => [460.0, 390.0],
             FloatingContentType::Markdown { .. } => [560.0, 380.0],
             FloatingContentType::Table { .. } => [580.0, 340.0],
+            FloatingContentType::Instrument => [640.0, 420.0],
             _ => [480.0, 280.0],
         };
 
@@ -1147,6 +1161,9 @@ impl FloatingCard {
                                                     });
                                             });
                                     });
+                                }
+                                FloatingContentType::Instrument => {
+                                    crate::instrument::render_instrument_view(ui, dwell_state, theme);
                                 }
                             }
                         });
