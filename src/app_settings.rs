@@ -944,8 +944,8 @@ impl OverlayApp {
                                                 play_earcon(Earcon::Success);
                                             }
                                             ui.add_space(4.0);
-                                            let open_inst_btn = ui.small_button("🎵 Ouvrir la Boîte à Rythme & Instrument adapté")
-                                                .on_hover_text("Ouvre le mini-jeu musical adapté au contacteur unique.");
+                                            let open_inst_btn = ui.small_button(t!("instrument.open_btn"))
+                                                .on_hover_text(t!("instrument.open_btn_tooltip"));
                                             if make_widget_accessible_and_activated(ui, &open_inst_btn, theme.accent) {
                                                 self.open_instrument_card();
                                                 self.show_api_key_modal = false;

@@ -523,6 +523,23 @@ pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<Comma
         return vec![CommandTag::TwitchStreamAndChat];
     }
 
+    // Détection immédiate boîte à rythme / drum machine / instrument adapté
+    if lower.contains("boite a rythme")
+        || lower.contains("boîte à rythme")
+        || lower.contains("drum machine")
+        || lower.contains("rhythm box")
+        || lower.contains("caja de ritmos")
+        || lower.contains("drumcomputer")
+        || lower.contains("instrument")
+        || lower.contains("mini jeu musical")
+        || lower.contains("minijeu musical")
+        || lower.contains("music toy")
+        || lower.contains("joue de la musique")
+        || lower.contains("play music")
+    {
+        return vec![CommandTag::RadioAndMusicStream, CommandTag::GeneralChitChat];
+    }
+
     // Détection immédiate des tâches planifiées, rappels, timers et chronomètres
     if lower.contains("minuteur")
         || lower.contains("minuterie")
@@ -1235,6 +1252,7 @@ Règles ACCESSIBILITÉ COGNITIVE & FALC (FACILE À LIRE ET À COMPRENDRE) :
             CommandTag::RadioAndMusicStream => {
                 prompt.push_str(r#"
 Règles STRATÉGIE RADIO & STREAMING AUDIO :
+- BOÎTE À RYTHME & INSTRUMENT ADAPTÉ : Si l'utilisateur demande la boîte à rythme, un instrument musical adapté, un mini-jeu musical ou de faire du rythme/des sons : utilise l'action {"action": "show_floating_card", "id": "instrument_toy", "title": "🎵 Boîte à Rythme & Instrument", "card_type": "instrument", "data": {}} avec next_passes: 0.
 - Étape 1 : Ouvre immédiatement le flux radio ou la page officielle via "navigate_to_url" (ex: "https://www.radiofrance.fr/franceinter" ou recherche Google directe "https://www.google.com/search?q=écouter+france+inter+en+direct").
 - Étape 2 (Bannière cookies & Focus) : Si le navigateur n'est pas actif ou si le clic précédent a échoué, remets-le au premier plan avec {"action": "focus_window", "title": "Chrome"} (ou le nom du navigateur détecté). Dès l'arrivée, clique systématiquement sur le bouton d'acceptation ("Tout accepter", "Accepter").
 - Étape 3 (Ciblage court) : Pour cliquer sur le résultat de recherche, utilise UNIQUEMENT le nom court de la station ou du site (ex: "Radio France" ou "France Inter", SURTOUT PAS le titre complet avec pipes "Radio France | Écoutez...").
@@ -1542,6 +1560,7 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
                 prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"guide_simple\", \"title\": \"Guide pas-à-pas\", \"card_type\": \"markdown\", \"data\": {\"text\": \"...\"}}\n");
             }
             CommandTag::RadioAndMusicStream => {
+                prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"instrument_toy\", \"title\": \"🎵 Boîte à Rythme & Instrument\", \"card_type\": \"instrument\", \"data\": {}}\n");
                 prompt.push_str("- {\"action\": \"navigate_to_url\", \"url\": \"https://www.radiofrance.fr/...\", \"target\": \"new_tab\"}\n");
                 prompt.push_str("- {\"action\": \"click_button\", \"button_name\": \"Écouter le direct\"}\n");
                 prompt.push_str("- {\"action\": \"set_volume\", \"command\": \"up\"|\"down\"|\"mute\"|\"unmute\"}\n");
@@ -2731,6 +2750,12 @@ pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<Command
                 vec![CommandTag::WebpageAnalysis, CommandTag::ScreenReadingOrSummary]
             } else if clean.to_lowercase().contains("fenêtre") || clean.to_lowercase().contains("fenetre") {
                 vec![CommandTag::FocusWindow, CommandTag::WindowManagementOrImmersion]
+            } else if clean.to_lowercase().contains("rythme")
+                || clean.to_lowercase().contains("rhythm")
+                || clean.to_lowercase().contains("instrument")
+                || clean.to_lowercase().contains("drum")
+            {
+                vec![CommandTag::RadioAndMusicStream]
         } else if clean.to_lowercase().contains("minuteur") || clean.to_lowercase().contains("rappel") || clean.to_lowercase().contains("timer") || clean.to_lowercase().contains("alarme") {
             vec![CommandTag::ScheduleTask]
             } else if clean.ends_with('?') {

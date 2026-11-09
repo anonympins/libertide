@@ -3,8 +3,132 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use eframe::egui;
+use rust_i18n::t;
 use crate::overlay::{apply_dwell_to_response, DwellState};
 use crate::theme::ThemeColors;
+
+fn sound_bank_label(bank: SoundBank) -> String {
+    match bank {
+        SoundBank::ElectroBeat => t!("instrument.bank_electro").to_string(),
+        SoundBank::ZenMeditation => t!("instrument.bank_zen").to_string(),
+        SoundBank::RetroArcade => t!("instrument.bank_arcade").to_string(),
+    }
+}
+
+fn localized_pad_labels(bank: SoundBank, lang: &str) -> [(&'static str, &'static str, &'static str); 8] {
+    let is_azerty = lang == "fr";
+    let k1 = if is_azerty { "[1] / [A]" } else { "[1] / [Q]" };
+    let k2 = if is_azerty { "[2] / [Z]" } else { "[2] / [W]" };
+
+    match bank {
+        SoundBank::ElectroBeat => match lang {
+            "es" => [
+                ("🥁 Bombo", "Do / C2", k1),
+                ("💥 Caja", "Re / D2", k2),
+                ("🎩 Charles", "Mi / E2", "[3] / [E]"),
+                ("👏 Palmas", "Sol / G2", "[4] / [R]"),
+                ("🎸 Bajo", "La / A2", "[5] / [T]"),
+                ("🎹 Sintetizador 1", "Do / C4", "[6] / [Y]"),
+                ("✨ Sintetizador 2", "Sol / G4", "[7] / [U]"),
+                ("⚡ Láser FX", "Cósmico", "[8] / [I]"),
+            ],
+            "de" => [
+                ("🥁 Kick", "C2", k1),
+                ("💥 Snare", "D2", k2),
+                ("🎩 Hi-Hat", "E2", "[3] / [E]"),
+                ("👏 Clap", "G2", "[4] / [R]"),
+                ("🎸 Bass", "A2", "[5] / [T]"),
+                ("🎹 Synth 1", "C4", "[6] / [Y]"),
+                ("✨ Synth 2", "G4", "[7] / [U]"),
+                ("⚡ Laser FX", "Kosmisch", "[8] / [I]"),
+            ],
+            "fr" => [
+                ("🥁 Kick", "Do / C2", k1),
+                ("💥 Snare", "Ré / D2", k2),
+                ("🎩 Hi-Hat", "Mi / E2", "[3] / [E]"),
+                ("👏 Clap", "Sol / G2", "[4] / [R]"),
+                ("🎸 Basse", "La / A2", "[5] / [T]"),
+                ("🎹 Synthé 1", "Do / C4", "[6] / [Y]"),
+                ("✨ Synthé 2", "Sol / G4", "[7] / [U]"),
+                ("⚡ Laser FX", "Cosmique", "[8] / [I]"),
+            ],
+            _ => [
+                ("🥁 Kick", "C2", k1),
+                ("💥 Snare", "D2", k2),
+                ("🎩 Hi-Hat", "E2", "[3] / [E]"),
+                ("👏 Clap", "G2", "[4] / [R]"),
+                ("🎸 Bass", "A2", "[5] / [T]"),
+                ("🎹 Synth 1", "C4", "[6] / [Y]"),
+                ("✨ Synth 2", "G4", "[7] / [U]"),
+                ("⚡ Laser FX", "Cosmic", "[8] / [I]"),
+            ],
+        },
+        SoundBank::ZenMeditation => match lang {
+            "es" => [
+                ("🔔 Campanilla 1", "Do / C4", k1),
+                ("🔔 Campanilla 2", "Re / D4", k2),
+                ("🔔 Campanilla 3", "Mi / E4", "[3] / [E]"),
+                ("🔔 Campanilla 4", "Sol / G4", "[4] / [R]"),
+                ("🔔 Campanilla 5", "La / A4", "[5] / [T]"),
+                ("🔔 Campanilla 6", "Do / C5", "[6] / [Y]"),
+                ("🧘 Cuenco Tibetano", "Gong", "[7] / [U]"),
+                ("✨ Estrella Zen", "Eco", "[8] / [I]"),
+            ],
+            "de" => [
+                ("🔔 Klangspiel 1", "C4", k1),
+                ("🔔 Klangspiel 2", "D4", k2),
+                ("🔔 Klangspiel 3", "E4", "[3] / [E]"),
+                ("🔔 Klangspiel 4", "G4", "[4] / [R]"),
+                ("🔔 Klangspiel 5", "A4", "[5] / [T]"),
+                ("🔔 Klangspiel 6", "C5", "[6] / [Y]"),
+                ("🧘 Klangschale", "Gong", "[7] / [U]"),
+                ("✨ Zen-Stern", "Echo", "[8] / [I]"),
+            ],
+            "fr" => [
+                ("🔔 Carillon 1", "Do / C4", k1),
+                ("🔔 Carillon 2", "Ré / D4", k2),
+                ("🔔 Carillon 3", "Mi / E4", "[3] / [E]"),
+                ("🔔 Carillon 4", "Sol / G4", "[4] / [R]"),
+                ("🔔 Carillon 5", "La / A4", "[5] / [T]"),
+                ("🔔 Carillon 6", "Do / C5", "[6] / [Y]"),
+                ("🧘 Bol Tibétain", "Gong", "[7] / [U]"),
+                ("✨ Étoile Zen", "Écho", "[8] / [I]"),
+            ],
+            _ => [
+                ("🔔 Chime 1", "C4", k1),
+                ("🔔 Chime 2", "D4", k2),
+                ("🔔 Chime 3", "E4", "[3] / [E]"),
+                ("🔔 Chime 4", "G4", "[4] / [R]"),
+                ("🔔 Chime 5", "A4", "[5] / [T]"),
+                ("🔔 Chime 6", "C5", "[6] / [Y]"),
+                ("🧘 Tibetan Bowl", "Gong", "[7] / [U]"),
+                ("✨ Zen Star", "Echo", "[8] / [I]"),
+            ],
+        },
+        SoundBank::RetroArcade => match lang {
+            "fr" => [
+                ("👾 Saut", "8-Bit", k1),
+                ("🪙 Pièce", "Double", k2),
+                ("⚡ Laser", "Balayage", "[3] / [E]"),
+                ("💥 Impact", "Bruit", "[4] / [R]"),
+                ("🕹️ Bonus", "Arpège", "[5] / [T]"),
+                ("🔊 Basse", "Carrée", "[6] / [Y]"),
+                ("🌟 Zap", "Impulsion", "[7] / [U]"),
+                ("🏆 Victoire", "Accord", "[8] / [I]"),
+            ],
+            _ => [
+                ("👾 Jump", "8-Bit", k1),
+                ("🪙 Coin", "Dual tone", k2),
+                ("⚡ Laser", "Sweep", "[3] / [E]"),
+                ("💥 Hit", "Noise", "[4] / [R]"),
+                ("🕹️ Power-Up", "Arp", "[5] / [T]"),
+                ("🔊 Square Bass", "Lead", "[6] / [Y]"),
+                ("🌟 Zap", "Pulse", "[7] / [U]"),
+                ("🏆 Victory", "Chord", "[8] / [I]"),
+            ],
+        },
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SoundBank {
@@ -426,6 +550,8 @@ pub fn render_instrument_view(ui: &mut egui::Ui, dwell_state: &mut DwellState, t
         guard.as_ref().cloned().unwrap()
     };
 
+    let loc = rust_i18n::locale();
+    let lang = loc.split(['-', '_']).next().unwrap_or("fr").to_lowercase();
     state.tick();
 
     let pad_colors = [
@@ -439,42 +565,10 @@ pub fn render_instrument_view(ui: &mut egui::Ui, dwell_state: &mut DwellState, t
         egui::Color32::from_rgb(224, 64, 251),
     ];
 
-    let pad_labels = match state.bank {
-        SoundBank::ElectroBeat => [
-            ("🥁 Kick", "Do / C2", "[1] / [A]"),
-            ("💥 Snare", "Ré / D2", "[2] / [Z]"),
-            ("🎩 Hi-Hat", "Mi / E2", "[3] / [E]"),
-            ("👏 Clap", "Sol / G2", "[4] / [R]"),
-            ("🎸 Basse", "La / A2", "[5] / [T]"),
-            ("🎹 Synthé 1", "Do / C4", "[6] / [Y]"),
-            ("✨ Synthé 2", "Sol / G4", "[7] / [U]"),
-            ("⚡ Laser FX", "Cosmic", "[8] / [I]"),
-        ],
-        SoundBank::ZenMeditation => [
-            ("🔔 Carillon 1", "Do / C4", "[1] / [A]"),
-            ("🔔 Carillon 2", "Ré / D4", "[2] / [Z]"),
-            ("🔔 Carillon 3", "Mi / E4", "[3] / [E]"),
-            ("🔔 Carillon 4", "Sol / G4", "[4] / [R]"),
-            ("🔔 Carillon 5", "La / A4", "[5] / [T]"),
-            ("🔔 Carillon 6", "Do / C5", "[6] / [Y]"),
-            ("🧘 Bol Tibétain", "Gong", "[7] / [U]"),
-            ("✨ Étoile Zen", "Écho", "[8] / [I]"),
-        ],
-        SoundBank::RetroArcade => [
-            ("👾 Jump", "8-Bit", "[1] / [A]"),
-            ("🪙 Coin", "Dual", "[2] / [Z]"),
-            ("⚡ Laser", "Sweep", "[3] / [E]"),
-            ("💥 Hit", "Noise", "[4] / [R]"),
-            ("🕹️ Power-Up", "Arp", "[5] / [T]"),
-            ("🔊 Bass", "Square", "[6] / [Y]"),
-            ("🌟 Zap", "Pulse", "[7] / [U]"),
-            ("🏆 Victoire", "Chord", "[8] / [I]"),
-        ],
-    };
-
-    let mut triggered_pad = None;
+    let pad_labels = localized_pad_labels(state.bank, &lang);
     let mut single_switch_hit = false;
 
+    let mut triggered_pad = None;
     ui.input(|i| {
         if i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter) {
             single_switch_hit = true;
@@ -488,15 +582,17 @@ pub fn render_instrument_view(ui: &mut egui::Ui, dwell_state: &mut DwellState, t
                 triggered_pad = Some(idx);
             }
         }
-        let letter_keys = [
-            egui::Key::A, egui::Key::Z, egui::Key::E, egui::Key::R,
-            egui::Key::T, egui::Key::Y, egui::Key::U, egui::Key::I,
-        ];
-        for (idx, &k) in letter_keys.iter().enumerate() {
-            if i.key_pressed(k) {
-                triggered_pad = Some(idx);
-            }
-        }
+        // Support universel QWERTY & AZERTY
+        if i.key_pressed(egui::Key::A) || i.key_pressed(egui::Key::Q) {
+            triggered_pad = Some(0);
+        } else if i.key_pressed(egui::Key::Z) || i.key_pressed(egui::Key::W) {
+            triggered_pad = Some(1);
+        } else if i.key_pressed(egui::Key::E) { triggered_pad = Some(2); }
+        else if i.key_pressed(egui::Key::R) { triggered_pad = Some(3); }
+        else if i.key_pressed(egui::Key::T) { triggered_pad = Some(4); }
+        else if i.key_pressed(egui::Key::Y) { triggered_pad = Some(5); }
+        else if i.key_pressed(egui::Key::U) { triggered_pad = Some(6); }
+        else if i.key_pressed(egui::Key::I) { triggered_pad = Some(7); }
     });
 
     if single_switch_hit {
@@ -509,17 +605,17 @@ pub fn render_instrument_view(ui: &mut egui::Ui, dwell_state: &mut DwellState, t
 
     // 1. Barre supérieure
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Banque sonore :").strong().size(11.5).color(theme.accent));
-        let b1 = ui.selectable_label(state.bank == SoundBank::ElectroBeat, "🎧 Électro Beat");
+        ui.label(egui::RichText::new(t!("instrument.sound_bank")).strong().size(11.5).color(theme.accent));
+        let b1 = ui.selectable_label(state.bank == SoundBank::ElectroBeat, sound_bank_label(SoundBank::ElectroBeat));
         if b1.clicked() { state.bank = SoundBank::ElectroBeat; }
-        let b2 = ui.selectable_label(state.bank == SoundBank::ZenMeditation, "🌸 Zen & Soin");
+        let b2 = ui.selectable_label(state.bank == SoundBank::ZenMeditation, sound_bank_label(SoundBank::ZenMeditation));
         if b2.clicked() { state.bank = SoundBank::ZenMeditation; }
-        let b3 = ui.selectable_label(state.bank == SoundBank::RetroArcade, "👾 8-Bit Arcade");
+        let b3 = ui.selectable_label(state.bank == SoundBank::RetroArcade, sound_bank_label(SoundBank::RetroArcade));
         if b3.clicked() { state.bank = SoundBank::RetroArcade; }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.checkbox(&mut state.echo_enabled, "Écho");
-            ui.checkbox(&mut state.auto_beat, "🥁 Beat Looper");
+            ui.checkbox(&mut state.echo_enabled, t!("instrument.echo"));
+            ui.checkbox(&mut state.auto_beat, t!("instrument.beat_looper"));
         });
     });
 
@@ -606,9 +702,11 @@ pub fn render_instrument_view(ui: &mut egui::Ui, dwell_state: &mut DwellState, t
     p.rect(bar_rect, egui::CornerRadius::same(8), bar_color, egui::Stroke::new(2.0, theme.accent), egui::StrokeKind::Inside);
 
     let bar_text = if hold_dur > 0.05 {
-        format!("🔥 Déformation active : Pitch +{:.1} demi-tons | Wah {:.0}%", (hold_dur * 4.0).min(7.0), (state.wah_cutoff * 100.0).min(100.0))
+        let semitones = (hold_dur * 4.0).min(7.0);
+        let wah = (state.wah_cutoff * 100.0).min(100.0);
+        t!("instrument.morphing_active", pitch = format!("{semitones:.1}"), wah = format!("{wah:.0}")).to_string()
     } else {
-        "🔘 CONTACTEUR UNIQUE (Maintenir pour déformer le son / Espace / Entrée)".to_string()
+        t!("instrument.switch_btn_idle").to_string()
     };
     p.text(bar_rect.center(), egui::Align2::CENTER_CENTER, bar_text, egui::FontId::proportional(12.5), egui::Color32::WHITE);
 
@@ -616,13 +714,13 @@ pub fn render_instrument_view(ui: &mut egui::Ui, dwell_state: &mut DwellState, t
 
     // 4. Curseurs de contrôle et modulation
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("BPM :").size(11.0).color(theme.text_secondary));
+        ui.label(egui::RichText::new(t!("instrument.bpm")).size(11.0).color(theme.text_secondary));
         ui.add(egui::Slider::new(&mut state.bpm, 60..=160).show_value(true));
         ui.separator();
-        ui.label(egui::RichText::new("Wah / Filtre :").size(11.0).color(theme.text_secondary));
+        ui.label(egui::RichText::new(t!("instrument.wah_filter")).size(11.0).color(theme.text_secondary));
         ui.add(egui::Slider::new(&mut state.wah_cutoff, 0.1..=1.0).show_value(false));
         ui.separator();
-        ui.label(egui::RichText::new("Pitch :").size(11.0).color(theme.text_secondary));
+        ui.label(egui::RichText::new(t!("instrument.pitch")).size(11.0).color(theme.text_secondary));
         ui.add(egui::Slider::new(&mut state.pitch_bend, -12.0..=12.0).show_value(true));
     });
 

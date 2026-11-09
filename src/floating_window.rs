@@ -87,7 +87,7 @@ pub fn update_open_floating_cards(cards: &[FloatingCard]) {
                         ("subtitles", format!("Window: {win} | Text: {text}"))
                     }
                     FloatingContentType::Instrument => {
-                        ("instrument", "Boîte à rythme & Instrument musical adapté".to_string())
+                        ("instrument", t!("instrument.card_summary").to_string())
                     }
                     FloatingContentType::Form { fields, .. } => {
                         let f_summary = fields.iter().map(|f| f.label.clone()).collect::<Vec<_>>().join(", ");
@@ -534,9 +534,7 @@ impl FloatingCard {
                 }
             }
             FloatingContentType::Instrument => {
-                speech.push_str("Boîte à rythme et instrument musical adapté pour contacteur unique. \
-                Vous pouvez appuyer sur votre contacteur, la touche Espace ou Entrée pour déclencher des sons rythmés. \
-                Maintenez le contacteur enfoncé pour déformer le son avec un effet wah-wah et pitch bend.");
+                speech.push_str(&t!("instrument.speech_description"));
             }
         }
         speech

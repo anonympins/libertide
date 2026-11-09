@@ -277,6 +277,28 @@
     "devices_pointing_label": "Dispositivi di puntamento rilevati:",
     "devices_pointing_none": "Nessun dispositivo di puntamento aggiuntivo rilevato",
     "devices_saved": "Impostazioni dispositivi salvate"
+  },
+  "instrument": {
+    "title": "🎵 Drum Machine & Strumento Adattato",
+    "card_summary": "Drum machine e strumento musicale adattato",
+    "btn_rhythm": "Ritmo",
+    "btn_rhythm_tooltip": "Drum machine e strumento sonoro adattato (Sensore singolo / Tasti multipli)",
+    "open_btn": "🎵 Apri la Drum Machine e Strumento adattato",
+    "open_btn_tooltip": "Apre il minigioco musicale adattato per sensore singolo.",
+    "opened_speech": "Drum machine e strumento adattato aperti. Usa il tuo sensore o i tasti per suonare!",
+    "close_suggestion": "Chiudi lo strumento",
+    "speech_description": "Drum machine e strumento musicale adattato per sensore singolo. Puoi premere il tuo sensore, Spazio o Invio per attivare suoni ritmici. Tieni premuto il sensore per deformare il suono con effetto wah-wah e pitch bend.",
+    "sound_bank": "Banca suoni:",
+    "bank_electro": "🎧 Electro Beat",
+    "bank_zen": "🌸 Zen & Meditazione",
+    "bank_arcade": "👾 8-Bit Arcade",
+    "echo": "Eco",
+    "beat_looper": "🥁 Beat Looper",
+    "switch_btn_idle": "🔘 SENSORE SINGOLO (Tieni premuto per deformare il suono / Spazio / Invio)",
+    "morphing_active": "🔥 Deformazione attiva: Pitch +%{pitch} semitoni | Wah %{wah}%",
+    "bpm": "BPM:",
+    "wah_filter": "Wah / Filtro:",
+    "pitch": "Pitch:"
   }
   ,"intents": {
     "noise": "ehm,euh,ah,oh,rumore",

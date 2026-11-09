@@ -480,7 +480,7 @@ impl OverlayApp {
     }
 
     pub fn open_instrument_card(&mut self) {
-        let title = "🎵 Boîte à Rythme & Instrument Adapté".to_string();
+        let title = t!("instrument.title").to_string();
         let card = FloatingCard::new("instrument_toy", title, FloatingContentType::Instrument);
         if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == "instrument_toy") {
             existing.open = true;
@@ -1414,12 +1414,12 @@ impl eframe::App for OverlayApp {
                         || norm_prompt.contains("joue de la musique")
                     {
                         self.open_instrument_card();
-                        let msg = "Boîte à rythme et instrument adapté ouverts. Utilisez votre contacteur ou vos touches pour jouer !".to_string();
+                        let msg = t!("instrument.opened_speech").to_string();
                         self.chat_history.push(ChatEntry {
                             role: ChatRole::Agent,
                             text: msg.clone(),
                             timestamp: current_time_str(),
-                            quick_suggestions: vec![QuickSuggestionItem::Text("Fermer l'instrument".to_string())],
+                            quick_suggestions: vec![QuickSuggestionItem::Text(t!("instrument.close_suggestion").to_string())],
                             screen_size_kb: None,
                         });
                         let _ = self.tts_sender.send(TtsCommand::Speak(msg));
@@ -4316,8 +4316,8 @@ impl eframe::App for OverlayApp {
                                             let rhythm_resp = render_accessible_icon_button(
                                                 ui,
                                                 "🎵",
-                                                "Rythme",
-                                                "Boîte à rythme & Instrument sonore adapté (Contacteur unique / Multi-touches)",
+                                                &t!("instrument.btn_rhythm"),
+                                                &t!("instrument.btn_rhythm_tooltip"),
                                                 is_open,
                                                 rhythm_prog,
                                                 Some(egui::Color32::from_rgb(180, 70, 240)),
