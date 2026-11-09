@@ -534,6 +534,8 @@ pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<Comma
         || lower.contains("mini jeu musical")
         || lower.contains("minijeu musical")
         || lower.contains("music toy")
+        || lower.contains("mode musique")
+        || lower.contains("music mode")
         || lower.contains("joue de la musique")
         || lower.contains("play music")
     {
@@ -2754,6 +2756,8 @@ pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<Command
                 || clean.to_lowercase().contains("rhythm")
                 || clean.to_lowercase().contains("instrument")
                 || clean.to_lowercase().contains("drum")
+                || clean.to_lowercase().contains("mode musique")
+                || clean.to_lowercase().contains("music mode")
             {
                 vec![CommandTag::RadioAndMusicStream]
         } else if clean.to_lowercase().contains("minuteur") || clean.to_lowercase().contains("rappel") || clean.to_lowercase().contains("timer") || clean.to_lowercase().contains("alarme") {

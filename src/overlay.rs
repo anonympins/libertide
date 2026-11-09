@@ -2470,7 +2470,7 @@ pub fn compute_and_sync_overlay_geometry(
     let min_win_w = if show_api_key_modal {
         420.0f32.min(work_area.w)
     } else {
-        380.0f32.min(work_area.w)
+        400.0f32.min(work_area.w)
     };
     let computed_min_win_h = (padding + min_chat_h + padding + control_h + padding).min(work_area.h);
     let min_win_h = if show_api_key_modal {

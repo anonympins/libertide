@@ -1410,6 +1410,11 @@ impl eframe::App for OverlayApp {
                     if norm_prompt.contains("boite a rythme")
                         || norm_prompt.contains("boîte à rythme")
                         || norm_prompt.contains("instrument")
+                        || norm_prompt.contains("mode musique")
+                        || norm_prompt.contains("musique adaptee")
+                        || norm_prompt.contains("musique adaptée")
+                        || norm_prompt.contains("lance la musique")
+                        || norm_prompt.contains("ouvre la musique")
                         || norm_prompt.contains("mini jeu")
                         || norm_prompt.contains("minijeu")
                         || norm_prompt.contains("joue de la musique")
@@ -4065,9 +4070,9 @@ impl eframe::App for OverlayApp {
 
                                     ui.add_space(3.0);
 
-                                    // 2e rangée : 6 boutons d'action ergonomiques (WCAG 2.2 AAA, Clic & Dwell 800 ms)
+                                    // 2e rangée : 7 boutons d'action ergonomiques (WCAG 2.2 AAA, Clic & Dwell 800 ms)
                                     ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        ui.spacing_mut().item_spacing.x = 4.0;
 
                                         // 1. Bouton Analyser (WCAG AAA 50x50)
                                         let analyze_id = ui.make_persistent_id("dwell_btn_analyze");
@@ -4312,34 +4317,6 @@ impl eframe::App for OverlayApp {
                                             self.toggle_recording(ui.ctx());
                                         }
 
-                                        // 3. Bouton Rythme (si profil handicap moteur/contacteur actif) ou Dictée standard
-                                        let is_motor_switch = self.active_disability_presets.contains(&DisabilityPreset::MotorSwitch);
-                                        if is_motor_switch {
-                                            let rhythm_id = ui.make_persistent_id("dwell_btn_rhythm");
-                                            let rhythm_prog = self.dwell_state.get_progress(rhythm_id);
-                                            let is_open = self.is_instrument_open();
-                                            let rhythm_resp = render_accessible_icon_button(
-                                                ui,
-                                                "🎵",
-                                                &t!("instrument.btn_rhythm"),
-                                                &t!("instrument.btn_rhythm_tooltip"),
-                                                is_open,
-                                                rhythm_prog,
-                                                Some(egui::Color32::from_rgb(180, 70, 240)),
-                                                Some(egui::Color32::from_rgb(205, 95, 255)),
-                                            );
-                                            let (rhythm_dwell, _) = self.dwell_state.update(rhythm_id, rhythm_resp.hovered());
-                                            let is_rhythm_key = rhythm_resp.has_focus() && ui.input(|i| {
-                                                i.events.iter().any(|ev| match ev {
-                                                    egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
-                                                    egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
-                                                    _ => false,
-                                                })
-                                            });
-                                            if rhythm_resp.clicked() || rhythm_dwell || is_rhythm_key {
-                                                self.open_instrument_card();
-                                            }
-                                        } else {
                                         let dict_id = ui.make_persistent_id("dwell_btn_dict");
                                         let dict_prog = self.dwell_state.get_progress(dict_id);
                                         let dict_sub = if self.dictation_mode { t!("ui.btn_dictation_active").to_string() } else { t!("ui.btn_dictation").to_string() };
@@ -4368,6 +4345,37 @@ impl eframe::App for OverlayApp {
                                                 self.enter_dictation_mode();
                                             }
                                         }
+
+                                        // 4. Bouton Musique / Rythme (Boîte à rythme & Instrument adapté) - disponible pour tous
+                                        let rhythm_id = ui.make_persistent_id("dwell_btn_rhythm");
+                                        let rhythm_prog = self.dwell_state.get_progress(rhythm_id);
+                                        let is_open = self.is_instrument_open();
+                                        let rhythm_resp = render_accessible_icon_button(
+                                            ui,
+                                            "🎵",
+                                            &t!("instrument.btn_rhythm"),
+                                            &t!("instrument.btn_rhythm_tooltip"),
+                                            is_open,
+                                            rhythm_prog,
+                                            Some(egui::Color32::from_rgb(180, 70, 240)),
+                                            Some(egui::Color32::from_rgb(205, 95, 255)),
+                                        );
+                                        let (rhythm_dwell, _) = self.dwell_state.update(rhythm_id, rhythm_resp.hovered());
+                                        let is_rhythm_key = rhythm_resp.has_focus() && ui.input(|i| {
+                                            i.events.iter().any(|ev| match ev {
+                                                egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                                egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                                _ => false,
+                                            })
+                                        });
+                                        if rhythm_resp.clicked() || rhythm_dwell || is_rhythm_key {
+                                            if is_open {
+                                                self.floating_cards.retain(|c| c.id != "instrument_toy");
+                                                crate::floating_window::update_open_floating_cards(&self.floating_cards);
+                                                play_earcon(Earcon::MicClose);
+                                            } else {
+                                                self.open_instrument_card();
+                                            }
                                         }
 
                                         // 4. Bouton Survol (Switch Access)
@@ -5351,7 +5359,7 @@ fn run_overlay_gui(
         .with_transparent(true)
         .with_always_on_top()
         .with_resizable(true)
-        .with_min_inner_size([380.0, 264.0])
+        .with_min_inner_size([400.0, 264.0])
         .with_inner_size([560.0, 280.0]);
 
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../public/favicon-256x256.png")) {
