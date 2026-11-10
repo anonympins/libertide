@@ -280,6 +280,29 @@
     "devices_pointing_label": "Detected pointing devices:",
     "devices_pointing_none": "No additional pointing devices detected",
     "devices_saved": "Device settings saved"
+  },
+  "instrument": {
+    "title": "🎵 Rhythm Machine & Adapted Instrument",
+    "card_summary": "Rhythm machine & Adapted musical instrument",
+    "btn_rhythm": "Rhythm",
+    "btn_rhythm_tooltip": "Rhythm machine & Adapted sound instrument (Single switch / Multi-keys)",
+    "open_btn": "🎵 Open Rhythm Machine & Adapted Instrument",
+    "open_btn_tooltip": "Opens the adapted musical toy for single switch.",
+    "opened_speech": "Rhythm machine and adapted instrument opened. Use your switch or keys to play!",
+    "close_suggestion": "Close instrument",
+    "speech_description": "Rhythm machine and musical instrument adapted for single switch. You can press your switch, Space or Enter to trigger rhythmic sounds. Hold the switch down to morph the sound with wah-wah and pitch bend effects.",
+    "sound_bank": "Sound bank:",
+    "bank_electro": "🎧 Electro Beat",
+    "bank_zen": "🌸 Zen & Meditation",
+    "bank_arcade": "👾 8-Bit Arcade",
+    "echo": "Echo",
+    "beat_looper": "🥁 Beat Looper",
+    "quantize_4_4": "🔒 4/4 Beat Guard",
+    "switch_btn_idle": "🔘 SINGLE SWITCH (Hold to morph sound / Space / Enter)",
+    "morphing_active": "🔥 Sound Morphing: Pitch +%{pitch} semitones | Wah %{wah}%",
+    "bpm": "BPM:",
+    "wah_filter": "Wah / Filter:",
+    "pitch": "Pitch:"
   }
   ,"intents": {
     "noise": "uh,um,er,ah,hmm,pfft,noise",

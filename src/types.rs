@@ -511,6 +511,15 @@ pub struct CachedWindowAnalysis {
 }
 
 #[derive(Debug, Clone)]
+pub struct ActiveDownloadState {
+    pub label: String,
+    pub percent: f32,
+    pub downloaded_mb: f32,
+    pub total_mb: f32,
+    pub speed_mb_s: f32,
+}
+
+#[derive(Debug, Clone)]
 pub enum AgentEvent {
     StatusChanged(AgentStatus),
     NarrationStart,
@@ -534,6 +543,7 @@ pub enum AgentEvent {
     ToggleNumberedTargets(Option<bool>),
     ClickNumberedTarget(usize),
     DownloadProgress {
+        label: String,
         percent: f32,
         downloaded_mb: f32,
         total_mb: f32,

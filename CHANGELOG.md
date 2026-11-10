@@ -3,6 +3,37 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.8.0] - 2026-11-27
+
+### 🎵 Adapted Drum Machine & Musical Instrument (`instrument.rs`, `floating_window.rs`, `main.rs`, `types.rs`, `overlay.rs`, `local_llm.rs`)
+- **Pure Procedural Synthesis & Real-Time Audio Engine (`synth_*`, `ActiveVoice`, `play_samples`)**:
+  - 100% software procedural sound synthesis in real-time (zero external audio sample files required) driven by CPAL in stereo / multichannel with dynamic voice mixing (`ACTIVE_VOICES`).
+  - 3 built-in sound banks:
+    - `ElectroBeat`: Punchy kick with exponential pitch drop, snare combining resonance and white noise, open/closed hi-hat, clap with pre-echoes, analog sub-bass, harmonic synth leads, and cosmic laser FX.
+    - `ZenMeditation`: Pentatonic chimes and bells, Tibetan singing bowl with deep harmonic modulation, and celestial resonance.
+    - `RetroArcade`: 8-bit chiptune sounds (square wave leads, arpeggiated power-ups, impact noise, and victory fanfares).
+  - Spatialized echo / delay effect (`echo_enabled`) and resonance filtering.
+- **Motor Accessibility & Dedicated Single Switch Access (`InstrumentState`)**:
+  - Giant single-switch activation bar with sequential automatic scanning (`single_switch_mode`, `auto_scan`).
+  - Anti-tremor debounce filter and 4/4 rhythmic quantization (`quantize_4_4`): eliminates accidental double triggers and bounce effects caused by tremors or spasticity.
+  - Automatic rhythmic backing track (`auto_beat`) locked to user-defined tempo (60 to 160 BPM).
+  - Expressive sustained hold (> 1.2 s) triggering continuous Wah-Wah filter sweeps (`wah_cutoff`) and dynamic Pitch Bend (`pitch_bend`).
+  - Synchronized eighth-note rhythm repeat when a key or switch remains held down.
+- **Multimodal Ergonomics & Floating Viewport (`FloatingContentType::Instrument`)**:
+  - 8 oversized ergonomic pads with dynamic impact halos (`pad_glow`), supporting touchscreens, mouse, Dwell pointer (`apply_dwell_to_response`), and keyboard bindings auto-adapting to keyboard layouts (AZERTY `[1..8]` / `[A..I]`, QWERTY `[1..8]` / `[Q..I]`).
+  - Direct *"🎵 Rhythm"* action button in the bottom overlay action bar and quick-launch shortcut in the Accessibility settings tab.
+  - Deterministic voice trigger and LLM intent routing (*"drum machine"*, *"music box"*, *"instrument"*, *"music mode"*, *"play music"*).
+
+### 📥 Background Download & Initialization Progress Panel (`overlay.rs`, `types.rs`, `main.rs`, `audio.rs`, `local_llm.rs`)
+- **Dynamic Download Progress Card (`draw_active_download_box`, `ActiveDownloadState`)**:
+  - Integrated visual status card anchored at the top of the Assistance tab whenever large models or assets are downloaded in the background (Whisper GGML models, local GGUF LLMs).
+  - Real-time transfer metrics: live throughput in MB/s (`speed_mb_s`), downloaded vs. total size (`downloaded_mb` / `total_mb`), and animated progress bar (`egui::ProgressBar`).
+  - Automated completion notification in chat history paired with confirmation auditory earcon (`Earcon::Success`).
+- **Asynchronous Event Streaming (`AgentEvent::DownloadProgress`)**:
+  - Full decoupling between network download loops and background worker threads, preventing any `egui` UI thread stutters or freezes during first-launch asset provisioning.
+
+---
+
 ## [0.7.4] - 2026-11-20
 
 ### 🧬 Voice Cloning Engine & "Click & Record" Trainer (`tts.rs`, `app_settings.rs`, `main.rs`, `audio_player.rs`)

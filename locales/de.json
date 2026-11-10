@@ -280,6 +280,29 @@
     "devices_pointing_label": "Erkannte Zeigegeräte:",
     "devices_pointing_none": "Keine zusätzlichen Zeigegeräte erkannt",
     "devices_saved": "Geräteeinstellungen gespeichert"
+  },
+  "instrument": {
+    "title": "🎵 Rhythmusbox & Adaptiertes Instrument",
+    "card_summary": "Rhythmusbox & Adaptiertes Musikinstrument",
+    "btn_rhythm": "Rhythmus",
+    "btn_rhythm_tooltip": "Rhythmusbox & adaptiertes Klanginstrument (Einzeltaster / Mehrfachtasten)",
+    "open_btn": "🎵 Rhythmusbox & Adaptiertes Instrument öffnen",
+    "open_btn_tooltip": "Öffnet das an Einzeltaster angepasste Musik-Minispiel.",
+    "opened_speech": "Rhythmusbox und adaptiertes Instrument geöffnet. Nutzen Sie Ihren Taster oder Tasten zum Spielen!",
+    "close_suggestion": "Instrument schließen",
+    "speech_description": "Rhythmusbox und Musikinstrument für Einzeltaster. Drücken Sie Ihren Taster, die Leertaste oder Eingabetaste für rhythmische Klänge. Halten Sie den Taster gedrückt, um den Klang mit Wah-Wah und Pitch-Bend zu verformen.",
+    "sound_bank": "Klangbank:",
+    "bank_electro": "🎧 Elektro-Beat",
+    "bank_zen": "🌸 Zen & Meditation",
+    "bank_arcade": "👾 8-Bit-Arcade",
+    "echo": "Echo",
+    "beat_looper": "🥁 Beat Looper",
+    "quantize_4_4": "🔒 4/4-Taktsperre",
+    "switch_btn_idle": "🔘 EINZELTASTER (Gedrückt halten zur Klangverformung / Leertaste / Eingabe)",
+    "morphing_active": "🔥 Klangverformung: Pitch +%{pitch} Halbtöne | Wah %{wah}%",
+    "bpm": "BPM:",
+    "wah_filter": "Wah / Filter:",
+    "pitch": "Pitch:"
   }
   ,"intents": {
     "noise": "äh,ähm,öh,geräusch",

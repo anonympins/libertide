@@ -682,8 +682,8 @@ impl OverlayApp {
 
                                             ui.add_space(6.0);
                                             let active_installed = local_llm::is_preset_downloaded(active_preset);
-                                            if let Some((percent, downloaded_mb, total_mb, speed_mb_s)) = self.local_download_progress {
-                                                ui.add(egui::ProgressBar::new(percent / 100.0).text(format!("{percent:.1} % ({downloaded_mb:.1} / {total_mb:.1} Mo - {speed_mb_s:.1} Mo/s)")).animate(true));
+                                            if let Some(ref dl) = self.active_download {
+                                                ui.add(egui::ProgressBar::new(dl.percent / 100.0).text(format!("{} - {:.1} % ({:.1} / {:.1} Mo - {:.1} Mo/s)", dl.label, dl.percent, dl.downloaded_mb, dl.total_mb, dl.speed_mb_s)).animate(true));
                                             } else if !active_installed {
                                                 let event_tx_clone = self.event_sender.clone();
                                                 let p = *active_preset;
@@ -922,6 +922,14 @@ impl OverlayApp {
                                                         self.select_exclusive_disability_preset(preset, ctx);
                                                         play_earcon(Earcon::Success);
                                                     }
+                                            ui.add_space(4.0);
+                                            let open_inst_btn = ui.small_button("🎵 Ouvrir la Boîte à Rythme & Instrument adapté")
+                                                .on_hover_text("Ouvre le mini-jeu musical adapté au contacteur unique.");
+                                            if make_widget_accessible_and_activated(ui, &open_inst_btn, theme.accent) {
+                                                self.open_instrument_card();
+                                                self.show_api_key_modal = false;
+                                                play_earcon(Earcon::Success);
+                                            }
                                                 });
                                             });
                                             ui.add_space(2.0);
@@ -933,6 +941,14 @@ impl OverlayApp {
                                             if make_widget_accessible_and_activated(ui, &reset_all_btn, theme.accent) {
                                                 self.active_disability_presets.clear();
                                                 self.apply_active_disability_presets(ctx);
+                                                play_earcon(Earcon::Success);
+                                            }
+                                            ui.add_space(4.0);
+                                            let open_inst_btn = ui.small_button(t!("instrument.open_btn"))
+                                                .on_hover_text(t!("instrument.open_btn_tooltip"));
+                                            if make_widget_accessible_and_activated(ui, &open_inst_btn, theme.accent) {
+                                                self.open_instrument_card();
+                                                self.show_api_key_modal = false;
                                                 play_earcon(Earcon::Success);
                                             }
                                         });

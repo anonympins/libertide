@@ -277,6 +277,29 @@
     "devices_pointing_label": "检测到的指针设备：",
     "devices_pointing_none": "未检测到其他指针设备",
     "devices_saved": "设备设置已保存"
+  },
+  "instrument": {
+    "title": "🎵 节奏鼓机与无障碍乐器",
+    "card_summary": "节奏鼓机与无障碍声音乐器",
+    "btn_rhythm": "节奏",
+    "btn_rhythm_tooltip": "节奏鼓机与无障碍声音乐器（单开关控制 / 多键位）",
+    "open_btn": "🎵 打开节奏鼓机与无障碍乐器",
+    "open_btn_tooltip": "打开专为单开关控制优化的音乐小游戏。",
+    "opened_speech": "节奏鼓机与无障碍乐器已打开。请使用开关或按键进行演奏！",
+    "close_suggestion": "关闭乐器",
+    "speech_description": "专为单开关优化的节奏鼓机与无障碍乐器。您可以轻按开关、空格键或回车键触发律动节奏音效。长按开关可通过哇音（Wah-Wah）和滑音（Pitch Bend）实时改变音色。",
+    "sound_bank": "声音音色库：",
+    "bank_electro": "🎧 电子律动",
+    "bank_zen": "🌸 禅意冥想",
+    "bank_arcade": "👾 8位街机",
+    "echo": "回声",
+    "beat_looper": "🥁 循环鼓点",
+    "quantize_4_4": "🔒 4/4节拍守卫",
+    "switch_btn_idle": "🔘 单开关控制（长按以调制音效 / 空格 / 回车）",
+    "morphing_active": "🔥 声音调制中: 音高 +%{pitch} 半音 | 哇音 %{wah}%",
+    "bpm": "BPM：",
+    "wah_filter": "哇音 / 滤波：",
+    "pitch": "音调："
   }
   ,"intents": {
     "noise": "嗯,啊,呃,噪音",

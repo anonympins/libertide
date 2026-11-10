@@ -29,6 +29,7 @@ mod ocr;
 mod devices;
 mod local_llm;
 mod agent_backend;
+mod instrument;
 pub use agent_backend::*;
 pub use locale::*;
 
@@ -160,7 +161,7 @@ pub struct OverlayApp {
     selected_provider_modal: LlmProvider,
     api_key_error: Option<String>,
 
-    local_download_progress: Option<(f32, f32, f32, f32)>,
+    active_download: Option<ActiveDownloadState>,
 
     // Suggestions d'applications en direct (PATH & Levenshtein)
     input_suggestions: Vec<String>,
@@ -455,7 +456,7 @@ impl OverlayApp {
             selected_provider_modal: llm_config.provider,
             show_api_key_plain: false,
             api_key_error: None,
-            local_download_progress: None,
+            active_download: None,
             input_suggestions: Vec::new(),
             last_suggestion_query: String::new(),
             macros,
@@ -476,6 +477,22 @@ impl OverlayApp {
         app.sync_modal_inputs_for_provider(llm_config.provider);
         update_open_floating_cards(&app.floating_cards);
         app
+    }
+
+    pub fn open_instrument_card(&mut self) {
+        let title = t!("instrument.title").to_string();
+        let card = FloatingCard::new("instrument_toy", title, FloatingContentType::Instrument);
+        if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == "instrument_toy") {
+            existing.open = true;
+        } else {
+            self.floating_cards.push(card);
+        }
+        update_open_floating_cards(&self.floating_cards);
+        play_earcon(Earcon::Success);
+    }
+
+    pub fn is_instrument_open(&self) -> bool {
+        self.floating_cards.iter().any(|c| c.id == "instrument_toy" && c.open)
     }
 
     fn draw_avatar(&self, ui: &mut egui::Ui, center: egui::Pos2, base_radius: f32, time: f64) {
@@ -954,7 +971,8 @@ impl eframe::App for OverlayApp {
         #[cfg(windows)]
         {
             // Gestion ergonomique des boutons auxiliaires trackball (VK_XBUTTON1, VK_XBUTTON2, VK_MBUTTON)
-            if self.last_trackball_input.elapsed() >= Duration::from_millis(250) {
+            if self.last_trackball_input.elapsed() >= Duration::from_millis(250)
+                && self.last_switch_input.elapsed() >= Duration::from_millis(250) {
                 let xbutton1 = unsafe { (GetAsyncKeyState(0x05) as u16 & 0x8000) != 0 }; // Trackball Bouton 4
                 let xbutton2 = unsafe { (GetAsyncKeyState(0x06) as u16 & 0x8000) != 0 }; // Trackball Bouton 5
                 let mbutton  = unsafe { (GetAsyncKeyState(0x04) as u16 & 0x8000) != 0 }; // Molette / Clic central
@@ -1023,11 +1041,26 @@ impl eframe::App for OverlayApp {
         // Dépouillement des événements asynchrones
         while let Ok(event) = self.event_receiver.try_recv() {
             match event {
-                AgentEvent::DownloadProgress { percent, downloaded_mb, total_mb, speed_mb_s } => {
+                AgentEvent::DownloadProgress { label, percent, downloaded_mb, total_mb, speed_mb_s } => {
                     if percent >= 100.0 {
-                        self.local_download_progress = None;
+                        if let Some(prev) = self.active_download.take() {
+                            self.chat_history.push(ChatEntry {
+                                role: ChatRole::Agent,
+                                text: format!("✅ Téléchargement terminé : **{}** ({:.1} Mo). Prêt à l'emploi.", prev.label, prev.total_mb),
+                                timestamp: current_time_str(),
+                                quick_suggestions: Vec::new(),
+                                screen_size_kb: None,
+                            });
+                            play_earcon(Earcon::Success);
+                        }
                     } else {
-                        self.local_download_progress = Some((percent, downloaded_mb, total_mb, speed_mb_s));
+                        self.active_download = Some(ActiveDownloadState {
+                            label,
+                            percent,
+                            downloaded_mb,
+                            total_mb,
+                            speed_mb_s,
+                        });
                     }
                     ctx.request_repaint();
                 }
@@ -1371,6 +1404,31 @@ impl eframe::App for OverlayApp {
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx, false);
                         }
+                        return;
+                    }
+
+                    if norm_prompt.contains("boite a rythme")
+                        || norm_prompt.contains("boîte à rythme")
+                        || norm_prompt.contains("instrument")
+                        || norm_prompt.contains("mode musique")
+                        || norm_prompt.contains("musique adaptee")
+                        || norm_prompt.contains("musique adaptée")
+                        || norm_prompt.contains("lance la musique")
+                        || norm_prompt.contains("ouvre la musique")
+                        || norm_prompt.contains("mini jeu")
+                        || norm_prompt.contains("minijeu")
+                        || norm_prompt.contains("joue de la musique")
+                    {
+                        self.open_instrument_card();
+                        let msg = t!("instrument.opened_speech").to_string();
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: msg.clone(),
+                            timestamp: current_time_str(),
+                            quick_suggestions: vec![QuickSuggestionItem::Text(t!("instrument.close_suggestion").to_string())],
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(msg));
                         return;
                     }
 
@@ -2009,6 +2067,7 @@ impl eframe::App for OverlayApp {
             && self.last_switch_input.elapsed() >= Duration::from_millis(200)
         {
             self.last_switch_input = Instant::now();
+            self.last_trackball_input = Instant::now();
             if self.dictation_mode {
                 self.exit_dictation_mode();
             } else {
@@ -2020,6 +2079,7 @@ impl eframe::App for OverlayApp {
             && self.last_switch_input.elapsed() >= Duration::from_millis(200)
         {
             self.last_switch_input = Instant::now();
+            self.last_trackball_input = Instant::now();
             self.toggle_switch_access_mode(None);
             ctx.request_repaint();
         }
@@ -2027,6 +2087,7 @@ impl eframe::App for OverlayApp {
             && self.last_switch_input.elapsed() >= Duration::from_millis(200)
         {
             self.last_switch_input = Instant::now();
+            self.last_trackball_input = Instant::now();
             self.set_voice_gender(self.voice_gender.next());
             ctx.request_repaint();
         }
@@ -2034,6 +2095,7 @@ impl eframe::App for OverlayApp {
             && self.last_switch_input.elapsed() >= Duration::from_millis(200)
         {
             self.last_switch_input = Instant::now();
+            self.last_trackball_input = Instant::now();
             let _ = self.command_sender.send(AgentCommand::ClearHistory);
             self.chat_history.clear();
             self.window_analysis_cache.clear();
@@ -2050,7 +2112,7 @@ impl eframe::App for OverlayApp {
         }
 
         #[cfg(windows)]
-        let global_escape_hit = unsafe { (GetAsyncKeyState(0x1B) as u16 & 0x8000) != 0 };
+        let global_escape_hit = false; // Géré de façon prioritaire et compatible avec les remappages par hook_escape_hit
         #[cfg(not(windows))]
         let global_escape_hit = false;
         let hook_escape_hit = hook_events.contains(&SwitchKeyEvent::Escape)
@@ -2348,10 +2410,18 @@ impl eframe::App for OverlayApp {
             let hook_nav_next = hook_events.contains(&SwitchKeyEvent::Next);
             let hook_nav_prev = hook_events.contains(&SwitchKeyEvent::Prev);
 
+            // Temporisation du balayage automatique pour contacteur unique (Auto-Scan ~1.8s)
+            let auto_scan_interval = Duration::from_millis(1800);
+            let auto_scan_tick = !self.hover_physical_mouse_moved
+                && !self.dictation_mode
+                && self.status != AgentStatus::Speaking
+                && self.last_switch_input.elapsed() >= Duration::from_millis(600)
+                && self.switch_last_tick.elapsed() >= auto_scan_interval;
+
             let mut switch_input_hit = (egui_enter || egui_space || hook_enter_or_space)
                 && self.last_switch_input.elapsed() >= Duration::from_millis(180);
 
-            let nav_next_hit = (egui_nav_next || hook_nav_next)
+            let nav_next_hit = (egui_nav_next || hook_nav_next || auto_scan_tick)
                 && self.last_switch_input.elapsed() >= Duration::from_millis(150);
             let nav_prev_hit = (egui_nav_prev || hook_nav_prev)
                 && self.last_switch_input.elapsed() >= Duration::from_millis(150);
@@ -4000,9 +4070,9 @@ impl eframe::App for OverlayApp {
 
                                     ui.add_space(3.0);
 
-                                    // 2e rangée : 6 boutons d'action ergonomiques (WCAG 2.2 AAA, Clic & Dwell 800 ms)
+                                    // 2e rangée : 7 boutons d'action ergonomiques (WCAG 2.2 AAA, Clic & Dwell 800 ms)
                                     ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        ui.spacing_mut().item_spacing.x = 4.0;
 
                                         // 1. Bouton Analyser (WCAG AAA 50x50)
                                         let analyze_id = ui.make_persistent_id("dwell_btn_analyze");
@@ -4247,7 +4317,6 @@ impl eframe::App for OverlayApp {
                                             self.toggle_recording(ui.ctx());
                                         }
 
-                                        // 3. Bouton Dictée
                                         let dict_id = ui.make_persistent_id("dwell_btn_dict");
                                         let dict_prog = self.dwell_state.get_progress(dict_id);
                                         let dict_sub = if self.dictation_mode { t!("ui.btn_dictation_active").to_string() } else { t!("ui.btn_dictation").to_string() };
@@ -4274,6 +4343,38 @@ impl eframe::App for OverlayApp {
                                                 self.exit_dictation_mode();
                                             } else {
                                                 self.enter_dictation_mode();
+                                            }
+                                        }
+
+                                        // 4. Bouton Musique / Rythme (Boîte à rythme & Instrument adapté) - disponible pour tous
+                                        let rhythm_id = ui.make_persistent_id("dwell_btn_rhythm");
+                                        let rhythm_prog = self.dwell_state.get_progress(rhythm_id);
+                                        let is_open = self.is_instrument_open();
+                                        let rhythm_resp = render_accessible_icon_button(
+                                            ui,
+                                            "🎵",
+                                            &t!("instrument.btn_rhythm"),
+                                            &t!("instrument.btn_rhythm_tooltip"),
+                                            is_open,
+                                            rhythm_prog,
+                                            Some(egui::Color32::from_rgb(180, 70, 240)),
+                                            Some(egui::Color32::from_rgb(205, 95, 255)),
+                                        );
+                                        let (rhythm_dwell, _) = self.dwell_state.update(rhythm_id, rhythm_resp.hovered());
+                                        let is_rhythm_key = rhythm_resp.has_focus() && ui.input(|i| {
+                                            i.events.iter().any(|ev| match ev {
+                                                egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                                egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                                _ => false,
+                                            })
+                                        });
+                                        if rhythm_resp.clicked() || rhythm_dwell || is_rhythm_key {
+                                            if is_open {
+                                                self.floating_cards.retain(|c| c.id != "instrument_toy");
+                                                crate::floating_window::update_open_floating_cards(&self.floating_cards);
+                                                play_earcon(Earcon::MicClose);
+                                            } else {
+                                                self.open_instrument_card();
                                             }
                                         }
 
@@ -4391,6 +4492,12 @@ impl eframe::App for OverlayApp {
                     ui.set_clip_rect(messages_rect);
                     match self.active_tab {
                         ActiveTab::Assistance => {
+                            // Encadré accessible des téléchargements en cours (Whisper, LLM local, Voix)
+                            if let Some(ref dl) = self.active_download {
+                                draw_active_download_box(ui, &theme, &dl.label, dl.percent, dl.downloaded_mb, dl.total_mb, dl.speed_mb_s);
+                                ui.add_space(3.0);
+                            }
+
                             // Encadré accessible des rappels & minuteurs en cours
                             if let Some(reminder_feedback) = draw_active_reminders_box(ui, &theme, &mut self.dwell_state) {
                                 self.chat_history.push(ChatEntry {
@@ -5252,7 +5359,7 @@ fn run_overlay_gui(
         .with_transparent(true)
         .with_always_on_top()
         .with_resizable(true)
-        .with_min_inner_size([380.0, 264.0])
+        .with_min_inner_size([400.0, 264.0])
         .with_inner_size([560.0, 280.0]);
 
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../public/favicon-256x256.png")) {

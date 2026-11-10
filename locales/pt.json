@@ -277,6 +277,29 @@
     "devices_pointing_label": "Dispositivos de apontamento detectados:",
     "devices_pointing_none": "Nenhum dispositivo de apontamento adicional detectado",
     "devices_saved": "Configurações de dispositivos salvas"
+  },
+  "instrument": {
+    "title": "🎵 Caixa de Ritmos e Instrumento Adaptado",
+    "card_summary": "Caixa de ritmos e instrumento musical adaptado",
+    "btn_rhythm": "Ritmo",
+    "btn_rhythm_tooltip": "Caixa de ritmos e instrumento sonoro adaptado (Comutador único / Múltiplas teclas)",
+    "open_btn": "🎵 Abrir Caixa de Ritmos e Instrumento adaptado",
+    "open_btn_tooltip": "Abre o minijogo musical adaptado para comutador único.",
+    "opened_speech": "Caixa de ritmos e instrumento adaptado abertos. Use seu comutador ou teclas para tocar!",
+    "close_suggestion": "Fechar o instrumento",
+    "speech_description": "Caixa de ritmos e instrumento musical adaptado para comutador único. Pressione seu comutador, Espaço ou Enter para disparar sons rítmicos. Mantenha pressionado para modular o som com wah-wah e pitch bend.",
+    "sound_bank": "Banco de som:",
+    "bank_electro": "🎧 Ritmo Electro",
+    "bank_zen": "🌸 Zen e Meditação",
+    "bank_arcade": "👾 Arcade 8-Bit",
+    "echo": "Eco",
+    "beat_looper": "🥁 Beat Looper",
+    "quantize_4_4": "🔒 Trava 4/4",
+    "switch_btn_idle": "🔘 COMUTADOR ÚNICO (Segurar para modular o som / Espaço / Enter)",
+    "morphing_active": "🔥 Deformação ativa: Tom +%{pitch} semitons | Wah %{wah}%",
+    "bpm": "BPM:",
+    "wah_filter": "Wah / Filtro:",
+    "pitch": "Tom:"
   }
   ,"intents": {
     "noise": "éh,hum,ah,oh,ruido,barulho",

@@ -506,16 +506,60 @@ fn ensure_model_downloaded(event_tx: &Sender<AgentEvent>) -> Result<PathBuf, Str
     println!("[Whisper] Téléchargement de ggml-base.bin depuis Hugging Face...");
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| format!("Runtime tokio: {e}"))?;
-    let client = reqwest::Client::new();
-    let resp = rt.block_on(async {
-        client.get(url).send().await?.bytes().await
-    }).map_err(|e| format!("Échec téléchargement modèle GGML: {e}"))?;
+    let event_tx_clone = event_tx.clone();
+    let temp_path_clone = temp_path.clone();
 
-    if resp.len() < 50_000_000 {
-        return Err("Fichier modèle téléchargé incomplet".to_string());
-    }
+    rt.block_on(async {
+        use tokio::io::AsyncWriteExt;
+        let client = reqwest::Client::new();
+        let mut res = client.get(url).send().await.map_err(|e| e.to_string())?;
+        if !res.status().is_success() {
+            return Err(format!("Erreur HTTP: {}", res.status()));
+        }
+        let total_bytes = res.content_length().unwrap_or(0);
+        let mut file = tokio::fs::File::create(&temp_path_clone).await.map_err(|e| e.to_string())?;
+        let mut downloaded: u64 = 0;
+        let start_time = Instant::now();
+        let mut last_update = Instant::now();
 
-    std::fs::write(&temp_path, &resp).map_err(|e| format!("Échec écriture modèle GGML: {e}"))?;
+        while let Some(chunk) = res.chunk().await.map_err(|e| e.to_string())? {
+            file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+            downloaded += chunk.len() as u64;
+
+            if last_update.elapsed() >= Duration::from_millis(100) || downloaded == total_bytes {
+                last_update = Instant::now();
+                let total_mb = total_bytes as f32 / (1024.0 * 1024.0);
+                let downloaded_mb = downloaded as f32 / (1024.0 * 1024.0);
+                let elapsed = start_time.elapsed().as_secs_f32().max(0.001);
+                let speed_mb_s = downloaded_mb / elapsed;
+                let percent = if total_bytes > 0 {
+                    (downloaded as f32 / total_bytes as f32) * 100.0
+                } else {
+                    0.0
+                };
+
+                let _ = event_tx_clone.send(AgentEvent::DownloadProgress {
+                    label: "Modèle Whisper (ggml-base.bin)".to_string(),
+                    percent,
+                    downloaded_mb,
+                    total_mb,
+                    speed_mb_s,
+                });
+            }
+        }
+        file.flush().await.map_err(|e| e.to_string())?;
+        let total_mb = total_bytes as f32 / (1024.0 * 1024.0);
+        let downloaded_mb = downloaded as f32 / (1024.0 * 1024.0);
+        let _ = event_tx_clone.send(AgentEvent::DownloadProgress {
+            label: "Modèle Whisper (ggml-base.bin)".to_string(),
+            percent: 100.0,
+            downloaded_mb,
+            total_mb,
+            speed_mb_s: 0.0,
+        });
+        Ok::<(), String>(())
+    })?;
+
     std::fs::rename(&temp_path, &model_path).map_err(|e| format!("Échec renommage modèle GGML: {e}"))?;
     Ok(model_path)
 }

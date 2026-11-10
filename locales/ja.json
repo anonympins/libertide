@@ -277,6 +277,29 @@
     "devices_pointing_label": "検出されたポインティングデバイス:",
     "devices_pointing_none": "追加のポインティングデバイスは検出されませんでした",
     "devices_saved": "デバイス設定を保存しました"
+  },
+  "instrument": {
+    "title": "🎵 リズムマシン＆支援楽器",
+    "card_summary": "リズムマシン＆スイッチ対応楽器",
+    "btn_rhythm": "リズム",
+    "btn_rhythm_tooltip": "リズムマシン＆支援サウンド楽器（ワンボタンスイッチ／キーボード対応）",
+    "open_btn": "🎵 リズムマシン＆支援楽器を開く",
+    "open_btn_tooltip": "ワンボタンスイッチ対応の音楽ミニゲームを開きます。",
+    "opened_speech": "リズムマシンと支援楽器を開きました。スイッチまたはキーを押して演奏しましょう！",
+    "close_suggestion": "楽器を閉じる",
+    "speech_description": "ワンボタンスイッチ対応のリズムマシン・支援楽器です。スイッチ、スペースキー、Enterキーを押してリズミカルな音を鳴らせます。長押しするとワウワウ効果やピッチベンドで音を変調できます。",
+    "sound_bank": "サウンドバンク:",
+    "bank_electro": "🎧 エレクトロ・ビート",
+    "bank_zen": "🌸 禅＆瞑想",
+    "bank_arcade": "👾 8ビット・アーケード",
+    "echo": "エコー",
+    "beat_looper": "🥁 ビートルーパー",
+    "quantize_4_4": "🔒 4/4拍子ガード",
+    "switch_btn_idle": "🔘 ワンボタンスイッチ（長押しで音を変調 / スペース / Enter）",
+    "morphing_active": "🔥 音響変調中: ピッチ +%{pitch} 半音 | ワウ %{wah}%",
+    "bpm": "BPM:",
+    "wah_filter": "ワウ / フィルター:",
+    "pitch": "ピッチ:"
   }
   ,"intents": {
     "noise": "えーと,あの,うーん,雑音",

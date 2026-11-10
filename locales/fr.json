@@ -280,6 +280,29 @@
     "devices_pointing_label": "Dispositifs de pointage détectés :",
     "devices_pointing_none": "Aucun dispositif de pointage additionnel détecté",
     "devices_saved": "Configuration des périphériques enregistrée"
+  },
+  "instrument": {
+    "title": "🎵 Boîte à Rythme & Instrument Adapté",
+    "card_summary": "Boîte à rythme & Instrument musical adapté",
+    "btn_rhythm": "Rythme",
+    "btn_rhythm_tooltip": "Boîte à rythme & Instrument sonore adapté (Contacteur unique / Multi-touches)",
+    "open_btn": "🎵 Ouvrir la Boîte à Rythme & Instrument adapté",
+    "open_btn_tooltip": "Ouvre le mini-jeu musical adapté au contacteur unique.",
+    "opened_speech": "Boîte à rythme et instrument adapté ouverts. Utilisez votre contacteur ou vos touches pour jouer !",
+    "close_suggestion": "Fermer l'instrument",
+    "speech_description": "Boîte à rythme et instrument musical adapté pour contacteur unique. Vous pouvez appuyer sur votre contacteur, la touche Espace ou Entrée pour déclencher des sons rythmés. Maintenez le contacteur enfoncé pour déformer le son avec un effet wah-wah et pitch bend.",
+    "sound_bank": "Banque sonore :",
+    "bank_electro": "🎧 Électro Beat",
+    "bank_zen": "🌸 Zen & Soin",
+    "bank_arcade": "👾 8-Bit Arcade",
+    "echo": "Écho",
+    "beat_looper": "🥁 Beat Looper",
+    "quantize_4_4": "🔒 Garde-fou 4/4",
+    "switch_btn_idle": "🔘 CONTACTEUR UNIQUE (Maintenir pour déformer le son / Espace / Entrée)",
+    "morphing_active": "🔥 Déformation active : Pitch +%{pitch} demi-tons | Wah %{wah}%",
+    "bpm": "BPM :",
+    "wah_filter": "Wah / Filtre :",
+    "pitch": "Pitch :"
   }
   ,"intents": {
     "noise": "euh,hum,bah,ah,oh,hein,pff,tss,bruit",
