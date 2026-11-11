@@ -54,10 +54,8 @@ jobs:
             vulkan-tools \
             glslang-tools \
             glslang-dev \
-            shaderc \
             libshaderc-dev \
             spirv-tools \
-            libspirv-tools-dev \
             spirv-headers
           echo "VULKAN_SDK=/usr" >> $GITHUB_ENV
           echo "VULKAN_SDK found at /usr"
