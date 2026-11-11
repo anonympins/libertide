@@ -51,13 +51,14 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends \
             libvulkan-dev \
+            glslc \
             vulkan-tools \
             glslang-tools \
             glslang-dev \
-            libshaderc-dev \
             spirv-tools \
             spirv-headers
           echo "VULKAN_SDK=/usr" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=/usr:${CMAKE_PREFIX_PATH:-}" >> $GITHUB_ENV
           echo "VULKAN_SDK found at /usr"
 
       - name: Install Rust stable
