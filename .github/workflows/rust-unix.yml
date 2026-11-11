@@ -47,13 +47,18 @@ jobs:
             speech-dispatcher \
             espeak-ng
 
-      - name: Install Vulkan SDK via LunarG APT repository
+      - name: Install Vulkan development packages
         run: |
-          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
-          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-$(lsb_release -cs).list http://packages.lunarg.com/vulkan/lunarg-vulkan-$(lsb_release -cs).list
-          sudo apt-get update
-          sudo apt-get install -y vulkan-sdk
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan-dev \
+            glslc \
+            vulkan-tools \
+            glslang-tools \
+            glslang-dev \
+            spirv-tools \
+            spirv-headers
           echo "VULKAN_SDK=/usr" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=/usr:${CMAKE_PREFIX_PATH:-}" >> $GITHUB_ENV
           echo "VULKAN_SDK found at /usr"
 
       - name: Install Rust stable
@@ -97,6 +102,9 @@ jobs:
               ln -sf "$(basename "$ORT_TARGET")" "$SHERPA_LIB_DIR/libonnxruntime.so"
             fi
           fi
+
+          # Clean any stale/corrupted build artifacts for llama-cpp-sys-2 from previous cached runs
+          cargo clean -p llama-cpp-sys-2 || true
 
           echo "LIBRARY_PATH=$SHERPA_LIB_DIR:${LIBRARY_PATH:-}" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=$SHERPA_LIB_DIR:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
