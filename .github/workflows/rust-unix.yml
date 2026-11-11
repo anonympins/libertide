@@ -47,12 +47,13 @@ jobs:
             speech-dispatcher \
             espeak-ng
 
-      - name: Install Vulkan SDK via LunarG APT repository
+      - name: Install Vulkan development packages
         run: |
-          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
-          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-$(lsb_release -cs).list http://packages.lunarg.com/vulkan/lunarg-vulkan-$(lsb_release -cs).list
-          sudo apt-get update
-          sudo apt-get install -y vulkan-sdk
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan-dev \
+            vulkan-tools \
+            glslang-tools \
+            spirv-tools
           echo "VULKAN_SDK=/usr" >> $GITHUB_ENV
           echo "VULKAN_SDK found at /usr"
 
