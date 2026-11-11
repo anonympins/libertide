@@ -51,9 +51,12 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends \
             libvulkan-dev \
+            vulkan-headers \
             vulkan-tools \
             glslang-tools \
-            spirv-tools
+            glslang-dev \
+            spirv-tools \
+            spirv-headers
           echo "VULKAN_SDK=/usr" >> $GITHUB_ENV
           echo "VULKAN_SDK found at /usr"
 
