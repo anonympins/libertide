@@ -18,6 +18,10 @@
   <img src="public/screenshot-3.png" alt="Dynamic forms (flight search...)" width="240">
 </p>
 
+**VIDEO :**
+
+[![Video](https://i.ibb.co/KzDQ9TCV/video-capture-t0000-00seg-4404.png)](https://youtu.be/Ozan2FyBZRI)
+
 ---
 
 ## 💡 Why Libertide? (The Autonomy Challenge)
