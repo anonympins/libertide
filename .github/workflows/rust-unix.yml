@@ -54,7 +54,10 @@ jobs:
             vulkan-tools \
             glslang-tools \
             glslang-dev \
+            shaderc \
+            libshaderc-dev \
             spirv-tools \
+            libspirv-tools-dev \
             spirv-headers
           echo "VULKAN_SDK=/usr" >> $GITHUB_ENV
           echo "VULKAN_SDK found at /usr"
@@ -100,6 +103,9 @@ jobs:
               ln -sf "$(basename "$ORT_TARGET")" "$SHERPA_LIB_DIR/libonnxruntime.so"
             fi
           fi
+
+          # Clean any stale/corrupted build artifacts for llama-cpp-sys-2 from previous cached runs
+          cargo clean -p llama-cpp-sys-2 || true
 
           echo "LIBRARY_PATH=$SHERPA_LIB_DIR:${LIBRARY_PATH:-}" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=$SHERPA_LIB_DIR:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
