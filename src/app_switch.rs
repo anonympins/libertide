@@ -53,12 +53,27 @@ impl OverlayApp {
             other => other.to_string(),
         };
 
-        let target_desc = if target.name.trim().is_empty() {
+        let effective_name = if target.role == "fenêtre" && !is_human_friendly_window_title(&target.name) {
+            #[cfg(windows)]
+            {
+                let wid = target.window_id.unwrap_or(0);
+                let (_pid, exe_name) = get_window_process_info(windows::Win32::Foundation::HWND(wid as _));
+                resolve_human_friendly_window_title(&target.name, &exe_name)
+            }
+            #[cfg(not(windows))]
+            {
+                "Fenêtre".to_string()
+            }
+        } else {
+            target.name.trim().to_string()
+        };
+
+        let target_desc = if effective_name.is_empty() {
             t!("commands.target_desc_role", index = target.index, role = role_label).to_string()
         } else if target.value.trim().is_empty() {
-            t!("commands.target_desc_name_role", index = target.index, name = target.name.trim(), role = role_label).to_string()
+            t!("commands.target_desc_name_role", index = target.index, name = effective_name, role = role_label).to_string()
         } else {
-            t!("commands.target_desc_full", index = target.index, name = target.name.trim(), role = role_label, value = target.value.trim()).to_string()
+            t!("commands.target_desc_full", index = target.index, name = effective_name, role = role_label, value = target.value.trim()).to_string()
         };
 
         let speech = if let Some(p) = prefix {
@@ -492,10 +507,25 @@ impl OverlayApp {
         // En cas de changement réel de fenêtre, vider l'ancien affichage.
         // Si on reste sur la même fenêtre, on conserve le buffer courant pour éviter tout clignotement.
         if is_different_win {
-            self.numbered_targets.clear();
+            if self.switch_step == SwitchAccessStep::Windows && !self.switch_windows.is_empty() {
+                self.numbered_targets = self.switch_windows.iter().enumerate().map(|(i, w)| {
+                    NumberedElementTarget {
+                        index: i + 1,
+                        name: w.title.clone(),
+                        role: "fenêtre".to_string(),
+                        rect: w.rect,
+                        click_x: w.click_x,
+                        click_y: w.click_y,
+                        shortcut: String::new(),
+                        value: String::new(),
+                        window_id: Some(w.id),
+                    }
+                }).collect();
+            } else {
+                self.numbered_targets.clear();
+            }
             self.switch_zones.clear();
             self.switch_active_zone_index = None;
-            clear_screen_numbered_badges();
         }
 
         #[cfg(windows)]

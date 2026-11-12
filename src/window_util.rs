@@ -29,6 +29,101 @@ pub struct ZoneOverlayInfo {
     pub is_focused: bool,
 }
 
+/// Vérifie si un titre de fenêtre est compréhensible et naturel pour un être humain
+/// (rejette les titres vides, les purs chiffres/identifiants, les adresses hexadécimales et fenêtres internes).
+pub fn is_human_friendly_window_title(title: &str) -> bool {
+    let t = title.trim();
+    if t.is_empty() {
+        return false;
+    }
+    // Rejeter les chaînes ne contenant aucune lettre alphabétique (purs chiffres, symboles, séparateurs, IDs)
+    if !t.chars().any(|c| c.is_alphabetic()) {
+        return false;
+    }
+    let lower = t.to_lowercase();
+    if lower == "default ime"
+        || lower == "msctfime ui"
+        || lower == "cicerouiwndframe"
+        || lower == "program manager"
+        || lower == "n/a"
+        || lower == "null"
+        || lower == "undefined"
+        || lower == "applicationframewindow"
+    {
+        return false;
+    }
+    // Identifiants hexadécimaux ou HWND (ex: "0x12fa3", "hwnd(12345)", "window 0x...")
+    if lower.starts_with("0x") && lower[2..].chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    if lower.starts_with("hwnd(") || lower.starts_with("hwnd ") || lower.starts_with("window 0x") {
+        return false;
+    }
+    // Token hexadécimal pur d'au moins 6 caractères avec au moins un chiffre
+    if t.len() >= 6 && t.chars().all(|c| c.is_ascii_hexdigit()) && t.chars().any(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    true
+}
+
+/// Extrait le nom lisible de l'application à partir du nom d'exécutable (sans l'extension .exe et avec alias conviviaux).
+pub fn clean_process_name(exe_name: &str) -> String {
+    let name = Path::new(exe_name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(exe_name);
+    let stem = Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name)
+        .trim();
+    if stem.is_empty() || stem.eq_ignore_ascii_case("inconnu") || stem.eq_ignore_ascii_case("unknown") {
+        return String::new();
+    }
+    let friendly = match stem.to_lowercase().as_str() {
+        "msedge" => "Microsoft Edge",
+        "chrome" => "Google Chrome",
+        "firefox" => "Mozilla Firefox",
+        "code" => "Visual Studio Code",
+        "windowsterminal" => "Terminal Windows",
+        "explorer" => "Explorateur de fichiers",
+        "notepad" => "Bloc-notes",
+        "taskmgr" => "Gestionnaire des tâches",
+        "systemsettings" => "Paramètres",
+        _ => stem,
+    };
+    if friendly == stem {
+        let mut chars = stem.chars();
+        if let Some(first) = chars.next() {
+            if first.is_lowercase() {
+                first.to_uppercase().collect::<String>() + chars.as_str()
+            } else {
+                stem.to_string()
+            }
+        } else {
+            stem.to_string()
+        }
+    } else {
+        friendly.to_string()
+    }
+}
+
+/// Résout un titre de fenêtre humainement compréhensible : conserve le titre s'il est valide,
+/// sinon utilise le nom du processus sans son extension.
+pub fn resolve_human_friendly_window_title(title: &str, exe_name: &str) -> String {
+    let trimmed = title.trim();
+    if is_human_friendly_window_title(trimmed) {
+        trimmed.to_string()
+    } else {
+        let proc_name = clean_process_name(exe_name);
+        if !proc_name.is_empty() {
+            proc_name
+        } else {
+            "Fenêtre".to_string()
+        }
+    }
+}
+
 #[cfg(windows)]
 pub fn is_window_hung(hwnd: HWND) -> bool {
     extern "system" {
@@ -370,6 +465,31 @@ pub fn is_toast_notification_window(_hwnd: (), _class_name: &str, _title: &str) 
 }
 
 #[cfg(windows)]
+pub fn is_system_tray_or_desktop(hwnd: HWND) -> bool {
+    if hwnd.0.is_null() {
+        return false;
+    }
+    let mut class_buf = [0u16; 256];
+    let len = unsafe { GetClassNameW(hwnd, &mut class_buf) };
+    if len > 0 {
+        let class_name = String::from_utf16_lossy(&class_buf[..len as usize]).to_lowercase();
+        if class_name == "shell_traywnd"
+            || class_name == "shell_secondarytraywnd"
+            || class_name == "progman"
+            || class_name == "workerw"
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(not(windows))]
+pub fn is_system_tray_or_desktop(_hwnd: impl std::fmt::Display) -> bool {
+    false
+}
+
+#[cfg(windows)]
 unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let list = &mut *(lparam.0 as *mut Vec<(HWND, String)>);
     if IsWindowVisible(hwnd).as_bool() {
@@ -394,15 +514,25 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> B
             String::new()
         };
 
+        let (_pid, exe_name) = get_window_process_info(hwnd);
+
         if is_toast_notification_window(hwnd, &class_name, &title) {
-            let display_title = if title.trim().is_empty() {
-                "Notification Windows".to_string()
+            let display_title = if is_human_friendly_window_title(&title) {
+                title.trim().to_string()
             } else {
-                title
+                "Notification Windows".to_string()
             };
             list.push((hwnd, display_title));
-        } else if !title.trim().is_empty() {
-            list.push((hwnd, title));
+        } else {
+            let mut r = RECT::default();
+            let has_rect = GetWindowRect(hwnd, &mut r).is_ok();
+            let is_real_window = has_rect && (r.right - r.left) >= 100 && (r.bottom - r.top) >= 60;
+            if is_real_window && !is_window_cloaked(hwnd) {
+                let friendly_title = resolve_human_friendly_window_title(&title, &exe_name);
+                if !friendly_title.is_empty() && friendly_title != "Program Manager" {
+                    list.push((hwnd, friendly_title));
+                }
+            }
         }
     }
     BOOL(1)

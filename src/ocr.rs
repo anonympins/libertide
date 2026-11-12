@@ -935,68 +935,39 @@ pub fn capture_window_rgba(_hwnd: HWND, _rect: [i32; 4]) -> Option<(Vec<u8>, u32
 
 #[cfg(windows)]
 fn resolve_visual_zone_content(
+    uia: Option<&IUIAutomation>,
     hwnd: HWND,
-    rect: [i32; 4],
+    _rect: [i32; 4],
     click_x: i32,
     click_y: i32,
 ) -> Option<String> {
     let current_pid = std::process::id();
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        if let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
-            let mid_x = click_x;
-            let mid_y = click_y;
-            let dx = ((rect[2] - rect[0]) / 4).max(2);
-            let dy = ((rect[3] - rect[1]) / 4).max(2);
-            let sample_points = [
-                POINT { x: mid_x, y: mid_y },
-                POINT { x: (rect[0] + dx).min(rect[2]), y: mid_y },
-                POINT { x: (rect[2] - dx).max(rect[0]), y: mid_y },
-                POINT { x: mid_x, y: (rect[1] + dy).min(rect[3]) },
-            ];
-
-            for pt in sample_points {
-                if let Ok(elem) = uia.ElementFromPoint(pt) {
-                    if let Ok(elem_pid) = elem.CurrentProcessId() {
-                        if elem_pid as u32 == current_pid {
-                            continue;
-                        }
-                    }
-                    if let Ok(name) = elem.CurrentName() {
-                        let s = name.to_string();
-                        let trimmed = s.trim();
-                        let lower = trimmed.to_lowercase();
-                        if !trimmed.is_empty()
-                            && lower != "pane"
-                            && lower != "group"
-                            && lower != "groupe"
-                            && lower != "window"
-                            && lower != "client"
-                            && lower != "panneau"
-                        {
-                            return Some(trimmed.to_string());
-                        }
-                    }
-
-                    if let Some(txt) = crate::ui::extract_inner_text(&uia, &elem, 300) {
-                        let trimmed = txt.trim();
-                        let lower = trimmed.to_lowercase();
-                        if !trimmed.is_empty()
-                            && lower != "pane"
-                            && lower != "group"
-                            && lower != "groupe"
-                            && lower != "window"
-                            && lower != "client"
-                            && lower != "panneau"
-                        {
-                            return Some(trimmed.to_string());
+        let pt = POINT { x: click_x, y: click_y };
+        if let Some(automation) = uia {
+            if let Ok(elem) = automation.ElementFromPoint(pt) {
+                if let Ok(elem_pid) = elem.CurrentProcessId() {
+                    if elem_pid as u32 != current_pid {
+                        if let Ok(name) = elem.CurrentName() {
+                            let s = name.to_string();
+                            let trimmed = s.trim();
+                            let lower = trimmed.to_lowercase();
+                            if !trimmed.is_empty()
+                                && lower != "pane"
+                                && lower != "group"
+                                && lower != "groupe"
+                                && lower != "window"
+                                && lower != "client"
+                                && lower != "panneau"
+                            {
+                                return Some(trimmed.to_string());
+                            }
                         }
                     }
                 }
             }
         }
 
-        let pt = POINT { x: click_x, y: click_y };
         let child = WindowFromPoint(pt);
         let mut child_pid = 0u32;
         let _ = GetWindowThreadProcessId(child, Some(&mut child_pid));
@@ -1220,7 +1191,7 @@ pub fn detect_visual_boxes_from_pixels(
 
     // Trier les cibles par ordre visuel de lecture (haut-vers-bas, gauche-vers-droite)
     candidate_boxes.sort_by_key(|b| (b[1] / 16) * 10000 + b[0]);
-    candidate_boxes.truncate(400);
+    candidate_boxes.truncate(80);
 
     candidate_boxes
 }
@@ -1637,12 +1608,24 @@ pub fn enrich_targets_with_ocr(
     let candidate_boxes =
         detect_visual_boxes_from_pixels(&pixels, w, h, window_rect, existing_targets);
 
+    #[cfg(windows)]
+    let uia_instance = unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()
+    };
+
     // Injection dans la liste des cibles d'interaction
     for cand_rect in candidate_boxes {
         let click_x = (cand_rect[0] + cand_rect[2]) / 2;
         let click_y = (cand_rect[1] + cand_rect[3]) / 2;
         let next_index = existing_targets.len() + 1;
 
+        #[cfg(windows)]
+        let display_name = resolve_visual_zone_content(uia_instance.as_ref(), hwnd, cand_rect, click_x, click_y)
+            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("Zone visuelle {next_index}"));
+        #[cfg(not(windows))]
         let display_name = resolve_visual_zone_content(hwnd, cand_rect, click_x, click_y)
             .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
             .filter(|s| !s.is_empty())

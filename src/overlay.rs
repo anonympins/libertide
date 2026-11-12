@@ -1913,8 +1913,14 @@ pub fn focus_element_target(target: &NumberedElementTarget) {
 }
 
 pub fn build_fallback_navigation_zones(window_title: &str, targets: &[NumberedElementTarget]) -> (String, Vec<NavigationZone>) {
+    let clean_win_title = if is_human_friendly_window_title(window_title) {
+        window_title
+    } else {
+        "active"
+    };
+
     if targets.is_empty() {
-        return (format!("Fenêtre {window_title}. Aucun contrôle interactif direct détecté."), Vec::new());
+        return (format!("Fenêtre {clean_win_title}. Aucun contrôle interactif direct détecté."), Vec::new());
     }
 
     // Regroupement par "features" / intentions fonctionnelles (façon mini-site accessible)
@@ -2023,9 +2029,9 @@ pub fn build_fallback_navigation_zones(window_title: &str, targets: &[NumberedEl
         .collect();
 
     let summary = if !notable_items.is_empty() {
-        format!("Fenêtre {}. {} zones d'interaction disponibles : {}.", window_title, fallback_zones.len(), notable_items.join(", "))
+        format!("Fenêtre {}. {} zones d'interaction disponibles : {}.", clean_win_title, fallback_zones.len(), notable_items.join(", "))
     } else {
-        format!("Fenêtre {}. {} zones d'interaction identifiées.", window_title, fallback_zones.len())
+        format!("Fenêtre {}. {} zones d'interaction identifiées.", clean_win_title, fallback_zones.len())
     };
     (summary, fallback_zones)
 }

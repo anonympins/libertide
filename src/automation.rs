@@ -156,9 +156,11 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
         let click_x = rect[0] + ((rect[2] - rect[0]) / 2);
         let click_y = (rect[1] + 30).min(rect[3] - 10);
 
+        let friendly_title = resolve_human_friendly_window_title(t_clean, &exe_name);
+
         candidates.push(SwitchWindowTarget {
             id: hwnd.0 as isize,
-            title: t_clean.to_string(),
+            title: friendly_title,
             click_x,
             click_y,
             rect,
@@ -353,11 +355,12 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
     let (_pid, exe_name) = get_window_process_info(hwnd);
     let mut win_title_buf = [0u16; 512];
     let t_len = unsafe { GetWindowTextW(hwnd, &mut win_title_buf) };
-    let win_title = if t_len > 0 {
+    let raw_title = if t_len > 0 {
         String::from_utf16_lossy(&win_title_buf[..t_len as usize])
     } else {
         String::new()
     };
+    let win_title = resolve_human_friendly_window_title(&raw_title, &exe_name);
 
     let elements = list_interactive_elements(hwnd);
     let potential_targets: Vec<UiaElementInfo> = elements
@@ -1310,7 +1313,13 @@ pub fn build_targeted_hover_speech(
     let clean_name = target_name.trim();
     let clean_role = target_role.trim();
 
-    let base_speech = if clean_role.eq_ignore_ascii_case("lecture textuelle") {
+    let base_speech = if clean_role.eq_ignore_ascii_case("fenêtre") || clean_role.eq_ignore_ascii_case("window") {
+        if is_human_friendly_window_title(clean_name) {
+            format!("Fenêtre : {clean_name}")
+        } else {
+            "Fenêtre".to_string()
+        }
+    } else if clean_role.eq_ignore_ascii_case("lecture textuelle") {
         if !clean_name.is_empty() {
             clean_name.to_string()
         } else {

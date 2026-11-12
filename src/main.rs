@@ -780,7 +780,13 @@ impl OverlayApp {
                 // Pré-chargement des zones et analyse UIA de la fenêtre active en tâche de fond
                 self.refresh_numbered_targets_for_window(cur_win.id);
 
-                let vocal_msg = format!("{}. {}", self.switch_focus_index + 1, cur_win.title);
+                let win_title = if cur_win.title.trim().is_empty() {
+                    "Fenêtre".to_string()
+                } else {
+                    cur_win.title.trim().to_string()
+                };
+                let vocal_msg = format!("Fenêtre {} : {}", self.switch_focus_index + 1, win_title);
+                self.hover_last_announced_target = Some(cur_win.id as usize);
                 let _ = self.tts_sender.send(TtsCommand::Stop);
                 let _ = self.tts_sender.send(TtsCommand::Speak(vocal_msg));
             } else {
@@ -958,6 +964,11 @@ impl eframe::App for OverlayApp {
             }
         } else {
             self.smoothed_audio_level += (0.0 - self.smoothed_audio_level) * 0.25;
+        }
+        if self.status == AgentStatus::Speaking && target_level <= 0.001 && self.smoothed_audio_level <= 0.01 {
+            if !self.is_streaming_narration {
+                self.status = AgentStatus::Idle;
+            }
         }
 
         let theme = self.theme.colors();
@@ -2257,10 +2268,12 @@ impl eframe::App for OverlayApp {
 
         // Réception asynchrone sans blocage des cibles calculées par le thread dédié
         while let Ok(result) = self.targets_result_rx.try_recv() {
-            if result.sequence >= self.last_applied_scan_sequence && self.switch_active_window_id == Some(result.hwnd) {
+            if result.sequence >= self.last_applied_scan_sequence {
                 self.last_applied_scan_sequence = result.sequence;
                 self.is_scan_in_progress = false;
 
+                let is_current_window = self.switch_active_window_id == Some(result.hwnd);
+                if is_current_window {
                 let (_, fb_zones) = build_fallback_navigation_zones("", &result.targets);
                 self.switch_zones = fb_zones;
 
@@ -2315,7 +2328,11 @@ impl eframe::App for OverlayApp {
                 }
                 self.sync_switch_access_overlays();
                 ctx.request_repaint();
+                }
             }
+        }
+        if self.is_scan_in_progress && self.numbered_last_refresh.elapsed() >= Duration::from_millis(2500) {
+            self.is_scan_in_progress = false;
         }
 
         // Actualisation automatique avec debounce pour le mode survol/numéros (UIA + OCR)
@@ -2327,8 +2344,9 @@ impl eframe::App for OverlayApp {
                 let mut fg_pid = 0u32;
                 unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(fg, Some(&mut fg_pid)) };
                 let is_overlay = fg_pid == current_pid;
+                let is_tray = is_system_tray_or_desktop(fg);
 
-                let (target_hwnd, cur_hwnd_id) = if !fg.0.is_null() && !is_overlay && !is_window_hung(fg) {
+                let (target_hwnd, cur_hwnd_id) = if !fg.0.is_null() && !is_overlay && !is_tray && !is_window_hung(fg) {
                     (fg, Some(fg.0 as isize))
                 } else if let Some(wid) = self.switch_active_window_id {
                     let h = windows::Win32::Foundation::HWND(wid as _);
@@ -2357,17 +2375,54 @@ impl eframe::App for OverlayApp {
                     };
                     let user_navigating = self.last_switch_input.elapsed() < Duration::from_millis(600);
 
-                    if win_changed && self.switch_step != SwitchAccessStep::Windows {
-                        // Changement de fenêtre : purger immédiatement les badges et l'overlay de la fenêtre précédente
+                    if win_changed {
+                        // Changement de fenêtre manuel (clic barre des tâches, Alt+Tab, etc.) :
+                        // Réveil immédiat de la détection UIA et de l'analyse OCR pour la nouvelle fenêtre
+                        self.switch_windows = collect_switch_candidate_windows();
+                        let mut new_win_idx = self.switch_windows.iter().position(|w| Some(w.id) == cur_hwnd_id);
+
+                        let cur_win_title = if let Some(idx) = new_win_idx {
+                            self.switch_windows[idx].title.clone()
+                        } else {
+                            get_window_title(target_hwnd)
+                        };
+                        let display_title = if cur_win_title.trim().is_empty() {
+                            "Fenêtre".to_string()
+                        } else {
+                            cur_win_title.trim().to_string()
+                        };
+
+                        if new_win_idx.is_none() {
+                            if let Some(rect) = cur_rect {
+                                let click_x = rect[0] + (rect[2] - rect[0]) / 2;
+                                let click_y = (rect[1] + 30).min(rect[3] - 10);
+                                self.switch_windows.push(SwitchWindowTarget {
+                                    id: target_hwnd.0 as isize,
+                                    title: display_title.clone(),
+                                    click_x,
+                                    click_y,
+                                    rect,
+                                });
+                                new_win_idx = Some(self.switch_windows.len() - 1);
+                            }
+                        }
+
+                        self.switch_focus_index = new_win_idx.unwrap_or(0);
                         self.numbered_last_hwnd = cur_hwnd_id;
                         self.switch_active_window_id = cur_hwnd_id;
-                        self.numbered_targets.clear();
-                        self.switch_zones.clear();
-                        self.switch_active_zone_index = None;
-                        self.switch_focus_index = 0;
-                        clear_screen_numbered_badges();
-                        draw_screen_orange_border(cur_rect.unwrap_or([0, 0, 0, 0]));
+                        self.numbered_last_win_rect = cur_rect;
+                        self.switch_step = SwitchAccessStep::Windows;
+                        self.numbered_chunk_offset = 0;
+                        self.numbered_input_buffer.clear();
+
                         self.refresh_numbered_targets_for_window(target_hwnd.0 as isize);
+
+                        let win_num = self.switch_focus_index + 1;
+                        let vocal_msg = format!("Fenêtre {} : {}", win_num, display_title);
+                        self.hover_last_announced_target = Some(target_hwnd.0 as usize);
+                        let _ = self.tts_sender.send(TtsCommand::Stop);
+                        let _ = self.tts_sender.send(TtsCommand::Speak(vocal_msg));
+                        ctx.request_repaint();
                     } else if rect_changed && !user_navigating {
                         if !self.is_scan_in_progress {
                             self.refresh_numbered_targets_for_window(target_hwnd.0 as isize);
@@ -2440,6 +2495,8 @@ impl eframe::App for OverlayApp {
             let nav_next_hit = egui_nav_next || hook_nav_next || auto_scan_tick;
             let nav_prev_hit = egui_nav_prev || hook_nav_prev;
 
+            let user_nav_hit = (egui_nav_next || hook_nav_next) || (egui_nav_prev || hook_nav_prev);
+
             if switch_input_hit || nav_next_hit || nav_prev_hit {
                 self.last_switch_input = Instant::now();
             }
@@ -2447,7 +2504,7 @@ impl eframe::App for OverlayApp {
             // Détection du déplacement physique de la souris en mode survol
             if let Some((cur_x, cur_y)) = get_global_cursor_pos() {
                 let mouse_moved = match self.hover_last_cursor_pos {
-                    Some((lx, ly)) => (cur_x - lx).abs() > 4 || (cur_y - ly).abs() > 4,
+                    Some((lx, ly)) => (cur_x - lx).abs() > 14 || (cur_y - ly).abs() > 14,
                     None => true,
                 };
 
@@ -2487,14 +2544,14 @@ impl eframe::App for OverlayApp {
                         let hovered_other_win: Option<usize> = None;
 
                         if let Some(new_win_idx) = hovered_other_win {
-                            if new_win_idx < self.switch_windows.len() {
+                            if new_win_idx < self.switch_windows.len() && self.hover_cursor_still_since.elapsed() >= Duration::from_millis(150) {
+                                let cur_win = self.switch_windows[new_win_idx].clone();
                                 clear_screen_numbered_badges();
                                 self.numbered_targets.clear();
                                 self.switch_zones.clear();
                                 self.switch_active_zone_index = None;
 
                                 self.switch_focus_index = new_win_idx;
-                                let cur_win = self.switch_windows[new_win_idx].clone();
                                 self.switch_active_window_id = Some(cur_win.id);
                                 self.numbered_last_hwnd = Some(cur_win.id);
                                 self.numbered_targets.clear();
@@ -2513,7 +2570,7 @@ impl eframe::App for OverlayApp {
                                     }
                                 }
                                 self.refresh_numbered_targets_for_window(cur_win.id);
-                                let vocal_msg = format!("{}. {}", new_win_idx + 1, cur_win.title);
+                                let vocal_msg = format!("Fenêtre {} : {}", new_win_idx + 1, cur_win.title);
                                 let _ = self.tts_sender.send(TtsCommand::Stop);
                                 let _ = self.tts_sender.send(TtsCommand::Speak(vocal_msg));
                                 self.hover_last_announced_target = Some(cur_win.id as usize);
@@ -2523,9 +2580,9 @@ impl eframe::App for OverlayApp {
                         match self.switch_step {
                             SwitchAccessStep::Windows => {
                                 if let Some(win_idx) = find_switch_window_at_point(&self.switch_windows, cur_x, cur_y) {
-                                    if win_idx != self.switch_focus_index && win_idx < self.switch_windows.len() {
+                                    let cur_win = self.switch_windows[win_idx].clone();
+                                    if (win_idx != self.switch_focus_index || self.hover_last_announced_target != Some(cur_win.id as usize)) && win_idx < self.switch_windows.len() {
                                         self.switch_focus_index = win_idx;
-                                        let cur_win = self.switch_windows[win_idx].clone();
                                         self.switch_active_window_id = Some(cur_win.id);
                                         self.numbered_last_hwnd = Some(cur_win.id);
                                         self.numbered_targets.clear();
@@ -2541,7 +2598,7 @@ impl eframe::App for OverlayApp {
                                             }
                                         }
                                         self.refresh_numbered_targets_for_window(cur_win.id);
-                                        let vocal_msg = format!("{}. {}", win_idx + 1, cur_win.title);
+                                        let vocal_msg = format!("Fenêtre {} : {}", win_idx + 1, cur_win.title);
                                         let _ = self.tts_sender.send(TtsCommand::Stop);
                                         let _ = self.tts_sender.send(TtsCommand::Speak(vocal_msg));
                                         self.hover_last_announced_target = Some(cur_win.id as usize);
@@ -2723,9 +2780,11 @@ impl eframe::App for OverlayApp {
                             self.switch_focus_index %= num_windows;
                             self.switch_last_tick = Instant::now();
                         self.last_switch_input = Instant::now();
-                        self.hover_controls_speech_enabled = false;
-                        play_earcon(Earcon::Navigation);
-                        self.switch_auto_scroll = false;
+                            self.hover_controls_speech_enabled = false;
+                            if user_nav_hit {
+                                play_earcon(Earcon::Navigation);
+                            }
+                        self.switch_auto_scroll = self.is_single_switch_mode();
                             self.hover_physical_mouse_moved = false;
 
                             let cur_win = self.switch_windows[self.switch_focus_index % num_windows].clone();
@@ -2760,7 +2819,7 @@ impl eframe::App for OverlayApp {
                             self.refresh_numbered_targets_for_window(cur_win.id);
 
                             let _ = self.tts_sender.send(TtsCommand::Stop);
-                            let vocal_msg = format!("{}. {}", self.switch_focus_index + 1, cur_win.title);
+                            let vocal_msg = format!("{} : {}", self.switch_focus_index + 1, cur_win.title);
                             let _ = self.tts_sender.send(TtsCommand::Speak(vocal_msg));
                             self.hover_last_announced_target = Some(cur_win.id as usize);
                             ctx.request_repaint();
@@ -2768,7 +2827,7 @@ impl eframe::App for OverlayApp {
 
                         if switch_input_hit {
                             self.last_switch_input = Instant::now();
-                            self.switch_auto_scroll = false;
+                            self.switch_auto_scroll = self.is_single_switch_mode();
                             self.hover_controls_speech_enabled = true;
                             self.hover_physical_mouse_moved = false;
                             play_earcon(Earcon::Success);
@@ -2802,12 +2861,14 @@ impl eframe::App for OverlayApp {
                             }
                             self.switch_focus_index %= num_zones;
                             self.hover_controls_speech_enabled = true;
-                            self.switch_last_tick = Instant::now();
-                            play_earcon(Earcon::Navigation);
+                            self.switch_last_tick = Instant::now(); // Reset tick for auto-scan
+                            if user_nav_hit {
+                                play_earcon(Earcon::Navigation);
+                            }
                             self.hover_physical_mouse_moved = false;
                             if nav_next_hit || nav_prev_hit {
                                 self.last_switch_input = Instant::now();
-                                self.switch_auto_scroll = false;
+                                self.switch_auto_scroll = self.is_single_switch_mode();
                             }
 
                             #[cfg(windows)]
@@ -2878,12 +2939,14 @@ impl eframe::App for OverlayApp {
                             }
                             self.switch_focus_index %= num_targets;
                             self.hover_controls_speech_enabled = true;
-                            self.switch_last_tick = Instant::now();
-                            play_earcon(Earcon::Navigation);
+                            self.switch_last_tick = Instant::now(); // Reset tick for auto-scan
+                            if user_nav_hit {
+                                play_earcon(Earcon::Navigation);
+                            }
                             self.hover_physical_mouse_moved = false;
                             if nav_next_hit || nav_prev_hit {
                                 self.last_switch_input = Instant::now();
-                                self.switch_auto_scroll = false;
+                                self.switch_auto_scroll = self.is_single_switch_mode();
                             }
 
                             let cur_target = &self.numbered_targets[self.switch_focus_index % num_targets];
@@ -2946,7 +3009,7 @@ impl eframe::App for OverlayApp {
 
                         if switch_input_hit {
                             self.last_switch_input = Instant::now();
-                            self.switch_auto_scroll = false;
+                            self.switch_auto_scroll = self.is_single_switch_mode();
                             self.hover_physical_mouse_moved = false;
                             play_earcon(Earcon::Success);
 

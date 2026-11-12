@@ -147,9 +147,11 @@ pub fn split_into_sentences(text: &str) -> Vec<String> {
                 && i + 1 < len
                 && chars[i + 1].is_ascii_digit();
 
-            // Vérification si c'est deux-points après un numéro d'élément (ex: "1 :" ou "2 :")
-            let is_index_colon = c == ':'
-                && current.trim_end_matches(':').trim().chars().all(|ch| ch.is_ascii_digit());
+            // Vérification si c'est un point ou deux-points après un numéro d'index (ex: "1.", "1 :", "2.", "2 :")
+            let is_index_prefix = (c == ':' || c == '.')
+                && !current.trim_end_matches([':', '.', ' ']).trim().is_empty()
+                && current.trim_end_matches([':', '.', ' ']).trim().split_whitespace().last()
+                    .map_or(false, |w| w.chars().all(|ch| ch.is_ascii_digit()));
 
             // Vérification si c'est une abréviation
             let is_abbreviation = if c == '.' {
@@ -166,7 +168,7 @@ pub fn split_into_sentences(text: &str) -> Vec<String> {
 
             let next_is_space_or_end = i + 1 >= len || chars[i + 1].is_whitespace();
 
-            if !is_decimal && !is_index_colon && !is_abbreviation && next_is_space_or_end {
+            if !is_decimal && !is_index_prefix && !is_abbreviation && next_is_space_or_end {
                 while i + 1 < len && (chars[i + 1] == '.' || chars[i + 1] == '!' || chars[i + 1] == '?') {
                     i += 1;
                     current.push(chars[i]);
@@ -1984,6 +1986,7 @@ pub fn spawn_tts_worker(event_tx: StdSender<AgentEvent>, initial_voice: VoiceGen
                 TtsCommand::Stop => {
                     composite_backend.stop();
                     set_tts_audio_level(0.0);
+                    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                 }
                 TtsCommand::Speak(raw_text) => {
                     composite_backend.stop();
