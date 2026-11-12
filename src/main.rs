@@ -3630,7 +3630,7 @@ impl eframe::App for OverlayApp {
                                 };
                                 painter.rect(
                                     badge_rect,
-                                    egui::CornerRadius::same(badge_h / 2.0),
+                                    egui::CornerRadius::same((badge_h / 2.0).round() as u8),
                                     b_color,
                                     stroke,
                                     egui::StrokeKind::Inside,
@@ -5443,10 +5443,7 @@ impl eframe::App for OverlayApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        #[cfg(windows)]
-        {
-            crate::automation::uninstall_switch_keyboard_hook();
-        }
+        crate::automation::uninstall_switch_keyboard_hook();
     }
 }
 
@@ -5596,7 +5593,6 @@ fn main() -> eframe::Result<()> {
 
     let initial_twitch_channel = std::env::var("TWITCH_CHANNEL").unwrap_or_default();
 
-    #[cfg(windows)]
     automation::install_switch_keyboard_hook();
 
     spawn_periodic_screen_monitor(cmd_tx.clone());

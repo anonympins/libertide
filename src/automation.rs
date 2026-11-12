@@ -1117,71 +1117,278 @@ struct AtspiElementRaw {
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 fn query_atspi_elements() -> Vec<AtspiElementRaw> {
-    // Script Python embarqué utilisant le binding standard Atspi (GObject introspection)
-    // présent nativement sur la quasi-totalité des distributions Linux avec environnement de bureau.
-    const ATSPI_SCRIPT: &str = r#"
-import json, sys
-try:
-    import gi
-    gi.require_version('Atspi', '2.0')
-    from gi.repository import Atspi
-except Exception:
-    sys.exit(0)
+    // Résolution de l'adresse du bus d'accessibilité (org.a11y.Bus)
+    let bus_addr = std::env::var("AT_SPI_BUS_ADDRESS").ok().filter(|s| !s.trim().is_empty()).or_else(|| {
+        let session = zbus::blocking::Connection::session().ok()?;
+        let reply: Result<String, _> = session.call_method(
+            Some("org.a11y.Bus"),
+            "/org/a11y/bus",
+            Some("org.a11y.Bus"),
+            "GetAddress",
+            &(),
+        ).and_then(|r| r.body().deserialize());
+        reply.ok().filter(|s| !s.trim().is_empty())
+    });
 
-elements = []
-desktop = Atspi.get_desktop(0)
-if not desktop:
-    sys.exit(0)
+    let Some(addr) = bus_addr else {
+        return Vec::new();
+    };
 
-def walk(accessible, depth=0):
-    if depth > 7 or len(elements) >= 120:
-        return
-    try:
-        role = accessible.get_role_name()
-        state = accessible.get_state_set()
-        is_showing = state.contains(Atspi.StateType.SHOWING) if state else True
-        if is_showing and role in ("push-button", "link", "entry", "password-text", "page-tab", "check-box", "radio-button", "combo-box", "label", "text"):
-            comp = accessible.get_component_iface()
-            if comp:
-                bbox = comp.get_extents(Atspi.CoordType.SCREEN)
-                name = accessible.get_name() or ""
-                val_text = ""
-                text_iface = accessible.get_text_iface()
-                if text_iface:
-                    val_text = text_iface.get_text(0, -1) or ""
-                if bbox.width > 5 and bbox.height > 5:
-                    elements.append({
-                        "name": name.strip(),
-                        "role": role,
-                        "x": bbox.x,
-                        "y": bbox.y,
-                        "width": bbox.width,
-                        "height": bbox.height,
-                        "value": val_text.strip()
-                    })
-        for i in range(accessible.get_child_count()):
-            child = accessible.get_child_at_index(i)
-            if child:
-                walk(child, depth + 1)
-    except Exception:
-        pass
-
-walk(desktop)
-print(json.dumps(elements))
-"#;
-
-    let Ok(output) = std::process::Command::new("python3")
-        .args(["-c", ATSPI_SCRIPT])
-        .output()
+    let Ok(conn) = zbus::blocking::connection::Builder::address(addr.as_str())
+        .and_then(|b| b.build())
     else {
         return Vec::new();
     };
 
-    if !output.status.success() {
-        return Vec::new();
+    let mut elements = Vec::new();
+
+    fn walk_node(
+        conn: &zbus::blocking::Connection,
+        dest: &str,
+        path: &str,
+        depth: usize,
+        elements: &mut Vec<AtspiElementRaw>,
+    ) {
+        if depth > 7 || elements.len() >= 120 {
+            return;
+        }
+
+        // Récupération du rôle
+        let role_res: Result<String, _> = conn.call_method(
+            Some(dest),
+            path,
+            Some("org.a11y.atspi.Accessible"),
+            "GetRoleName",
+            &(),
+        ).and_then(|r| r.body().deserialize());
+
+        let role = role_res.unwrap_or_default();
+        let is_target_role = matches!(
+            role.as_str(),
+            "push-button" | "link" | "entry" | "password-text" | "page-tab"
+                | "check-box" | "radio-button" | "combo-box" | "label" | "text"
+        );
+
+        if is_target_role {
+            // ATSPI_COORD_TYPE_SCREEN = 0
+            let extents_res: Result<(i32, i32, i32, i32), _> = conn.call_method(
+                Some(dest),
+                path,
+                Some("org.a11y.atspi.Component"),
+                "GetExtents",
+                &(0u32),
+            ).and_then(|r| r.body().deserialize());
+
+            if let Ok((x, y, width, height)) = extents_res {
+                if width > 5 && height > 5 {
+                    let name_res: Result<String, _> = conn.call_method(
+                        Some(dest),
+                        path,
+                        Some("org.a11y.atspi.Accessible"),
+                        "getName",
+                        &(),
+                    ).or_else(|_| {
+                        conn.call_method(
+                            Some(dest),
+                            path,
+                            Some("org.freedesktop.DBus.Properties"),
+                            "Get",
+                            &("org.a11y.atspi.Accessible", "Name"),
+                        ).and_then(|r| {
+                            let val: zbus::zvariant::OwnedValue = r.body().deserialize()?;
+                            val.downcast::<String>().map_err(|e| zbus::Error::Variant(e))
+                        })
+                    }).and_then(|r| r.body().deserialize());
+
+                    let mut val_text = String::new();
+                    let text_res: Result<String, _> = conn.call_method(
+                        Some(dest),
+                        path,
+                        Some("org.a11y.atspi.Text"),
+                        "GetText",
+                        &(0i32, -1i32),
+                    ).and_then(|r| r.body().deserialize());
+                    if let Ok(txt) = text_res {
+                        val_text = txt.trim().to_string();
+                    }
+
+                    elements.push(AtspiElementRaw {
+                        name: name_res.unwrap_or_default().trim().to_string(),
+                        role,
+                        x,
+                        y,
+                        width,
+                        height,
+                        value: val_text,
+                    });
+                }
+            }
+        }
+
+        // Parcours récursif des enfants
+        let children_res: Result<Vec<(String, zbus::zvariant::OwnedObjectPath)>, _> = conn.call_method(
+            Some(dest),
+            path,
+            Some("org.a11y.atspi.Accessible"),
+            "GetChildren",
+            &(),
+        ).and_then(|r| r.body().deserialize());
+
+        if let Ok(children) = children_res {
+            for (child_dest, child_path) in children {
+                walk_node(conn, &child_dest, child_path.as_str(), depth + 1, elements);
+                if elements.len() >= 120 {
+                    break;
+                }
+            }
+        }
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(&stdout).unwrap_or_default()
+
+    walk_node(
+        &conn,
+        "org.a11y.atspi.Registry",
+        "/org/a11y/atspi/accessible/root",
+        0,
+        &mut elements,
+    );
+
+    elements
+}
+#[cfg(not(windows))]
+static HOOK_THREAD_ACTIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(not(windows))]
+static SPACE_DOWN_TIME: Mutex<Option<Instant>> = Mutex::new(None);
+#[cfg(not(windows))]
+static RETURN_DOWN_TIME: Mutex<Option<Instant>> = Mutex::new(None);
+
+#[cfg(not(windows))]
+pub fn install_switch_keyboard_hook() {
+    if HOOK_THREAD_ACTIVE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    std::thread::Builder::new()
+        .name("rdev_switch_hook_worker".to_string())
+        .spawn(move || {
+            let callback = move |event: rdev::Event| {
+                let is_switch_on = SWITCH_HOOK_ENABLED.load(Ordering::Relaxed);
+                let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::Relaxed);
+                let is_typing = IS_USER_TYPING.load(Ordering::Relaxed);
+
+                match event.event_type {
+                    rdev::EventType::KeyPress(key) => {
+                        // Raccourcis globaux
+                        let global_evt = match key {
+                            rdev::Key::F7 => Some(crate::types::SwitchKeyEvent::ToggleSwitch),
+                            rdev::Key::F8 => Some(crate::types::SwitchKeyEvent::ToggleDictation),
+                            rdev::Key::F9 => Some(crate::types::SwitchKeyEvent::ToggleVoice),
+                            rdev::Key::F4 => Some(crate::types::SwitchKeyEvent::Clear),
+                            rdev::Key::Escape if is_dictation || is_switch_on => Some(crate::types::SwitchKeyEvent::Escape),
+                            _ => None,
+                        };
+                        if let Some(evt) = global_evt {
+                            if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                q.push(evt);
+                            }
+                            trigger_repaint();
+                            return;
+                        }
+
+                        if !is_switch_on || is_dictation || is_typing {
+                            return;
+                        }
+
+                        // Chiffres pour sélection directe de badge
+                        let digit = match key {
+                            rdev::Key::Num0 | rdev::Key::Kp0 => Some('0'),
+                            rdev::Key::Num1 | rdev::Key::Kp1 => Some('1'),
+                            rdev::Key::Num2 | rdev::Key::Kp2 => Some('2'),
+                            rdev::Key::Num3 | rdev::Key::Kp3 => Some('3'),
+                            rdev::Key::Num4 | rdev::Key::Kp4 => Some('4'),
+                            rdev::Key::Num5 | rdev::Key::Kp5 => Some('5'),
+                            rdev::Key::Num6 | rdev::Key::Kp6 => Some('6'),
+                            rdev::Key::Num7 | rdev::Key::Kp7 => Some('7'),
+                            rdev::Key::Num8 | rdev::Key::Kp8 => Some('8'),
+                            rdev::Key::Num9 | rdev::Key::Kp9 => Some('9'),
+                            _ => None,
+                        };
+                        if let Some(d) = digit {
+                            if let Ok(mut nq) = NUMBER_KEY_QUEUE.lock() {
+                                nq.push(d);
+                            }
+                            trigger_repaint();
+                            return;
+                        }
+
+                        match key {
+                            rdev::Key::Space => {
+                                if let Ok(mut t) = SPACE_DOWN_TIME.lock() {
+                                    if t.is_none() { *t = Some(Instant::now()); }
+                                }
+                            }
+                            rdev::Key::Return => {
+                                if let Ok(mut t) = RETURN_DOWN_TIME.lock() {
+                                    if t.is_none() { *t = Some(Instant::now()); }
+                                }
+                            }
+                            rdev::Key::Tab | rdev::Key::RightArrow | rdev::Key::DownArrow => {
+                                if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                    q.push(crate::types::SwitchKeyEvent::Next);
+                                }
+                                trigger_repaint();
+                            }
+                            rdev::Key::LeftArrow | rdev::Key::UpArrow => {
+                                if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                    q.push(crate::types::SwitchKeyEvent::Prev);
+                                }
+                                trigger_repaint();
+                            }
+                            rdev::Key::Backspace => {
+                                if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                    q.push(crate::types::SwitchKeyEvent::Back);
+                                }
+                                trigger_repaint();
+                            }
+                            _ => {}
+                        }
+                    }
+                    rdev::EventType::KeyRelease(key) => {
+                        if !is_switch_on || is_dictation || is_typing {
+                            return;
+                        }
+                        let down_dur = match key {
+                            rdev::Key::Space => SPACE_DOWN_TIME.lock().ok().and_then(|mut t| t.take()).map(|s| s.elapsed()),
+                            rdev::Key::Return => RETURN_DOWN_TIME.lock().ok().and_then(|mut t| t.take()).map(|s| s.elapsed()),
+                            _ => None,
+                        };
+                        if let Some(dur) = down_dur {
+                            let long_press_thresh = Duration::from_millis(SWITCH_LONG_PRESS_MS.load(Ordering::Relaxed));
+                            let evt = if dur >= long_press_thresh {
+                                crate::types::SwitchKeyEvent::Back
+                            } else {
+                                crate::types::SwitchKeyEvent::Select
+                            };
+                            if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                q.push(evt);
+                            }
+                            trigger_repaint();
+                        }
+                    }
+                    _ => {}
+                }
+            };
+
+            if let Err(e) = rdev::listen(callback) {
+                eprintln!("[rdev Hook Worker] Erreur écoute globale des événements matériels: {:?}", e);
+            }
+            HOOK_THREAD_ACTIVE.store(false, Ordering::SeqCst);
+        })
+        .expect("Échec lancement worker rdev");
+}
+
+#[cfg(not(windows))]
+pub fn uninstall_switch_keyboard_hook() {
+    HOOK_THREAD_ACTIVE.store(false, Ordering::SeqCst);
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]

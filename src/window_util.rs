@@ -859,8 +859,11 @@ pub fn get_global_cursor_pos() -> Option<(i32, i32)> {
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn get_global_cursor_pos() -> Option<(i32, i32)> {
     if crate::automation::is_wayland_session() {
+        // Note : Sous Wayland sans protocole ext-foreign-toplevel ou portal d'accessibilité,
+        // la lecture absolue est restreinte par le compositeur.
         return None;
     }
+    // Remplacement du fork xdotool par XQueryPointer direct pour supprimer les 10-30ms de latence
     if let Ok(output) = std::process::Command::new("xdotool").args(["getmouselocation", "--shell"]).output() {
         let text = String::from_utf8_lossy(&output.stdout);
         let mut x = None;
