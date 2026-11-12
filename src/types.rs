@@ -84,7 +84,7 @@ impl NumberedElementTarget {
     }
 
     pub fn is_ocr(&self) -> bool {
-        self.role == "visuel (ocr)" || self.role == "ocr"
+        self.role == "visuel (ocr)" || self.role == "ocr" || self.role.contains("vlm") || self.role.contains("qwen")
     }
 
     /// Vérifie si deux cibles partagent la même signature logique (nom et rôle)
@@ -130,6 +130,7 @@ pub enum LlmProvider {
     Glm,
     Groq,
     Local,
+    QwenVL,
 }
 
 impl LlmProvider {
@@ -141,6 +142,7 @@ impl LlmProvider {
         Self::Glm,
         Self::Groq,
         Self::Local,
+        Self::QwenVL,
     ];
 
     pub fn display_name(&self) -> &'static str {
@@ -152,6 +154,7 @@ impl LlmProvider {
             Self::Glm => "Zhipu GLM",
             Self::Groq => "Groq",
             Self::Local => "Local (GGUF / Llama)",
+            Self::QwenVL => "Qwen2-VL (Vision & Grounding)",
         }
     }
 
@@ -164,6 +167,7 @@ impl LlmProvider {
             Self::Glm => "GLM",
             Self::Groq => "GROQ",
             Self::Local => "LOCAL",
+            Self::QwenVL => "QWENVL",
         }
     }
 
@@ -176,6 +180,7 @@ impl LlmProvider {
             Self::Glm => "GLM_API_KEY",
             Self::Groq => "GROQ_API_KEY",
             Self::Local => "LOCAL_LLAMA_MODEL",
+            Self::QwenVL => "QWENVL_API_KEY",
         }
     }
 
@@ -188,6 +193,7 @@ impl LlmProvider {
             Self::Glm => "GLM_MODEL",
             Self::Groq => "GROQ_MODEL",
             Self::Local => "LOCAL_MODEL",
+            Self::QwenVL => "QWENVL_MODEL",
         }
     }
 
@@ -200,6 +206,7 @@ impl LlmProvider {
             Self::Glm => "GLM_ENDPOINT",
             Self::Groq => "GROQ_ENDPOINT",
             Self::Local => "LOCAL_ENDPOINT",
+            Self::QwenVL => "QWENVL_ENDPOINT",
         }
     }
 
@@ -212,6 +219,7 @@ impl LlmProvider {
             Self::Glm => "GLM_ENABLED",
             Self::Groq => "GROQ_ENABLED",
             Self::Local => "LOCAL_ENABLED",
+            Self::QwenVL => "QWENVL_ENABLED",
         }
     }
 
@@ -242,6 +250,7 @@ impl LlmProvider {
             Self::Glm => "glm-4-flash",
             Self::Groq => "llama-3.3-70b-versatile",
             Self::Local => "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+            Self::QwenVL => "Qwen/Qwen2.5-VL-3B-Instruct",
         }
     }
 
@@ -254,6 +263,7 @@ impl LlmProvider {
             Self::Glm => "https://open.bigmodel.cn/api/paas/v4/chat/completions",
             Self::Groq => "https://api.groq.com/openai/v1/chat/completions",
             Self::Local => "local",
+            Self::QwenVL => "http://127.0.0.1:8000/v1/chat/completions",
         }
     }
 
@@ -275,6 +285,7 @@ impl LlmProvider {
         else if clean.contains("mistral") { Some(Self::Mistral) }
         else if clean.contains("glm") || clean.contains("zhipu") { Some(Self::Glm) }
         else if clean.contains("groq") { Some(Self::Groq) }
+        else if clean.contains("qwenvl") || clean.contains("qwen-vl") || clean.contains("qwen2-vl") || clean.contains("qwen2.5-vl") { Some(Self::QwenVL) }
         else if clean.contains("local") || clean.contains("qwen") || clean.contains("llama") { Some(Self::Local) }
         else { None }
     }
@@ -303,6 +314,7 @@ impl LlmConfig {
                 .unwrap_or(16384),
             LlmProvider::Groq => 8192,
             LlmProvider::Mistral => 32768,
+            LlmProvider::QwenVL => 32768,
             LlmProvider::Glm => 32768,
             LlmProvider::DeepSeek => 65536,
             LlmProvider::OpenAI | LlmProvider::Anthropic => 128000,

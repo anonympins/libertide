@@ -297,6 +297,25 @@ impl OverlayApp {
         let selected_microphone = crate::devices::get_active_microphone();
         let detected_pointing_devices = crate::devices::list_pointing_devices();
 
+        let active_disability_presets: std::collections::BTreeSet<DisabilityPreset> = std::env::var("DISABILITY_PRESETS")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "DISABILITY_PRESETS"))
+            .or_else(|| std::env::var("DISABILITY_PRESET").ok())
+            .or_else(|| read_env_var_from_file(".env", "DISABILITY_PRESET"))
+            .map(|s| {
+                s.split([',', ';', ' '])
+                    .filter_map(DisabilityPreset::from_key)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let switch_auto_scroll = std::env::var("SWITCH_AUTO_SCROLL")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "SWITCH_AUTO_SCROLL"))
+            .map(|s| s.trim().eq_ignore_ascii_case("true") || s.trim() == "1")
+            .unwrap_or(false)
+            || active_disability_presets.contains(&DisabilityPreset::MotorSwitch);
+
         let voice_clone_url_input = std::env::var("VOICE_CLONE_URL")
             .ok()
             .or_else(|| read_env_var_from_file(".env", "VOICE_CLONE_URL"))
@@ -332,18 +351,6 @@ impl OverlayApp {
             .map(|s| !s.trim().eq_ignore_ascii_case("false") && s.trim() != "0")
             .unwrap_or(true);
         crate::overlay::EARCONS_ENABLED.store(earcons_enabled, Ordering::Relaxed);
-
-        let active_disability_presets: std::collections::BTreeSet<DisabilityPreset> = std::env::var("DISABILITY_PRESETS")
-            .ok()
-            .or_else(|| read_env_var_from_file(".env", "DISABILITY_PRESETS"))
-            .or_else(|| std::env::var("DISABILITY_PRESET").ok())
-            .or_else(|| read_env_var_from_file(".env", "DISABILITY_PRESET"))
-            .map(|s| {
-                s.split([',', ';', ' '])
-                    .filter_map(DisabilityPreset::from_key)
-                    .collect()
-            })
-            .unwrap_or_default();
 
         let mut app = Self {
             status: AgentStatus::Idle,
@@ -414,7 +421,7 @@ impl OverlayApp {
             switch_active_zone_index: None,
             window_analysis_cache: std::collections::HashMap::new(),
             last_switch_input: Instant::now() - Duration::from_secs(1),
-            switch_auto_scroll: false,
+            switch_auto_scroll,
             switch_focus_index: 0,
             switch_last_tick: Instant::now(),
 
@@ -477,6 +484,11 @@ impl OverlayApp {
         app.sync_modal_inputs_for_provider(llm_config.provider);
         update_open_floating_cards(&app.floating_cards);
         app
+    }
+
+    pub fn is_single_switch_mode(&self) -> bool {
+        self.switch_auto_scroll
+            || self.active_disability_presets.contains(&DisabilityPreset::MotorSwitch)
     }
 
     pub fn open_instrument_card(&mut self) {
@@ -711,7 +723,7 @@ impl OverlayApp {
             self.is_hidden = true;
             self.switch_step = SwitchAccessStep::Windows;
             self.switch_windows = collect_switch_candidate_windows();
-            self.switch_auto_scroll = false;
+            self.switch_auto_scroll = self.is_single_switch_mode();
             self.switch_active_zone_index = None;
             self.numbered_targets.clear();
             self.switch_focus_index = 0;
@@ -727,18 +739,13 @@ impl OverlayApp {
             play_earcon(Earcon::Success);
 
             if !self.switch_windows.is_empty() {
-                let physical_cursor = get_global_cursor_pos();
-                let hovered_idx = physical_cursor.and_then(|(cx, cy)| {
-                    find_switch_window_at_point(&self.switch_windows, cx, cy)
-                });
-
                 #[cfg(windows)]
-                let active_idx = hovered_idx.or_else(|| {
+                let active_idx = {
                     let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
                     self.switch_windows.iter().position(|w| w.id == fg.0 as isize)
-                });
+                };
                 #[cfg(not(windows))]
-                let active_idx = hovered_idx;
+                let active_idx = None;
 
                 self.switch_focus_index = active_idx.unwrap_or(0);
                 let cur_win = self.switch_windows[self.switch_focus_index].clone();
@@ -795,7 +802,7 @@ impl OverlayApp {
             self.switch_zones.clear();
             self.switch_active_zone_index = None;
             self.switch_step = SwitchAccessStep::Windows;
-            self.switch_auto_scroll = false;
+            self.switch_auto_scroll = self.is_single_switch_mode();
             self.hover_last_cursor_pos = None;
             self.hover_cursor_still_since = Instant::now();
             self.hover_pending_speech = None;
@@ -2149,7 +2156,6 @@ impl eframe::App for OverlayApp {
                         self.switch_active_zone_index = None;
                         self.numbered_targets.clear();
                         self.switch_focus_index = 0;
-                        self.switch_auto_scroll = false;
                         self.hover_physical_mouse_moved = false;
                         self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
                         let _ = self.tts_sender.send(TtsCommand::Stop);
@@ -2180,7 +2186,6 @@ impl eframe::App for OverlayApp {
                         clear_screen_numbered_badges();
                         self.switch_active_zone_index = None;
                         self.switch_windows = collect_switch_candidate_windows();
-                        self.switch_auto_scroll = false;
                         self.switch_focus_index = 0;
                         self.hover_physical_mouse_moved = false;
                         self.numbered_targets = self.switch_windows.iter().enumerate().map(|(i, w)| {
@@ -2213,7 +2218,6 @@ impl eframe::App for OverlayApp {
                     self.switch_zones.clear();
                     self.switch_active_zone_index = None;
                     self.switch_windows = collect_switch_candidate_windows();
-                    self.switch_auto_scroll = false;
                     self.switch_focus_index = 0;
                     self.hover_physical_mouse_moved = false;
                     self.numbered_targets = self.switch_windows.iter().enumerate().map(|(i, w)| {
@@ -2290,20 +2294,7 @@ impl eframe::App for OverlayApp {
                     // En mode Zones, les cibles affichées restent restreintes à la zone focalisée
                 }
 
-                let physical_cursor = get_global_cursor_pos();
-                if let Some((cx, cy)) = physical_cursor {
-                    self.hover_last_cursor_pos = Some((cx, cy));
-                    self.hover_cursor_still_since = Instant::now();
-                    if self.switch_step == SwitchAccessStep::Elements {
-                        if let Some(pos) = self.numbered_targets.iter().position(|t| {
-                            cx >= t.rect[0] && cx <= t.rect[2] && cy >= t.rect[1] && cy <= t.rect[3]
-                        }) {
-                            self.switch_focus_index = pos;
-                        } else if self.switch_focus_index >= self.numbered_targets.len() {
-                            self.switch_focus_index = 0;
-                        }
-                    }
-                } else if self.switch_step == SwitchAccessStep::Elements && self.switch_focus_index >= self.numbered_targets.len() {
+                if self.switch_step == SwitchAccessStep::Elements && self.switch_focus_index >= self.numbered_targets.len() {
                     self.switch_focus_index = 0;
                 }
                 ctx.request_repaint();
@@ -2410,9 +2401,9 @@ impl eframe::App for OverlayApp {
             let hook_nav_next = hook_events.contains(&SwitchKeyEvent::Next);
             let hook_nav_prev = hook_events.contains(&SwitchKeyEvent::Prev);
 
-            // Temporisation du balayage automatique pour contacteur unique (Auto-Scan ~1.8s)
+            let is_single_switch = self.is_single_switch_mode();
             let auto_scan_interval = Duration::from_millis(1800);
-            let auto_scan_tick = !self.hover_physical_mouse_moved
+            let auto_scan_tick = is_single_switch
                 && !self.dictation_mode
                 && self.status != AgentStatus::Speaking
                 && self.last_switch_input.elapsed() >= Duration::from_millis(600)
@@ -2425,6 +2416,128 @@ impl eframe::App for OverlayApp {
                 && self.last_switch_input.elapsed() >= Duration::from_millis(150);
             let nav_prev_hit = (egui_nav_prev || hook_nav_prev)
                 && self.last_switch_input.elapsed() >= Duration::from_millis(150);
+
+            // Détection du déplacement physique de la souris en mode survol
+            if let Some((cur_x, cur_y)) = get_global_cursor_pos() {
+                let mouse_moved = match self.hover_last_cursor_pos {
+                    Some((lx, ly)) => (cur_x - lx).abs() > 4 || (cur_y - ly).abs() > 4,
+                    None => true,
+                };
+
+                if mouse_moved {
+                    self.hover_last_cursor_pos = Some((cur_x, cur_y));
+                    self.hover_cursor_still_since = Instant::now();
+                    self.hover_physical_mouse_moved = true;
+                    self.switch_last_tick = Instant::now();
+                    self.last_switch_input = Instant::now();
+
+                    if !is_single_switch {
+                        match self.switch_step {
+                            SwitchAccessStep::Windows => {
+                                if let Some(win_idx) = find_switch_window_at_point(&self.switch_windows, cur_x, cur_y) {
+                                    if win_idx != self.switch_focus_index && win_idx < self.switch_windows.len() {
+                                        self.switch_focus_index = win_idx;
+                                        let cur_win = self.switch_windows[win_idx].clone();
+                                        self.switch_active_window_id = Some(cur_win.id);
+                                        self.numbered_last_hwnd = Some(cur_win.id);
+                                        self.numbered_targets.clear();
+                                        clear_screen_numbered_badges();
+                                        #[cfg(windows)]
+                                        {
+                                            let hwnd = windows::Win32::Foundation::HWND(cur_win.id as _);
+                                            let mut r = windows::Win32::Foundation::RECT::default();
+                                            if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut r).is_ok() } {
+                                                draw_screen_orange_border([r.left, r.top, r.right, r.bottom]);
+                                            } else {
+                                                draw_screen_orange_border(cur_win.rect);
+                                            }
+                                        }
+                                        self.refresh_numbered_targets_for_window(cur_win.id);
+                                        let vocal_msg = format!("{}. {}", win_idx + 1, cur_win.title);
+                                        let _ = self.tts_sender.send(TtsCommand::Stop);
+                                        let _ = self.tts_sender.send(TtsCommand::Speak(vocal_msg));
+                                        self.hover_last_announced_target = Some(cur_win.id as usize);
+                                        ctx.request_repaint();
+                                    }
+                                }
+                            }
+                            SwitchAccessStep::Zones => {
+                                let hovered_zone = self.switch_zones.iter().position(|z| {
+                                    cur_x >= z.rect[0] && cur_x <= z.rect[2] && cur_y >= z.rect[1] && cur_y <= z.rect[3]
+                                });
+                                if let Some(z_idx) = hovered_zone {
+                                    if z_idx != self.switch_focus_index && z_idx < self.switch_zones.len() {
+                                        self.switch_focus_index = z_idx;
+                                        let cur_zone = &self.switch_zones[z_idx];
+                                        let zone_infos: Vec<ZoneOverlayInfo> = self.switch_zones.iter().enumerate().map(|(i, z)| {
+                                            ZoneOverlayInfo {
+                                                index: i + 1,
+                                                title: z.title.clone(),
+                                                rect: z.rect,
+                                                is_focused: i == z_idx,
+                                            }
+                                        }).collect();
+                                        let mut active_targets = cur_zone.targets.clone();
+                                        for (i, t) in active_targets.iter_mut().enumerate() {
+                                            t.index = i + 1;
+                                        }
+                                        self.numbered_targets = active_targets;
+                                        let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
+                                        draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
+                                        let vocal_label = cur_zone.title.clone();
+                                        let _ = self.tts_sender.send(TtsCommand::Stop);
+                                        let _ = self.tts_sender.send(TtsCommand::Speak(vocal_label));
+                                        self.hover_last_announced_zone = Some(cur_zone.title.clone());
+                                        ctx.request_repaint();
+                                    }
+                                }
+                            }
+                            SwitchAccessStep::Elements => {
+                                let hovered_target = self.numbered_targets.iter().position(|t| {
+                                    cur_x >= t.rect[0] - 6 && cur_x <= t.rect[2] + 6 && cur_y >= t.rect[1] - 6 && cur_y <= t.rect[3] + 6
+                                });
+                                if let Some(t_idx) = hovered_target {
+                                    if t_idx != self.switch_focus_index && t_idx < self.numbered_targets.len() {
+                                        self.switch_focus_index = t_idx;
+                                        let cur_target = &self.numbered_targets[t_idx];
+                                        #[cfg(windows)]
+                                        draw_screen_control_border(cur_target.rect, false);
+                                        let parent_zone = self.switch_active_zone_index.and_then(|idx| self.switch_zones.get(idx));
+                                        let zone_title = parent_zone.map(|z| z.title.as_str());
+                                        let index_in_zone = parent_zone.and_then(|z| {
+                                            z.targets.iter().position(|t| t.index == cur_target.index).map(|p| p + 1)
+                                        }).or(Some(t_idx + 1));
+                                        let is_same_zone = self.hover_last_announced_zone.as_deref() == zone_title;
+                                        let announcement = build_targeted_hover_speech(
+                                            zone_title,
+                                            parent_zone.map_or(&self.numbered_targets, |z| &z.targets),
+                                            index_in_zone.unwrap_or(t_idx + 1),
+                                            &cur_target.name,
+                                            &cur_target.role,
+                                            &cur_target.shortcut,
+                                            is_same_zone,
+                                        );
+                                        let _ = self.tts_sender.send(TtsCommand::Stop);
+                                        let _ = self.tts_sender.send(TtsCommand::Speak(announcement));
+                                        self.hover_last_announced_target = Some(cur_target.index);
+                                        self.hover_last_announced_zone = zone_title.map(|s| s.to_string());
+                                        if let Some(zone) = parent_zone {
+                                            let zone_info = vec![ZoneOverlayInfo {
+                                                index: self.switch_active_zone_index.unwrap_or(0) + 1,
+                                                title: zone.title.clone(),
+                                                rect: zone.rect,
+                                                is_focused: true,
+                                            }];
+                                            draw_screen_zones_and_targets(&zone_info, &self.numbered_targets, self.zoom_factor, Some(cur_target.index));
+                                        }
+                                        ctx.request_repaint();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             if egui_enter || egui_space || egui_tab || egui_nav_next || egui_nav_prev {
                 ctx.input_mut(|i| {
@@ -3184,277 +3297,6 @@ impl eframe::App for OverlayApp {
                 }
             }
 
-            // Traitement du survol physique de la souris avec anti-rebond (150-250 ms)
-            let physical_cursor = get_global_cursor_pos();
-
-            if let Some((cur_x, cur_y)) = physical_cursor {
-                let is_over_overlay = {
-                    #[cfg(windows)]
-                    {
-                        let overlay_hwnd = unsafe {
-                            windows::Win32::UI::WindowsAndMessaging::FindWindowW(None, windows::core::w!("Libertide overlay")).unwrap_or(windows::Win32::Foundation::HWND(std::ptr::null_mut()))
-                        };
-                        if !overlay_hwnd.0.is_null() {
-                            let mut r = windows::Win32::Foundation::RECT::default();
-                            if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(overlay_hwnd, &mut r).is_ok() } {
-                                cur_x >= r.left && cur_x <= r.right && cur_y >= r.top && cur_y <= r.bottom
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        if let Some(pos) = self.window_pos {
-                            let ppp = ctx.pixels_per_point().max(0.5);
-                            let rx = pos.x * ppp;
-                            let ry = pos.y * ppp;
-                            let rw = self.current_win_w * ppp;
-                            let rh = self.current_win_h * ppp;
-                            (cur_x as f32) >= rx && (cur_x as f32) <= rx + rw && (cur_y as f32) >= ry && (cur_y as f32) <= ry + rh
-                        } else {
-                            false
-                        }
-                    }
-                };
-
-                let has_moved = match self.hover_last_cursor_pos {
-                    Some((lx, ly)) => (lx - cur_x).abs() > 15 || (ly - cur_y).abs() > 15,
-                    None => false,
-                };
-
-                let is_recent_switch_nav = self.last_switch_input.elapsed() < Duration::from_millis(800);
-
-                if is_over_overlay {
-                    self.hover_physical_mouse_moved = false;
-                    self.hover_pending_speech = None;
-                    self.hover_speech_deadline = None;
-                } else if has_moved && !is_recent_switch_nav {
-                    self.hover_physical_mouse_moved = true;
-                    self.hover_cursor_still_since = Instant::now();
-                    self.hover_last_cursor_pos = Some((cur_x, cur_y));
-                    self.hover_pending_speech = None;
-                    self.hover_speech_deadline = None;
-
-                    // Détection et bascule immédiate vers la fenêtre survolée en cours de mouvement
-                    if !self.switch_windows.is_empty() {
-                        if let Some(w_idx) = find_switch_window_at_point(&self.switch_windows, cur_x, cur_y) {
-                            let hovered_win = &self.switch_windows[w_idx];
-                            if self.switch_active_window_id != Some(hovered_win.id) {
-                                self.switch_active_window_id = Some(hovered_win.id);
-                                self.switch_focus_index = w_idx;
-                                #[cfg(windows)]
-                                {
-                                    let hwnd = windows::Win32::Foundation::HWND(hovered_win.id as _);
-                                    focus_and_isolate_window(hwnd);
-                                    let mut r = windows::Win32::Foundation::RECT::default();
-                                    if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut r).is_ok() } {
-                                        draw_screen_orange_border([r.left, r.top, r.right, r.bottom]);
-                                    } else {
-                                        draw_screen_orange_border(hovered_win.rect);
-                                    }
-                                }
-                                #[cfg(not(windows))]
-                                {
-                                    focus_and_isolate_window(&hovered_win.title);
-                                }
-                                if self.switch_step == SwitchAccessStep::Elements {
-                                    // Rafraîchissement direct de l'OCR et des badges de la nouvelle fenêtre survolée
-                                    self.refresh_numbered_targets_for_window(hovered_win.id);
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    let hover_still_min = if self.active_disability_presets.contains(&DisabilityPreset::Tremor) {
-                        Duration::from_millis(450)
-                    } else if self.dwell_state.is_enabled() {
-                        self.dwell_state.effective_activation_delay().clamp(Duration::from_millis(350), Duration::from_millis(800))
-                    } else {
-                        Duration::from_millis(350)
-                    };
-                    if !is_over_overlay
-                        && self.hover_physical_mouse_moved
-                        && !is_recent_switch_nav
-                        && self.hover_cursor_still_since.elapsed() >= hover_still_min {
-                    // Le curseur est immobilisé depuis au moins 200 ms : annonce détaillée selon l'étape
-                    match self.switch_step {
-                        SwitchAccessStep::Elements => {
-                            if self.hover_controls_speech_enabled && !self.numbered_targets.is_empty() {
-                                let num_targets = self.numbered_targets.len();
-                                let current_contains_cursor = self.numbered_targets
-                                    .get(self.switch_focus_index % num_targets)
-                                    .map_or(false, |t| {
-                                        cur_x >= t.rect[0] && cur_x <= t.rect[2] && cur_y >= t.rect[1] && cur_y <= t.rect[3]
-                                    });
-
-                                let hovered_pos_opt = if current_contains_cursor {
-                                    Some(self.switch_focus_index % num_targets)
-                                } else {
-                                    self.numbered_targets
-                                        .iter()
-                                        .enumerate()
-                                        .filter(|(_, t)| {
-                                            cur_x >= t.rect[0] && cur_x <= t.rect[2] && cur_y >= t.rect[1] && cur_y <= t.rect[3]
-                                        })
-                                        .min_by_key(|(_, t)| {
-                                            let w = (t.rect[2] - t.rect[0]).max(1) as i64;
-                                            let h = (t.rect[3] - t.rect[1]).max(1) as i64;
-                                            w * h
-                                        })
-                                        .map(|(idx, _)| idx)
-                                };
-
-                                if let Some(pos) = hovered_pos_opt {
-                                    if let Some(target) = self.numbered_targets.get(pos) {
-                                        if self.hover_last_announced_target != Some(target.index) {
-                                            let parent_zone = self.switch_zones.iter().find(|z| {
-                                                cur_x >= z.rect[0] && cur_x <= z.rect[2] && cur_y >= z.rect[1] && cur_y <= z.rect[3]
-                                            }).or_else(|| {
-                                                self.switch_active_zone_index.and_then(|idx| self.switch_zones.get(idx))
-                                            });
-
-                                            let zone_title = parent_zone.map(|z| z.title.as_str());
-                                            let index_in_zone = parent_zone.and_then(|z| {
-                                                z.targets.iter().position(|t| t.index == target.index).map(|p| p + 1)
-                                            }).or(Some(pos + 1));
-                                            let is_same_zone = self.hover_last_announced_zone.as_deref() == zone_title;
-
-                                            let announcement = build_targeted_hover_speech(
-                                                zone_title,
-                                                parent_zone.map_or(&self.numbered_targets, |z| &z.targets),
-                                                index_in_zone.unwrap_or(pos + 1),
-                                                &target.name,
-                                                &target.role,
-                                                &target.shortcut,
-                                                is_same_zone,
-                                            );
-
-                                            self.switch_focus_index = pos;
-                                            focus_element_target(target);
-                                            #[cfg(windows)]
-                                            draw_screen_control_border(target.rect, false);
-
-                                            let _ = self.tts_sender.send(TtsCommand::Stop);
-                                            let _ = self.tts_sender.send(TtsCommand::Speak(announcement));
-                                            self.hover_last_announced_target = Some(target.index);
-                                            self.hover_last_announced_zone = zone_title.map(|s| s.to_string());
-                                            ctx.request_repaint();
-                                            self.hover_physical_mouse_moved = false;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        SwitchAccessStep::Zones => {
-                            if self.hover_controls_speech_enabled && !self.switch_zones.is_empty() {
-                                let num_zones = self.switch_zones.len();
-                                let current_contains_cursor = self.switch_zones
-                                    .get(self.switch_focus_index % num_zones)
-                                    .map_or(false, |z| {
-                                        cur_x >= z.rect[0] && cur_x <= z.rect[2] && cur_y >= z.rect[1] && cur_y <= z.rect[3]
-                                    });
-
-                                let hovered_z_pos = if current_contains_cursor {
-                                    Some(self.switch_focus_index % num_zones)
-                                } else {
-                                    self.switch_zones
-                                        .iter()
-                                        .enumerate()
-                                        .filter(|(_, z)| {
-                                            cur_x >= z.rect[0] && cur_x <= z.rect[2] && cur_y >= z.rect[1] && cur_y <= z.rect[3]
-                                        })
-                                        .min_by_key(|(_, z)| {
-                                            let w = (z.rect[2] - z.rect[0]).max(1) as i64;
-                                            let h = (z.rect[3] - z.rect[1]).max(1) as i64;
-                                            w * h
-                                        })
-                                        .map(|(idx, _)| idx)
-                                };
-                                if let Some(z_pos) = hovered_z_pos {
-                                    if let Some(cur_zone) = self.switch_zones.get(z_pos) {
-                                        if self.hover_last_announced_zone.as_deref() != Some(&cur_zone.title) {
-                                            #[cfg(windows)]
-                                            if let Some(id) = self.switch_active_window_id {
-                                                let hwnd = windows::Win32::Foundation::HWND(id as _);
-                                                if !is_window_hung(hwnd) {
-                                                    force_foreground_window(hwnd);
-                                                    restore_if_iconic(hwnd);
-                                                }
-                                            }
-
-                                            self.switch_focus_index = z_pos;
-                                            #[cfg(windows)]
-                                            draw_screen_control_border(cur_zone.rect, true);
-                                            let msg = cur_zone.title.clone();
-                                            let _ = self.tts_sender.send(TtsCommand::Stop);
-                                            let _ = self.tts_sender.send(TtsCommand::Speak(msg));
-                                            self.hover_last_announced_zone = Some(cur_zone.title.clone());
-                                            ctx.request_repaint();
-                                            self.hover_physical_mouse_moved = false;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        SwitchAccessStep::Windows => {
-                            if !self.switch_windows.is_empty() {
-                                let hovered_win_idx = find_switch_window_at_point(&self.switch_windows, cur_x, cur_y);
-
-                                if let Some(w_idx) = hovered_win_idx {
-                                    let cur_win = self.switch_windows[w_idx].clone();
-                                    let win_id = cur_win.id;
-                                    let win_title = cur_win.title;
-                                    let win_rect = cur_win.rect;
-
-                                    if self.hover_last_announced_target != Some(win_id as usize) {
-                                        self.switch_focus_index = w_idx;
-                                        self.switch_active_window_id = Some(win_id);
-                                        #[cfg(windows)]
-                                        {
-                                            let hwnd = windows::Win32::Foundation::HWND(win_id as _);
-                                            focus_and_isolate_window(hwnd);
-                                            let mut r = windows::Win32::Foundation::RECT::default();
-                                            if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut r).is_ok() } {
-                                                draw_screen_orange_border([r.left, r.top, r.right, r.bottom]);
-                                            } else {
-                                                draw_screen_orange_border(win_rect);
-                                            }
-                                        }
-                                        #[cfg(not(windows))]
-                                        {
-                                            focus_and_isolate_window(&win_title);
-                                        }
-                                        let _ = self.tts_sender.send(TtsCommand::Stop);
-                                        let _ = self.tts_sender.send(TtsCommand::Speak(format!("{}. {}", w_idx + 1, win_title)));
-                                        self.hover_last_announced_target = Some(win_id as usize);
-                                        self.hover_last_announced_zone = Some(win_title);
-                                        ctx.request_repaint();
-                                        self.hover_physical_mouse_moved = false;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    }
-                }
-            }
-
-            // Dispatch de la parole mise en attente (anti-rebond 180 ms)
-            if let Some(deadline) = self.hover_speech_deadline {
-                let now = Instant::now();
-                if now >= deadline {
-                    if let Some(speech) = self.hover_pending_speech.take() {
-                        let _ = self.tts_sender.send(TtsCommand::Stop);
-                        let _ = self.tts_sender.send(TtsCommand::Speak(speech));
-                    }
-                    self.hover_speech_deadline = None;
-                } else {
-                    ctx.request_repaint_after(deadline - now);
-                }
-            }
         }
 
         // Raccourci clavier 'R' pour basculer le micro via Event::Text & Event::Key
@@ -5448,6 +5290,12 @@ fn main() -> eframe::Result<()> {
             println!("[Main] Démarrage du thread de préchargement LLM local...");
             local_llm::init_local_llm();
             println!("[Main] Thread de préchargement LLM local terminé.");
+        });
+    }
+    if local_llm::is_vlm_grounding_enabled() {
+        let event_tx_vlm = event_tx.clone();
+        std::thread::spawn(move || {
+            local_llm::init_vlm_async(event_tx_vlm);
         });
     }
 

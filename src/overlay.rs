@@ -1412,6 +1412,7 @@ pub fn resolve_llm_config() -> LlmConfig {
         (LlmProvider::Glm, &["GLM_API_KEY", "ZHIPU_API_KEY"][..]),
         (LlmProvider::Groq, &["GROQ_API_KEY"][..]),
         (LlmProvider::Local, &["LOCAL_LLAMA_MODEL"][..]),
+        (LlmProvider::QwenVL, &["QWENVL_API_KEY"][..]),
     ];
 
     let forced_provider = std::env::var("LLM_PROVIDER")

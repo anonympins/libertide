@@ -2,6 +2,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::mpsc::Sender;
 use serde::{Deserialize, Serialize};
 use llama_cpp_2::context::params::LlamaContextParams;
@@ -225,6 +226,27 @@ pub const MODEL_PRESETS: &[ModelPreset] = &[
         size_desc: "~4.9 Go",
         family: ModelFamily::Llama3,
     },
+    ModelPreset {
+        id: "qwen2.5-vl-3b",
+        name: "Qwen 2 VL 2B (Vision Grounding bartowski)",
+        filename: "Qwen2-VL-2B-Instruct-Q4_K_M.gguf",
+        hf_url: "https://huggingface.co/bartowski/Qwen2-VL-2B-Instruct-GGUF/resolve/main/Qwen2-VL-2B-Instruct-Q4_K_M.gguf",
+        size_desc: "~1.5 Go",
+        family: ModelFamily::ChatML,
+    },
+    ModelPreset {
+        id: "qwen2.5-vl-7b",
+        name: "Qwen 2.5 VL 7B (Vision Grounding haute précision)",
+        filename: "Qwen_Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
+        hf_url: "https://huggingface.co/bartowski/Qwen_Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/Qwen_Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
+        size_desc: "~4.7 Go",
+        family: ModelFamily::ChatML,
+    },
+];
+
+pub const VLM_PRESETS: &[ModelPreset] = &[
+    MODEL_PRESETS[6],
+    MODEL_PRESETS[7],
 ];
 
 pub fn get_active_preset() -> &'static ModelPreset {
@@ -248,6 +270,111 @@ pub fn set_active_preset(preset_id: &str) {
     if let Ok(mut lock) = LOCAL_ENGINE.lock() {
         *lock = None;
     }
+}
+
+pub fn is_vlm_grounding_enabled() -> bool {
+    std::env::var("VLM_GROUNDING_ENABLED")
+        .ok()
+        .or_else(|| crate::fs_util::read_env_var_from_file(".env", "VLM_GROUNDING_ENABLED"))
+        .map(|s| {
+            let t = s.trim();
+            t.eq_ignore_ascii_case("true") || t == "1"
+        })
+        .unwrap_or(false)
+}
+
+pub fn set_vlm_grounding_enabled(enabled: bool) {
+    let val_str = if enabled { "true" } else { "false" };
+    std::env::set_var("VLM_GROUNDING_ENABLED", val_str);
+    let _ = crate::fs_util::write_env_var_to_file(".env", "VLM_GROUNDING_ENABLED", val_str);
+}
+
+pub fn get_active_vlm_preset() -> &'static ModelPreset {
+    let preset_var = std::env::var("VLM_PRESET")
+        .ok()
+        .or_else(|| crate::fs_util::read_env_var_from_file(".env", "VLM_PRESET"));
+    if let Some(preset_id) = preset_var {
+        let trimmed = preset_id.trim();
+        if let Some(p) = MODEL_PRESETS.iter().find(|p| p.id.eq_ignore_ascii_case(trimmed)) {
+            return p;
+        }
+    }
+    MODEL_PRESETS.iter().find(|p| p.id == "qwen2.5-vl-3b").unwrap_or(&MODEL_PRESETS[0])
+}
+
+pub fn set_active_vlm_preset(preset_id: &str) {
+    std::env::set_var("VLM_PRESET", preset_id);
+    let _ = crate::fs_util::write_env_var_to_file(".env", "VLM_PRESET", preset_id);
+}
+
+static VLM_ENGINE: Mutex<Option<LocalLlamaEngine>> = Mutex::new(None);
+static VLM_LOADING: AtomicBool = AtomicBool::new(false);
+
+pub fn is_vlm_ready() -> bool {
+    if let Ok(guard) = VLM_ENGINE.lock() {
+        guard.is_some()
+    } else {
+        false
+    }
+}
+
+/// Initialise et précharge le modèle Qwen-VL de manière totalement asynchrone en arrière-plan
+pub fn init_vlm_async(event_tx: Sender<AgentEvent>) {
+    if !is_vlm_grounding_enabled() {
+        return;
+    }
+    if is_vlm_ready() || VLM_LOADING.swap(true, AtomicOrdering::SeqCst) {
+        return;
+    }
+
+    std::thread::spawn(move || {
+        let preset = get_active_vlm_preset();
+        println!("[Qwen-VL Async] Démarrage du chargement en arrière-plan pour {}...", preset.name);
+
+        match ensure_llama_model_downloaded_for_preset(preset, &event_tx) {
+            Ok(path) => {
+                match LocalLlamaEngine::load(&path) {
+                    Ok(engine) => {
+                        println!("[Qwen-VL Async] Modèle visuel {} prêt en mémoire !", preset.name);
+                        let _ = event_tx.send(AgentEvent::SilentNarration(format!(
+                            "👁️ Modèle de vision {} chargé en mémoire avec succès.",
+                            preset.name
+                        )));
+                        if let Ok(mut guard) = VLM_ENGINE.lock() {
+                            *guard = Some(engine);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[Qwen-VL Async] Échec chargement modèle: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[Qwen-VL Async] Échec téléchargement du modèle {}: {e}", preset.name);
+            }
+        }
+        VLM_LOADING.store(false, AtomicOrdering::SeqCst);
+    });
+}
+
+/// Exécute l'inférence locale de grounding sur le modèle Qwen-VL chargé en RAM
+pub fn query_vlm_grounding_local(prompt: &str) -> Option<String> {
+    let guard = VLM_ENGINE.lock().ok()?;
+    let engine = guard.as_ref()?;
+    let preset = get_active_vlm_preset();
+
+    let formatted = match preset.family {
+        ModelFamily::Llama3 => format!(
+            "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are a vision grounding assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+            prompt
+        ),
+        ModelFamily::ChatML => format!(
+            "<|im_start|>system\nYou are a vision grounding assistant.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+            prompt
+        ),
+    };
+
+    engine.generate_fast(&formatted, 512).ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2213,13 +2340,33 @@ pub fn ensure_llama_model_downloaded_for_preset(
             .enable_all()
             .build()
             .map_err(|e| format!("Runtime Tokio: {e}"))?;
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .user_agent("libertide/1.0 (https://github.com/libertide)")
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
 
         rt.block_on(async {
             use tokio::io::AsyncWriteExt;
 
-            let mut res = client.get(&hf_url).send().await.map_err(|e| e.to_string())?;
+            let mut req = client.get(&hf_url);
+            let hf_token = std::env::var("HF_TOKEN").ok()
+                .or_else(|| std::env::var("HUGGING_FACE_HUB_TOKEN").ok())
+                .or_else(|| crate::fs_util::read_env_var_from_file(".env", "HF_TOKEN"))
+                .or_else(|| crate::fs_util::read_env_var_from_file(".env", "HUGGING_FACE_HUB_TOKEN"));
+            if let Some(token) = hf_token {
+                let t = token.trim();
+                if !t.is_empty() {
+                    req = req.bearer_auth(t);
+                }
+            }
+            let mut res = req.send().await.map_err(|e| e.to_string())?;
             if !res.status().is_success() {
+                if res.status().as_u16() == 401 {
+                    return Err(format!(
+                        "Erreur HTTP 401 (Non autorisé) sur {} : le dépôt requiert une authentification.",
+                        hf_url
+                    ));
+                }
                 return Err(format!("Erreur HTTP: {}", res.status()));
             }
 

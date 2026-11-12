@@ -1,6 +1,8 @@
 use crate::automation::NumberedElementTarget;
 #[cfg(windows)]
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
+use std::time::Duration;
+
 #[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
@@ -1179,6 +1181,280 @@ pub fn detect_visual_boxes_from_pixels(
     candidate_boxes
 }
 
+/// Encode une image RGBA en flux mémoire BMP 24 bits (sans dépendance externe)
+pub fn rgba_to_bmp(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let row_size = ((24 * width + 31) / 32) * 4;
+    let image_size = row_size * height;
+    let file_size = 54 + image_size;
+    let mut bmp = Vec::with_capacity(file_size as usize);
+
+    // BITMAPFILEHEADER (14 octets)
+    bmp.extend_from_slice(b"BM");
+    bmp.extend_from_slice(&file_size.to_le_bytes());
+    bmp.extend_from_slice(&[0, 0, 0, 0]); // Réservé
+    bmp.extend_from_slice(&54u32.to_le_bytes()); // Décalage vers les pixels
+
+    // BITMAPINFOHEADER (40 octets)
+    bmp.extend_from_slice(&40u32.to_le_bytes());
+    bmp.extend_from_slice(&(width as i32).to_le_bytes());
+    bmp.extend_from_slice(&(-(height as i32)).to_le_bytes()); // Négatif = top-down
+    bmp.extend_from_slice(&1u16.to_le_bytes());
+    bmp.extend_from_slice(&24u16.to_le_bytes());
+    bmp.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
+    bmp.extend_from_slice(&image_size.to_le_bytes());
+    bmp.extend_from_slice(&2835u32.to_le_bytes());
+    bmp.extend_from_slice(&2835u32.to_le_bytes());
+    bmp.extend_from_slice(&0u32.to_le_bytes());
+    bmp.extend_from_slice(&0u32.to_le_bytes());
+
+    let padding_bytes = (row_size - width * 3) as usize;
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let idx = (y * (width as usize) + x) * 4;
+            if idx + 2 < pixels.len() {
+                bmp.push(pixels[idx]);     // B
+                bmp.push(pixels[idx + 1]); // G
+                bmp.push(pixels[idx + 2]); // R
+            } else {
+                bmp.extend_from_slice(&[0, 0, 0]);
+            }
+        }
+        for _ in 0..padding_bytes {
+            bmp.push(0);
+        }
+    }
+    bmp
+}
+
+/// Encodage Base64 pur Rust sans crate supplémentaire
+pub fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct VlmElement {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    box_2d: Option<[f32; 4]>,
+    #[serde(default)]
+    point: Option<[f32; 2]>,
+}
+
+/// Exécute le GUI Grounding visuel via Qwen2-VL pour découvrir les icônes muettes et composants canvas
+pub fn detect_vlm_grounding_targets(
+    pixels: &[u8],
+    w: u32,
+    h: u32,
+    window_rect: [i32; 4],
+    existing_targets: &[NumberedElementTarget],
+) -> Vec<NumberedElementTarget> {
+    if w < 20 || h < 20 || pixels.is_empty() {
+        return Vec::new();
+    }
+
+    let max_dim = 960u32;
+    let (target_w, target_h) = if w > max_dim || h > max_dim {
+        let scale = (max_dim as f32 / w.max(h) as f32).min(1.0);
+        ((w as f32 * scale).round() as u32, (h as f32 * scale).round() as u32)
+    } else {
+        (w, h)
+    };
+
+    let bmp_bytes = if target_w != w || target_h != h {
+        let mut scaled = vec![0u8; (target_w * target_h * 4) as usize];
+        for dy in 0..target_h {
+            let sy = (dy * h / target_h) as usize;
+            for dx in 0..target_w {
+                let sx = (dx * w / target_w) as usize;
+                let s_idx = (sy * w as usize + sx) * 4;
+                let d_idx = (dy as usize * target_w as usize + dx as usize) * 4;
+                if s_idx + 4 <= pixels.len() && d_idx + 4 <= scaled.len() {
+                    scaled[d_idx..d_idx + 4].copy_from_slice(&pixels[s_idx..s_idx + 4]);
+                }
+            }
+        }
+        rgba_to_bmp(&scaled, target_w, target_h)
+    } else {
+        rgba_to_bmp(pixels, w, h)
+    };
+
+    let prompt = "Detect interactive icons, buttons, menus, canvas controls and cards lacking text. Output JSON list: [{\"name\": \"...\", \"role\": \"bouton\", \"box_2d\": [ymin, xmin, ymax, xmax]}] where coords are normalized 0..1000.";
+
+    // 1. Tenter en priorité absolue le modèle Qwen-VL chargé localement en asynchrone
+    if crate::local_llm::is_vlm_ready() {
+        if let Some(raw_text) = crate::local_llm::query_vlm_grounding_local(prompt) {
+            if let (Some(s), Some(e)) = (raw_text.find('['), raw_text.rfind(']')) {
+                let clean = &raw_text[s..=e];
+                if let Ok(elements) = serde_json::from_str::<Vec<VlmElement>>(clean) {
+                    return convert_vlm_elements_to_targets(elements, window_rect, existing_targets);
+                }
+            }
+        }
+    }
+
+    // 2. Repli vers le serveur / endpoint d'inférence configuré
+    let b64 = base64_encode(&bmp_bytes);
+    let data_uri = format!("data:image/bmp;base64,{b64}");
+
+    let endpoint = std::env::var("QWENVL_ENDPOINT")
+        .ok()
+        .or_else(|| crate::fs_util::read_env_var_from_file(".env", "QWENVL_ENDPOINT"))
+        .unwrap_or_else(|| "http://127.0.0.1:8000/v1/chat/completions".to_string());
+
+    let model_name = std::env::var("QWENVL_MODEL")
+        .ok()
+        .or_else(|| crate::fs_util::read_env_var_from_file(".env", "QWENVL_MODEL"))
+        .unwrap_or_else(|| "Qwen/Qwen2.5-VL-3B-Instruct".to_string());
+
+    let api_key = std::env::var("QWENVL_API_KEY")
+        .ok()
+        .or_else(|| crate::fs_util::read_env_var_from_file(".env", "QWENVL_API_KEY"))
+        .unwrap_or_default();
+
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+        return Vec::new();
+    };
+
+    let client = match reqwest::Client::builder().timeout(Duration::from_millis(3500)).build() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let body = serde_json::json!({
+        "model": model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": prompt },
+                    { "type": "image_url", "image_url": { "url": data_uri } }
+                ]
+            }
+        ],
+        "temperature": 0.1,
+        "max_tokens": 512
+    });
+
+    let mut req = client.post(&endpoint).json(&body);
+    if !api_key.trim().is_empty() {
+        req = req.bearer_auth(api_key.trim());
+    }
+
+    let res: Result<Vec<VlmElement>, String> = rt.block_on(async {
+        let resp = req.send().await.map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let raw_text = v.pointer("/choices/0/message/content").and_then(|v| v.as_str()).unwrap_or("");
+        let clean = if let (Some(s), Some(e)) = (raw_text.find('['), raw_text.rfind(']')) {
+            &raw_text[s..=e]
+        } else {
+            return Ok(Vec::new());
+        };
+        serde_json::from_str::<Vec<VlmElement>>(clean).map_err(|e| e.to_string())
+    });
+
+    let Ok(elements) = res else {
+        return Vec::new();
+    };
+
+    convert_vlm_elements_to_targets(elements, window_rect, existing_targets)
+}
+
+fn convert_vlm_elements_to_targets(
+    elements: Vec<VlmElement>,
+    window_rect: [i32; 4],
+    existing_targets: &[NumberedElementTarget],
+) -> Vec<NumberedElementTarget> {
+
+    let win_w = (window_rect[2] - window_rect[0]).max(1) as f32;
+    let win_h = (window_rect[3] - window_rect[1]).max(1) as f32;
+
+    let mut results = Vec::new();
+    for elem in elements {
+        let (rect, click_x, click_y) = if let Some([ymin, xmin, ymax, xmax]) = elem.box_2d {
+            let x0 = window_rect[0] + (xmin * win_w / 1000.0).round() as i32;
+            let y0 = window_rect[1] + (ymin * win_h / 1000.0).round() as i32;
+            let x1 = window_rect[0] + (xmax * win_w / 1000.0).round() as i32;
+            let y1 = window_rect[1] + (ymax * win_h / 1000.0).round() as i32;
+            let cx = (x0 + x1) / 2;
+            let cy = (y0 + y1) / 2;
+            ([x0, y0, x1, y1], cx, cy)
+        } else if let Some([px, py]) = elem.point {
+            let cx = window_rect[0] + (px * win_w / 1000.0).round() as i32;
+            let cy = window_rect[1] + (py * win_h / 1000.0).round() as i32;
+            ([cx - 16, cy - 16, cx + 16, cy + 16], cx, cy)
+        } else {
+            continue;
+        };
+
+        let overlaps = existing_targets.iter().any(|t| {
+            if t.name.trim().is_empty() { return false; }
+            let inter_x0 = rect[0].max(t.rect[0]);
+            let inter_y0 = rect[1].max(t.rect[1]);
+            let inter_x1 = rect[2].min(t.rect[2]);
+            let inter_y1 = rect[3].min(t.rect[3]);
+            if inter_x1 > inter_x0 && inter_y1 > inter_y0 {
+                let inter_area = ((inter_x1 - inter_x0) * (inter_y1 - inter_y0)) as f32;
+                let area = ((rect[2] - rect[0]).max(1) * (rect[3] - rect[1]).max(1)) as f32;
+                inter_area / area > 0.45
+            } else {
+                false
+            }
+        });
+
+        if !overlaps {
+            let role = if elem.role.trim().is_empty() {
+                "bouton (Qwen2-VL)".to_string()
+            } else {
+                format!("{} (Qwen2-VL)", elem.role.trim())
+            };
+            let name = if elem.name.trim().is_empty() {
+                "Élément visuel (VLM)".to_string()
+            } else {
+                elem.name.trim().to_string()
+            };
+            results.push(NumberedElementTarget {
+                index: 0,
+                click_x,
+                click_y,
+                rect,
+                name,
+                role,
+                shortcut: "Entrée".to_string(),
+                value: String::new(),
+                window_id: None,
+            });
+        }
+    }
+    results
+}
+
 /// Palette de couleurs vives et contrastées pour différencier chaque zone visuelle détectée
 pub fn visual_zone_color(index: usize) -> &'static str {
     const PALETTE: [&str; 12] = [
@@ -1204,6 +1480,20 @@ pub fn enrich_targets_with_ocr(
     window_rect: [i32; 4],
     existing_targets: &mut Vec<NumberedElementTarget>,
 ) {
+    // Injection du Grounding Visuel Qwen2-VL si activé
+    if crate::local_llm::is_vlm_grounding_enabled() {
+        if let Some((pixels, w, h)) = capture_window_rgba(hwnd, window_rect) {
+            let vlm_targets = detect_vlm_grounding_targets(&pixels, w, h, window_rect, existing_targets);
+            for mut t in vlm_targets {
+                let next_index = existing_targets.len() + 1;
+                t.index = next_index;
+                t.value = visual_zone_color(next_index).to_string();
+                t.window_id = Some(hwnd.0 as isize);
+                existing_targets.push(t);
+            }
+        }
+    }
+
     #[cfg(target_os = "macos")]
     {
         let vision_items = recognize_texts_vision(window_rect);

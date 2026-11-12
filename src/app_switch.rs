@@ -49,6 +49,7 @@ impl OverlayApp {
             "liste déroulante" | "select" | "combobox" => t!("roles.combobox").to_string(),
             "curseur" | "slider" => t!("roles.slider").to_string(),
             "lecteur multimédia" | "media" => t!("roles.media").to_string(),
+            s if s.contains("qwen") || s.contains("vlm") => "icône ou élément visuel détecté".to_string(),
             other => other.to_string(),
         };
 
@@ -293,7 +294,7 @@ impl OverlayApp {
         self.switch_active_window_id = Some(window_id);
         self.switch_step = SwitchAccessStep::Zones;
         self.switch_focus_index = 0;
-        self.switch_auto_scroll = false;
+        self.switch_auto_scroll = self.is_single_switch_mode();
         self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
         clear_screen_numbered_badges();
 
@@ -507,7 +508,7 @@ impl OverlayApp {
             return;
         }
         self.last_switch_input = Instant::now();
-        self.switch_auto_scroll = false;
+        self.switch_auto_scroll = self.is_single_switch_mode();
         self.hover_physical_mouse_moved = false;
         play_earcon(Earcon::Success);
 
