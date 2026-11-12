@@ -1197,7 +1197,7 @@ fn query_atspi_elements() -> Vec<AtspiElementRaw> {
                             &("org.a11y.atspi.Accessible", "Name"),
                         ).and_then(|r| {
                             let val: zbus::zvariant::OwnedValue = r.body().deserialize()?;
-                            val.into_inner().downcast::<String>().map_err(zbus::Error::Variant)
+                            zbus::zvariant::Value::from(val).downcast::<String>().map_err(zbus::Error::Variant)
                         })
                     });
 
