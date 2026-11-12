@@ -368,22 +368,27 @@ impl OverlayApp {
     }
 
     pub fn display_zones_overlay(&mut self, speech_text: &str) {
+        let num_zones = self.switch_zones.len();
+        let cur_zone_idx = self.switch_focus_index % num_zones.max(1);
         let zone_infos: Vec<ZoneOverlayInfo> = self.switch_zones.iter().enumerate().map(|(i, z)| {
             ZoneOverlayInfo {
                 index: i + 1,
                 title: z.title.clone(),
                 rect: z.rect,
-                is_focused: (self.switch_focus_index % self.switch_zones.len().max(1)) == i,
+                is_focused: cur_zone_idx == i,
             }
         }).collect();
 
-        // N'injecter que les badges jaunes de la zone active/focalisée
-        if let Some(cur_zone) = self.switch_zones.get(self.switch_focus_index % self.switch_zones.len().max(1)) {
-            let mut active_targets = cur_zone.targets.clone();
-            for (i, t) in active_targets.iter_mut().enumerate() {
+        // Positionnement physique et injection des badges de la première zone active
+        if let Some(cur_zone) = self.switch_zones.get_mut(cur_zone_idx) {
+            for (i, t) in cur_zone.targets.iter_mut().enumerate() {
                 t.index = i + 1;
             }
-            self.numbered_targets = active_targets;
+            self.numbered_targets = cur_zone.targets.clone();
+            set_global_cursor_pos(cur_zone.click_x, cur_zone.click_y);
+            self.hover_last_cursor_pos = Some((cur_zone.click_x, cur_zone.click_y));
+            self.hover_cursor_still_since = Instant::now();
+            self.hover_last_announced_zone = Some(cur_zone.title.clone());
         } else {
             self.numbered_targets.clear();
         }
@@ -391,15 +396,23 @@ impl OverlayApp {
         let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
         draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
 
+        let narration = if let Some(cur_zone) = self.switch_zones.get(cur_zone_idx) {
+            format!("Zone 1 : {}", cur_zone.title)
+        } else if !speech_text.is_empty() {
+            speech_text.to_string()
+        } else {
+            "Aucune zone interactive disponible".to_string()
+        };
+
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
-            text: speech_text.to_string(),
+            text: narration.clone(),
             timestamp: current_time_str(),
             quick_suggestions: Vec::new(),
             screen_size_kb: None,
         });
         let _ = self.tts_sender.send(TtsCommand::Stop);
-        let _ = self.tts_sender.send(TtsCommand::Speak(speech_text.to_string()));
+        let _ = self.tts_sender.send(TtsCommand::Speak(narration));
     }
 
     /// Active une fenêtre et affiche immédiatement la première zone bleue identifiée ainsi que ses points jaunes
@@ -464,12 +477,11 @@ impl OverlayApp {
         };
 
         self.switch_zones = zones;
-        if let Some(first_zone) = self.switch_zones.first() {
-            let mut active_targets = first_zone.targets.clone();
-            for (i, t) in active_targets.iter_mut().enumerate() {
+        if let Some(first_zone) = self.switch_zones.first_mut() {
+            for (i, t) in first_zone.targets.iter_mut().enumerate() {
                 t.index = i + 1;
             }
-            self.numbered_targets = active_targets;
+            self.numbered_targets = first_zone.targets.clone();
         } else {
             self.numbered_targets.clear();
         }
@@ -487,7 +499,13 @@ impl OverlayApp {
         draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
 
         if speak_summary {
-            let speech = if !summary.is_empty() { summary } else { win_title.to_string() };
+            let speech = if let Some(first_z) = self.switch_zones.first() {
+                format!("Zone 1 : {}", first_z.title)
+            } else if !summary.is_empty() {
+                summary
+            } else {
+                win_title.to_string()
+            };
             let _ = self.tts_sender.send(TtsCommand::Stop);
             let _ = self.tts_sender.send(TtsCommand::Speak(speech));
         }
@@ -600,6 +618,10 @@ impl OverlayApp {
         // Réaffecter des indices séquentiels pour ce chunk
         for (i, t) in self.numbered_targets.iter_mut().enumerate() {
             t.index = i + 1;
+        }
+
+        if let Some(zone) = self.switch_zones.get_mut(zone_idx) {
+            zone.targets = self.numbered_targets.clone();
         }
 
         if let Some(first_target) = self.numbered_targets.first() {

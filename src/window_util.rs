@@ -524,10 +524,11 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> B
             };
             list.push((hwnd, display_title));
         } else {
+            let is_iconic = IsIconic(hwnd).as_bool();
             let mut r = RECT::default();
             let has_rect = GetWindowRect(hwnd, &mut r).is_ok();
-            let is_real_window = has_rect && (r.right - r.left) >= 100 && (r.bottom - r.top) >= 60;
-            if is_real_window && !is_window_cloaked(hwnd) {
+            let is_real_window = is_iconic || (has_rect && (r.right - r.left) >= 100 && (r.bottom - r.top) >= 60);
+            if is_real_window && (!is_window_cloaked(hwnd) || is_iconic) {
                 let friendly_title = resolve_human_friendly_window_title(&title, &exe_name);
                 if !friendly_title.is_empty() && friendly_title != "Program Manager" {
                     list.push((hwnd, friendly_title));
@@ -2085,6 +2086,9 @@ pub fn focus_and_isolate_window(target: HWND) {
     }
 
     unsafe {
+        if IsIconic(target).as_bool() {
+            let _ = ShowWindow(target, SW_RESTORE);
+        }
         let _ = ShowWindow(target, SW_MAXIMIZE);
     }
     crate::automation::force_foreground_window(target);

@@ -91,7 +91,7 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
         let is_iconic = unsafe { IsIconic(hwnd).as_bool() };
         let is_visible = unsafe { IsWindowVisible(hwnd).as_bool() };
 
-        if !is_visible || is_window_cloaked(hwnd) {
+        if !is_visible || (!is_iconic && is_window_cloaked(hwnd)) {
             continue;
         }
 
@@ -157,10 +157,15 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
         let click_y = (rect[1] + 30).min(rect[3] - 10);
 
         let friendly_title = resolve_human_friendly_window_title(t_clean, &exe_name);
+        let display_title = if is_iconic {
+            format!("{friendly_title} (réduite)")
+        } else {
+            friendly_title
+        };
 
         candidates.push(SwitchWindowTarget {
             id: hwnd.0 as isize,
-            title: friendly_title,
+            title: display_title,
             click_x,
             click_y,
             rect,

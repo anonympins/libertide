@@ -2040,14 +2040,18 @@ impl eframe::App for OverlayApp {
                                     index: i + 1,
                                     title: z.title.clone(),
                                     rect: z.rect,
-                                    is_focused: i == 0,
+                                    is_focused: i == (self.switch_focus_index % self.switch_zones.len().max(1)),
                                 }
                             }).collect();
-                            draw_screen_zones_and_targets(&zone_infos, &[], self.zoom_factor, None);
-                        }
-                        if !summary.is_empty() && (self.hover_controls_speech_enabled || self.switch_step == SwitchAccessStep::Zones) {
-                            let _ = self.tts_sender.send(TtsCommand::Stop);
-                            let _ = self.tts_sender.send(TtsCommand::Speak(summary));
+                            if let Some(cur_zone) = self.switch_zones.get(self.switch_focus_index % self.switch_zones.len().max(1)) {
+                                let mut active_targets = cur_zone.targets.clone();
+                                for (i, t) in active_targets.iter_mut().enumerate() {
+                                    t.index = i + 1;
+                                }
+                                self.numbered_targets = active_targets;
+                            }
+                            let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
+                            draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
                         }
                         ctx.request_repaint();
                     }
@@ -2301,8 +2305,12 @@ impl eframe::App for OverlayApp {
                             if fresh_zone_targets.is_empty() {
                                 self.numbered_targets = result.targets.clone();
                             } else {
-                                zone.targets = fresh_zone_targets.clone();
-                                self.numbered_targets = fresh_zone_targets;
+                                let mut active_targets = fresh_zone_targets;
+                                for (i, t) in active_targets.iter_mut().enumerate() {
+                                    t.index = i + 1;
+                                }
+                                zone.targets = active_targets.clone();
+                                self.numbered_targets = active_targets;
                             }
                         } else {
                             self.numbered_targets = result.targets.clone();
@@ -2649,14 +2657,11 @@ impl eframe::App for OverlayApp {
                                         draw_screen_control_border(cur_target.rect, false);
                                         let parent_zone = self.switch_active_zone_index.and_then(|idx| self.switch_zones.get(idx));
                                         let zone_title = parent_zone.map(|z| z.title.as_str());
-                                        let index_in_zone = parent_zone.and_then(|z| {
-                                            z.targets.iter().position(|t| t.index == cur_target.index).map(|p| p + 1)
-                                        }).or(Some(t_idx + 1));
                                         let is_same_zone = self.hover_last_announced_zone.as_deref() == zone_title;
                                         let announcement = build_targeted_hover_speech(
                                             zone_title,
                                             parent_zone.map_or(&self.numbered_targets, |z| &z.targets),
-                                            index_in_zone.unwrap_or(t_idx + 1),
+                                            cur_target.index,
                                             &cur_target.name,
                                             &cur_target.role,
                                             &cur_target.shortcut,
@@ -2969,15 +2974,12 @@ impl eframe::App for OverlayApp {
 
                             let parent_zone = self.switch_active_zone_index.and_then(|idx| self.switch_zones.get(idx));
                             let zone_title = parent_zone.map(|z| z.title.as_str());
-                            let index_in_zone = parent_zone.and_then(|z| {
-                                z.targets.iter().position(|t| t.index == cur_target.index).map(|p| p + 1)
-                            }).or(Some(self.switch_focus_index + 1));
                             let is_same_zone = self.hover_last_announced_zone.as_deref() == zone_title;
 
                             let announcement = build_targeted_hover_speech(
                                 zone_title,
                                 parent_zone.map_or(&self.numbered_targets, |z| &z.targets),
-                                index_in_zone.unwrap_or(self.switch_focus_index + 1),
+                                cur_target.index,
                                 &cur_target.name,
                                 &cur_target.role,
                                 &cur_target.shortcut,
