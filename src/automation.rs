@@ -2140,7 +2140,6 @@ pub fn install_switch_keyboard_hook() {
 
                     let mut msg = MSG::default();
                     // Boucle de messages Win32 dédiée pour pomper les notifications WH_KEYBOARD_LL
-                    let mut msg = MSG::default();
                     unsafe {
                         while GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0).as_bool() {
                             let _ = TranslateMessage(&msg);
