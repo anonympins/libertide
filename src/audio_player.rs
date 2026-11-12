@@ -2,19 +2,23 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 #[derive(Clone)]
 pub struct AudioPlayer {
-    sender: Sender<(Vec<f32>, u32)>,
+    sender: Sender<(u64, Vec<f32>, u32)>,
     ring_buffer: Arc<Mutex<VecDeque<f32>>>,
+    generation: Arc<AtomicU64>,
 }
 
 impl AudioPlayer {
     pub fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let (tx, rx) = channel::<(Vec<f32>, u32)>();
+        let (tx, rx) = channel::<(u64, Vec<f32>, u32)>();
         let ring_buffer: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
         let ring_buffer_clone = Arc::clone(&ring_buffer);
+        let generation = Arc::new(AtomicU64::new(0));
+        let generation_clone = Arc::clone(&generation);
         let rx = Arc::new(Mutex::new(rx));
 
         thread::spawn(move || {
@@ -102,11 +106,17 @@ impl AudioPlayer {
                 return;
             }
 
-            while let Ok((raw_samples, src_rate)) = rx.lock().unwrap().recv() {
+            while let Ok((gen, raw_samples, src_rate)) = rx.lock().unwrap().recv() {
+                if gen != generation_clone.load(Ordering::SeqCst) {
+                    continue;
+                }
                 if raw_samples.is_empty() {
                     continue;
                 }
                 let converted = resample_audio(&raw_samples, src_rate, sample_rate, channels);
+                if gen != generation_clone.load(Ordering::SeqCst) {
+                    continue;
+                }
                 let mut buf = ring_buffer.lock().unwrap();
                 buf.extend(converted);
             }
@@ -115,14 +125,17 @@ impl AudioPlayer {
         Ok(Self {
             sender: tx,
             ring_buffer: ring_buffer_clone,
+            generation,
         })
     }
 
     pub fn play_samples(&self, samples: Vec<f32>, sample_rate: u32) {
-        let _ = self.sender.send((samples, sample_rate));
+        let gen = self.generation.load(Ordering::SeqCst);
+        let _ = self.sender.send((gen, samples, sample_rate));
     }
 
     pub fn stop(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut buf) = self.ring_buffer.lock() {
             buf.clear();
         }

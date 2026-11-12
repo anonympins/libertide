@@ -212,6 +212,7 @@ impl OverlayApp {
         self.dwell_state.activation_delay = Duration::from_millis(200);
         SWITCH_DEBOUNCE_MS.store(180, Ordering::Relaxed);
         SWITCH_LONG_PRESS_MS.store(1100, Ordering::Relaxed);
+        self.switch_auto_scroll = false;
     }
 
     pub fn select_exclusive_disability_preset(&mut self, preset: DisabilityPreset, ctx: &egui::Context) {
@@ -294,16 +295,19 @@ impl OverlayApp {
             self.dwell_state.activation_delay = Duration::from_millis(600);
             SWITCH_DEBOUNCE_MS.store(450, Ordering::Relaxed);
             SWITCH_LONG_PRESS_MS.store(1600, Ordering::Relaxed);
+            self.switch_auto_scroll = true;
         } else if has_tremor {
             self.dwell_state.dwell_duration = Duration::ZERO;
             self.dwell_state.activation_delay = Duration::from_millis(200);
             SWITCH_DEBOUNCE_MS.store(450, Ordering::Relaxed);
             SWITCH_LONG_PRESS_MS.store(1600, Ordering::Relaxed);
+            self.switch_auto_scroll = false;
         } else if has_switch {
             self.dwell_state.dwell_duration = Duration::from_millis(1400);
             self.dwell_state.activation_delay = Duration::from_millis(450);
             SWITCH_DEBOUNCE_MS.store(220, Ordering::Relaxed);
             SWITCH_LONG_PRESS_MS.store(1200, Ordering::Relaxed);
+            self.switch_auto_scroll = true;
         }
         let _ = write_env_var_to_file(".env", "DWELL_TIME_MS", &self.dwell_state.dwell_duration.as_millis().to_string());
         let _ = write_env_var_to_file(".env", "DWELL_ACTIVATION_DELAY_MS", &self.dwell_state.activation_delay.as_millis().to_string());
@@ -702,6 +706,107 @@ impl OverlayApp {
                                         });
                                 } else {
                                     ui.add_space(4.0);
+
+                                    // Bloc dédié Qwen2-VL : Supplément visuel & Grounding GUI
+                                    egui::Frame::new()
+                                        .fill(theme.control_bg)
+                                        .stroke(egui::Stroke::new(1.0, theme.accent))
+                                        .corner_radius(egui::CornerRadius::same(8))
+                                        .inner_margin(egui::Margin::symmetric(10, 8))
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new("👁️ Supplément Visuel & GUI Grounding (Qwen2-VL)")
+                                                        .size(11.5)
+                                                        .color(theme.accent)
+                                                        .strong(),
+                                                );
+                                            });
+                                            ui.add_space(2.0);
+                                            ui.label(
+                                                egui::RichText::new("Détecte visuellement les icônes sans texte (☰, ⚙️, 🔍), les toiles Canvas HTML5 et les interfaces non exposées par l'accessibilité native.")
+                                                    .size(10.5)
+                                                    .color(theme.text_secondary),
+                                            );
+                                            ui.add_space(4.0);
+
+                                            let mut vlm_on = local_llm::is_vlm_grounding_enabled();
+                                            if ui.checkbox(&mut vlm_on, "Activer le Grounding Visuel Qwen2-VL").changed() {
+                                                local_llm::set_vlm_grounding_enabled(vlm_on);
+                                                if vlm_on {
+                                                    local_llm::init_vlm_async(self.event_sender.clone());
+                                                }
+                                                play_earcon(Earcon::Success);
+                                            }
+
+                                            ui.add_space(4.0);
+                                            let active_vlm = local_llm::get_active_vlm_preset();
+                                            let mut model_to_delete = None;
+
+                                            for preset in local_llm::VLM_PRESETS {
+                                                let is_active = active_vlm.id == preset.id;
+                                                let is_installed = local_llm::is_preset_downloaded(preset);
+
+                                                ui.horizontal(|ui| {
+                                                    let radio_label = format!("{} ({})", preset.name, preset.size_desc);
+                                                    let radio_resp = ui.radio(is_active, radio_label);
+                                                    if make_widget_accessible_and_activated(ui, &radio_resp, theme.accent) && !is_active {
+                                                        local_llm::set_active_vlm_preset(preset.id);
+                                                        if local_llm::is_vlm_grounding_enabled() {
+                                                            local_llm::init_vlm_async(self.event_sender.clone());
+                                                        }
+                                                        play_earcon(Earcon::Success);
+                                                    }
+
+                                                    if is_installed {
+                                                        ui.label(egui::RichText::new("✓ Installé").size(10.5).color(egui::Color32::from_rgb(100, 225, 130)).strong());
+                                                        let del_btn = ui.small_button("🗑").on_hover_text("Supprimer ce modèle local du disque");
+                                                        if make_widget_accessible_and_activated(ui, &del_btn, theme.accent) {
+                                                            model_to_delete = Some(preset);
+                                                        }
+                                                    } else {
+                                                        let event_tx_clone = self.event_sender.clone();
+                                                        let p = *preset;
+                                                        let dl_btn = ui.small_button(format!("📥 Télécharger ({})", p.size_desc));
+                                                        if make_widget_accessible_and_activated(ui, &dl_btn, theme.accent) {
+                                                            std::thread::spawn(move || {
+                                                                let _ = local_llm::ensure_llama_model_downloaded_for_preset(&p, &event_tx_clone);
+                                                            });
+                                                        }
+                                                    }
+                                                });
+                                            }
+
+                                            if let Some(p) = model_to_delete {
+                                                let event_tx = self.event_sender.clone();
+                                                std::thread::spawn(move || {
+                                                    match local_llm::delete_preset_model(p) {
+                                                        Ok(()) => {
+                                                            play_earcon(Earcon::Success);
+                                                            let _ = event_tx.send(AgentEvent::SilentNarration(format!("Modèle {} supprimé du disque.", p.name)));
+                                                        }
+                                                        Err(e) => {
+                                                            play_earcon(Earcon::Error);
+                                                            let _ = event_tx.send(AgentEvent::SilentNarration(format!("Erreur suppression {} : {}", p.name, e)));
+                                                        }
+                                                    }
+                                                });
+                                            }
+
+                                            if let Some(ref dl) = self.active_download {
+                                                if dl.label.contains("VL") || dl.label.contains("Grounding") {
+                                                    ui.add_space(3.0);
+                                                    ui.add(
+                                                        egui::ProgressBar::new(dl.percent / 100.0)
+                                                            .text(format!("{:.1}% ({:.1}/{:.1} Mo - {:.1} Mo/s)", dl.percent, dl.downloaded_mb, dl.total_mb, dl.speed_mb_s))
+                                                            .animate(true),
+                                                    );
+                                                }
+                                            }
+                                        });
+
+                                    ui.add_space(6.0);
+
                                     ui.label(egui::RichText::new(t!("ui.api_key_label", env = env_var_target)).size(11.0).color(egui::Color32::WHITE).strong());
                                     ui.add_space(2.0);
 
@@ -1122,6 +1227,26 @@ impl OverlayApp {
                                         ui.add_space(4.0);
                                         ui.separator();
                                         ui.add_space(4.0);
+
+                                        let mut auto_scan = self.switch_auto_scroll;
+                                        let resp_auto_scan = ui.checkbox(
+                                            &mut auto_scan,
+                                            egui::RichText::new("Défilement automatique (Balayage contacteur unique)")
+                                                .size(11.5)
+                                                .color(theme.text_primary),
+                                        ).on_hover_text("Active le balayage automatique cadencé en mode contacteur unique (désactivé par défaut en mode survol)");
+                                        let id_auto_scan = ui.make_persistent_id("dwell_switch_auto_scroll");
+                                        let is_scan_key = make_toggle_accessible(ui, &resp_auto_scan, theme.accent);
+                                        if resp_auto_scan.changed() || apply_dwell_to_response(ui, &mut self.dwell_state, id_auto_scan, &resp_auto_scan) || is_scan_key {
+                                            if resp_auto_scan.changed() {
+                                                self.switch_auto_scroll = auto_scan;
+                                            } else {
+                                                self.switch_auto_scroll = !self.switch_auto_scroll;
+                                            }
+                                            let val_str = if self.switch_auto_scroll { "true" } else { "false" };
+                                            let _ = write_env_var_to_file(".env", "SWITCH_AUTO_SCROLL", val_str);
+                                            std::env::set_var("SWITCH_AUTO_SCROLL", val_str);
+                                        }
 
                                         // 4. Contacteur unique (Switch Access)
                                         let mut cur_long_press = SWITCH_LONG_PRESS_MS.load(Ordering::Relaxed);

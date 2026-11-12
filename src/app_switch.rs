@@ -49,15 +49,31 @@ impl OverlayApp {
             "liste déroulante" | "select" | "combobox" => t!("roles.combobox").to_string(),
             "curseur" | "slider" => t!("roles.slider").to_string(),
             "lecteur multimédia" | "media" => t!("roles.media").to_string(),
+            s if s.contains("qwen") || s.contains("vlm") => "icône ou élément visuel détecté".to_string(),
             other => other.to_string(),
         };
 
-        let target_desc = if target.name.trim().is_empty() {
+        let effective_name = if target.role == "fenêtre" && !is_human_friendly_window_title(&target.name) {
+            #[cfg(windows)]
+            {
+                let wid = target.window_id.unwrap_or(0);
+                let (_pid, exe_name) = get_window_process_info(windows::Win32::Foundation::HWND(wid as _));
+                resolve_human_friendly_window_title(&target.name, &exe_name)
+            }
+            #[cfg(not(windows))]
+            {
+                "Fenêtre".to_string()
+            }
+        } else {
+            target.name.trim().to_string()
+        };
+
+        let target_desc = if effective_name.is_empty() {
             t!("commands.target_desc_role", index = target.index, role = role_label).to_string()
         } else if target.value.trim().is_empty() {
-            t!("commands.target_desc_name_role", index = target.index, name = target.name.trim(), role = role_label).to_string()
+            t!("commands.target_desc_name_role", index = target.index, name = effective_name, role = role_label).to_string()
         } else {
-            t!("commands.target_desc_full", index = target.index, name = target.name.trim(), role = role_label, value = target.value.trim()).to_string()
+            t!("commands.target_desc_full", index = target.index, name = effective_name, role = role_label, value = target.value.trim()).to_string()
         };
 
         let speech = if let Some(p) = prefix {
@@ -74,7 +90,7 @@ impl OverlayApp {
         if self.switch_access_mode {
             match self.switch_step {
                 SwitchAccessStep::Windows => {
-                    if !self.switch_zones.is_empty() {
+                    if !self.switch_zones.is_empty() && !self.numbered_targets.is_empty() {
                         let zone_infos: Vec<ZoneOverlayInfo> = self.switch_zones.iter().enumerate().map(|(i, z)| {
                             ZoneOverlayInfo {
                                 index: i + 1,
@@ -88,6 +104,8 @@ impl OverlayApp {
                     } else if !self.numbered_targets.is_empty() {
                         let focused_idx = self.numbered_targets.first().map(|t| t.index);
                         draw_screen_numbered_badges(&self.numbered_targets, self.zoom_factor, focused_idx);
+                    } else {
+                        clear_screen_numbered_badges();
                     }
                 }
                 SwitchAccessStep::Zones => {
@@ -103,11 +121,17 @@ impl OverlayApp {
                         }).collect();
                         let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
                         draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
+                    } else if !self.numbered_targets.is_empty() {
+                        let focused_idx = self.numbered_targets.first().map(|t| t.index);
+                        draw_screen_numbered_badges(&self.numbered_targets, self.zoom_factor, focused_idx);
+                    } else {
+                        clear_screen_numbered_badges();
                     }
                 }
                 SwitchAccessStep::Elements => {
                     let focused_target = self.numbered_targets.get(self.switch_focus_index % self.numbered_targets.len().max(1));
                     let focused_idx = focused_target.map(|t| t.index);
+                    let focused_border = focused_target.map(|t| (t.rect, t.role == "lecture textuelle"));
                     let active_zone_opt = self.switch_active_zone_index.and_then(|idx| self.switch_zones.get(idx));
                     let chunk_start = self.numbered_chunk_offset.min(self.numbered_targets.len());
                     let chunk_end = (chunk_start + 50).min(self.numbered_targets.len());
@@ -116,6 +140,8 @@ impl OverlayApp {
                     } else {
                         &self.numbered_targets[..]
                     };
+
+                    set_overlay_focused_border(focused_border);
 
                     if let Some(zone) = active_zone_opt {
                         let zone_info = vec![ZoneOverlayInfo {
@@ -127,14 +153,13 @@ impl OverlayApp {
                         draw_screen_zones_and_targets(&zone_info, visible_targets, self.zoom_factor, focused_idx);
                     } else if !visible_targets.is_empty() {
                         draw_screen_numbered_badges(visible_targets, self.zoom_factor, focused_idx);
-                    }
-
-                    #[cfg(windows)]
-                    if let Some(target) = focused_target {
-                        draw_screen_control_border(target.rect, target.role == "lecture textuelle");
+                    } else {
+                        clear_screen_numbered_badges();
                     }
                 }
             }
+        } else {
+            clear_screen_numbered_badges();
         }
     }
 
@@ -176,9 +201,12 @@ impl OverlayApp {
                 }
             }
 
+            self.numbered_targets.clear();
+            self.switch_zones.clear();
+            self.switch_active_zone_index = None;
+            clear_screen_numbered_badges();
             #[cfg(windows)]
             {
-                clear_screen_numbered_badges();
                 if let Some(wid) = target.window_id {
                     let hwnd = windows::Win32::Foundation::HWND(wid as _);
                     if !hwnd.0.is_null() && !is_window_hung(hwnd) {
@@ -290,10 +318,15 @@ impl OverlayApp {
 
     /// Transitionne de l'étape fenêtre vers l'étape des Chunks de badges / Zones
     pub fn transition_to_zones_for_window(&mut self, window_id: isize, win_title: &str) {
+        self.numbered_targets.clear();
+        self.switch_zones.clear();
+        self.switch_active_zone_index = None;
+        clear_screen_numbered_badges();
+
         self.switch_active_window_id = Some(window_id);
         self.switch_step = SwitchAccessStep::Zones;
         self.switch_focus_index = 0;
-        self.switch_auto_scroll = false;
+        self.switch_auto_scroll = self.is_single_switch_mode();
         self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
         clear_screen_numbered_badges();
 
@@ -334,22 +367,27 @@ impl OverlayApp {
     }
 
     pub fn display_zones_overlay(&mut self, speech_text: &str) {
+        let num_zones = self.switch_zones.len();
+        let cur_zone_idx = self.switch_focus_index % num_zones.max(1);
         let zone_infos: Vec<ZoneOverlayInfo> = self.switch_zones.iter().enumerate().map(|(i, z)| {
             ZoneOverlayInfo {
                 index: i + 1,
                 title: z.title.clone(),
                 rect: z.rect,
-                is_focused: (self.switch_focus_index % self.switch_zones.len().max(1)) == i,
+                is_focused: cur_zone_idx == i,
             }
         }).collect();
 
-        // N'injecter que les badges jaunes de la zone active/focalisée
-        if let Some(cur_zone) = self.switch_zones.get(self.switch_focus_index % self.switch_zones.len().max(1)) {
-            let mut active_targets = cur_zone.targets.clone();
-            for (i, t) in active_targets.iter_mut().enumerate() {
+        // Positionnement physique et injection des badges de la première zone active
+        if let Some(cur_zone) = self.switch_zones.get_mut(cur_zone_idx) {
+            for (i, t) in cur_zone.targets.iter_mut().enumerate() {
                 t.index = i + 1;
             }
-            self.numbered_targets = active_targets;
+            self.numbered_targets = cur_zone.targets.clone();
+            set_global_cursor_pos(cur_zone.click_x, cur_zone.click_y);
+            self.hover_last_cursor_pos = Some((cur_zone.click_x, cur_zone.click_y));
+            self.hover_cursor_still_since = Instant::now();
+            self.hover_last_announced_zone = Some(cur_zone.title.clone());
         } else {
             self.numbered_targets.clear();
         }
@@ -357,15 +395,23 @@ impl OverlayApp {
         let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
         draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
 
+        let narration = if let Some(cur_zone) = self.switch_zones.get(cur_zone_idx) {
+            format!("Zone 1 : {}", cur_zone.title)
+        } else if !speech_text.is_empty() {
+            speech_text.to_string()
+        } else {
+            "Aucune zone interactive disponible".to_string()
+        };
+
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
-            text: speech_text.to_string(),
+            text: narration.clone(),
             timestamp: current_time_str(),
             quick_suggestions: Vec::new(),
             screen_size_kb: None,
         });
         let _ = self.tts_sender.send(TtsCommand::Stop);
-        let _ = self.tts_sender.send(TtsCommand::Speak(speech_text.to_string()));
+        let _ = self.tts_sender.send(TtsCommand::Speak(narration));
     }
 
     /// Active une fenêtre et affiche immédiatement la première zone bleue identifiée ainsi que ses points jaunes
@@ -376,6 +422,11 @@ impl OverlayApp {
         win_rect: [i32; 4],
         speak_summary: bool,
     ) {
+        self.numbered_targets.clear();
+        self.switch_zones.clear();
+        self.switch_active_zone_index = None;
+        clear_screen_numbered_badges();
+
         self.switch_active_window_id = Some(window_id);
 
         #[cfg(windows)]
@@ -425,12 +476,11 @@ impl OverlayApp {
         };
 
         self.switch_zones = zones;
-        if let Some(first_zone) = self.switch_zones.first() {
-            let mut active_targets = first_zone.targets.clone();
-            for (i, t) in active_targets.iter_mut().enumerate() {
+        if let Some(first_zone) = self.switch_zones.first_mut() {
+            for (i, t) in first_zone.targets.iter_mut().enumerate() {
                 t.index = i + 1;
             }
-            self.numbered_targets = active_targets;
+            self.numbered_targets = first_zone.targets.clone();
         } else {
             self.numbered_targets.clear();
         }
@@ -448,13 +498,53 @@ impl OverlayApp {
         draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
 
         if speak_summary {
-            let speech = if !summary.is_empty() { summary } else { win_title.to_string() };
+            let speech = if let Some(first_z) = self.switch_zones.first() {
+                format!("Zone 1 : {}", first_z.title)
+            } else if !summary.is_empty() {
+                summary
+            } else {
+                win_title.to_string()
+            };
             let _ = self.tts_sender.send(TtsCommand::Stop);
             let _ = self.tts_sender.send(TtsCommand::Speak(speech));
         }
     }
 
     pub fn refresh_numbered_targets_for_window(&mut self, hwnd_id: isize) {
+        let is_different_win = self.numbered_last_hwnd != Some(hwnd_id)
+            || self.switch_active_window_id != Some(hwnd_id)
+            || !self.numbered_targets.iter().all(|t| t.window_id == Some(hwnd_id));
+
+        let previous_for_reconcile = if !is_different_win {
+            self.numbered_targets.clone()
+        } else {
+            Vec::new()
+        };
+
+        // En cas de changement réel de fenêtre, vider l'ancien affichage.
+        // Si on reste sur la même fenêtre, on conserve le buffer courant pour éviter tout clignotement.
+        if is_different_win {
+            if self.switch_step == SwitchAccessStep::Windows && !self.switch_windows.is_empty() {
+                self.numbered_targets = self.switch_windows.iter().enumerate().map(|(i, w)| {
+                    NumberedElementTarget {
+                        index: i + 1,
+                        name: w.title.clone(),
+                        role: "fenêtre".to_string(),
+                        rect: w.rect,
+                        click_x: w.click_x,
+                        click_y: w.click_y,
+                        shortcut: String::new(),
+                        value: String::new(),
+                        window_id: Some(w.id),
+                    }
+                }).collect();
+            } else {
+                self.numbered_targets.clear();
+            }
+            self.switch_zones.clear();
+            self.switch_active_zone_index = None;
+        }
+
         #[cfg(windows)]
         {
             let hwnd = windows::Win32::Foundation::HWND(hwnd_id as _);
@@ -465,6 +555,10 @@ impl OverlayApp {
             let mut r = windows::Win32::Foundation::RECT::default();
             let has_rect = unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut r).is_ok() };
             let cur_rect = if has_rect { Some([r.left, r.top, r.right, r.bottom]) } else { None };
+
+            if let Some(rect) = cur_rect {
+                draw_screen_orange_border(rect);
+            }
 
             self.numbered_last_refresh = Instant::now();
             self.numbered_last_hwnd = Some(hwnd_id);
@@ -477,7 +571,7 @@ impl OverlayApp {
             let req = TargetsScanRequest {
                 hwnd: hwnd_id,
                 win_rect: cur_rect,
-                previous: self.numbered_targets.clone(),
+                previous: previous_for_reconcile,
                 sequence: self.scan_sequence_counter,
             };
             self.is_scan_in_progress = true;
@@ -485,15 +579,23 @@ impl OverlayApp {
         }
         #[cfg(not(windows))]
         {
+            let cur_rect = self.switch_windows
+                .iter()
+                .find(|w| w.id == hwnd_id)
+                .map(|w| w.rect)
+                .or_else(get_active_window_rect);
+
             self.numbered_last_refresh = Instant::now();
+            self.numbered_last_hwnd = Some(hwnd_id);
+            self.numbered_last_win_rect = cur_rect;
             self.numbered_chunk_offset = 0;
             self.switch_active_window_id = Some(hwnd_id);
             self.numbered_input_buffer.clear();
             self.scan_sequence_counter += 1;
             let req = TargetsScanRequest {
                 hwnd: hwnd_id,
-                win_rect: None,
-                previous: self.numbered_targets.clone(),
+                win_rect: cur_rect,
+                previous: if !is_different_win { self.numbered_targets.clone() } else { Vec::new() },
                 sequence: self.scan_sequence_counter,
             };
             self.is_scan_in_progress = true;
@@ -507,10 +609,11 @@ impl OverlayApp {
             return;
         }
         self.last_switch_input = Instant::now();
-        self.switch_auto_scroll = false;
+        self.switch_auto_scroll = self.is_single_switch_mode();
         self.hover_physical_mouse_moved = false;
         play_earcon(Earcon::Success);
 
+        clear_screen_numbered_badges();
         let cur_zone = self.switch_zones[zone_idx].clone();
         self.numbered_targets = cur_zone.targets.clone();
         self.switch_active_zone_index = Some(zone_idx);
@@ -521,6 +624,10 @@ impl OverlayApp {
         // Réaffecter des indices séquentiels pour ce chunk
         for (i, t) in self.numbered_targets.iter_mut().enumerate() {
             t.index = i + 1;
+        }
+
+        if let Some(zone) = self.switch_zones.get_mut(zone_idx) {
+            zone.targets = self.numbered_targets.clone();
         }
 
         if let Some(first_target) = self.numbered_targets.first() {

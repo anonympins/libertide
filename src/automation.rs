@@ -12,6 +12,8 @@ use crate::fs_util::{
     create_temp_note_file, find_executable_in_path, find_file_in_workspace,
     open_path_with_default_app,
 };
+#[cfg(not(windows))]
+use crate::ocr::HWND;
 use crate::types::{AgentAction, QuickSuggestionItem};
 pub use crate::types::{NavigationZone, NumberedElementTarget};
 use crate::window_util::*;
@@ -44,8 +46,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow,
     DispatchMessageW, FindWindowW, GetForegroundWindow, GetMessageW, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, MSG, PostThreadMessageW,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, HHOOK, WM_QUIT,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, MSG, PostThreadMessageW,
+    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, HHOOK, WM_QUIT,
     GetGUIThreadInfo, GUITHREADINFO,
     PostMessageW, SendMessageW, SetForegroundWindow, ShowWindow,
     SW_RESTORE, WM_CLOSE,
@@ -76,7 +78,6 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
         FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()))
     };
     let current_pid = std::process::id();
-    let wa = get_desktop_work_area();
 
     let mut candidates = Vec::new();
 
@@ -89,7 +90,12 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
             continue;
         }
 
-        let is_minimized = unsafe { IsIconic(hwnd).as_bool() };
+        let is_iconic = unsafe { IsIconic(hwnd).as_bool() };
+        let is_visible = unsafe { IsWindowVisible(hwnd).as_bool() };
+
+        if !is_visible || (!is_iconic && is_window_cloaked(hwnd)) {
+            continue;
+        }
 
         let t_clean = title.trim();
         let t_lower = t_clean.to_lowercase();
@@ -113,8 +119,24 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
             continue;
         }
 
-        let rect = if is_minimized {
-            [wa.left, wa.top, wa.right, wa.bottom]
+        let rect = if is_iconic {
+            // Récupérer la géométrie normale mémorisée de la fenêtre minimisée
+            let mut wp = windows::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT::default();
+            wp.length = std::mem::size_of::<windows::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT>() as u32;
+            if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowPlacement(hwnd, &mut wp).is_ok() } {
+                let r = wp.rcNormalPosition;
+                let w = r.right - r.left;
+                let h = r.bottom - r.top;
+                if w >= 120 && h >= 80 {
+                    [r.left, r.top, r.right, r.bottom]
+                } else {
+                    let wa = get_desktop_work_area();
+                    [wa.left, wa.top, wa.right, wa.bottom]
+                }
+            } else {
+                let wa = get_desktop_work_area();
+                [wa.left, wa.top, wa.right, wa.bottom]
+            }
         } else {
             let mut r = RECT::default();
             let rect_ok = unsafe { GetWindowRect(hwnd, &mut r).is_ok() };
@@ -126,15 +148,26 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
             if width < 120 || height < 80 {
                 continue;
             }
-            [r.left, r.top, r.right, r.bottom]
+            let screen_rect = [r.left, r.top, r.right, r.bottom];
+            if crate::ocr::capture_window_rgba(hwnd, screen_rect).is_none() {
+                continue;
+            }
+            screen_rect
         };
 
         let click_x = rect[0] + ((rect[2] - rect[0]) / 2);
         let click_y = (rect[1] + 30).min(rect[3] - 10);
 
+        let friendly_title = resolve_human_friendly_window_title(t_clean, &exe_name);
+        let display_title = if is_iconic {
+            format!("{friendly_title} (réduite)")
+        } else {
+            friendly_title
+        };
+
         candidates.push(SwitchWindowTarget {
             id: hwnd.0 as isize,
-            title: t_clean.to_string(),
+            title: display_title,
             click_x,
             click_y,
             rect,
@@ -199,6 +232,7 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
     items
         .into_iter()
         .filter(|w| w.width >= 100 && w.height >= 60)
+        .filter(|w| crate::ocr::capture_window_rgba(HWND::NULL, [w.x, w.y, w.x + w.width, w.y + w.height]).is_some())
         .map(|w| {
             let hash = w.id.as_bytes().iter().fold(0isize, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as isize));
             SwitchWindowTarget {
@@ -240,13 +274,18 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
                 if w < 100 || h < 60 {
                     continue;
                 }
+                let rect = [x, y, x + w, y + h];
+                if crate::ocr::capture_window_rgba(HWND::NULL, rect).is_none() {
+                    continue;
+                }
+
                 let hash = win_id.as_bytes().iter().fold(0isize, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as isize));
                 candidates.push(SwitchWindowTarget {
                     id: hash.abs().max(1),
                     title: t_clean.to_string(),
                     click_x: x + (w / 2),
                     click_y: (y + 30).min(y + h - 10),
-                    rect: [x, y, x + w, y + h],
+                    rect,
                 });
             }
         }
@@ -315,14 +354,20 @@ pub fn collect_numbered_targets_for_window(hwnd: HWND) -> Vec<NumberedElementTar
     if hwnd.0.is_null() || is_window_hung(hwnd) {
         return Vec::new();
     }
+    // Stabilisation DWM et garantie de premier plan avant la capture et l'inspection UIA
+    force_foreground_window(hwnd);
+    restore_if_iconic(hwnd);
+    std::thread::sleep(Duration::from_millis(80));
+
     let (_pid, exe_name) = get_window_process_info(hwnd);
     let mut win_title_buf = [0u16; 512];
     let t_len = unsafe { GetWindowTextW(hwnd, &mut win_title_buf) };
-    let win_title = if t_len > 0 {
+    let raw_title = if t_len > 0 {
         String::from_utf16_lossy(&win_title_buf[..t_len as usize])
     } else {
         String::new()
     };
+    let win_title = resolve_human_friendly_window_title(&raw_title, &exe_name);
 
     let elements = list_interactive_elements(hwnd);
     let potential_targets: Vec<UiaElementInfo> = elements
@@ -688,15 +733,191 @@ pub fn spawn_targets_worker(
 
                 reconcile_numbered_targets(&mut targets, &req.previous);
 
+                // 1. Envoi et affichage immédiat des cibles OCR + UIA
                 let _ = result_tx.send(TargetsScanResult {
                     hwnd: req.hwnd,
                     win_rect: req.win_rect,
-                    targets,
+                    targets: targets.clone(),
                     sequence: req.sequence,
                 });
+
+                // 2. En parallèle, Qwen2-VL détecte les icônes et canvas non textuels et fusionne ses badges
+                if crate::local_llm::is_vlm_grounding_enabled() || crate::local_llm::is_vlm_ready() {
+                    let result_tx_vlm = result_tx.clone();
+                    let hwnd_val = req.hwnd;
+                    let win_rect_val = req.win_rect;
+                    let sequence_val = req.sequence;
+                    let mut base_targets = targets;
+
+                    std::thread::Builder::new()
+                        .name("vlm_grounding_async".to_string())
+                        .spawn(move || {
+                            #[cfg(windows)]
+                            let capture_opt = {
+                                let hwnd = HWND(hwnd_val as _);
+                                if let Some(r) = win_rect_val {
+                                    crate::ocr::capture_window_rgba(hwnd, r)
+                                } else {
+                                    let mut r = RECT::default();
+                                    if unsafe { GetWindowRect(hwnd, &mut r).is_ok() } {
+                                        crate::ocr::capture_window_rgba(hwnd, [r.left, r.top, r.right, r.bottom])
+                                    } else {
+                                        None
+                                    }
+                                }
+                            };
+                            #[cfg(not(windows))]
+                            let capture_opt = {
+                                let rect = win_rect_val.or_else(get_active_window_rect);
+                                rect.and_then(|r| crate::ocr::capture_window_rgba(HWND::NULL, r))
+                            };
+
+                            if let Some((pixels, w, h)) = capture_opt {
+                                let win_rect = win_rect_val.unwrap_or([0, 0, w as i32, h as i32]);
+                                let vlm_targets = crate::ocr::detect_vlm_grounding_targets(&pixels, w, h, win_rect, &base_targets);
+                                if !vlm_targets.is_empty() {
+                                    for mut t in vlm_targets {
+                                        let next_index = base_targets.len() + 1;
+                                        t.index = next_index;
+                                        t.value = crate::ocr::visual_zone_color(next_index).to_string();
+                                        t.window_id = Some(hwnd_val);
+                                        base_targets.push(t);
+                                    }
+                                    let _ = result_tx_vlm.send(TargetsScanResult {
+                                        hwnd: hwnd_val,
+                                        win_rect: win_rect_val,
+                                        targets: base_targets,
+                                        sequence: sequence_val,
+                                    });
+                                }
+                            }
+                        })
+                        .ok();
+                }
             }
         })
         .expect("Échec du lancement du worker de ciblage des numéros");
+}
+
+/// Déclenche l'affichage immédiat des badges OCR dès l'arrivée sur la fenêtre,
+/// puis enrichit l'affichage en tâche de fond avec Qwen VLM.
+#[cfg(windows)]
+pub fn trigger_window_scan_async(hwnd: HWND) {
+    if hwnd.0.is_null() || is_window_hung(hwnd) {
+        return;
+    }
+
+    let hwnd_raw = hwnd.0 as isize;
+    let epoch = SCAN_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+
+    std::thread::Builder::new()
+        .name("fast_window_ocr_scan".to_string())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            let hwnd = HWND(hwnd_raw as _);
+            if SCAN_EPOCH.load(Ordering::SeqCst) != epoch {
+                return;
+            }
+
+            // 1. Passe immédiate : UIA + OCR local direct
+            let targets = collect_numbered_targets_for_window(hwnd);
+            if SCAN_EPOCH.load(Ordering::SeqCst) != epoch {
+                return;
+            }
+
+            if !targets.is_empty() {
+                draw_screen_numbered_badges(&targets, 1.0, None);
+                trigger_repaint();
+            }
+
+            // 2. Passe en arrière-plan : Qwen VLM pour les zones et canvas
+            if crate::local_llm::is_vlm_grounding_enabled() || crate::local_llm::is_vlm_ready() {
+                let hwnd_val = hwnd_raw;
+                let mut base_targets = targets;
+
+                std::thread::Builder::new()
+                    .name("vlm_grounding_async_window".to_string())
+                    .spawn(move || {
+                        let hwnd = HWND(hwnd_val as _);
+                        let mut r = RECT::default();
+                        let rect = if unsafe { GetWindowRect(hwnd, &mut r).is_ok() } {
+                            [r.left, r.top, r.right, r.bottom]
+                        } else {
+                            return;
+                        };
+
+                        if let Some((pixels, w, h)) = crate::ocr::capture_window_rgba(hwnd, rect) {
+                            if SCAN_EPOCH.load(Ordering::SeqCst) != epoch {
+                                return;
+                            }
+
+                            let vlm_targets = crate::ocr::detect_vlm_grounding_targets(&pixels, w, h, rect, &base_targets);
+                            if !vlm_targets.is_empty() && SCAN_EPOCH.load(Ordering::SeqCst) == epoch {
+                                for mut t in vlm_targets {
+                                    let next_index = base_targets.len() + 1;
+                                    t.index = next_index;
+                                    t.value = crate::ocr::visual_zone_color(next_index).to_string();
+                                    t.window_id = Some(hwnd_val);
+                                    base_targets.push(t);
+                                }
+                                draw_screen_numbered_badges(&base_targets, 1.0, None);
+                                trigger_repaint();
+                            }
+                        }
+                    })
+                    .ok();
+            }
+        })
+        .ok();
+}
+
+#[cfg(not(windows))]
+pub fn trigger_window_scan_async_target(_target: &str) {
+    let epoch = SCAN_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+    std::thread::Builder::new()
+        .name("fast_window_ocr_scan_nonwin".to_string())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            if SCAN_EPOCH.load(Ordering::SeqCst) != epoch {
+                return;
+            }
+            let targets = collect_numbered_targets_for_active_window();
+            if SCAN_EPOCH.load(Ordering::SeqCst) != epoch {
+                return;
+            }
+            if !targets.is_empty() {
+                draw_screen_numbered_badges(&targets, 1.0, None);
+                trigger_repaint();
+            }
+
+            // Passe en arrière-plan : Qwen VLM pour les icônes et canvas
+            if crate::local_llm::is_vlm_grounding_enabled() || crate::local_llm::is_vlm_ready() {
+                let mut base_targets = targets;
+                std::thread::Builder::new()
+                    .name("vlm_grounding_async_window_nonwin".to_string())
+                    .spawn(move || {
+                        let rect = get_active_window_rect().unwrap_or([0, 0, 1920, 1080]);
+                        if let Some((pixels, w, h)) = crate::ocr::capture_window_rgba(HWND::NULL, rect) {
+                            if SCAN_EPOCH.load(Ordering::SeqCst) != epoch {
+                                return;
+                            }
+                            let vlm_targets = crate::ocr::detect_vlm_grounding_targets(&pixels, w, h, rect, &base_targets);
+                            if !vlm_targets.is_empty() && SCAN_EPOCH.load(Ordering::SeqCst) == epoch {
+                                for mut t in vlm_targets {
+                                    let next_index = base_targets.len() + 1;
+                                    t.index = next_index;
+                                    t.value = crate::ocr::visual_zone_color(next_index).to_string();
+                                    base_targets.push(t);
+                                }
+                                draw_screen_numbered_badges(&base_targets, 1.0, None);
+                                trigger_repaint();
+                            }
+                        }
+                    })
+                    .ok();
+            }
+        })
+        .ok();
 }
 
 #[cfg(not(windows))]
@@ -841,7 +1062,7 @@ fn query_macos_ax_elements() -> Vec<MacosAxElementRaw> {
 #[cfg(target_os = "macos")]
 pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget> {
     let items = query_macos_ax_elements();
-    items
+    let mut targets: Vec<NumberedElementTarget> = items
         .into_iter()
         .take(300)
         .enumerate()
@@ -870,7 +1091,15 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
             value: e.value,
             window_id: None,
         })
-        .collect()
+        .collect();
+
+    if let Some(rect) = get_active_window_rect() {
+        crate::ocr::enrich_targets_with_ocr(HWND::NULL, rect, &mut targets);
+        for (i, t) in targets.iter_mut().enumerate() {
+            t.index = i + 1;
+        }
+    }
+    targets
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
@@ -888,77 +1117,285 @@ struct AtspiElementRaw {
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 fn query_atspi_elements() -> Vec<AtspiElementRaw> {
-    // Script Python embarqué utilisant le binding standard Atspi (GObject introspection)
-    // présent nativement sur la quasi-totalité des distributions Linux avec environnement de bureau.
-    const ATSPI_SCRIPT: &str = r#"
-import json, sys
-try:
-    import gi
-    gi.require_version('Atspi', '2.0')
-    from gi.repository import Atspi
-except Exception:
-    sys.exit(0)
+    // Résolution de l'adresse du bus d'accessibilité (org.a11y.Bus)
+    let bus_addr = std::env::var("AT_SPI_BUS_ADDRESS").ok().filter(|s| !s.trim().is_empty()).or_else(|| {
+        let session = zbus::blocking::Connection::session().ok()?;
+        let reply: Result<String, _> = session.call_method(
+            Some("org.a11y.Bus"),
+            "/org/a11y/bus",
+            Some("org.a11y.Bus"),
+            "GetAddress",
+            &(),
+        ).and_then(|r| r.body().deserialize());
+        reply.ok().filter(|s| !s.trim().is_empty())
+    });
 
-elements = []
-desktop = Atspi.get_desktop(0)
-if not desktop:
-    sys.exit(0)
+    let Some(addr) = bus_addr else {
+        return Vec::new();
+    };
 
-def walk(accessible, depth=0):
-    if depth > 7 or len(elements) >= 120:
-        return
-    try:
-        role = accessible.get_role_name()
-        state = accessible.get_state_set()
-        is_showing = state.contains(Atspi.StateType.SHOWING) if state else True
-        if is_showing and role in ("push-button", "link", "entry", "password-text", "page-tab", "check-box", "radio-button", "combo-box", "label", "text"):
-            comp = accessible.get_component_iface()
-            if comp:
-                bbox = comp.get_extents(Atspi.CoordType.SCREEN)
-                name = accessible.get_name() or ""
-                val_text = ""
-                text_iface = accessible.get_text_iface()
-                if text_iface:
-                    val_text = text_iface.get_text(0, -1) or ""
-                if bbox.width > 5 and bbox.height > 5:
-                    elements.append({
-                        "name": name.strip(),
-                        "role": role,
-                        "x": bbox.x,
-                        "y": bbox.y,
-                        "width": bbox.width,
-                        "height": bbox.height,
-                        "value": val_text.strip()
-                    })
-        for i in range(accessible.get_child_count()):
-            child = accessible.get_child_at_index(i)
-            if child:
-                walk(child, depth + 1)
-    except Exception:
-        pass
-
-walk(desktop)
-print(json.dumps(elements))
-"#;
-
-    let Ok(output) = std::process::Command::new("python3")
-        .args(["-c", ATSPI_SCRIPT])
-        .output()
+    let Ok(conn) = zbus::blocking::connection::Builder::address(addr.as_str())
+        .and_then(|b| b.build())
     else {
         return Vec::new();
     };
 
-    if !output.status.success() {
-        return Vec::new();
+    let mut elements = Vec::new();
+
+    fn walk_node(
+        conn: &zbus::blocking::Connection,
+        dest: &str,
+        path: &str,
+        depth: usize,
+        elements: &mut Vec<AtspiElementRaw>,
+    ) {
+        if depth > 7 || elements.len() >= 120 {
+            return;
+        }
+
+        // Récupération du rôle
+        let role_res: Result<String, _> = conn.call_method(
+            Some(dest),
+            path,
+            Some("org.a11y.atspi.Accessible"),
+            "GetRoleName",
+            &(),
+        ).and_then(|r| r.body().deserialize());
+
+        let role = role_res.unwrap_or_default();
+        let is_target_role = matches!(
+            role.as_str(),
+            "push-button" | "link" | "entry" | "password-text" | "page-tab"
+                | "check-box" | "radio-button" | "combo-box" | "label" | "text"
+        );
+
+        if is_target_role {
+            // ATSPI_COORD_TYPE_SCREEN = 0
+            let extents_res: Result<(i32, i32, i32, i32), _> = conn.call_method(
+                Some(dest),
+                path,
+                Some("org.a11y.atspi.Component"),
+                "GetExtents",
+                &(0u32),
+            ).and_then(|r| r.body().deserialize());
+
+            if let Ok((x, y, width, height)) = extents_res {
+                if width > 5 && height > 5 {
+                    let name_res: Result<String, _> = conn.call_method(
+                        Some(dest),
+                        path,
+                        Some("org.a11y.atspi.Accessible"),
+                        "getName",
+                        &(),
+                    ).and_then(|r| r.body().deserialize())
+                    .or_else(|_| {
+                        conn.call_method(
+                            Some(dest),
+                            path,
+                            Some("org.freedesktop.DBus.Properties"),
+                            "Get",
+                            &("org.a11y.atspi.Accessible", "Name"),
+                        ).and_then(|r| {
+                            let val: zbus::zvariant::OwnedValue = r.body().deserialize()?;
+                            zbus::zvariant::Value::from(val).downcast::<String>().map_err(zbus::Error::Variant)
+                        })
+                    });
+
+                    let mut val_text = String::new();
+                    let text_res: Result<String, _> = conn.call_method(
+                        Some(dest),
+                        path,
+                        Some("org.a11y.atspi.Text"),
+                        "GetText",
+                        &(0i32, -1i32),
+                    ).and_then(|r| r.body().deserialize());
+                    if let Ok(txt) = text_res {
+                        val_text = txt.trim().to_string();
+                    }
+
+                    elements.push(AtspiElementRaw {
+                        name: name_res.unwrap_or_default().trim().to_string(),
+                        role,
+                        x,
+                        y,
+                        width,
+                        height,
+                        value: val_text,
+                    });
+                }
+            }
+        }
+
+        // Parcours récursif des enfants
+        let children_res: Result<Vec<(String, zbus::zvariant::OwnedObjectPath)>, _> = conn.call_method(
+            Some(dest),
+            path,
+            Some("org.a11y.atspi.Accessible"),
+            "GetChildren",
+            &(),
+        ).and_then(|r| r.body().deserialize());
+
+        if let Ok(children) = children_res {
+            for (child_dest, child_path) in children {
+                walk_node(conn, &child_dest, child_path.as_str(), depth + 1, elements);
+                if elements.len() >= 120 {
+                    break;
+                }
+            }
+        }
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(&stdout).unwrap_or_default()
+
+    walk_node(
+        &conn,
+        "org.a11y.atspi.Registry",
+        "/org/a11y/atspi/accessible/root",
+        0,
+        &mut elements,
+    );
+
+    elements
+}
+#[cfg(not(windows))]
+static HOOK_THREAD_ACTIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(not(windows))]
+static SPACE_DOWN_TIME: Mutex<Option<Instant>> = Mutex::new(None);
+#[cfg(not(windows))]
+static RETURN_DOWN_TIME: Mutex<Option<Instant>> = Mutex::new(None);
+
+#[cfg(not(windows))]
+pub fn install_switch_keyboard_hook() {
+    if HOOK_THREAD_ACTIVE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    std::thread::Builder::new()
+        .name("rdev_switch_hook_worker".to_string())
+        .spawn(move || {
+            let callback = move |event: rdev::Event| {
+                let is_switch_on = SWITCH_HOOK_ENABLED.load(Ordering::Relaxed);
+                let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::Relaxed);
+                let is_typing = IS_USER_TYPING.load(Ordering::Relaxed);
+
+                match event.event_type {
+                    rdev::EventType::KeyPress(key) => {
+                        // Raccourcis globaux
+                        let global_evt = match key {
+                            rdev::Key::F7 => Some(crate::types::SwitchKeyEvent::ToggleSwitch),
+                            rdev::Key::F8 => Some(crate::types::SwitchKeyEvent::ToggleDictation),
+                            rdev::Key::F9 => Some(crate::types::SwitchKeyEvent::ToggleVoice),
+                            rdev::Key::F4 => Some(crate::types::SwitchKeyEvent::Clear),
+                            rdev::Key::Escape if is_dictation || is_switch_on => Some(crate::types::SwitchKeyEvent::Escape),
+                            _ => None,
+                        };
+                        if let Some(evt) = global_evt {
+                            if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                q.push(evt);
+                            }
+                            trigger_repaint();
+                            return;
+                        }
+
+                        if !is_switch_on || is_dictation || is_typing {
+                            return;
+                        }
+
+                        // Chiffres pour sélection directe de badge
+                        let digit = match key {
+                            rdev::Key::Num0 | rdev::Key::Kp0 => Some('0'),
+                            rdev::Key::Num1 | rdev::Key::Kp1 => Some('1'),
+                            rdev::Key::Num2 | rdev::Key::Kp2 => Some('2'),
+                            rdev::Key::Num3 | rdev::Key::Kp3 => Some('3'),
+                            rdev::Key::Num4 | rdev::Key::Kp4 => Some('4'),
+                            rdev::Key::Num5 | rdev::Key::Kp5 => Some('5'),
+                            rdev::Key::Num6 | rdev::Key::Kp6 => Some('6'),
+                            rdev::Key::Num7 | rdev::Key::Kp7 => Some('7'),
+                            rdev::Key::Num8 | rdev::Key::Kp8 => Some('8'),
+                            rdev::Key::Num9 | rdev::Key::Kp9 => Some('9'),
+                            _ => None,
+                        };
+                        if let Some(d) = digit {
+                            if let Ok(mut nq) = NUMBER_KEY_QUEUE.lock() {
+                                nq.push(d);
+                            }
+                            trigger_repaint();
+                            return;
+                        }
+
+                        match key {
+                            rdev::Key::Space => {
+                                if let Ok(mut t) = SPACE_DOWN_TIME.lock() {
+                                    if t.is_none() { *t = Some(Instant::now()); }
+                                }
+                            }
+                            rdev::Key::Return => {
+                                if let Ok(mut t) = RETURN_DOWN_TIME.lock() {
+                                    if t.is_none() { *t = Some(Instant::now()); }
+                                }
+                            }
+                            rdev::Key::Tab | rdev::Key::RightArrow | rdev::Key::DownArrow => {
+                                if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                    q.push(crate::types::SwitchKeyEvent::Next);
+                                }
+                                trigger_repaint();
+                            }
+                            rdev::Key::LeftArrow | rdev::Key::UpArrow => {
+                                if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                    q.push(crate::types::SwitchKeyEvent::Prev);
+                                }
+                                trigger_repaint();
+                            }
+                            rdev::Key::Backspace => {
+                                if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                    q.push(crate::types::SwitchKeyEvent::Back);
+                                }
+                                trigger_repaint();
+                            }
+                            _ => {}
+                        }
+                    }
+                    rdev::EventType::KeyRelease(key) => {
+                        if !is_switch_on || is_dictation || is_typing {
+                            return;
+                        }
+                        let down_dur = match key {
+                            rdev::Key::Space => SPACE_DOWN_TIME.lock().ok().and_then(|mut t| t.take()).map(|s| s.elapsed()),
+                            rdev::Key::Return => RETURN_DOWN_TIME.lock().ok().and_then(|mut t| t.take()).map(|s| s.elapsed()),
+                            _ => None,
+                        };
+                        if let Some(dur) = down_dur {
+                            let long_press_thresh = Duration::from_millis(SWITCH_LONG_PRESS_MS.load(Ordering::Relaxed));
+                            let evt = if dur >= long_press_thresh {
+                                crate::types::SwitchKeyEvent::Back
+                            } else {
+                                crate::types::SwitchKeyEvent::Select
+                            };
+                            if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                q.push(evt);
+                            }
+                            trigger_repaint();
+                        }
+                    }
+                    _ => {}
+                }
+            };
+
+            if let Err(e) = rdev::listen(callback) {
+                eprintln!("[rdev Hook Worker] Erreur écoute globale des événements matériels: {:?}", e);
+            }
+            HOOK_THREAD_ACTIVE.store(false, Ordering::SeqCst);
+        })
+        .expect("Échec lancement worker rdev");
+}
+
+#[cfg(not(windows))]
+pub fn uninstall_switch_keyboard_hook() {
+    HOOK_THREAD_ACTIVE.store(false, Ordering::SeqCst);
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget> {
     let items = query_atspi_elements();
-    items
+    let mut targets: Vec<NumberedElementTarget> = items
         .into_iter()
         .take(300)
         .enumerate()
@@ -986,7 +1423,15 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
             value: e.value,
             window_id: None,
         })
-        .collect()
+        .collect();
+
+    if let Some(rect) = get_active_window_rect() {
+        crate::ocr::enrich_targets_with_ocr(HWND::NULL, rect, &mut targets);
+        for (i, t) in targets.iter_mut().enumerate() {
+            t.index = i + 1;
+        }
+    }
+    targets
 }
 
 #[cfg(not(windows))]
@@ -1126,7 +1571,13 @@ pub fn build_targeted_hover_speech(
     let clean_name = target_name.trim();
     let clean_role = target_role.trim();
 
-    let base_speech = if clean_role.eq_ignore_ascii_case("lecture textuelle") {
+    let base_speech = if clean_role.eq_ignore_ascii_case("fenêtre") || clean_role.eq_ignore_ascii_case("window") {
+        if is_human_friendly_window_title(clean_name) {
+            format!("Fenêtre : {clean_name}")
+        } else {
+            "Fenêtre".to_string()
+        }
+    } else if clean_role.eq_ignore_ascii_case("lecture textuelle") {
         if !clean_name.is_empty() {
             clean_name.to_string()
         } else {
@@ -1251,6 +1702,7 @@ pub static LAST_FOCUSED_CHILD_HWND: Mutex<Option<isize>> = Mutex::new(None);
 pub static LAST_FOCUSED_RECT: Mutex<Option<[i32; 4]>> = Mutex::new(None);
 
 pub static CURRENT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
+pub static SCAN_EPOCH: AtomicU64 = AtomicU64::new(0);
 pub static IS_EMERGENCY_STOPPED: AtomicBool = AtomicBool::new(false);
 pub static AGENT_BUSY: AtomicBool = AtomicBool::new(false);
 pub static TARGET_REASONING_PASSES: AtomicUsize = AtomicUsize::new(5);
@@ -1344,6 +1796,7 @@ pub fn reset_switch_keys() {
 #[cfg(windows)]
 struct HookWorkerState {
     hook_handle: isize,
+    mouse_hook_handle: isize,
     thread_id: u32,
 }
 
@@ -1396,13 +1849,6 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         // PowerToys Keyboard Manager utilise dwExtraInfo = 1 (KEYBOARDMANAGER_INJECTED_FLAG) ou 2 (KEYBOARDMANAGER_SHORTCUT_FLAG)
         let is_powertoys = kbd.dwExtraInfo == 0x1 || kbd.dwExtraInfo == 0x2;
 
-        // Appel préalable des hooks suivants dans la chaîne (ex: PowerToys Keyboard Manager).
-        // Si un gestionnaire de remappage a consommé et remappé la touche physique, il renvoie un code non nul.
-        let downstream_res = CallNextHookEx(None, code, wparam, lparam);
-        if !is_injected && !is_powertoys && downstream_res.0 != 0 {
-            // Un remappeur (ex: PowerToys) a consommé cette touche physique pour la réinjecter remappée.
-            return downstream_res;
-        }
 
         // Évaluation des modificateurs : pour les touches injectées par un remappeur (PowerToys / AHK),
         // on ne laisse pas les touches physiques maintenues (ex: Ctrl/Alt du raccourci déclencheur) fausser la touche réémise.
@@ -1484,12 +1930,12 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         // laisser passer les frappes courantes (lettres, chiffres, ponctuation) vers l'application active.
         let is_user_typing = IS_USER_TYPING.load(Ordering::Relaxed);
         if is_dictation || is_user_typing {
-            return downstream_res;
+            return CallNextHookEx(None, code, wparam, lparam);
         }
 
         // 3. Si le mode survol / contacteur n'est pas activé, laisser passer les touches de navigation standard.
         if !is_switch_hook_on {
-            return downstream_res;
+            return CallNextHookEx(None, code, wparam, lparam);
         }
 
         #[cfg(windows)]
@@ -1550,10 +1996,10 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
 
         let switch_event = match vk {
             0x09 => Some(if is_shift { SwitchKeyEvent::Prev } else { SwitchKeyEvent::Next }), // Tab / Shift+Tab
-            // Précédent : Flèche Gauche (0x25), Flèche Haut (0x26)
-            0x25 | 0x26 => Some(SwitchKeyEvent::Prev),
-            // Suivant : Flèche Droite (0x27), Flèche Bas (0x28)
-            0x27 | 0x28 => Some(SwitchKeyEvent::Next),
+            // Précédent : Flèche Gauche (0x25)
+            0x25 => Some(SwitchKeyEvent::Prev),
+            // Suivant : Flèche Droite (0x27)
+            0x27 => Some(SwitchKeyEvent::Next),
             // Sélection : Entrée, Espace
             0x0D | 0x20 => Some(SwitchKeyEvent::Select),
             // Retour / Sortie : Backspace (Retour arrière)
@@ -1632,13 +2078,31 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
 }
 
 #[cfg(windows)]
+unsafe extern "system" fn switch_mouse_hook_proc(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{WM_MOUSEWHEEL, WM_MOUSEHWHEEL};
+
+    if code >= 0 && SWITCH_HOOK_ENABLED.load(Ordering::Relaxed) {
+        let msg = wparam.0 as u32;
+        if msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL {
+            clear_screen_numbered_badges();
+            trigger_repaint();
+        }
+    }
+    windows::Win32::UI::WindowsAndMessaging::CallNextHookEx(None, code, wparam, lparam)
+}
+
+#[cfg(windows)]
 pub fn install_switch_keyboard_hook() {
     let mut guard = HOOK_WORKER.lock().unwrap();
     if guard.is_some() {
         return;
     }
 
-    let (init_tx, init_rx) = std::sync::mpsc::channel::<(isize, u32)>();
+    let (init_tx, init_rx) = std::sync::mpsc::channel::<(isize, isize, u32)>();
 
     std::thread::Builder::new()
         .name("win32_keyboard_hook_worker".to_string())
@@ -1651,7 +2115,7 @@ pub fn install_switch_keyboard_hook() {
 
             let thread_id = unsafe { GetCurrentThreadId() };
 
-            let hook_res = unsafe {
+            let kbd_hook_res = unsafe {
                 SetWindowsHookExW(
                     WH_KEYBOARD_LL,
                     Some(switch_keyboard_hook_proc),
@@ -1660,33 +2124,53 @@ pub fn install_switch_keyboard_hook() {
                 )
             };
 
-            match hook_res {
-                Ok(hook) => {
-                    let hook_raw = hook.0 as isize;
-                    let _ = init_tx.send((hook_raw, thread_id));
+            let mouse_hook_res = unsafe {
+                SetWindowsHookExW(
+                    WH_MOUSE_LL,
+                    Some(switch_mouse_hook_proc),
+                    HINSTANCE(std::ptr::null_mut()),
+                    0,
+                )
+            };
 
-                    // Boucle de messages Win32 dédiée pour pomper les notifications WH_KEYBOARD_LL
+            match (kbd_hook_res, mouse_hook_res) {
+                (Ok(kbd_hook), Ok(mouse_hook)) => {
+                    let kbd_raw = kbd_hook.0 as isize;
+                    let mouse_raw = mouse_hook.0 as isize;
+                    let _ = init_tx.send((kbd_raw, mouse_raw, thread_id));
+
                     let mut msg = MSG::default();
+                    // Boucle de messages Win32 dédiée pour pomper les notifications WH_KEYBOARD_LL
                     unsafe {
                         while GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0).as_bool() {
                             let _ = TranslateMessage(&msg);
                             DispatchMessageW(&msg);
                         }
-                        let _ = UnhookWindowsHookEx(hook);
+                        let _ = UnhookWindowsHookEx(kbd_hook);
+                        let _ = UnhookWindowsHookEx(mouse_hook);
                     }
                 }
-                Err(e) => {
+                (Ok(kbd_hook), Err(e)) => {
+                    eprintln!("[Hook Worker] Échec installation WH_MOUSE_LL: {:?}", e);
+                    let _ = init_tx.send((kbd_hook.0 as isize, 0, thread_id));
+                }
+                (Err(e), Ok(mouse_hook)) => {
                     eprintln!("[Hook Worker] Échec installation WH_KEYBOARD_LL: {:?}", e);
-                    let _ = init_tx.send((0, thread_id));
+                    let _ = init_tx.send((0, mouse_hook.0 as isize, thread_id));
+                }
+                (Err(e1), Err(e2)) => {
+                    eprintln!("[Hook Worker] Échec installation hooks: {:?}, {:?}", e1, e2);
+                    let _ = init_tx.send((0, 0, thread_id));
                 }
             }
         })
         .expect("Échec du lancement du worker de hook clavier Win32");
 
-    if let Ok((hook_raw, thread_id)) = init_rx.recv() {
+    if let Ok((hook_raw, mouse_raw, thread_id)) = init_rx.recv() {
         if hook_raw != 0 {
             *guard = Some(HookWorkerState {
                 hook_handle: hook_raw,
+                mouse_hook_handle: mouse_raw,
                 thread_id,
             });
         }
@@ -1699,6 +2183,9 @@ pub fn uninstall_switch_keyboard_hook() {
     if let Some(state) = guard.take() {
         unsafe {
             let _ = UnhookWindowsHookEx(HHOOK(state.hook_handle as _));
+            if state.mouse_hook_handle != 0 {
+                let _ = UnhookWindowsHookEx(HHOOK(state.mouse_hook_handle as _));
+            }
             let _ = PostThreadMessageW(
                 state.thread_id,
                 WM_QUIT,

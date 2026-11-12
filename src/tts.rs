@@ -147,6 +147,12 @@ pub fn split_into_sentences(text: &str) -> Vec<String> {
                 && i + 1 < len
                 && chars[i + 1].is_ascii_digit();
 
+            // Vérification si c'est un point ou deux-points après un numéro d'index (ex: "1.", "1 :", "2.", "2 :")
+            let is_index_prefix = (c == ':' || c == '.')
+                && !current.trim_end_matches([':', '.', ' ']).trim().is_empty()
+                && current.trim_end_matches([':', '.', ' ']).trim().split_whitespace().last()
+                    .map_or(false, |w| w.chars().all(|ch| ch.is_ascii_digit()));
+
             // Vérification si c'est une abréviation
             let is_abbreviation = if c == '.' {
                 let last_word = current
@@ -162,7 +168,7 @@ pub fn split_into_sentences(text: &str) -> Vec<String> {
 
             let next_is_space_or_end = i + 1 >= len || chars[i + 1].is_whitespace();
 
-            if !is_decimal && !is_abbreviation && next_is_space_or_end {
+            if !is_decimal && !is_index_prefix && !is_abbreviation && next_is_space_or_end {
                 while i + 1 < len && (chars[i + 1] == '.' || chars[i + 1] == '!' || chars[i + 1] == '?') {
                     i += 1;
                     current.push(chars[i]);
@@ -1095,6 +1101,46 @@ impl NativeVoiceCloneBackend {
         pending_cmd: &mut Option<TtsCommand>,
         sentence_queue: &mut VecDeque<String>,
     ) -> Result<bool, String> {
+        if let Ok(mut next_cmd) = rx.try_recv() {
+            while let Ok(more) = rx.try_recv() {
+                match more {
+                    TtsCommand::SetGender(_) => {}
+                    TtsCommand::Stop => next_cmd = TtsCommand::Stop,
+                    TtsCommand::Speak(t) => next_cmd = TtsCommand::Speak(t),
+                    TtsCommand::Enqueue(t) => {
+                        match &mut next_cmd {
+                            TtsCommand::Speak(s) | TtsCommand::Enqueue(s) => {
+                                s.push(' ');
+                                s.push_str(&t);
+                            }
+                            _ => next_cmd = TtsCommand::Enqueue(t),
+                        }
+                    }
+                }
+            }
+            match next_cmd {
+                TtsCommand::SetGender(_) => {}
+                TtsCommand::Stop => {
+                    self.player.stop();
+                    set_tts_audio_level(0.0);
+                    *pending_cmd = None;
+                    return Ok(true);
+                }
+                TtsCommand::Speak(next_text) => {
+                    self.player.stop();
+                    set_tts_audio_level(0.0);
+                    *pending_cmd = Some(TtsCommand::Speak(next_text));
+                    return Ok(true);
+                }
+                TtsCommand::Enqueue(next_text) => {
+                    let clean = sanitize_for_tts(&next_text);
+                    for s in split_into_sentences(&clean) {
+                        sentence_queue.push_back(s);
+                    }
+                }
+            }
+        }
+
         let (samples, rate) = self.synthesize(sentence)?;
         self.player.play_samples(samples, rate);
 
@@ -1108,12 +1154,29 @@ impl NativeVoiceCloneBackend {
 
             std::thread::sleep(Duration::from_millis(15));
 
-            if let Ok(next_cmd) = rx.try_recv() {
+            if let Ok(mut next_cmd) = rx.try_recv() {
+                while let Ok(more) = rx.try_recv() {
+                    match more {
+                        TtsCommand::SetGender(_) => {}
+                        TtsCommand::Stop => next_cmd = TtsCommand::Stop,
+                        TtsCommand::Speak(t) => next_cmd = TtsCommand::Speak(t),
+                        TtsCommand::Enqueue(t) => {
+                            match &mut next_cmd {
+                                TtsCommand::Speak(s) | TtsCommand::Enqueue(s) => {
+                                    s.push(' ');
+                                    s.push_str(&t);
+                                }
+                                _ => next_cmd = TtsCommand::Enqueue(t),
+                            }
+                        }
+                    }
+                }
                 match next_cmd {
                     TtsCommand::SetGender(_) => {}
                     TtsCommand::Stop => {
                         self.player.stop();
                         set_tts_audio_level(0.0);
+                        *pending_cmd = None;
                         return Ok(true);
                     }
                     TtsCommand::Speak(next_text) => {
@@ -1303,18 +1366,75 @@ impl HttpVoiceCloneBackend {
         pending_cmd: &mut Option<TtsCommand>,
         sentence_queue: &mut VecDeque<String>,
     ) -> Result<bool, String> {
+        if let Ok(mut next_cmd) = rx.try_recv() {
+            while let Ok(more) = rx.try_recv() {
+                match more {
+                    TtsCommand::SetGender(_) => {}
+                    TtsCommand::Stop => next_cmd = TtsCommand::Stop,
+                    TtsCommand::Speak(t) => next_cmd = TtsCommand::Speak(t),
+                    TtsCommand::Enqueue(t) => {
+                        match &mut next_cmd {
+                            TtsCommand::Speak(s) | TtsCommand::Enqueue(s) => {
+                                s.push(' ');
+                                s.push_str(&t);
+                            }
+                            _ => next_cmd = TtsCommand::Enqueue(t),
+                        }
+                    }
+                }
+            }
+            match next_cmd {
+                TtsCommand::SetGender(_) => {}
+                TtsCommand::Stop => {
+                    self.player.stop();
+                    set_tts_audio_level(0.0);
+                    *pending_cmd = None;
+                    return Ok(true);
+                }
+                TtsCommand::Speak(next_text) => {
+                    self.player.stop();
+                    set_tts_audio_level(0.0);
+                    *pending_cmd = Some(TtsCommand::Speak(next_text));
+                    return Ok(true);
+                }
+                TtsCommand::Enqueue(next_text) => {
+                    let clean = sanitize_for_tts(&next_text);
+                    for s in split_into_sentences(&clean) {
+                        sentence_queue.push_back(s);
+                    }
+                }
+            }
+        }
+
         let (samples, rate) = self.synthesize(sentence)?;
         self.player.play_samples(samples, rate);
 
         while self.player.is_playing() {
             std::thread::sleep(Duration::from_millis(20));
 
-            if let Ok(next_cmd) = rx.try_recv() {
+            if let Ok(mut next_cmd) = rx.try_recv() {
+                while let Ok(more) = rx.try_recv() {
+                    match more {
+                        TtsCommand::SetGender(_) => {}
+                        TtsCommand::Stop => next_cmd = TtsCommand::Stop,
+                        TtsCommand::Speak(t) => next_cmd = TtsCommand::Speak(t),
+                        TtsCommand::Enqueue(t) => {
+                            match &mut next_cmd {
+                                TtsCommand::Speak(s) | TtsCommand::Enqueue(s) => {
+                                    s.push(' ');
+                                    s.push_str(&t);
+                                }
+                                _ => next_cmd = TtsCommand::Enqueue(t),
+                            }
+                        }
+                    }
+                }
                 match next_cmd {
                     TtsCommand::SetGender(_) => {}
                     TtsCommand::Stop => {
                         self.player.stop();
                         set_tts_audio_level(0.0);
+                        *pending_cmd = None;
                         return Ok(true);
                     }
                     TtsCommand::Speak(next_text) => {
@@ -1421,6 +1541,46 @@ impl SystemTtsBackend for SapiBackend {
         use windows::core::PCWSTR;
         use windows::Win32::Media::Speech::SPVOICESTATUS;
 
+        if let Ok(mut next_cmd) = rx.try_recv() {
+            while let Ok(more) = rx.try_recv() {
+                match more {
+                    TtsCommand::SetGender(g) => self.set_gender(g),
+                    TtsCommand::Stop => next_cmd = TtsCommand::Stop,
+                    TtsCommand::Speak(t) => next_cmd = TtsCommand::Speak(t),
+                    TtsCommand::Enqueue(t) => {
+                        match &mut next_cmd {
+                            TtsCommand::Speak(s) | TtsCommand::Enqueue(s) => {
+                                s.push(' ');
+                                s.push_str(&t);
+                            }
+                            _ => next_cmd = TtsCommand::Enqueue(t),
+                        }
+                    }
+                }
+            }
+            match next_cmd {
+                TtsCommand::SetGender(new_gender) => {
+                    self.set_gender(new_gender);
+                }
+                TtsCommand::Stop => {
+                    self.stop();
+                    *pending_cmd = None;
+                    return true;
+                }
+                TtsCommand::Speak(next_text) => {
+                    self.stop();
+                    *pending_cmd = Some(TtsCommand::Speak(next_text));
+                    return true;
+                }
+                TtsCommand::Enqueue(next_text) => {
+                    let clean = sanitize_for_tts(&next_text);
+                    for s in split_into_sentences(&clean) {
+                        sentence_queue.push_back(s);
+                    }
+                }
+            }
+        }
+
         let active_wide_buf: Vec<u16> = sentence.encode_utf16().chain(std::iter::once(0)).collect();
 
         unsafe {
@@ -1434,9 +1594,25 @@ impl SystemTtsBackend for SapiBackend {
             const STARTUP_TIMEOUT: Duration = Duration::from_millis(3000);
 
             loop {
-                std::thread::sleep(Duration::from_millis(20));
+                std::thread::sleep(Duration::from_millis(15));
 
-                if let Ok(next_cmd) = rx.try_recv() {
+                if let Ok(mut next_cmd) = rx.try_recv() {
+                    while let Ok(more) = rx.try_recv() {
+                        match more {
+                            TtsCommand::SetGender(g) => self.set_gender(g),
+                            TtsCommand::Stop => next_cmd = TtsCommand::Stop,
+                            TtsCommand::Speak(t) => next_cmd = TtsCommand::Speak(t),
+                            TtsCommand::Enqueue(t) => {
+                                match &mut next_cmd {
+                                    TtsCommand::Speak(s) | TtsCommand::Enqueue(s) => {
+                                        s.push(' ');
+                                        s.push_str(&t);
+                                    }
+                                    _ => next_cmd = TtsCommand::Enqueue(t),
+                                }
+                            }
+                        }
+                    }
                     match next_cmd {
                         TtsCommand::SetGender(new_gender) => {
                             self.set_gender(new_gender);
@@ -1444,6 +1620,7 @@ impl SystemTtsBackend for SapiBackend {
                         TtsCommand::Stop => {
                             let _ = self.voice.Speak(PCWSTR::null(), self.base_flags, None);
                             set_tts_audio_level(0.0);
+                            *pending_cmd = None;
                             return true;
                         }
                         TtsCommand::Speak(next_text) => {
@@ -1523,6 +1700,46 @@ impl SystemTtsBackend for UnixTtsBackend {
         pending_cmd: &mut Option<TtsCommand>,
         sentence_queue: &mut VecDeque<String>,
     ) -> bool {
+        if let Ok(mut next_cmd) = rx.try_recv() {
+            while let Ok(more) = rx.try_recv() {
+                match more {
+                    TtsCommand::SetGender(g) => self.set_gender(g),
+                    TtsCommand::Stop => next_cmd = TtsCommand::Stop,
+                    TtsCommand::Speak(t) => next_cmd = TtsCommand::Speak(t),
+                    TtsCommand::Enqueue(t) => {
+                        match &mut next_cmd {
+                            TtsCommand::Speak(s) | TtsCommand::Enqueue(s) => {
+                                s.push(' ');
+                                s.push_str(&t);
+                            }
+                            _ => next_cmd = TtsCommand::Enqueue(t),
+                        }
+                    }
+                }
+            }
+            match next_cmd {
+                TtsCommand::SetGender(new_gender) => {
+                    self.set_gender(new_gender);
+                }
+                TtsCommand::Stop => {
+                    self.stop();
+                    *pending_cmd = None;
+                    return true;
+                }
+                TtsCommand::Speak(next_text) => {
+                    self.stop();
+                    *pending_cmd = Some(TtsCommand::Speak(next_text));
+                    return true;
+                }
+                TtsCommand::Enqueue(next_text) => {
+                    let clean = sanitize_for_tts(&next_text);
+                    for s in split_into_sentences(&clean) {
+                        sentence_queue.push_back(s);
+                    }
+                }
+            }
+        }
+
         let is_clone_male = self.current_gender == VoiceGender::Clone && get_voice_clone_gender() == "male";
 
         #[cfg(target_os = "macos")]
@@ -1569,7 +1786,23 @@ impl SystemTtsBackend for UnixTtsBackend {
                 set_tts_audio_level(sim_level);
                 std::thread::sleep(Duration::from_millis(25));
 
-                if let Ok(next_cmd) = rx.try_recv() {
+                if let Ok(mut next_cmd) = rx.try_recv() {
+                    while let Ok(more) = rx.try_recv() {
+                        match more {
+                            TtsCommand::SetGender(g) => self.set_gender(g),
+                            TtsCommand::Stop => next_cmd = TtsCommand::Stop,
+                            TtsCommand::Speak(t) => next_cmd = TtsCommand::Speak(t),
+                            TtsCommand::Enqueue(t) => {
+                                match &mut next_cmd {
+                                    TtsCommand::Speak(s) | TtsCommand::Enqueue(s) => {
+                                        s.push(' ');
+                                        s.push_str(&t);
+                                    }
+                                    _ => next_cmd = TtsCommand::Enqueue(t),
+                                }
+                            }
+                        }
+                    }
                     match next_cmd {
                         TtsCommand::SetGender(new_gender) => {
                             self.set_gender(new_gender);
@@ -1577,6 +1810,7 @@ impl SystemTtsBackend for UnixTtsBackend {
                         TtsCommand::Stop => {
                             let _ = proc.kill();
                             set_tts_audio_level(0.0);
+                            *pending_cmd = None;
                             return true;
                         }
                         TtsCommand::Speak(next_text) => {
@@ -1702,7 +1936,7 @@ pub fn spawn_tts_worker(event_tx: StdSender<AgentEvent>, initial_voice: VoiceGen
         let mut pending_cmd: Option<TtsCommand> = None;
 
         loop {
-            let cmd = if let Some(c) = pending_cmd.take() {
+            let mut cmd = if let Some(c) = pending_cmd.take() {
                 c
             } else {
                 match rx.recv() {
@@ -1710,6 +1944,39 @@ pub fn spawn_tts_worker(event_tx: StdSender<AgentEvent>, initial_voice: VoiceGen
                     Err(_) => break,
                 }
             };
+
+            // Vider et fusionner immédiatement les commandes en attente
+            // afin d'interrompre et remplacer sans empilement sonore lors du défilement rapide
+            while let Ok(next) = rx.try_recv() {
+                match next {
+                    TtsCommand::SetGender(new_gender) => {
+                        current_gender = new_gender;
+                        composite_backend.set_gender(new_gender);
+                    }
+                    TtsCommand::Stop => {
+                        composite_backend.stop();
+                        set_tts_audio_level(0.0);
+                        cmd = TtsCommand::Stop;
+                    }
+                    TtsCommand::Speak(text) => {
+                        composite_backend.stop();
+                        set_tts_audio_level(0.0);
+                        cmd = TtsCommand::Speak(text);
+                    }
+                    TtsCommand::Enqueue(text) => {
+                        match &mut cmd {
+                            TtsCommand::Speak(cur) | TtsCommand::Enqueue(cur) => {
+                                cur.push(' ');
+                                cur.push_str(&text);
+                            }
+                            TtsCommand::Stop => {
+                                cmd = TtsCommand::Speak(text);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
 
             match cmd {
                 TtsCommand::SetGender(new_gender) => {
@@ -1719,8 +1986,11 @@ pub fn spawn_tts_worker(event_tx: StdSender<AgentEvent>, initial_voice: VoiceGen
                 TtsCommand::Stop => {
                     composite_backend.stop();
                     set_tts_audio_level(0.0);
+                    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
                 }
-                TtsCommand::Speak(raw_text) | TtsCommand::Enqueue(raw_text) => {
+                TtsCommand::Speak(raw_text) => {
+                    composite_backend.stop();
+                    set_tts_audio_level(0.0);
                     let clean_text = sanitize_for_tts(&raw_text);
                     let mut sentence_queue: VecDeque<String> = split_into_sentences(&clean_text).into();
                     if sentence_queue.is_empty() {
@@ -1743,18 +2013,118 @@ pub fn spawn_tts_worker(event_tx: StdSender<AgentEvent>, initial_voice: VoiceGen
                         let pause_start = Instant::now();
                         while pause_start.elapsed() < pause_dur {
                             std::thread::sleep(Duration::from_millis(10));
-                            if let Ok(next_cmd) = rx.try_recv() {
+                            if let Ok(mut next_cmd) = rx.try_recv() {
+                                while let Ok(more) = rx.try_recv() {
+                                    match more {
+                                        TtsCommand::SetGender(g) => {
+                                            current_gender = g;
+                                            composite_backend.set_gender(g);
+                                        }
+                                        TtsCommand::Stop => next_cmd = TtsCommand::Stop,
+                                        TtsCommand::Speak(t) => next_cmd = TtsCommand::Speak(t),
+                                        TtsCommand::Enqueue(t) => {
+                                            match &mut next_cmd {
+                                                TtsCommand::Speak(s) | TtsCommand::Enqueue(s) => {
+                                                    s.push(' ');
+                                                    s.push_str(&t);
+                                                }
+                                                _ => next_cmd = TtsCommand::Enqueue(t),
+                                            }
+                                        }
+                                    }
+                                }
                                 match next_cmd {
                                     TtsCommand::SetGender(new_gender) => {
                                         current_gender = new_gender;
                                         composite_backend.set_gender(new_gender);
                                     }
                                     TtsCommand::Stop => {
+                                        composite_backend.stop();
                                         set_tts_audio_level(0.0);
                                         was_interrupted = true;
                                         break;
                                     }
                                     TtsCommand::Speak(next_text) => {
+                                        composite_backend.stop();
+                                        set_tts_audio_level(0.0);
+                                        pending_cmd = Some(TtsCommand::Speak(next_text));
+                                        was_interrupted = true;
+                                        break;
+                                    }
+                                    TtsCommand::Enqueue(next_text) => {
+                                        let clean = sanitize_for_tts(&next_text);
+                                        for s in split_into_sentences(&clean) {
+                                            sentence_queue.push_back(s);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if was_interrupted {
+                            break;
+                        }
+                    }
+
+                    if !was_interrupted {
+                        set_tts_audio_level(0.0);
+                        let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                        let _ = event_tx.send(AgentEvent::TtsFinished);
+                    }
+                }
+                TtsCommand::Enqueue(raw_text) => {
+                    let clean_text = sanitize_for_tts(&raw_text);
+                    let mut sentence_queue: VecDeque<String> = split_into_sentences(&clean_text).into();
+                    if sentence_queue.is_empty() {
+                        continue;
+                    }
+
+                    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Speaking));
+                    let mut was_interrupted = false;
+
+                    while let Some(sentence) = sentence_queue.pop_front() {
+                        if composite_backend.speak_sentence(&sentence, &rx, &mut pending_cmd, &mut sentence_queue) {
+                            was_interrupted = true;
+                            break;
+                        }
+
+                        // Pause prosodique entre les phrases
+                        let pause_dur = punctuation_pause_duration(&sentence);
+                        let pause_start = Instant::now();
+                        while pause_start.elapsed() < pause_dur {
+                            std::thread::sleep(Duration::from_millis(10));
+                            if let Ok(mut next_cmd) = rx.try_recv() {
+                                while let Ok(more) = rx.try_recv() {
+                                    match more {
+                                        TtsCommand::SetGender(g) => {
+                                            current_gender = g;
+                                            composite_backend.set_gender(g);
+                                        }
+                                        TtsCommand::Stop => next_cmd = TtsCommand::Stop,
+                                        TtsCommand::Speak(t) => next_cmd = TtsCommand::Speak(t),
+                                        TtsCommand::Enqueue(t) => {
+                                            match &mut next_cmd {
+                                                TtsCommand::Speak(s) | TtsCommand::Enqueue(s) => {
+                                                    s.push(' ');
+                                                    s.push_str(&t);
+                                                }
+                                                _ => next_cmd = TtsCommand::Enqueue(t),
+                                            }
+                                        }
+                                    }
+                                }
+                                match next_cmd {
+                                    TtsCommand::SetGender(new_gender) => {
+                                        current_gender = new_gender;
+                                        composite_backend.set_gender(new_gender);
+                                    }
+                                    TtsCommand::Stop => {
+                                        composite_backend.stop();
+                                        set_tts_audio_level(0.0);
+                                        was_interrupted = true;
+                                        break;
+                                    }
+                                    TtsCommand::Speak(next_text) => {
+                                        composite_backend.stop();
                                         set_tts_audio_level(0.0);
                                         pending_cmd = Some(TtsCommand::Speak(next_text));
                                         was_interrupted = true;

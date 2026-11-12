@@ -1412,6 +1412,7 @@ pub fn resolve_llm_config() -> LlmConfig {
         (LlmProvider::Glm, &["GLM_API_KEY", "ZHIPU_API_KEY"][..]),
         (LlmProvider::Groq, &["GROQ_API_KEY"][..]),
         (LlmProvider::Local, &["LOCAL_LLAMA_MODEL"][..]),
+        (LlmProvider::QwenVL, &["QWENVL_API_KEY"][..]),
     ];
 
     let forced_provider = std::env::var("LLM_PROVIDER")
@@ -1753,6 +1754,7 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
         | "bajar" | "nach unten" | "nach unten scrollen" | "scorri giù"
         | "rolar para baixo" | "прокрутить вниз" | "вниз"
         | "向下滚动" | "下翻" | "下にスクロール" => {
+            clear_screen_numbered_badges();
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x22));
             #[cfg(target_os = "macos")]
@@ -1765,6 +1767,7 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
         | "subir" | "nach oben" | "nach oben scrollen" | "scorri su"
         | "rolar para cima" | "прокрутить вверх" | "вверх"
         | "向上滚动" | "上翻" | "上にスクロール" => {
+            clear_screen_numbered_badges();
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x21));
             #[cfg(target_os = "macos")]
@@ -1910,8 +1913,14 @@ pub fn focus_element_target(target: &NumberedElementTarget) {
 }
 
 pub fn build_fallback_navigation_zones(window_title: &str, targets: &[NumberedElementTarget]) -> (String, Vec<NavigationZone>) {
+    let clean_win_title = if is_human_friendly_window_title(window_title) {
+        window_title
+    } else {
+        "active"
+    };
+
     if targets.is_empty() {
-        return (format!("Fenêtre {window_title}. Aucun contrôle interactif direct détecté."), Vec::new());
+        return (format!("Fenêtre {clean_win_title}. Aucun contrôle interactif direct détecté."), Vec::new());
     }
 
     // Regroupement par "features" / intentions fonctionnelles (façon mini-site accessible)
@@ -2020,9 +2029,9 @@ pub fn build_fallback_navigation_zones(window_title: &str, targets: &[NumberedEl
         .collect();
 
     let summary = if !notable_items.is_empty() {
-        format!("Fenêtre {}. {} zones d'interaction disponibles : {}.", window_title, fallback_zones.len(), notable_items.join(", "))
+        format!("Fenêtre {}. {} zones d'interaction disponibles : {}.", clean_win_title, fallback_zones.len(), notable_items.join(", "))
     } else {
-        format!("Fenêtre {}. {} zones d'interaction identifiées.", window_title, fallback_zones.len())
+        format!("Fenêtre {}. {} zones d'interaction identifiées.", clean_win_title, fallback_zones.len())
     };
     (summary, fallback_zones)
 }

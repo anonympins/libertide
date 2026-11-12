@@ -1,6 +1,6 @@
 [package]
 name = "libertide"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 
 [features]
@@ -20,10 +20,14 @@ tokio = { version = "1", features = ["full"] }
 rust-i18n = "4.2.4"
 llama-cpp-2 = { version = "0.1" }
 sherpa-rs = { version = "0.6.8", optional = true, features = ["tts"] }
+rdev = "0.5.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ocrs = "0.13.1"
 rten = "0.26.0"
+
+[target.'cfg(all(not(windows), not(target_os = "macos")))'.dependencies]
+zbus = { version = "5", features = ["blocking-api"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58.0", features = [

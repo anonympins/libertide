@@ -29,6 +29,101 @@ pub struct ZoneOverlayInfo {
     pub is_focused: bool,
 }
 
+/// Vérifie si un titre de fenêtre est compréhensible et naturel pour un être humain
+/// (rejette les titres vides, les purs chiffres/identifiants, les adresses hexadécimales et fenêtres internes).
+pub fn is_human_friendly_window_title(title: &str) -> bool {
+    let t = title.trim();
+    if t.is_empty() {
+        return false;
+    }
+    // Rejeter les chaînes ne contenant aucune lettre alphabétique (purs chiffres, symboles, séparateurs, IDs)
+    if !t.chars().any(|c| c.is_alphabetic()) {
+        return false;
+    }
+    let lower = t.to_lowercase();
+    if lower == "default ime"
+        || lower == "msctfime ui"
+        || lower == "cicerouiwndframe"
+        || lower == "program manager"
+        || lower == "n/a"
+        || lower == "null"
+        || lower == "undefined"
+        || lower == "applicationframewindow"
+    {
+        return false;
+    }
+    // Identifiants hexadécimaux ou HWND (ex: "0x12fa3", "hwnd(12345)", "window 0x...")
+    if lower.starts_with("0x") && lower[2..].chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    if lower.starts_with("hwnd(") || lower.starts_with("hwnd ") || lower.starts_with("window 0x") {
+        return false;
+    }
+    // Token hexadécimal pur d'au moins 6 caractères avec au moins un chiffre
+    if t.len() >= 6 && t.chars().all(|c| c.is_ascii_hexdigit()) && t.chars().any(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    true
+}
+
+/// Extrait le nom lisible de l'application à partir du nom d'exécutable (sans l'extension .exe et avec alias conviviaux).
+pub fn clean_process_name(exe_name: &str) -> String {
+    let name = Path::new(exe_name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(exe_name);
+    let stem = Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name)
+        .trim();
+    if stem.is_empty() || stem.eq_ignore_ascii_case("inconnu") || stem.eq_ignore_ascii_case("unknown") {
+        return String::new();
+    }
+    let friendly = match stem.to_lowercase().as_str() {
+        "msedge" => "Microsoft Edge",
+        "chrome" => "Google Chrome",
+        "firefox" => "Mozilla Firefox",
+        "code" => "Visual Studio Code",
+        "windowsterminal" => "Terminal Windows",
+        "explorer" => "Explorateur de fichiers",
+        "notepad" => "Bloc-notes",
+        "taskmgr" => "Gestionnaire des tâches",
+        "systemsettings" => "Paramètres",
+        _ => stem,
+    };
+    if friendly == stem {
+        let mut chars = stem.chars();
+        if let Some(first) = chars.next() {
+            if first.is_lowercase() {
+                first.to_uppercase().collect::<String>() + chars.as_str()
+            } else {
+                stem.to_string()
+            }
+        } else {
+            stem.to_string()
+        }
+    } else {
+        friendly.to_string()
+    }
+}
+
+/// Résout un titre de fenêtre humainement compréhensible : conserve le titre s'il est valide,
+/// sinon utilise le nom du processus sans son extension.
+pub fn resolve_human_friendly_window_title(title: &str, exe_name: &str) -> String {
+    let trimmed = title.trim();
+    if is_human_friendly_window_title(trimmed) {
+        trimmed.to_string()
+    } else {
+        let proc_name = clean_process_name(exe_name);
+        if !proc_name.is_empty() {
+            proc_name
+        } else {
+            "Fenêtre".to_string()
+        }
+    }
+}
+
 #[cfg(windows)]
 pub fn is_window_hung(hwnd: HWND) -> bool {
     extern "system" {
@@ -38,6 +133,57 @@ pub fn is_window_hung(hwnd: HWND) -> bool {
         return false;
     }
     unsafe { IsHungAppWindow(hwnd).as_bool() }
+}
+
+#[cfg(windows)]
+pub fn is_window_cloaked(hwnd: HWND) -> bool {
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmGetWindowAttribute(
+            hwnd: HWND,
+            dwAttribute: u32,
+            pvAttribute: *mut std::ffi::c_void,
+            cbAttribute: u32,
+        ) -> windows::core::HRESULT;
+    }
+    const DWMWA_CLOAKED: u32 = 14;
+    let mut cloaked: u32 = 0;
+    unsafe {
+        let hr = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut _ as *mut std::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        hr.is_ok() && cloaked != 0
+    }
+}
+
+#[cfg(windows)]
+pub fn is_window_visible_on_screen(hwnd: HWND) -> bool {
+    if hwnd.0.is_null() || is_window_hung(hwnd) {
+        return false;
+    }
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return false;
+        }
+    }
+    if is_window_cloaked(hwnd) {
+        return false;
+    }
+    let mut r = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut r).is_err() } {
+        return false;
+    }
+    let w = r.right - r.left;
+    let h = r.bottom - r.top;
+    w > 10 && h > 10
+}
+
+#[cfg(not(windows))]
+pub fn is_window_visible_on_screen(_target: impl std::fmt::Display) -> bool {
+    true
 }
 
 #[cfg(windows)]
@@ -319,6 +465,31 @@ pub fn is_toast_notification_window(_hwnd: (), _class_name: &str, _title: &str) 
 }
 
 #[cfg(windows)]
+pub fn is_system_tray_or_desktop(hwnd: HWND) -> bool {
+    if hwnd.0.is_null() {
+        return false;
+    }
+    let mut class_buf = [0u16; 256];
+    let len = unsafe { GetClassNameW(hwnd, &mut class_buf) };
+    if len > 0 {
+        let class_name = String::from_utf16_lossy(&class_buf[..len as usize]).to_lowercase();
+        if class_name == "shell_traywnd"
+            || class_name == "shell_secondarytraywnd"
+            || class_name == "progman"
+            || class_name == "workerw"
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(not(windows))]
+pub fn is_system_tray_or_desktop(_hwnd: impl std::fmt::Display) -> bool {
+    false
+}
+
+#[cfg(windows)]
 unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let list = &mut *(lparam.0 as *mut Vec<(HWND, String)>);
     if IsWindowVisible(hwnd).as_bool() {
@@ -343,15 +514,26 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> B
             String::new()
         };
 
+        let (_pid, exe_name) = get_window_process_info(hwnd);
+
         if is_toast_notification_window(hwnd, &class_name, &title) {
-            let display_title = if title.trim().is_empty() {
-                "Notification Windows".to_string()
+            let display_title = if is_human_friendly_window_title(&title) {
+                title.trim().to_string()
             } else {
-                title
+                "Notification Windows".to_string()
             };
             list.push((hwnd, display_title));
-        } else if !title.trim().is_empty() {
-            list.push((hwnd, title));
+        } else {
+            let is_iconic = IsIconic(hwnd).as_bool();
+            let mut r = RECT::default();
+            let has_rect = GetWindowRect(hwnd, &mut r).is_ok();
+            let is_real_window = is_iconic || (has_rect && (r.right - r.left) >= 100 && (r.bottom - r.top) >= 60);
+            if is_real_window && (!is_window_cloaked(hwnd) || is_iconic) {
+                let friendly_title = resolve_human_friendly_window_title(&title, &exe_name);
+                if !friendly_title.is_empty() && friendly_title != "Program Manager" {
+                    list.push((hwnd, friendly_title));
+                }
+            }
         }
     }
     BOOL(1)
@@ -454,6 +636,82 @@ pub fn get_active_x11_window() -> Option<String> {
     } else {
         Some(id)
     }
+}
+
+#[cfg(windows)]
+pub fn get_active_window_rect() -> Option<[i32; 4]> {
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let mut r = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut r).is_ok() } {
+        Some([r.left, r.top, r.right, r.bottom])
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn get_active_window_rect() -> Option<[i32; 4]> {
+    let script = r#"tell application "System Events"
+        set p to first process whose frontmost is true
+        tell p
+            if (count of windows) > 0 then
+                set w to front window
+                set {x, y} to position of w
+                set {w_w, w_h} to size of w
+                return (x as text) & "," & (y as text) & "," & (w_w as text) & "," & (w_h as text)
+            end if
+        end tell
+    end tell"#;
+    let output = std::process::Command::new("osascript").args(["-e", script]).output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let parts: Vec<&str> = text.split(',').map(|s| s.trim()).collect();
+    if parts.len() == 4 {
+        let x = parts[0].parse::<i32>().ok()?;
+        let y = parts[1].parse::<i32>().ok()?;
+        let w = parts[2].parse::<i32>().ok()?;
+        let h = parts[3].parse::<i32>().ok()?;
+        return Some([x, y, x + w, y + h]);
+    }
+    None
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn get_active_window_rect() -> Option<[i32; 4]> {
+    let active_id = get_active_x11_window()?;
+    let parse_id = |s: &str| -> Option<u64> {
+        let s = s.trim();
+        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            u64::from_str_radix(hex, 16).ok()
+        } else {
+            s.parse::<u64>().ok()
+        }
+    };
+    let active_num = parse_id(&active_id);
+
+    let output = std::process::Command::new("wmctrl")
+        .args(["-l", "-G"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 6 {
+            let win_id = parts[0];
+            let is_match = win_id.eq_ignore_ascii_case(&active_id)
+                || (active_num.is_some() && parse_id(win_id) == active_num);
+            if is_match {
+                let x = parts[2].parse::<i32>().ok()?;
+                let y = parts[3].parse::<i32>().ok()?;
+                let w = parts[4].parse::<i32>().ok()?;
+                let h = parts[5].parse::<i32>().ok()?;
+                return Some([x, y, x + w, y + h]);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(not(windows))]
@@ -601,8 +859,11 @@ pub fn get_global_cursor_pos() -> Option<(i32, i32)> {
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn get_global_cursor_pos() -> Option<(i32, i32)> {
     if crate::automation::is_wayland_session() {
+        // Note : Sous Wayland sans protocole ext-foreign-toplevel ou portal d'accessibilité,
+        // la lecture absolue est restreinte par le compositeur.
         return None;
     }
+    // Remplacement du fork xdotool par XQueryPointer direct pour supprimer les 10-30ms de latence
     if let Ok(output) = std::process::Command::new("xdotool").args(["getmouselocation", "--shell"]).output() {
         let text = String::from_utf8_lossy(&output.stdout);
         let mut x = None;
@@ -660,7 +921,6 @@ pub fn set_global_cursor_pos(x: i32, y: i32) {
 #[cfg(windows)]
 static BADGE_OVERLAY_HWND: std::sync::Mutex<Option<isize>> = std::sync::Mutex::new(None);
 
-#[cfg(windows)]
 #[derive(Default, Clone)]
 pub struct OverlayDrawState {
     pub targets: Vec<crate::types::NumberedElementTarget>,
@@ -672,7 +932,6 @@ pub struct OverlayDrawState {
     pub is_visible: bool,
 }
 
-#[cfg(windows)]
 pub static OVERLAY_STATE: std::sync::Mutex<OverlayDrawState> = std::sync::Mutex::new(OverlayDrawState {
     targets: Vec::new(),
     zones: Vec::new(),
@@ -682,6 +941,13 @@ pub static OVERLAY_STATE: std::sync::Mutex<OverlayDrawState> = std::sync::Mutex:
     orange_border: None,
     is_visible: false,
 });
+
+pub fn get_overlay_draw_state() -> OverlayDrawState {
+    OVERLAY_STATE
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default()
+}
 
 #[cfg(windows)]
 pub fn hex_to_gdi_bgr(hex: &str) -> u32 {
@@ -888,6 +1154,7 @@ pub fn render_overlay_state(state: &OverlayDrawState) {
         fn FillRect(hdc: *mut std::ffi::c_void, lprc: *const RECT, hbr: *mut std::ffi::c_void) -> i32;
         fn GetStockObject(i: i32) -> *mut std::ffi::c_void;
         fn ShowWindow(hwnd: *mut std::ffi::c_void, nCmdShow: i32) -> i32;
+        fn SetWindowPos(hwnd: *mut std::ffi::c_void, hWndInsertAfter: *mut std::ffi::c_void, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) -> i32;
         fn GetSystemMetrics(nIndex: i32) -> i32;
     }
 
@@ -907,6 +1174,38 @@ pub fn render_overlay_state(state: &OverlayDrawState) {
     } else {
         (0, 0, unsafe { GetSystemMetrics(0) }, unsafe { GetSystemMetrics(1) })
     };
+
+    let is_empty = !state.is_visible
+        || (state.targets.is_empty()
+            && state.zones.is_empty()
+            && state.orange_border.is_none()
+            && state.focused_border.is_none());
+
+    if is_empty {
+        unsafe {
+            let hdc = GetDC(hwnd);
+            if !hdc.is_null() {
+                let mem_dc = CreateCompatibleDC(hdc);
+                let mem_bmp = CreateCompatibleBitmap(hdc, vw, vh);
+                let old_bmp = SelectObject(mem_dc, mem_bmp);
+
+                let key_brush = CreateSolidBrush(OVERLAY_COLOR_KEY);
+                let full_screen_rc = RECT { left: 0, top: 0, right: vw, bottom: vh };
+                FillRect(mem_dc, &full_screen_rc, key_brush);
+                DeleteObject(key_brush);
+
+                BitBlt(hdc, 0, 0, vw, vh, mem_dc, 0, 0, 0x00CC0020); // SRCCOPY
+
+                SelectObject(mem_dc, old_bmp);
+                DeleteObject(mem_bmp);
+                DeleteDC(mem_dc);
+                ReleaseDC(hwnd, hdc);
+            }
+            let _ = SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0, 0x0080 | 0x0002 | 0x0001 | 0x0004 | 0x0010);
+            let _ = ShowWindow(hwnd, 0); // SW_HIDE
+        }
+        return;
+    }
 
     unsafe {
         let hdc = GetDC(hwnd);
@@ -1169,11 +1468,41 @@ pub fn draw_screen_control_border(rect: [i32; 4], is_cyan: bool) {
     }
 }
 
-#[cfg(not(windows))]
-pub fn draw_screen_control_border(_rect: [i32; 4], _is_cyan: bool) {}
+#[cfg(windows)]
+pub fn set_overlay_focused_border(border: Option<([i32; 4], bool)>) {
+    if let Ok(mut state) = OVERLAY_STATE.lock() {
+        state.focused_border = border;
+    }
+}
 
 #[cfg(not(windows))]
-pub fn draw_screen_orange_border(_rect: [i32; 4]) {}
+pub fn draw_screen_control_border(rect: [i32; 4], is_cyan: bool) {
+    if let Ok(mut state) = OVERLAY_STATE.lock() {
+        if state.focused_border == Some((rect, is_cyan)) && state.is_visible {
+            return;
+        }
+        state.focused_border = Some((rect, is_cyan));
+        state.is_visible = true;
+    }
+}
+
+#[cfg(not(windows))]
+pub fn draw_screen_orange_border(rect: [i32; 4]) {
+    if let Ok(mut state) = OVERLAY_STATE.lock() {
+        if state.orange_border == Some(rect) && state.is_visible {
+            return;
+        }
+        state.orange_border = Some(rect);
+        state.is_visible = true;
+    }
+}
+
+#[cfg(not(windows))]
+pub fn set_overlay_focused_border(border: Option<([i32; 4], bool)>) {
+    if let Ok(mut state) = OVERLAY_STATE.lock() {
+        state.focused_border = border;
+    }
+}
 
 #[cfg(windows)]
 pub fn draw_screen_numbered_badges(
@@ -1233,11 +1562,19 @@ pub fn draw_screen_zones_and_targets(
 
 #[cfg(not(windows))]
 pub fn draw_screen_zones_and_targets(
-    _zones: &[ZoneOverlayInfo],
-    _targets: &[crate::types::NumberedElementTarget],
-    _zoom_factor: f32,
-    _focused_index: Option<usize>,
-) {}
+    zones: &[ZoneOverlayInfo],
+    targets: &[crate::types::NumberedElementTarget],
+    zoom_factor: f32,
+    focused_index: Option<usize>,
+) {
+    if let Ok(mut state) = OVERLAY_STATE.lock() {
+        state.zones = zones.to_vec();
+        state.targets = targets.to_vec();
+        state.zoom_factor = zoom_factor;
+        state.focused_index = focused_index;
+        state.is_visible = !zones.is_empty() || !targets.is_empty() || state.orange_border.is_some();
+    }
+}
 
 #[cfg(windows)]
 pub fn clear_screen_numbered_badges() {
@@ -1253,8 +1590,15 @@ pub fn clear_screen_numbered_badges() {
         if let Some(hwnd) = *guard {
             extern "system" {
                 fn ShowWindow(hwnd: *mut std::ffi::c_void, nCmdShow: i32) -> i32;
+                fn SetWindowPos(hwnd: *mut std::ffi::c_void, hWndInsertAfter: *mut std::ffi::c_void, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) -> i32;
             }
             unsafe {
+                let _ = SetWindowPos(
+                    hwnd as _,
+                    std::ptr::null_mut(),
+                    0, 0, 0, 0,
+                    0x0080 | 0x0002 | 0x0001 | 0x0004 | 0x0010, // SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+                );
                 let _ = ShowWindow(hwnd as _, 0); // SW_HIDE
             }
         }
@@ -1263,12 +1607,28 @@ pub fn clear_screen_numbered_badges() {
 
 #[cfg(not(windows))]
 pub fn draw_screen_numbered_badges(
-    _targets: &[crate::types::NumberedElementTarget],
-    _zoom_factor: f32,
-    _focused_index: Option<usize>,
-) {}
+    targets: &[crate::types::NumberedElementTarget],
+    zoom_factor: f32,
+    focused_index: Option<usize>,
+) {
+    if let Ok(mut state) = OVERLAY_STATE.lock() {
+        state.zones.clear();
+        state.targets = targets.to_vec();
+        state.zoom_factor = zoom_factor;
+        state.focused_index = focused_index;
+        state.is_visible = !targets.is_empty();
+    }
+}
 #[cfg(not(windows))]
-pub fn clear_screen_numbered_badges() {}
+pub fn clear_screen_numbered_badges() {
+    if let Ok(mut state) = OVERLAY_STATE.lock() {
+        state.targets.clear();
+        state.zones.clear();
+        state.focused_border = None;
+        state.orange_border = None;
+        state.is_visible = false;
+    }
+}
 
 #[cfg(windows)]
 pub fn get_window_process_info(hwnd: HWND) -> (u32, String) {
@@ -1857,15 +2217,20 @@ pub fn focus_and_isolate_window(target: HWND) {
     }
 
     unsafe {
+        if IsIconic(target).as_bool() {
+            let _ = ShowWindow(target, SW_RESTORE);
+        }
         let _ = ShowWindow(target, SW_MAXIMIZE);
     }
     crate::automation::force_foreground_window(target);
+    crate::automation::trigger_window_scan_async(target);
 }
 
 #[cfg(not(windows))]
 pub fn focus_and_isolate_window(target: impl crate::automation::AsWindowTarget) {
     let t = target.to_window_target();
     crate::automation::force_foreground_window(&t);
+    crate::automation::trigger_window_scan_async_target(&t);
     #[cfg(target_os = "macos")]
     {
         let script = format!(

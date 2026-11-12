@@ -1,6 +1,8 @@
 use crate::automation::NumberedElementTarget;
 #[cfg(windows)]
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
+use std::time::Duration;
+
 #[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
@@ -126,6 +128,10 @@ impl Default for HWND {
 pub fn capture_window_rgba(hwnd: HWND, rect: [i32; 4]) -> Option<(Vec<u8>, u32, u32)> {
     let w = (rect[2] - rect[0]).max(1) as u32;
     let h = (rect[3] - rect[1]).max(1) as u32;
+    
+    if w < 10 || h < 10 {
+        return None;
+    }
 
     unsafe {
         let hdc_screen = GetDC(HWND(std::ptr::null_mut()));
@@ -143,8 +149,19 @@ pub fn capture_window_rgba(hwnd: HWND, rect: [i32; 4]) -> Option<(Vec<u8>, u32, 
             isolated_success = PrintWindow(hwnd, hdc_mem, PW_RENDERFULLCONTENT).as_bool();
         }
 
-        // 2. Repli sur BitBlt de l'écran avec application du masque d'occlusion
-        let used_screen_fallback = !isolated_success;
+        // 2. Repli sur BitBlt de l'écran uniquement si la fenêtre est réellement visible
+        let is_visible = hwnd.0.is_null() || crate::window_util::is_window_visible_on_screen(hwnd);
+        let used_screen_fallback = !isolated_success && is_visible;
+
+        if !isolated_success && !is_visible {
+            // Aucune capture bitmap de la fenêtre n'a pu être faite (fenêtre invisible)
+            SelectObject(hdc_mem, old_bm);
+            let _ = DeleteObject(hbm);
+            let _ = DeleteDC(hdc_mem);
+            ReleaseDC(HWND(std::ptr::null_mut()), hdc_screen);
+            return None;
+        }
+
         if used_screen_fallback {
             let _ = BitBlt(
                 hdc_mem, 0, 0, w as i32, h as i32,
@@ -179,6 +196,35 @@ pub fn capture_window_rgba(hwnd: HWND, rect: [i32; 4]) -> Option<(Vec<u8>, u32, 
         SelectObject(hdc_mem, old_bm);
         let _ = DeleteObject(hbm);
         let _ = DeleteDC(hdc_mem);
+
+        // Détection de l'échec silencieux de PrintWindow (écran noir fréquent sous Chrome/Edge/DirectX)
+        if isolated_success && lines > 0 && is_visible {
+            let sample_step = ((w * h) / 100).max(1) as usize;
+            let mut has_color = false;
+            for i in (0..(w * h) as usize).step_by(sample_step) {
+                let idx = i * 4;
+                if idx + 2 < buffer.len() {
+                    if buffer[idx] > 10 || buffer[idx + 1] > 10 || buffer[idx + 2] > 10 {
+                        has_color = true;
+                        break;
+                    }
+                }
+            }
+
+            // Si le rendu interne est tout noir, basculer sur le BitBlt direct de l'écran visible
+            if !has_color {
+                let hdc_mem_retry = CreateCompatibleDC(hdc_screen);
+                let hbm_retry = CreateCompatibleBitmap(hdc_screen, w as i32, h as i32);
+                let old_bm_retry = SelectObject(hdc_mem_retry, hbm_retry);
+                let _ = BitBlt(hdc_mem_retry, 0, 0, w as i32, h as i32, hdc_screen, rect[0], rect[1], SRCCOPY);
+                let _ = GetDIBits(hdc_mem_retry, hbm_retry, 0, h, Some(buffer.as_mut_ptr() as *mut _), &mut bmi, DIB_RGB_COLORS);
+                SelectObject(hdc_mem_retry, old_bm_retry);
+                let _ = DeleteObject(hbm_retry);
+                let _ = DeleteDC(hdc_mem_retry);
+                apply_window_occlusion_mask(hwnd, rect, &mut buffer, w, h);
+            }
+        }
+
         ReleaseDC(HWND(std::ptr::null_mut()), hdc_screen);
 
         if lines > 0 {
@@ -889,68 +935,39 @@ pub fn capture_window_rgba(_hwnd: HWND, _rect: [i32; 4]) -> Option<(Vec<u8>, u32
 
 #[cfg(windows)]
 fn resolve_visual_zone_content(
+    uia: Option<&IUIAutomation>,
     hwnd: HWND,
-    rect: [i32; 4],
+    _rect: [i32; 4],
     click_x: i32,
     click_y: i32,
 ) -> Option<String> {
     let current_pid = std::process::id();
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        if let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
-            let mid_x = click_x;
-            let mid_y = click_y;
-            let dx = ((rect[2] - rect[0]) / 4).max(2);
-            let dy = ((rect[3] - rect[1]) / 4).max(2);
-            let sample_points = [
-                POINT { x: mid_x, y: mid_y },
-                POINT { x: (rect[0] + dx).min(rect[2]), y: mid_y },
-                POINT { x: (rect[2] - dx).max(rect[0]), y: mid_y },
-                POINT { x: mid_x, y: (rect[1] + dy).min(rect[3]) },
-            ];
-
-            for pt in sample_points {
-                if let Ok(elem) = uia.ElementFromPoint(pt) {
-                    if let Ok(elem_pid) = elem.CurrentProcessId() {
-                        if elem_pid as u32 == current_pid {
-                            continue;
-                        }
-                    }
-                    if let Ok(name) = elem.CurrentName() {
-                        let s = name.to_string();
-                        let trimmed = s.trim();
-                        let lower = trimmed.to_lowercase();
-                        if !trimmed.is_empty()
-                            && lower != "pane"
-                            && lower != "group"
-                            && lower != "groupe"
-                            && lower != "window"
-                            && lower != "client"
-                            && lower != "panneau"
-                        {
-                            return Some(trimmed.to_string());
-                        }
-                    }
-
-                    if let Some(txt) = crate::ui::extract_inner_text(&uia, &elem, 300) {
-                        let trimmed = txt.trim();
-                        let lower = trimmed.to_lowercase();
-                        if !trimmed.is_empty()
-                            && lower != "pane"
-                            && lower != "group"
-                            && lower != "groupe"
-                            && lower != "window"
-                            && lower != "client"
-                            && lower != "panneau"
-                        {
-                            return Some(trimmed.to_string());
+        let pt = POINT { x: click_x, y: click_y };
+        if let Some(automation) = uia {
+            if let Ok(elem) = automation.ElementFromPoint(pt) {
+                if let Ok(elem_pid) = elem.CurrentProcessId() {
+                    if elem_pid as u32 != current_pid {
+                        if let Ok(name) = elem.CurrentName() {
+                            let s = name.to_string();
+                            let trimmed = s.trim();
+                            let lower = trimmed.to_lowercase();
+                            if !trimmed.is_empty()
+                                && lower != "pane"
+                                && lower != "group"
+                                && lower != "groupe"
+                                && lower != "window"
+                                && lower != "client"
+                                && lower != "panneau"
+                            {
+                                return Some(trimmed.to_string());
+                            }
                         }
                     }
                 }
             }
         }
 
-        let pt = POINT { x: click_x, y: click_y };
         let child = WindowFromPoint(pt);
         let mut child_pid = 0u32;
         let _ = GetWindowThreadProcessId(child, Some(&mut child_pid));
@@ -1174,9 +1191,283 @@ pub fn detect_visual_boxes_from_pixels(
 
     // Trier les cibles par ordre visuel de lecture (haut-vers-bas, gauche-vers-droite)
     candidate_boxes.sort_by_key(|b| (b[1] / 16) * 10000 + b[0]);
-    candidate_boxes.truncate(400);
+    candidate_boxes.truncate(80);
 
     candidate_boxes
+}
+
+/// Encode une image RGBA en flux mémoire BMP 24 bits (sans dépendance externe)
+pub fn rgba_to_bmp(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let row_size = ((24 * width + 31) / 32) * 4;
+    let image_size = row_size * height;
+    let file_size = 54 + image_size;
+    let mut bmp = Vec::with_capacity(file_size as usize);
+
+    // BITMAPFILEHEADER (14 octets)
+    bmp.extend_from_slice(b"BM");
+    bmp.extend_from_slice(&file_size.to_le_bytes());
+    bmp.extend_from_slice(&[0, 0, 0, 0]); // Réservé
+    bmp.extend_from_slice(&54u32.to_le_bytes()); // Décalage vers les pixels
+
+    // BITMAPINFOHEADER (40 octets)
+    bmp.extend_from_slice(&40u32.to_le_bytes());
+    bmp.extend_from_slice(&(width as i32).to_le_bytes());
+    bmp.extend_from_slice(&(-(height as i32)).to_le_bytes()); // Négatif = top-down
+    bmp.extend_from_slice(&1u16.to_le_bytes());
+    bmp.extend_from_slice(&24u16.to_le_bytes());
+    bmp.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
+    bmp.extend_from_slice(&image_size.to_le_bytes());
+    bmp.extend_from_slice(&2835u32.to_le_bytes());
+    bmp.extend_from_slice(&2835u32.to_le_bytes());
+    bmp.extend_from_slice(&0u32.to_le_bytes());
+    bmp.extend_from_slice(&0u32.to_le_bytes());
+
+    let padding_bytes = (row_size - width * 3) as usize;
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let idx = (y * (width as usize) + x) * 4;
+            if idx + 2 < pixels.len() {
+                bmp.push(pixels[idx]);     // B
+                bmp.push(pixels[idx + 1]); // G
+                bmp.push(pixels[idx + 2]); // R
+            } else {
+                bmp.extend_from_slice(&[0, 0, 0]);
+            }
+        }
+        for _ in 0..padding_bytes {
+            bmp.push(0);
+        }
+    }
+    bmp
+}
+
+/// Encodage Base64 pur Rust sans crate supplémentaire
+pub fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct VlmElement {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    box_2d: Option<[f32; 4]>,
+    #[serde(default)]
+    point: Option<[f32; 2]>,
+}
+
+/// Exécute le GUI Grounding visuel via Qwen2-VL pour découvrir les icônes muettes et composants canvas
+pub fn detect_vlm_grounding_targets(
+    pixels: &[u8],
+    w: u32,
+    h: u32,
+    window_rect: [i32; 4],
+    existing_targets: &[NumberedElementTarget],
+) -> Vec<NumberedElementTarget> {
+    if w < 20 || h < 20 || pixels.is_empty() {
+        return Vec::new();
+    }
+
+    let max_dim = 960u32;
+    let (target_w, target_h) = if w > max_dim || h > max_dim {
+        let scale = (max_dim as f32 / w.max(h) as f32).min(1.0);
+        ((w as f32 * scale).round() as u32, (h as f32 * scale).round() as u32)
+    } else {
+        (w, h)
+    };
+
+    let bmp_bytes = if target_w != w || target_h != h {
+        let mut scaled = vec![0u8; (target_w * target_h * 4) as usize];
+        for dy in 0..target_h {
+            let sy = (dy * h / target_h) as usize;
+            for dx in 0..target_w {
+                let sx = (dx * w / target_w) as usize;
+                let s_idx = (sy * w as usize + sx) * 4;
+                let d_idx = (dy as usize * target_w as usize + dx as usize) * 4;
+                if s_idx + 4 <= pixels.len() && d_idx + 4 <= scaled.len() {
+                    scaled[d_idx..d_idx + 4].copy_from_slice(&pixels[s_idx..s_idx + 4]);
+                }
+            }
+        }
+        rgba_to_bmp(&scaled, target_w, target_h)
+    } else {
+        rgba_to_bmp(pixels, w, h)
+    };
+
+    let prompt = "Detect interactive icons, buttons, menus, canvas controls and cards lacking text. Output JSON list: [{\"name\": \"...\", \"role\": \"bouton\", \"box_2d\": [ymin, xmin, ymax, xmax]}] where coords are normalized 0..1000.";
+
+    // 1. Tenter en priorité absolue le modèle Qwen-VL chargé localement en asynchrone
+    if crate::local_llm::is_vlm_ready() {
+        if let Some(raw_text) = crate::local_llm::query_vlm_grounding_local(prompt) {
+            if let (Some(s), Some(e)) = (raw_text.find('['), raw_text.rfind(']')) {
+                let clean = &raw_text[s..=e];
+                if let Ok(elements) = serde_json::from_str::<Vec<VlmElement>>(clean) {
+                    return convert_vlm_elements_to_targets(elements, window_rect, existing_targets);
+                }
+            }
+        }
+    }
+
+    // 2. Repli vers le serveur / endpoint d'inférence configuré
+    let b64 = base64_encode(&bmp_bytes);
+    let data_uri = format!("data:image/bmp;base64,{b64}");
+
+    let endpoint = std::env::var("QWENVL_ENDPOINT")
+        .ok()
+        .or_else(|| crate::fs_util::read_env_var_from_file(".env", "QWENVL_ENDPOINT"))
+        .unwrap_or_else(|| "http://127.0.0.1:8000/v1/chat/completions".to_string());
+
+    let model_name = std::env::var("QWENVL_MODEL")
+        .ok()
+        .or_else(|| crate::fs_util::read_env_var_from_file(".env", "QWENVL_MODEL"))
+        .unwrap_or_else(|| "Qwen/Qwen2.5-VL-3B-Instruct".to_string());
+
+    let api_key = std::env::var("QWENVL_API_KEY")
+        .ok()
+        .or_else(|| crate::fs_util::read_env_var_from_file(".env", "QWENVL_API_KEY"))
+        .unwrap_or_default();
+
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+        return Vec::new();
+    };
+
+    let client = match reqwest::Client::builder().timeout(Duration::from_millis(3500)).build() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let body = serde_json::json!({
+        "model": model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": prompt },
+                    { "type": "image_url", "image_url": { "url": data_uri } }
+                ]
+            }
+        ],
+        "temperature": 0.1,
+        "max_tokens": 512
+    });
+
+    let mut req = client.post(&endpoint).json(&body);
+    if !api_key.trim().is_empty() {
+        req = req.bearer_auth(api_key.trim());
+    }
+
+    let res: Result<Vec<VlmElement>, String> = rt.block_on(async {
+        let resp = req.send().await.map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let raw_text = v.pointer("/choices/0/message/content").and_then(|v| v.as_str()).unwrap_or("");
+        let clean = if let (Some(s), Some(e)) = (raw_text.find('['), raw_text.rfind(']')) {
+            &raw_text[s..=e]
+        } else {
+            return Ok(Vec::new());
+        };
+        serde_json::from_str::<Vec<VlmElement>>(clean).map_err(|e| e.to_string())
+    });
+
+    let Ok(elements) = res else {
+        return Vec::new();
+    };
+
+    convert_vlm_elements_to_targets(elements, window_rect, existing_targets)
+}
+
+fn convert_vlm_elements_to_targets(
+    elements: Vec<VlmElement>,
+    window_rect: [i32; 4],
+    existing_targets: &[NumberedElementTarget],
+) -> Vec<NumberedElementTarget> {
+
+    let win_w = (window_rect[2] - window_rect[0]).max(1) as f32;
+    let win_h = (window_rect[3] - window_rect[1]).max(1) as f32;
+
+    let mut results = Vec::new();
+    for elem in elements {
+        let (rect, click_x, click_y) = if let Some([ymin, xmin, ymax, xmax]) = elem.box_2d {
+            let x0 = window_rect[0] + (xmin * win_w / 1000.0).round() as i32;
+            let y0 = window_rect[1] + (ymin * win_h / 1000.0).round() as i32;
+            let x1 = window_rect[0] + (xmax * win_w / 1000.0).round() as i32;
+            let y1 = window_rect[1] + (ymax * win_h / 1000.0).round() as i32;
+            let cx = (x0 + x1) / 2;
+            let cy = (y0 + y1) / 2;
+            ([x0, y0, x1, y1], cx, cy)
+        } else if let Some([px, py]) = elem.point {
+            let cx = window_rect[0] + (px * win_w / 1000.0).round() as i32;
+            let cy = window_rect[1] + (py * win_h / 1000.0).round() as i32;
+            ([cx - 16, cy - 16, cx + 16, cy + 16], cx, cy)
+        } else {
+            continue;
+        };
+
+        let overlaps = existing_targets.iter().any(|t| {
+            if t.name.trim().is_empty() { return false; }
+            let inter_x0 = rect[0].max(t.rect[0]);
+            let inter_y0 = rect[1].max(t.rect[1]);
+            let inter_x1 = rect[2].min(t.rect[2]);
+            let inter_y1 = rect[3].min(t.rect[3]);
+            if inter_x1 > inter_x0 && inter_y1 > inter_y0 {
+                let inter_area = ((inter_x1 - inter_x0) * (inter_y1 - inter_y0)) as f32;
+                let area = ((rect[2] - rect[0]).max(1) * (rect[3] - rect[1]).max(1)) as f32;
+                inter_area / area > 0.45
+            } else {
+                false
+            }
+        });
+
+        if !overlaps {
+            let role = if elem.role.trim().is_empty() {
+                "bouton (Qwen2-VL)".to_string()
+            } else {
+                format!("{} (Qwen2-VL)", elem.role.trim())
+            };
+            let name = if elem.name.trim().is_empty() {
+                "Élément visuel (VLM)".to_string()
+            } else {
+                elem.name.trim().to_string()
+            };
+            results.push(NumberedElementTarget {
+                index: 0,
+                click_x,
+                click_y,
+                rect,
+                name,
+                role,
+                shortcut: "Entrée".to_string(),
+                value: String::new(),
+                window_id: None,
+            });
+        }
+    }
+    results
 }
 
 /// Palette de couleurs vives et contrastées pour différencier chaque zone visuelle détectée
@@ -1317,12 +1608,24 @@ pub fn enrich_targets_with_ocr(
     let candidate_boxes =
         detect_visual_boxes_from_pixels(&pixels, w, h, window_rect, existing_targets);
 
+    #[cfg(windows)]
+    let uia_instance = unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()
+    };
+
     // Injection dans la liste des cibles d'interaction
     for cand_rect in candidate_boxes {
         let click_x = (cand_rect[0] + cand_rect[2]) / 2;
         let click_y = (cand_rect[1] + cand_rect[3]) / 2;
         let next_index = existing_targets.len() + 1;
 
+        #[cfg(windows)]
+        let display_name = resolve_visual_zone_content(uia_instance.as_ref(), hwnd, cand_rect, click_x, click_y)
+            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("Zone visuelle {next_index}"));
+        #[cfg(not(windows))]
         let display_name = resolve_visual_zone_content(hwnd, cand_rect, click_x, click_y)
             .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
             .filter(|s| !s.is_empty())
