@@ -39,6 +39,7 @@ jobs:
             libxrandr-dev \
             libxinerama-dev \
             libwayland-dev \
+            libxtst-dev \
             libx11-dev \
             xdotool \
             wmctrl \
