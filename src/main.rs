@@ -824,11 +824,7 @@ impl OverlayApp {
             // Restauration de la géométrie de la capsule egui sur macOS/Linux
             #[cfg(not(windows))]
             {
-                let work_area = get_desktop_work_area_scaled(ctx);
-                let def_pos = egui::pos2(work_area.x + work_area.w - self.current_win_w - 16.0, (work_area.taskbar_top - self.current_win_h).max(work_area.y));
-                self.window_pos = Some(def_pos);
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(self.current_win_w, self.current_win_h)));
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(def_pos));
+                self.position_initialized = false;
             }
 
             let msg = t!("speech.switch_access_disabled").to_string();
