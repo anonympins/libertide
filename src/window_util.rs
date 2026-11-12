@@ -41,6 +41,57 @@ pub fn is_window_hung(hwnd: HWND) -> bool {
 }
 
 #[cfg(windows)]
+pub fn is_window_cloaked(hwnd: HWND) -> bool {
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmGetWindowAttribute(
+            hwnd: HWND,
+            dwAttribute: u32,
+            pvAttribute: *mut std::ffi::c_void,
+            cbAttribute: u32,
+        ) -> windows::core::HRESULT;
+    }
+    const DWMWA_CLOAKED: u32 = 14;
+    let mut cloaked: u32 = 0;
+    unsafe {
+        let hr = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut _ as *mut std::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        hr.is_ok() && cloaked != 0
+    }
+}
+
+#[cfg(windows)]
+pub fn is_window_visible_on_screen(hwnd: HWND) -> bool {
+    if hwnd.0.is_null() || is_window_hung(hwnd) {
+        return false;
+    }
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return false;
+        }
+    }
+    if is_window_cloaked(hwnd) {
+        return false;
+    }
+    let mut r = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut r).is_err() } {
+        return false;
+    }
+    let w = r.right - r.left;
+    let h = r.bottom - r.top;
+    w > 10 && h > 10
+}
+
+#[cfg(not(windows))]
+pub fn is_window_visible_on_screen(_target: impl std::fmt::Display) -> bool {
+    true
+}
+
+#[cfg(windows)]
 pub fn is_terminal_window(hwnd: HWND, title: &str) -> bool {
     let (_pid, exe_name) = get_window_process_info(hwnd);
     let exe_lower = exe_name.to_lowercase();
@@ -888,6 +939,7 @@ pub fn render_overlay_state(state: &OverlayDrawState) {
         fn FillRect(hdc: *mut std::ffi::c_void, lprc: *const RECT, hbr: *mut std::ffi::c_void) -> i32;
         fn GetStockObject(i: i32) -> *mut std::ffi::c_void;
         fn ShowWindow(hwnd: *mut std::ffi::c_void, nCmdShow: i32) -> i32;
+        fn SetWindowPos(hwnd: *mut std::ffi::c_void, hWndInsertAfter: *mut std::ffi::c_void, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) -> i32;
         fn GetSystemMetrics(nIndex: i32) -> i32;
     }
 
@@ -907,6 +959,38 @@ pub fn render_overlay_state(state: &OverlayDrawState) {
     } else {
         (0, 0, unsafe { GetSystemMetrics(0) }, unsafe { GetSystemMetrics(1) })
     };
+
+    let is_empty = !state.is_visible
+        || (state.targets.is_empty()
+            && state.zones.is_empty()
+            && state.orange_border.is_none()
+            && state.focused_border.is_none());
+
+    if is_empty {
+        unsafe {
+            let hdc = GetDC(hwnd);
+            if !hdc.is_null() {
+                let mem_dc = CreateCompatibleDC(hdc);
+                let mem_bmp = CreateCompatibleBitmap(hdc, vw, vh);
+                let old_bmp = SelectObject(mem_dc, mem_bmp);
+
+                let key_brush = CreateSolidBrush(OVERLAY_COLOR_KEY);
+                let full_screen_rc = RECT { left: 0, top: 0, right: vw, bottom: vh };
+                FillRect(mem_dc, &full_screen_rc, key_brush);
+                DeleteObject(key_brush);
+
+                BitBlt(hdc, 0, 0, vw, vh, mem_dc, 0, 0, 0x00CC0020); // SRCCOPY
+
+                SelectObject(mem_dc, old_bmp);
+                DeleteObject(mem_bmp);
+                DeleteDC(mem_dc);
+                ReleaseDC(hwnd, hdc);
+            }
+            let _ = SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0, 0x0080 | 0x0002 | 0x0001 | 0x0004 | 0x0010);
+            let _ = ShowWindow(hwnd, 0); // SW_HIDE
+        }
+        return;
+    }
 
     unsafe {
         let hdc = GetDC(hwnd);
@@ -1169,6 +1253,13 @@ pub fn draw_screen_control_border(rect: [i32; 4], is_cyan: bool) {
     }
 }
 
+#[cfg(windows)]
+pub fn set_overlay_focused_border(border: Option<([i32; 4], bool)>) {
+    if let Ok(mut state) = OVERLAY_STATE.lock() {
+        state.focused_border = border;
+    }
+}
+
 #[cfg(not(windows))]
 pub fn draw_screen_control_border(_rect: [i32; 4], _is_cyan: bool) {}
 
@@ -1253,8 +1344,15 @@ pub fn clear_screen_numbered_badges() {
         if let Some(hwnd) = *guard {
             extern "system" {
                 fn ShowWindow(hwnd: *mut std::ffi::c_void, nCmdShow: i32) -> i32;
+                fn SetWindowPos(hwnd: *mut std::ffi::c_void, hWndInsertAfter: *mut std::ffi::c_void, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) -> i32;
             }
             unsafe {
+                let _ = SetWindowPos(
+                    hwnd as _,
+                    std::ptr::null_mut(),
+                    0, 0, 0, 0,
+                    0x0080 | 0x0002 | 0x0001 | 0x0004 | 0x0010, // SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+                );
                 let _ = ShowWindow(hwnd as _, 0); // SW_HIDE
             }
         }
@@ -1860,12 +1958,14 @@ pub fn focus_and_isolate_window(target: HWND) {
         let _ = ShowWindow(target, SW_MAXIMIZE);
     }
     crate::automation::force_foreground_window(target);
+    crate::automation::trigger_window_scan_async(target);
 }
 
 #[cfg(not(windows))]
 pub fn focus_and_isolate_window(target: impl crate::automation::AsWindowTarget) {
     let t = target.to_window_target();
     crate::automation::force_foreground_window(&t);
+    crate::automation::trigger_window_scan_async_target(&t);
     #[cfg(target_os = "macos")]
     {
         let script = format!(

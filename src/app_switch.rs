@@ -75,7 +75,7 @@ impl OverlayApp {
         if self.switch_access_mode {
             match self.switch_step {
                 SwitchAccessStep::Windows => {
-                    if !self.switch_zones.is_empty() {
+                    if !self.switch_zones.is_empty() && !self.numbered_targets.is_empty() {
                         let zone_infos: Vec<ZoneOverlayInfo> = self.switch_zones.iter().enumerate().map(|(i, z)| {
                             ZoneOverlayInfo {
                                 index: i + 1,
@@ -89,6 +89,8 @@ impl OverlayApp {
                     } else if !self.numbered_targets.is_empty() {
                         let focused_idx = self.numbered_targets.first().map(|t| t.index);
                         draw_screen_numbered_badges(&self.numbered_targets, self.zoom_factor, focused_idx);
+                    } else {
+                        clear_screen_numbered_badges();
                     }
                 }
                 SwitchAccessStep::Zones => {
@@ -104,11 +106,17 @@ impl OverlayApp {
                         }).collect();
                         let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
                         draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
+                    } else if !self.numbered_targets.is_empty() {
+                        let focused_idx = self.numbered_targets.first().map(|t| t.index);
+                        draw_screen_numbered_badges(&self.numbered_targets, self.zoom_factor, focused_idx);
+                    } else {
+                        clear_screen_numbered_badges();
                     }
                 }
                 SwitchAccessStep::Elements => {
                     let focused_target = self.numbered_targets.get(self.switch_focus_index % self.numbered_targets.len().max(1));
                     let focused_idx = focused_target.map(|t| t.index);
+                    let focused_border = focused_target.map(|t| (t.rect, t.role == "lecture textuelle"));
                     let active_zone_opt = self.switch_active_zone_index.and_then(|idx| self.switch_zones.get(idx));
                     let chunk_start = self.numbered_chunk_offset.min(self.numbered_targets.len());
                     let chunk_end = (chunk_start + 50).min(self.numbered_targets.len());
@@ -117,6 +125,9 @@ impl OverlayApp {
                     } else {
                         &self.numbered_targets[..]
                     };
+
+                    #[cfg(windows)]
+                    set_overlay_focused_border(focused_border);
 
                     if let Some(zone) = active_zone_opt {
                         let zone_info = vec![ZoneOverlayInfo {
@@ -128,14 +139,13 @@ impl OverlayApp {
                         draw_screen_zones_and_targets(&zone_info, visible_targets, self.zoom_factor, focused_idx);
                     } else if !visible_targets.is_empty() {
                         draw_screen_numbered_badges(visible_targets, self.zoom_factor, focused_idx);
-                    }
-
-                    #[cfg(windows)]
-                    if let Some(target) = focused_target {
-                        draw_screen_control_border(target.rect, target.role == "lecture textuelle");
+                    } else {
+                        clear_screen_numbered_badges();
                     }
                 }
             }
+        } else {
+            clear_screen_numbered_badges();
         }
     }
 
@@ -177,9 +187,12 @@ impl OverlayApp {
                 }
             }
 
+            self.numbered_targets.clear();
+            self.switch_zones.clear();
+            self.switch_active_zone_index = None;
+            clear_screen_numbered_badges();
             #[cfg(windows)]
             {
-                clear_screen_numbered_badges();
                 if let Some(wid) = target.window_id {
                     let hwnd = windows::Win32::Foundation::HWND(wid as _);
                     if !hwnd.0.is_null() && !is_window_hung(hwnd) {
@@ -291,6 +304,11 @@ impl OverlayApp {
 
     /// Transitionne de l'étape fenêtre vers l'étape des Chunks de badges / Zones
     pub fn transition_to_zones_for_window(&mut self, window_id: isize, win_title: &str) {
+        self.numbered_targets.clear();
+        self.switch_zones.clear();
+        self.switch_active_zone_index = None;
+        clear_screen_numbered_badges();
+
         self.switch_active_window_id = Some(window_id);
         self.switch_step = SwitchAccessStep::Zones;
         self.switch_focus_index = 0;
@@ -377,6 +395,11 @@ impl OverlayApp {
         win_rect: [i32; 4],
         speak_summary: bool,
     ) {
+        self.numbered_targets.clear();
+        self.switch_zones.clear();
+        self.switch_active_zone_index = None;
+        clear_screen_numbered_badges();
+
         self.switch_active_window_id = Some(window_id);
 
         #[cfg(windows)]
@@ -456,6 +479,25 @@ impl OverlayApp {
     }
 
     pub fn refresh_numbered_targets_for_window(&mut self, hwnd_id: isize) {
+        let is_different_win = self.numbered_last_hwnd != Some(hwnd_id)
+            || self.switch_active_window_id != Some(hwnd_id)
+            || !self.numbered_targets.iter().all(|t| t.window_id == Some(hwnd_id));
+
+        let previous_for_reconcile = if !is_different_win {
+            self.numbered_targets.clone()
+        } else {
+            Vec::new()
+        };
+
+        // En cas de changement réel de fenêtre, vider l'ancien affichage.
+        // Si on reste sur la même fenêtre, on conserve le buffer courant pour éviter tout clignotement.
+        if is_different_win {
+            self.numbered_targets.clear();
+            self.switch_zones.clear();
+            self.switch_active_zone_index = None;
+            clear_screen_numbered_badges();
+        }
+
         #[cfg(windows)]
         {
             let hwnd = windows::Win32::Foundation::HWND(hwnd_id as _);
@@ -466,6 +508,10 @@ impl OverlayApp {
             let mut r = windows::Win32::Foundation::RECT::default();
             let has_rect = unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut r).is_ok() };
             let cur_rect = if has_rect { Some([r.left, r.top, r.right, r.bottom]) } else { None };
+
+            if let Some(rect) = cur_rect {
+                draw_screen_orange_border(rect);
+            }
 
             self.numbered_last_refresh = Instant::now();
             self.numbered_last_hwnd = Some(hwnd_id);
@@ -478,7 +524,7 @@ impl OverlayApp {
             let req = TargetsScanRequest {
                 hwnd: hwnd_id,
                 win_rect: cur_rect,
-                previous: self.numbered_targets.clone(),
+                previous: previous_for_reconcile,
                 sequence: self.scan_sequence_counter,
             };
             self.is_scan_in_progress = true;
@@ -487,6 +533,7 @@ impl OverlayApp {
         #[cfg(not(windows))]
         {
             self.numbered_last_refresh = Instant::now();
+            self.numbered_last_hwnd = Some(hwnd_id);
             self.numbered_chunk_offset = 0;
             self.switch_active_window_id = Some(hwnd_id);
             self.numbered_input_buffer.clear();
@@ -494,7 +541,7 @@ impl OverlayApp {
             let req = TargetsScanRequest {
                 hwnd: hwnd_id,
                 win_rect: None,
-                previous: self.numbered_targets.clone(),
+                previous: if !is_different_win { self.numbered_targets.clone() } else { Vec::new() },
                 sequence: self.scan_sequence_counter,
             };
             self.is_scan_in_progress = true;
@@ -512,6 +559,7 @@ impl OverlayApp {
         self.hover_physical_mouse_moved = false;
         play_earcon(Earcon::Success);
 
+        clear_screen_numbered_badges();
         let cur_zone = self.switch_zones[zone_idx].clone();
         self.numbered_targets = cur_zone.targets.clone();
         self.switch_active_zone_index = Some(zone_idx);

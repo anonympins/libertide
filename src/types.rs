@@ -119,6 +119,7 @@ pub enum SwitchKeyEvent {
     ToggleDictation,
     ToggleVoice,
     Clear,
+    Scroll,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -128,6 +128,10 @@ impl Default for HWND {
 pub fn capture_window_rgba(hwnd: HWND, rect: [i32; 4]) -> Option<(Vec<u8>, u32, u32)> {
     let w = (rect[2] - rect[0]).max(1) as u32;
     let h = (rect[3] - rect[1]).max(1) as u32;
+    
+    if w < 10 || h < 10 {
+        return None;
+    }
 
     unsafe {
         let hdc_screen = GetDC(HWND(std::ptr::null_mut()));
@@ -145,8 +149,19 @@ pub fn capture_window_rgba(hwnd: HWND, rect: [i32; 4]) -> Option<(Vec<u8>, u32, 
             isolated_success = PrintWindow(hwnd, hdc_mem, PW_RENDERFULLCONTENT).as_bool();
         }
 
-        // 2. Repli sur BitBlt de l'écran avec application du masque d'occlusion
-        let used_screen_fallback = !isolated_success;
+        // 2. Repli sur BitBlt de l'écran uniquement si la fenêtre est réellement visible
+        let is_visible = hwnd.0.is_null() || crate::window_util::is_window_visible_on_screen(hwnd);
+        let used_screen_fallback = !isolated_success && is_visible;
+
+        if !isolated_success && !is_visible {
+            // Aucune capture bitmap de la fenêtre n'a pu être faite (fenêtre invisible)
+            SelectObject(hdc_mem, old_bm);
+            let _ = DeleteObject(hbm);
+            let _ = DeleteDC(hdc_mem);
+            ReleaseDC(HWND(std::ptr::null_mut()), hdc_screen);
+            return None;
+        }
+
         if used_screen_fallback {
             let _ = BitBlt(
                 hdc_mem, 0, 0, w as i32, h as i32,
@@ -181,6 +196,35 @@ pub fn capture_window_rgba(hwnd: HWND, rect: [i32; 4]) -> Option<(Vec<u8>, u32, 
         SelectObject(hdc_mem, old_bm);
         let _ = DeleteObject(hbm);
         let _ = DeleteDC(hdc_mem);
+
+        // Détection de l'échec silencieux de PrintWindow (écran noir fréquent sous Chrome/Edge/DirectX)
+        if isolated_success && lines > 0 && is_visible {
+            let sample_step = ((w * h) / 100).max(1) as usize;
+            let mut has_color = false;
+            for i in (0..(w * h) as usize).step_by(sample_step) {
+                let idx = i * 4;
+                if idx + 2 < buffer.len() {
+                    if buffer[idx] > 10 || buffer[idx + 1] > 10 || buffer[idx + 2] > 10 {
+                        has_color = true;
+                        break;
+                    }
+                }
+            }
+
+            // Si le rendu interne est tout noir, basculer sur le BitBlt direct de l'écran visible
+            if !has_color {
+                let hdc_mem_retry = CreateCompatibleDC(hdc_screen);
+                let hbm_retry = CreateCompatibleBitmap(hdc_screen, w as i32, h as i32);
+                let old_bm_retry = SelectObject(hdc_mem_retry, hbm_retry);
+                let _ = BitBlt(hdc_mem_retry, 0, 0, w as i32, h as i32, hdc_screen, rect[0], rect[1], SRCCOPY);
+                let _ = GetDIBits(hdc_mem_retry, hbm_retry, 0, h, Some(buffer.as_mut_ptr() as *mut _), &mut bmi, DIB_RGB_COLORS);
+                SelectObject(hdc_mem_retry, old_bm_retry);
+                let _ = DeleteObject(hbm_retry);
+                let _ = DeleteDC(hdc_mem_retry);
+                apply_window_occlusion_mask(hwnd, rect, &mut buffer, w, h);
+            }
+        }
+
         ReleaseDC(HWND(std::ptr::null_mut()), hdc_screen);
 
         if lines > 0 {
@@ -1480,20 +1524,6 @@ pub fn enrich_targets_with_ocr(
     window_rect: [i32; 4],
     existing_targets: &mut Vec<NumberedElementTarget>,
 ) {
-    // Injection du Grounding Visuel Qwen2-VL si activé
-    if crate::local_llm::is_vlm_grounding_enabled() {
-        if let Some((pixels, w, h)) = capture_window_rgba(hwnd, window_rect) {
-            let vlm_targets = detect_vlm_grounding_targets(&pixels, w, h, window_rect, existing_targets);
-            for mut t in vlm_targets {
-                let next_index = existing_targets.len() + 1;
-                t.index = next_index;
-                t.value = visual_zone_color(next_index).to_string();
-                t.window_id = Some(hwnd.0 as isize);
-                existing_targets.push(t);
-            }
-        }
-    }
-
     #[cfg(target_os = "macos")]
     {
         let vision_items = recognize_texts_vision(window_rect);

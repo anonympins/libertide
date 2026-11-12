@@ -1754,6 +1754,7 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
         | "bajar" | "nach unten" | "nach unten scrollen" | "scorri giù"
         | "rolar para baixo" | "прокрутить вниз" | "вниз"
         | "向下滚动" | "下翻" | "下にスクロール" => {
+            clear_screen_numbered_badges();
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x22));
             #[cfg(target_os = "macos")]
@@ -1766,6 +1767,7 @@ pub fn try_execute_local_navigation_shortcut(prompt: &str) -> Option<&'static st
         | "subir" | "nach oben" | "nach oben scrollen" | "scorri su"
         | "rolar para cima" | "прокрутить вверх" | "вверх"
         | "向上滚动" | "上翻" | "上にスクロール" => {
+            clear_screen_numbered_badges();
             #[cfg(windows)]
             send_hotkey(&[], VIRTUAL_KEY(0x21));
             #[cfg(target_os = "macos")]
