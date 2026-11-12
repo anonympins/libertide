@@ -3,6 +3,43 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.8.1] - 2026-11-12
+
+### 🎯 Rewritten Hover Mode & Cross-Platform Parity (`main.rs`, `automation.rs`, `window_util.rs`, `ocr.rs`)
+- **Complete Hover Mode Engine Rewrite & Fluid Cursor Traversal**:
+  - Re-architected pointer motion tracking with responsive physical mouse delta detection and anti-jitter stabilization (`hover_cursor_still_since`, `hover_physical_mouse_moved`).
+  - Real-time cross-window hover transitions: pointer movement smoothly discovers top-level root windows (`GA_ROOT`) on the fly, auto-focusing target windows and refreshing their interactive elements without requiring manual Alt+Tab or taskbar clicks.
+  - Dynamic hierarchy climbing and descent (Window ➔ Zone ➔ Control) with contextual preemption and speech cancellation on rapid cursor sweeps (`hover_speech_deadline`).
+- **Cross-Platform Overlay & Drawing Parity (macOS / Linux / Windows)**:
+  - Native GDI drawing on Windows coupled with transparent fullscreen viewport rendering on macOS and Linux compositors via `egui::Painter`.
+  - Unified high-contrast visual styling across all operating systems: vibrant 3.5 px orange active window borders, color-coded visual zone bounding boxes (`visual_zone_color`), and crisp control outlines with rounded corners.
+
+### 🏷️ Exhaustive Window & Control Badge Narration (`main.rs`, `automation.rs`, `ui.rs`)
+- **Omni-Target Voice Guidance (`build_targeted_hover_speech`)**:
+  - Spoken narration across all interactive elements, reading zones, and visual OCR boxes with structural contextual awareness (e.g. *"Window 1: Notepad"*, zone headers, and relative item offsets).
+  - Deduplicated announcements: automatically suppresses redundant parent zone speech when sweeping between sibling controls within the same macro-zone.
+  - Direct single-press or numeric buffer targeting via numpad and top-row digits (`NUMBER_KEY_QUEUE`), backed by auto-commit timeouts (900 ms) and backspace error-correction.
+  - Enhanced chunked badge navigation (`AgentEvent::NextNumberedChunk`, `AgentEvent::PreviousNumberedChunk`) with vocal range updates for dense application interfaces.
+
+### 🪟 Advanced Window Title & System Tray Filtering (`main.rs`, `window_util.rs`)
+- **System Tray & Desktop Occlusion Guards (`is_system_tray_or_desktop`)**:
+  - Added filtering for shell trays, taskbar notification overflow areas, and desktop wallpaper surfaces to prevent accidental background locking or lost focus traps.
+  - Automated title sanitization and fallback labelling (`"Fenêtre"` / `"Window"`) when querying untitled Win32 or Chromium top-level frames.
+  - Resilient foreground management chaining `force_foreground_window`, `restore_if_iconic`, and responsive `is_window_hung` checks before dispatching UIA or click inputs.
+
+### 👁️ Asynchronous Vision-Language Model (VLM) Grounding (`main.rs`, `local_llm.rs`)
+- **Background VLM Initialization Pipeline (`init_vlm_async`, `is_vlm_grounding_enabled`)**:
+  - Added non-blocking asynchronous preloading for local multimodal Vision-Language Models (VLM) during application bootstrap.
+  - Offloaded heavy weight allocation and vision encoder preparation to dedicated worker threads, ensuring the UI thread remains completely responsive at 60 FPS on first boot.
+
+### 🛠️ Stability & Audio/Dictation Enhancements (`main.rs`, `commands.rs`)
+- **Trackball & Hardware Switch Input Debouncing**:
+  - Refined multi-button hardware trackball ergonomics (`XButton1` dictation toggle, `XButton2` switch mode, `MButton` immediate speech cutoff) with strict timing debouncing.
+- **Subtitles & Card Narration Cleanup**:
+  - Synchronized card audio state transitions with live subtitles loopback capture to eliminate audio channel conflicts.
+
+---
+
 ## [0.8.0] - 2026-11-27
 
 ### 🎵 Adapted Drum Machine & Musical Instrument (`instrument.rs`, `floating_window.rs`, `main.rs`, `types.rs`, `overlay.rs`, `local_llm.rs`)

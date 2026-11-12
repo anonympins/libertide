@@ -1187,7 +1187,8 @@ fn query_atspi_elements() -> Vec<AtspiElementRaw> {
                         Some("org.a11y.atspi.Accessible"),
                         "getName",
                         &(),
-                    ).or_else(|_| {
+                    ).and_then(|r| r.body().deserialize())
+                    .or_else(|_| {
                         conn.call_method(
                             Some(dest),
                             path,
@@ -1198,7 +1199,7 @@ fn query_atspi_elements() -> Vec<AtspiElementRaw> {
                             let val: zbus::zvariant::OwnedValue = r.body().deserialize()?;
                             val.downcast::<String>().map_err(|e| zbus::Error::Variant(e))
                         })
-                    }).and_then(|r| r.body().deserialize());
+                    });
 
                     let mut val_text = String::new();
                     let text_res: Result<String, _> = conn.call_method(
