@@ -638,6 +638,82 @@ pub fn get_active_x11_window() -> Option<String> {
     }
 }
 
+#[cfg(windows)]
+pub fn get_active_window_rect() -> Option<[i32; 4]> {
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let mut r = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut r).is_ok() } {
+        Some([r.left, r.top, r.right, r.bottom])
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn get_active_window_rect() -> Option<[i32; 4]> {
+    let script = r#"tell application "System Events"
+        set p to first process whose frontmost is true
+        tell p
+            if (count of windows) > 0 then
+                set w to front window
+                set {x, y} to position of w
+                set {w_w, w_h} to size of w
+                return (x as text) & "," & (y as text) & "," & (w_w as text) & "," & (w_h as text)
+            end if
+        end tell
+    end tell"#;
+    let output = std::process::Command::new("osascript").args(["-e", script]).output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let parts: Vec<&str> = text.split(',').map(|s| s.trim()).collect();
+    if parts.len() == 4 {
+        let x = parts[0].parse::<i32>().ok()?;
+        let y = parts[1].parse::<i32>().ok()?;
+        let w = parts[2].parse::<i32>().ok()?;
+        let h = parts[3].parse::<i32>().ok()?;
+        return Some([x, y, x + w, y + h]);
+    }
+    None
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn get_active_window_rect() -> Option<[i32; 4]> {
+    let active_id = get_active_x11_window()?;
+    let parse_id = |s: &str| -> Option<u64> {
+        let s = s.trim();
+        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            u64::from_str_radix(hex, 16).ok()
+        } else {
+            s.parse::<u64>().ok()
+        }
+    };
+    let active_num = parse_id(&active_id);
+
+    let output = std::process::Command::new("wmctrl")
+        .args(["-l", "-G"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 6 {
+            let win_id = parts[0];
+            let is_match = win_id.eq_ignore_ascii_case(&active_id)
+                || (active_num.is_some() && parse_id(win_id) == active_num);
+            if is_match {
+                let x = parts[2].parse::<i32>().ok()?;
+                let y = parts[3].parse::<i32>().ok()?;
+                let w = parts[4].parse::<i32>().ok()?;
+                let h = parts[5].parse::<i32>().ok()?;
+                return Some([x, y, x + w, y + h]);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(not(windows))]
 pub fn get_x11_window_properties(win_id: &str) -> (String, String) {
     // Récupère WM_CLASS et _NET_WM_PID via xprop
@@ -842,7 +918,6 @@ pub fn set_global_cursor_pos(x: i32, y: i32) {
 #[cfg(windows)]
 static BADGE_OVERLAY_HWND: std::sync::Mutex<Option<isize>> = std::sync::Mutex::new(None);
 
-#[cfg(windows)]
 #[derive(Default, Clone)]
 pub struct OverlayDrawState {
     pub targets: Vec<crate::types::NumberedElementTarget>,
@@ -854,7 +929,6 @@ pub struct OverlayDrawState {
     pub is_visible: bool,
 }
 
-#[cfg(windows)]
 pub static OVERLAY_STATE: std::sync::Mutex<OverlayDrawState> = std::sync::Mutex::new(OverlayDrawState {
     targets: Vec::new(),
     zones: Vec::new(),
@@ -864,6 +938,13 @@ pub static OVERLAY_STATE: std::sync::Mutex<OverlayDrawState> = std::sync::Mutex:
     orange_border: None,
     is_visible: false,
 });
+
+pub fn get_overlay_draw_state() -> OverlayDrawState {
+    OVERLAY_STATE
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default()
+}
 
 #[cfg(windows)]
 pub fn hex_to_gdi_bgr(hex: &str) -> u32 {
@@ -1392,10 +1473,33 @@ pub fn set_overlay_focused_border(border: Option<([i32; 4], bool)>) {
 }
 
 #[cfg(not(windows))]
-pub fn draw_screen_control_border(_rect: [i32; 4], _is_cyan: bool) {}
+pub fn draw_screen_control_border(rect: [i32; 4], is_cyan: bool) {
+    if let Ok(mut state) = OVERLAY_STATE.lock() {
+        if state.focused_border == Some((rect, is_cyan)) && state.is_visible {
+            return;
+        }
+        state.focused_border = Some((rect, is_cyan));
+        state.is_visible = true;
+    }
+}
 
 #[cfg(not(windows))]
-pub fn draw_screen_orange_border(_rect: [i32; 4]) {}
+pub fn draw_screen_orange_border(rect: [i32; 4]) {
+    if let Ok(mut state) = OVERLAY_STATE.lock() {
+        if state.orange_border == Some(rect) && state.is_visible {
+            return;
+        }
+        state.orange_border = Some(rect);
+        state.is_visible = true;
+    }
+}
+
+#[cfg(not(windows))]
+pub fn set_overlay_focused_border(border: Option<([i32; 4], bool)>) {
+    if let Ok(mut state) = OVERLAY_STATE.lock() {
+        state.focused_border = border;
+    }
+}
 
 #[cfg(windows)]
 pub fn draw_screen_numbered_badges(
@@ -1455,11 +1559,19 @@ pub fn draw_screen_zones_and_targets(
 
 #[cfg(not(windows))]
 pub fn draw_screen_zones_and_targets(
-    _zones: &[ZoneOverlayInfo],
-    _targets: &[crate::types::NumberedElementTarget],
-    _zoom_factor: f32,
-    _focused_index: Option<usize>,
-) {}
+    zones: &[ZoneOverlayInfo],
+    targets: &[crate::types::NumberedElementTarget],
+    zoom_factor: f32,
+    focused_index: Option<usize>,
+) {
+    if let Ok(mut state) = OVERLAY_STATE.lock() {
+        state.zones = zones.to_vec();
+        state.targets = targets.to_vec();
+        state.zoom_factor = zoom_factor;
+        state.focused_index = focused_index;
+        state.is_visible = !zones.is_empty() || !targets.is_empty() || state.orange_border.is_some();
+    }
+}
 
 #[cfg(windows)]
 pub fn clear_screen_numbered_badges() {
@@ -1492,12 +1604,28 @@ pub fn clear_screen_numbered_badges() {
 
 #[cfg(not(windows))]
 pub fn draw_screen_numbered_badges(
-    _targets: &[crate::types::NumberedElementTarget],
-    _zoom_factor: f32,
-    _focused_index: Option<usize>,
-) {}
+    targets: &[crate::types::NumberedElementTarget],
+    zoom_factor: f32,
+    focused_index: Option<usize>,
+) {
+    if let Ok(mut state) = OVERLAY_STATE.lock() {
+        state.zones.clear();
+        state.targets = targets.to_vec();
+        state.zoom_factor = zoom_factor;
+        state.focused_index = focused_index;
+        state.is_visible = !targets.is_empty();
+    }
+}
 #[cfg(not(windows))]
-pub fn clear_screen_numbered_badges() {}
+pub fn clear_screen_numbered_badges() {
+    if let Ok(mut state) = OVERLAY_STATE.lock() {
+        state.targets.clear();
+        state.zones.clear();
+        state.focused_border = None;
+        state.orange_border = None;
+        state.is_visible = false;
+    }
+}
 
 #[cfg(windows)]
 pub fn get_window_process_info(hwnd: HWND) -> (u32, String) {

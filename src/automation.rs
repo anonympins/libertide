@@ -12,6 +12,8 @@ use crate::fs_util::{
     create_temp_note_file, find_executable_in_path, find_file_in_workspace,
     open_path_with_default_app,
 };
+#[cfg(not(windows))]
+use crate::ocr::HWND;
 use crate::types::{AgentAction, QuickSuggestionItem};
 pub use crate::types::{NavigationZone, NumberedElementTarget};
 use crate::window_util::*;
@@ -766,11 +768,8 @@ pub fn spawn_targets_worker(
                             };
                             #[cfg(not(windows))]
                             let capture_opt = {
-                                if let Some(r) = win_rect_val {
-                                    crate::ocr::capture_window_rgba(HWND::NULL, r)
-                                } else {
-                                    None
-                                }
+                                let rect = win_rect_val.or_else(get_active_window_rect);
+                                rect.and_then(|r| crate::ocr::capture_window_rgba(HWND::NULL, r))
                             };
 
                             if let Some((pixels, w, h)) = capture_opt {
@@ -875,20 +874,50 @@ pub fn trigger_window_scan_async(hwnd: HWND) {
 #[cfg(not(windows))]
 pub fn trigger_window_scan_async_target(_target: &str) {
     let epoch = SCAN_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(50));
-        if SCAN_EPOCH.load(Ordering::SeqCst) != epoch {
-            return;
-        }
-        let targets = collect_numbered_targets_for_active_window();
-        if SCAN_EPOCH.load(Ordering::SeqCst) != epoch {
-            return;
-        }
-        if !targets.is_empty() {
-            draw_screen_numbered_badges(&targets, 1.0, None);
-            trigger_repaint();
-        }
-    });
+    std::thread::Builder::new()
+        .name("fast_window_ocr_scan_nonwin".to_string())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            if SCAN_EPOCH.load(Ordering::SeqCst) != epoch {
+                return;
+            }
+            let targets = collect_numbered_targets_for_active_window();
+            if SCAN_EPOCH.load(Ordering::SeqCst) != epoch {
+                return;
+            }
+            if !targets.is_empty() {
+                draw_screen_numbered_badges(&targets, 1.0, None);
+                trigger_repaint();
+            }
+
+            // Passe en arrière-plan : Qwen VLM pour les icônes et canvas
+            if crate::local_llm::is_vlm_grounding_enabled() || crate::local_llm::is_vlm_ready() {
+                let mut base_targets = targets;
+                std::thread::Builder::new()
+                    .name("vlm_grounding_async_window_nonwin".to_string())
+                    .spawn(move || {
+                        let rect = get_active_window_rect().unwrap_or([0, 0, 1920, 1080]);
+                        if let Some((pixels, w, h)) = crate::ocr::capture_window_rgba(HWND::NULL, rect) {
+                            if SCAN_EPOCH.load(Ordering::SeqCst) != epoch {
+                                return;
+                            }
+                            let vlm_targets = crate::ocr::detect_vlm_grounding_targets(&pixels, w, h, rect, &base_targets);
+                            if !vlm_targets.is_empty() && SCAN_EPOCH.load(Ordering::SeqCst) == epoch {
+                                for mut t in vlm_targets {
+                                    let next_index = base_targets.len() + 1;
+                                    t.index = next_index;
+                                    t.value = crate::ocr::visual_zone_color(next_index).to_string();
+                                    base_targets.push(t);
+                                }
+                                draw_screen_numbered_badges(&base_targets, 1.0, None);
+                                trigger_repaint();
+                            }
+                        }
+                    })
+                    .ok();
+            }
+        })
+        .ok();
 }
 
 #[cfg(not(windows))]
@@ -1033,7 +1062,7 @@ fn query_macos_ax_elements() -> Vec<MacosAxElementRaw> {
 #[cfg(target_os = "macos")]
 pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget> {
     let items = query_macos_ax_elements();
-    items
+    let mut targets: Vec<NumberedElementTarget> = items
         .into_iter()
         .take(300)
         .enumerate()
@@ -1062,7 +1091,15 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
             value: e.value,
             window_id: None,
         })
-        .collect()
+        .collect();
+
+    if let Some(rect) = get_active_window_rect() {
+        crate::ocr::enrich_targets_with_ocr(HWND::NULL, rect, &mut targets);
+        for (i, t) in targets.iter_mut().enumerate() {
+            t.index = i + 1;
+        }
+    }
+    targets
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
@@ -1150,7 +1187,7 @@ print(json.dumps(elements))
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget> {
     let items = query_atspi_elements();
-    items
+    let mut targets: Vec<NumberedElementTarget> = items
         .into_iter()
         .take(300)
         .enumerate()
@@ -1178,7 +1215,15 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
             value: e.value,
             window_id: None,
         })
-        .collect()
+        .collect();
+
+    if let Some(rect) = get_active_window_rect() {
+        crate::ocr::enrich_targets_with_ocr(HWND::NULL, rect, &mut targets);
+        for (i, t) in targets.iter_mut().enumerate() {
+            t.index = i + 1;
+        }
+    }
+    targets
 }
 
 #[cfg(not(windows))]
@@ -1830,7 +1875,7 @@ unsafe extern "system" fn switch_mouse_hook_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
-    use windows::Win32::UI::WindowsAndMessaging::{CallNextHookEx, WM_MOUSEWHEEL, WM_MOUSEHWHEEL};
+    use windows::Win32::UI::WindowsAndMessaging::{WM_MOUSEWHEEL, WM_MOUSEHWHEEL};
 
     if code >= 0 && SWITCH_HOOK_ENABLED.load(Ordering::Relaxed) {
         let msg = wparam.0 as u32;

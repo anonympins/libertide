@@ -141,7 +141,6 @@ impl OverlayApp {
                         &self.numbered_targets[..]
                     };
 
-                    #[cfg(windows)]
                     set_overlay_focused_border(focused_border);
 
                     if let Some(zone) = active_zone_opt {
@@ -580,15 +579,22 @@ impl OverlayApp {
         }
         #[cfg(not(windows))]
         {
+            let cur_rect = self.switch_windows
+                .iter()
+                .find(|w| w.id == hwnd_id)
+                .map(|w| w.rect)
+                .or_else(get_active_window_rect);
+
             self.numbered_last_refresh = Instant::now();
             self.numbered_last_hwnd = Some(hwnd_id);
+            self.numbered_last_win_rect = cur_rect;
             self.numbered_chunk_offset = 0;
             self.switch_active_window_id = Some(hwnd_id);
             self.numbered_input_buffer.clear();
             self.scan_sequence_counter += 1;
             let req = TargetsScanRequest {
                 hwnd: hwnd_id,
-                win_rect: None,
+                win_rect: cur_rect,
                 previous: if !is_different_win { self.numbered_targets.clone() } else { Vec::new() },
                 sequence: self.scan_sequence_counter,
             };

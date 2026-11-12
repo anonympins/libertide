@@ -820,6 +820,17 @@ impl OverlayApp {
             self.numbered_input_buffer.clear();
             clear_screen_numbered_badges();
             play_earcon(Earcon::MicClose);
+
+            // Restauration de la géométrie de la capsule egui sur macOS/Linux
+            #[cfg(not(windows))]
+            {
+                let work_area = get_desktop_work_area_scaled(ctx);
+                let def_pos = egui::pos2(work_area.x + work_area.w - self.current_win_w - 16.0, (work_area.taskbar_top - self.current_win_h).max(work_area.y));
+                self.window_pos = Some(def_pos);
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(self.current_win_w, self.current_win_h)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(def_pos));
+            }
+
             let msg = t!("speech.switch_access_disabled").to_string();
             self.chat_history.push(ChatEntry {
                 role: ChatRole::Agent,
@@ -1029,6 +1040,14 @@ impl eframe::App for OverlayApp {
         let has_suggestions = !self.input_suggestions.is_empty();
         let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         let work_area = get_desktop_work_area_scaled(&ctx);
+
+        #[cfg(not(windows))]
+        if self.switch_access_mode {
+            // Couverture plein écran transparente pour dessiner les badges sur macOS & Linux
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(work_area.w, work_area.h)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(work_area.x, work_area.y)));
+        }
+
         let overlay_layout = compute_and_sync_overlay_geometry(
             &ctx,
             &work_area,
@@ -3501,7 +3520,138 @@ impl eframe::App for OverlayApp {
             self.sync_switch_access_overlays();
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
-                .show(ui, |_ui| {});
+                .show(ui, |ui| {
+                    #[cfg(not(windows))]
+                    if self.switch_access_mode {
+                        let state = crate::window_util::get_overlay_draw_state();
+                        if state.is_visible {
+                            let painter = ui.painter();
+                            let ppp = ctx.pixels_per_point().max(0.5);
+
+                            // 1. Bordure orange de la fenêtre active
+                            if let Some([l, t, r, b]) = state.orange_border {
+                                let win_rect = egui::Rect::from_min_max(
+                                    egui::pos2(l as f32 / ppp, t as f32 / ppp),
+                                    egui::pos2(r as f32 / ppp, b as f32 / ppp),
+                                );
+                                painter.rect_stroke(
+                                    win_rect.expand(2.0),
+                                    egui::CornerRadius::same(8),
+                                    egui::Stroke::new(3.5, egui::Color32::from_rgb(255, 140, 0)),
+                                    egui::StrokeKind::Outside,
+                                );
+                            }
+
+                            // 2. Zones de navigation (encadrés et badges de titre)
+                            for zone in &state.zones {
+                                let z_rect = egui::Rect::from_min_max(
+                                    egui::pos2(zone.rect[0] as f32 / ppp, zone.rect[1] as f32 / ppp),
+                                    egui::pos2(zone.rect[2] as f32 / ppp, zone.rect[3] as f32 / ppp),
+                                );
+                                let (hex, _) = (crate::ocr::visual_zone_color(zone.index), ());
+                                let r = u8::from_str_radix(&hex[1..3], 16).unwrap_or(40);
+                                let g = u8::from_str_radix(&hex[3..5], 16).unwrap_or(200);
+                                let b = u8::from_str_radix(&hex[5..7], 16).unwrap_or(255);
+                                let z_color = egui::Color32::from_rgb(r, g, b);
+
+                                let stroke_w = if zone.is_focused { 4.0 } else { 2.0 };
+                                painter.rect_stroke(
+                                    z_rect,
+                                    egui::CornerRadius::same(8),
+                                    egui::Stroke::new(stroke_w, z_color),
+                                    egui::StrokeKind::Inside,
+                                );
+
+                                let title_text = if zone.title.starts_with(|c: char| c.is_ascii_digit()) {
+                                    zone.title.clone()
+                                } else {
+                                    format!("{}. {}", zone.index, zone.title)
+                                };
+                                let badge_pos = egui::pos2(z_rect.min.x, (z_rect.min.y - 24.0).max(4.0));
+                                let badge_rect = egui::Rect::from_min_size(badge_pos, egui::vec2(title_text.len() as f32 * 8.5 + 16.0, 22.0));
+                                painter.rect_filled(badge_rect, egui::CornerRadius::same(4), z_color);
+                                painter.text(
+                                    badge_rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    title_text,
+                                    egui::FontId::proportional(12.0),
+                                    egui::Color32::BLACK,
+                                );
+                            }
+
+                            // 3. Cadre du contrôle sélectionné
+                            if let Some(([l, t, r_b, b_b], is_reader)) = state.focused_border {
+                                let t_rect = egui::Rect::from_min_max(
+                                    egui::pos2(l as f32 / ppp, t as f32 / ppp),
+                                    egui::pos2(r_b as f32 / ppp, b_b as f32 / ppp),
+                                );
+                                let color = if is_reader {
+                                    egui::Color32::from_rgb(0, 230, 255)
+                                } else {
+                                    egui::Color32::from_rgb(255, 140, 0)
+                                };
+                                painter.rect_stroke(
+                                    t_rect.expand(2.0),
+                                    egui::CornerRadius::same(6),
+                                    egui::Stroke::new(3.0, color),
+                                    egui::StrokeKind::Outside,
+                                );
+                            }
+
+                            // 4. Badges numérotés
+                            let badge_h = (28.0 * self.zoom_factor).clamp(24.0, 48.0);
+                            for target in &state.targets {
+                                let is_focused = state.focused_index == Some(target.index);
+                                let hex = if target.value.starts_with('#') {
+                                    target.value.as_str()
+                                } else {
+                                    crate::ocr::visual_zone_color(target.index)
+                                };
+                                let cr = u8::from_str_radix(&hex[1..3], 16).unwrap_or(255);
+                                let cg = u8::from_str_radix(&hex[3..5], 16).unwrap_or(214);
+                                let cb = u8::from_str_radix(&hex[5..7], 16).unwrap_or(0);
+                                let b_color = egui::Color32::from_rgb(cr, cg, cb);
+
+                                let bx = target.rect[0] as f32 / ppp;
+                                let by = (target.rect[1] as f32 / ppp - badge_h / 2.0).max(2.0);
+                                let badge_w = if target.role == "lecture textuelle" || target.index < 10 {
+                                    badge_h
+                                } else if target.index < 100 {
+                                    badge_h * 1.30
+                                } else {
+                                    badge_h * 1.65
+                                };
+                                let badge_rect = egui::Rect::from_min_size(egui::pos2(bx, by), egui::vec2(badge_w, badge_h));
+
+                                let stroke = if is_focused {
+                                    egui::Stroke::new(3.5, egui::Color32::BLACK)
+                                } else {
+                                    egui::Stroke::new(1.8, egui::Color32::BLACK)
+                                };
+                                painter.rect(
+                                    badge_rect,
+                                    egui::CornerRadius::same(badge_h / 2.0),
+                                    b_color,
+                                    stroke,
+                                    egui::StrokeKind::Inside,
+                                );
+
+                                let label = if target.role == "lecture textuelle" {
+                                    "📖".to_string()
+                                } else {
+                                    target.index.to_string()
+                                };
+                                painter.text(
+                                    badge_rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    label,
+                                    egui::FontId::proportional(badge_h * 0.55),
+                                    egui::Color32::BLACK,
+                                );
+                            }
+                        }
+                    }
+                });
             return;
         }
 
