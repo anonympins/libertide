@@ -1341,6 +1341,42 @@ impl OverlayApp {
                                         }
                                         ui.add_space(3.0);
 
+                                        // Réglage fin du Pitch caméra / hauteur du regard
+                                        let current_pitch = crate::eyetracking::get_camera_pitch_offset();
+                                        let mut pitch_val = current_pitch;
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("Hauteur du regard (Pitch caméra) :").size(11.0).color(theme.text_secondary));
+                                            if ui.small_button("➖").on_hover_text("Diminuer le pitch de 1.0° (incliner vers le haut)").clicked() {
+                                                crate::eyetracking::set_camera_pitch_offset(current_pitch - 1.0);
+                                            }
+                                            let slider = egui::Slider::new(&mut pitch_val, -60.0..=30.0)
+                                                .step_by(0.5)
+                                                .suffix("°")
+                                                .show_value(true);
+                                            if ui.add(slider).on_hover_text("Ajuste l'axe neutre du regard par rapport à l'inclinaison de votre webcam.").changed() {
+                                                crate::eyetracking::set_camera_pitch_offset(pitch_val);
+                                            }
+                                            if ui.small_button("➕").on_hover_text("Augmenter le pitch de 1.0° (incliner vers le bas)").clicked() {
+                                                crate::eyetracking::set_camera_pitch_offset(current_pitch + 1.0);
+                                            }
+                                            if ui.small_button("🎯 Tare").on_hover_text("Calibrer instantanément le pitch neutre sur votre regard actuel").clicked() {
+                                                crate::eyetracking::tare_camera_pitch_to_current_gaze();
+                                            }
+                                        });
+                                        ui.add_space(3.0);
+
+                                        ui.horizontal(|ui| {
+                                            let mut inv_x = crate::eyetracking::is_eye_invert_x();
+                                            if ui.checkbox(&mut inv_x, "Inverser X").on_hover_text("Inverser l'axe horizontal du regard").changed() {
+                                                crate::eyetracking::set_eye_invert_x(inv_x);
+                                            }
+                                            let mut inv_y = crate::eyetracking::is_eye_invert_y();
+                                            if ui.checkbox(&mut inv_y, "Inverser Y").on_hover_text("Inverser l'axe vertical du regard").changed() {
+                                                crate::eyetracking::set_eye_invert_y(inv_y);
+                                            }
+                                        });
+                                        ui.add_space(3.0);
+
                                         // Sensibilité d'échelle du regard
                                         let mut sens = crate::eyetracking::get_eye_tracking_sensitivity();
                                         let prev_sens = sens;

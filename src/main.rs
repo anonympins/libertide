@@ -1076,12 +1076,17 @@ impl eframe::App for OverlayApp {
                 &self.numbered_targets,
             );
 
-            // N'altérer la position physique de la souris que si l'Eye-Tracking est actif et hors calibration
+            // N'altérer la position physique de la souris que si l'Eye-Tracking est actif, hors calibration et hors override souris
             if !self.eye_tracker.calibration.is_active && eyetracking::is_eye_tracking_enabled() {
-                let abs_x = ((work_area.x + gaze_x) * ppp).round() as i32;
-                let abs_y = ((work_area.y + gaze_y) * ppp).round() as i32;
-                self.hover_last_cursor_pos = Some((abs_x, abs_y));
-                set_global_cursor_pos(abs_x, abs_y);
+                if !self.eye_tracker.is_mouse_overridden() {
+                    let abs_x = ((work_area.x + gaze_x) * ppp).round() as i32;
+                    let abs_y = ((work_area.y + gaze_y) * ppp).round() as i32;
+                    self.hover_last_cursor_pos = Some((abs_x, abs_y));
+                    self.eye_tracker.last_eye_applied_cursor = Some((abs_x, abs_y));
+                    set_global_cursor_pos(abs_x, abs_y);
+                } else {
+                    self.eye_tracker.last_eye_applied_cursor = None;
+                }
 
                 // Si le regard est fixé sur un contrôle interactif en mode survol
                 if let Some(target_idx) = snapped_idx {
@@ -3858,13 +3863,16 @@ impl eframe::App for OverlayApp {
                 if let Some((gx, gy)) = *gaze_guard {
                     let p = ui.painter();
                     let center = egui::pos2(gx, gy);
-                    let is_snapped = self.eye_tracker.last_snapped_target_id.is_some() && self.eye_tracker.snapping_enabled;
-                    let (reticle_radius, stroke_color, core_color) = if is_snapped {
+                    let is_mouse_active = self.eye_tracker.is_mouse_overridden();
+                    let is_snapped = self.eye_tracker.last_snapped_target_id.is_some() && self.eye_tracker.snapping_enabled && !is_mouse_active;
+                    let (reticle_radius, stroke_color, core_color) = if is_mouse_active {
+                        (14.0, egui::Color32::from_rgba_unmultiplied(255, 170, 0, 120), egui::Color32::from_rgb(255, 170, 0))
+                    } else if is_snapped {
                         (22.0, egui::Color32::from_rgb(0, 230, 118), egui::Color32::from_rgb(0, 230, 118))
                     } else {
                         (18.0, egui::Color32::from_rgba_unmultiplied(0, 229, 255, 140), egui::Color32::from_rgb(0, 229, 255))
                     };
-                    p.circle_stroke(center, reticle_radius, egui::Stroke::new(2.0, stroke_color));
+                    p.circle_stroke(center, reticle_radius, egui::Stroke::new(if is_mouse_active { 1.2 } else { 2.0 }, stroke_color));
                     p.circle_filled(center, 4.0, core_color);
                 }
             }
@@ -4062,6 +4070,8 @@ impl eframe::App for OverlayApp {
                                     let prov_name = self.current_agent_model_display_name();
                                     let status_badge = if self.dictation_mode {
                                         t!("ui.dictation_badge").to_string()
+                                    } else if eyetracking::is_eye_tracking_enabled() && self.eye_tracker.is_mouse_overridden() {
+                                        "🖱️ Souris prioritaire (Eye-tracking en veille)".to_string()
                                     } else if self.switch_access_mode {
                                         if self.switch_step == SwitchAccessStep::Windows {
                                             if !self.switch_windows.is_empty() {
@@ -4103,6 +4113,8 @@ impl eframe::App for OverlayApp {
 
                                     let badge_color = if self.dictation_mode {
                                         egui::Color32::from_rgb(255, 205, 70)
+                                    } else if eyetracking::is_eye_tracking_enabled() && self.eye_tracker.is_mouse_overridden() {
+                                        egui::Color32::from_rgb(255, 170, 0)
                                     } else if self.switch_access_mode {
                                         egui::Color32::from_rgb(255, 140, 0)
                                     } else if self.status == AgentStatus::Listening {

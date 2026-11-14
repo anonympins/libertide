@@ -19,6 +19,17 @@ extern "system" {
     fn GetAsyncKeyState(vKey: i32) -> i16;
 }
 
+pub static IS_MOUSE_OVERRIDDEN: AtomicBool = AtomicBool::new(false);
+
+pub fn is_mouse_priority_active() -> bool {
+    IS_MOUSE_OVERRIDDEN.load(Ordering::Relaxed)
+}
+
+/// Récupère la position physique réelle du curseur OS (multiplateforme)
+pub fn get_physical_cursor_pos() -> Option<(i32, i32)> {
+    crate::window_util::get_global_cursor_pos()
+}
+
 pub static ESCAPE_PRESSED: AtomicBool = AtomicBool::new(false);
 
 /// Indique si la touche Échap (VK_ESCAPE = 0x1B) est actuellement pressée physiquement
@@ -159,12 +170,17 @@ pub fn set_camera_pitch_offset(offset: f32) {
     std::env::set_var("EYE_CAMERA_PITCH_OFFSET", val_str);
 }
 
-/// Tare instantanée du pitch caméra sur le regard neutre actuel
+/// Tare instantanée du pitch caméra et du centrage neutre sur le regard actuel
 pub fn tare_camera_pitch_to_current_gaze() {
     if let Some(raw) = get_latest_raw_gaze() {
         let current_offset = get_camera_pitch_offset();
         let new_offset = current_offset - raw.head_pitch;
         set_camera_pitch_offset(new_offset);
+        if is_eye_continuous_mode() {
+            let raw_x = if is_eye_invert_x() { -raw.eye_x } else { raw.eye_x };
+            set_eye_offset_x(raw_x);
+            set_eye_offset_y(0.0);
+        }
         crate::overlay::play_earcon(crate::overlay::Earcon::Success);
     }
 }
@@ -518,8 +534,8 @@ pub fn show_eye_debug_floating_window(ctx: &egui::Context, theme: &ThemeColors) 
         .with_transparent(true)
         .with_decorations(false)
         .with_always_on_top()
-        .with_inner_size([340.0, 220.0])
-        .with_min_inner_size([240.0, 140.0])
+        .with_inner_size([360.0, 260.0])
+        .with_min_inner_size([260.0, 160.0])
         .with_resizable(true);
 
     ctx.show_viewport_immediate(vp_id, builder, |vp_ctx, _class| {
@@ -540,6 +556,14 @@ pub fn show_eye_debug_floating_window(ctx: &egui::Context, theme: &ThemeColors) 
 
             let header = ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(title).strong().size(11.5).color(theme.accent));
+                if is_mouse_priority_active() {
+                    ui.label(
+                        egui::RichText::new("🖱️ Souris active")
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(255, 170, 0))
+                            .strong(),
+                    );
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("✕").on_hover_text("Fermer l'encadré debug").clicked() {
                         set_show_eye_debug_overlay(false);
@@ -569,55 +593,17 @@ pub fn show_eye_debug_floating_window(ctx: &egui::Context, theme: &ThemeColors) 
                 let onnx_ready = is_eyetracking_model_installed();
                 let onnx_col = if onnx_ready { egui::Color32::from_rgb(0, 230, 118) } else { egui::Color32::from_rgb(255, 180, 50) };
                 ui.label(
-                    egui::RichText::new(format!("Moteur: {}", if onnx_ready { "L2CS ONNX" } else { "En attente" }))
+                    egui::RichText::new(if onnx_ready { "L2CS ONNX" } else { "En attente" })
                         .size(10.0)
                         .color(onnx_col),
                 );
-                let off_x = get_eye_offset_x();
-                let off_y = get_eye_offset_y();
-                ui.label(
-                    egui::RichText::new(format!("Off X: {:+.0}px", off_x))
-                        .size(10.0)
-                        .color(egui::Color32::from_rgb(100, 200, 255)),
-                );
-                if ui.small_button("◀").on_hover_text("Décaler X gauche (-30px)").clicked() {
-                    set_eye_offset_x(off_x - 30.0);
-                }
-                if ui.small_button("▶").on_hover_text("Décaler X droite (+30px)").clicked() {
-                    set_eye_offset_x(off_x + 30.0);
-                }
-                ui.label(
-                    egui::RichText::new(format!("Off Y: {:+.0}px", off_y))
-                        .size(10.0)
-                        .color(egui::Color32::from_rgb(255, 150, 200)),
-                );
-                if ui.small_button("▲").on_hover_text("Monter curseur Y (-30px)").clicked() {
-                    set_eye_offset_y(off_y - 30.0);
-                }
-                if ui.small_button("▼").on_hover_text("Descendre curseur Y (+30px)").clicked() {
-                    set_eye_offset_y(off_y + 30.0);
-                }
-                ui.label(
-                    egui::RichText::new(format!("Pitch Off: {:+.0}°", get_camera_pitch_offset()))
-                        .size(10.0)
-                        .color(egui::Color32::from_rgb(255, 180, 100)),
-                );
-                if ui.small_button("Tare").on_hover_text("Calibrer le pitch neutre sur votre regard actuel").clicked() {
-                    tare_camera_pitch_to_current_gaze();
-                }
-                if ui.small_button("▲").on_hover_text("Monter le pitch (+2°)").clicked() {
-                    set_camera_pitch_offset(get_camera_pitch_offset() + 2.0);
-                }
-                if ui.small_button("▼").on_hover_text("Descendre le pitch (-2°)").clicked() {
-                    set_camera_pitch_offset(get_camera_pitch_offset() - 2.0);
-                }
-                let mut inv = is_eye_invert_x();
-                if ui.checkbox(&mut inv, egui::RichText::new("Inv X").size(10.0)).on_hover_text("Inverser l'axe horizontal X").changed() {
-                    set_eye_invert_x(inv);
-                }
-                let mut inv_y = is_eye_invert_y();
-                if ui.checkbox(&mut inv_y, egui::RichText::new("Inv Y").size(10.0)).on_hover_text("Inverser l'axe vertical Y").changed() {
-                    set_eye_invert_y(inv_y);
+                if is_mouse_priority_active() {
+                    ui.label(
+                        egui::RichText::new("🖱️ Souris")
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(255, 170, 0))
+                            .strong(),
+                    );
                 }
                 let mut cont = is_eye_continuous_mode();
                 if ui.checkbox(&mut cont, egui::RichText::new("Continu").size(10.0)).on_hover_text("Mode joystick relatif : défilement linéaire selon l'angle relatif du regard sans avoir à suivre le curseur").changed() {
@@ -632,6 +618,47 @@ pub fn show_eye_debug_floating_window(ctx: &egui::Context, theme: &ThemeColors) 
                                 .color(theme.text_user),
                         );
                     });
+                }
+            });
+
+            // Contrôle fin du Pitch caméra / hauteur du regard
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Pitch:")
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(255, 180, 100)),
+                );
+                let current_pitch = get_camera_pitch_offset();
+                if ui.small_button("➖").on_hover_text("Diminuer le pitch de 1.0° (incliner vers le haut)").clicked() {
+                    set_camera_pitch_offset(current_pitch - 1.0);
+                }
+                let mut pitch_val = current_pitch;
+                let slider = egui::Slider::new(&mut pitch_val, -60.0..=30.0)
+                    .step_by(0.5)
+                    .suffix("°")
+                    .show_value(true);
+                if ui.add(slider).changed() {
+                    set_camera_pitch_offset(pitch_val);
+                }
+                if ui.small_button("➕").on_hover_text("Augmenter le pitch de 1.0° (incliner vers le bas)").clicked() {
+                    set_camera_pitch_offset(current_pitch + 1.0);
+                }
+                if ui.small_button("🎯 Tare").on_hover_text("Calibrer automatiquement le pitch neutre et le centrage sur votre regard actuel").clicked() {
+                    tare_camera_pitch_to_current_gaze();
+                }
+            });
+
+            // Options d'inversion des axes
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                let mut inv = is_eye_invert_x();
+                if ui.checkbox(&mut inv, egui::RichText::new("Inv X").size(10.0)).on_hover_text("Inverser l'axe horizontal X").changed() {
+                    set_eye_invert_x(inv);
+                }
+                let mut inv_y = is_eye_invert_y();
+                if ui.checkbox(&mut inv_y, egui::RichText::new("Inv Y").size(10.0)).on_hover_text("Inverser l'axe vertical Y").changed() {
+                    set_eye_invert_y(inv_y);
                 }
             });
         });
@@ -1368,6 +1395,108 @@ impl CalibrationSession {
         }
     }
 
+    /// Finalise la session de calibration : déduit automatiquement le pitch neutre,
+    /// l'orientation des axes, le centrage et entraîne le modèle polynomial.
+    fn finalize_calibration(
+        &mut self,
+        screen_w: f32,
+        screen_h: f32,
+        model: &mut GazePolynomialModel,
+    ) -> bool {
+        self.is_active = false;
+        set_calibration_active(false);
+
+        if self.accumulated_samples.is_empty() {
+            return false;
+        }
+
+        // 1. Auto-calibration du pitch caméra à partir des fixations sur les points médians verticaux (ny ~ 0.5)
+        let median_indices: Vec<usize> = self.accumulated_samples
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| (s.screen_y / screen_h - 0.5).abs() < 0.15)
+            .map(|(i, _)| i)
+            .collect();
+
+        let avg_pitch_error = if !median_indices.is_empty() {
+            median_indices.iter().map(|&i| self.accumulated_samples[i].head_pitch).sum::<f32>() / median_indices.len() as f32
+        } else {
+            self.accumulated_samples.iter().map(|s| s.head_pitch).sum::<f32>() / self.accumulated_samples.len() as f32
+        };
+
+        if avg_pitch_error.is_finite() && avg_pitch_error.abs() > 0.1 {
+            let current_pitch_offset = get_camera_pitch_offset();
+            let new_pitch_offset = (current_pitch_offset - avg_pitch_error).clamp(-60.0, 30.0);
+            set_camera_pitch_offset(new_pitch_offset);
+
+            // Ajuster rétrospectivement les échantillons accumulés pour que le modèle
+            // soit entraîné avec le nouveau repère de pitch compensé
+            for s in &mut self.accumulated_samples {
+                s.head_pitch -= avg_pitch_error;
+                s.eye_y = (s.head_pitch / 11.5).clamp(-1.0, 1.0);
+            }
+        }
+
+        // 2. Détermination automatique des inversions d'axe (Invert X / Invert Y) par covariance
+        if self.accumulated_samples.len() >= 6 {
+            let n = self.accumulated_samples.len() as f32;
+            let mean_eye_x = self.accumulated_samples.iter().map(|s| s.eye_x).sum::<f32>() / n;
+            let mean_scr_x = self.accumulated_samples.iter().map(|s| s.screen_x).sum::<f32>() / n;
+            let cov_x: f32 = self.accumulated_samples.iter().map(|s| (s.eye_x - mean_eye_x) * (s.screen_x - mean_scr_x)).sum();
+
+            if cov_x < -1e-4 {
+                let new_inv_x = !is_eye_invert_x();
+                set_eye_invert_x(new_inv_x);
+                for s in &mut self.accumulated_samples {
+                    s.eye_x = -s.eye_x;
+                    s.head_yaw = -s.head_yaw;
+                }
+            }
+
+            let mean_eye_y = self.accumulated_samples.iter().map(|s| s.eye_y).sum::<f32>() / n;
+            let mean_scr_y = self.accumulated_samples.iter().map(|s| s.screen_y).sum::<f32>() / n;
+            let cov_y: f32 = self.accumulated_samples.iter().map(|s| (s.eye_y - mean_eye_y) * (s.screen_y - mean_scr_y)).sum();
+
+            if cov_y < -1e-4 {
+                let new_inv_y = !is_eye_invert_y();
+                set_eye_invert_y(new_inv_y);
+                for s in &mut self.accumulated_samples {
+                    s.eye_y = -s.eye_y;
+                    s.head_pitch = -s.head_pitch;
+                }
+            }
+        }
+
+        // 3. Détermination automatique du centrage neutre (Offset X/Y)
+        let center_indices: Vec<usize> = self.accumulated_samples
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| (s.screen_x / screen_w - 0.5).abs() < 0.15 && (s.screen_y / screen_h - 0.5).abs() < 0.15)
+            .map(|(i, _)| i)
+            .collect();
+
+        let center_x_opt = if !center_indices.is_empty() {
+            Some(center_indices.iter().map(|&i| self.accumulated_samples[i].eye_x).sum::<f32>() / center_indices.len() as f32)
+        } else if !median_indices.is_empty() {
+            Some(median_indices.iter().map(|&i| self.accumulated_samples[i].eye_x).sum::<f32>() / median_indices.len() as f32)
+        } else {
+            None
+        };
+
+        if let Some(cx) = center_x_opt {
+            if is_eye_continuous_mode() {
+                set_eye_offset_x(cx);
+                set_eye_offset_y(0.0);
+            } else {
+                set_eye_offset_x(0.0);
+                set_eye_offset_y(0.0);
+            }
+        }
+
+        // 4. Entraînement polynomial des moindres carrés (gérant échelle & courbures)
+        model.fit(&self.accumulated_samples)
+    }
+
     pub fn feed_sample_and_advance(
         &mut self,
         eye_x: f32,
@@ -1405,10 +1534,7 @@ impl CalibrationSession {
                 }
 
                 if elapsed >= self.total_duration {
-                    self.is_active = false;
-                    set_calibration_active(false);
-                    model.fit(&self.accumulated_samples);
-                    return true;
+                    return self.finalize_calibration(screen_w, screen_h, model);
                 }
                 false
             }
@@ -1434,10 +1560,7 @@ impl CalibrationSession {
                         crate::overlay::play_earcon(crate::overlay::Earcon::Navigation);
                     }
                     if self.current_point_index >= CALIBRATION_POINTS_9.len() {
-                        self.is_active = false;
-                        set_calibration_active(false);
-                        model.fit(&self.accumulated_samples);
-                        return true;
+                        return self.finalize_calibration(screen_w, screen_h, model);
                     }
                 }
                 false
@@ -1560,6 +1683,7 @@ pub struct EyeTrackingController {
     pub last_lerp_timestamp: Option<Instant>,
     pub last_target_local: Option<(f32, f32)>,
     pub last_eye_applied_cursor: Option<(i32, i32)>,
+    pub last_detected_mouse_pos: Option<(i32, i32)>,
     pub mouse_override_until: Option<Instant>,
     pub mouse_override_debounce: Duration,
 }
@@ -1688,6 +1812,7 @@ impl Default for EyeTrackingController {
             last_lerp_timestamp: None,
             last_target_local: None,
             last_eye_applied_cursor: None,
+            last_detected_mouse_pos: None,
             mouse_override_until: None,
             mouse_override_debounce: Duration::from_millis(mouse_override_ms),
         }
@@ -1710,6 +1835,7 @@ impl EyeTrackingController {
         self.raw_history_len = 0;
         self.last_target_local = None;
         self.last_eye_applied_cursor = None;
+        self.last_detected_mouse_pos = None;
         self.mouse_override_until = None;
     }
 
@@ -1728,6 +1854,7 @@ impl EyeTrackingController {
         self.raw_history_len = 0;
         self.last_target_local = None;
         self.last_eye_applied_cursor = None;
+        self.last_detected_mouse_pos = None;
         self.mouse_override_until = None;
         if let Ok(mut lock) = GLOBAL_GAZE_POS.lock() {
             *lock = None;
@@ -1763,6 +1890,8 @@ impl EyeTrackingController {
         self.last_raw_gaze = None;
         self.last_snapped_target_id = None;
         self.last_snap_timestamp = None;
+        self.last_eye_applied_cursor = None;
+        self.last_detected_mouse_pos = None;
         if let Ok(mut lock) = GLOBAL_GAZE_POS.lock() {
             *lock = None;
         }
@@ -1859,19 +1988,23 @@ impl EyeTrackingController {
 
     #[inline]
     pub fn is_mouse_overridden(&self) -> bool {
-        if let Some(until) = self.mouse_override_until {
+        let overridden = if let Some(until) = self.mouse_override_until {
             Instant::now() < until
         } else {
             false
-        }
+        };
+        IS_MOUSE_OVERRIDDEN.store(overridden, Ordering::Relaxed);
+        overridden
     }
 
     pub fn trigger_mouse_override(&mut self, current_phys: (i32, i32), work_area_offset: (f32, f32), ppp: f32) {
         let now = Instant::now();
         self.mouse_override_until = Some(now + self.mouse_override_debounce);
-        self.last_eye_applied_cursor = Some(current_phys);
-        let local_x = (current_phys.0 as f32 / ppp) - work_area_offset.0;
-        let local_y = (current_phys.1 as f32 / ppp) - work_area_offset.1;
+        IS_MOUSE_OVERRIDDEN.store(true, Ordering::Relaxed);
+        self.last_eye_applied_cursor = None;
+        let ppp_safe = if ppp > 0.0 { ppp } else { 1.0 };
+        let local_x = (current_phys.0 as f32 / ppp_safe) - work_area_offset.0;
+        let local_y = (current_phys.1 as f32 / ppp_safe) - work_area_offset.1;
         self.current_lerp_pos = Some((local_x, local_y));
         self.cursor_vel = (0.0, 0.0);
         self.confirmed_pred_gaze = Some((local_x, local_y));
@@ -1941,6 +2074,9 @@ impl EyeTrackingController {
                 &mut self.model,
             );
             if finished {
+                self.offset_x = get_eye_offset_x();
+                self.offset_y = get_eye_offset_y();
+                self.filter.reset();
                 crate::overlay::play_earcon(crate::overlay::Earcon::Success);
             }
             let target = self.calibration.current_screen_target(screen_w, screen_h).unwrap_or((screen_w / 2.0, screen_h / 2.0));
@@ -1950,13 +2086,53 @@ impl EyeTrackingController {
             return (target.0, target.1, None);
         }
 
-        if self.is_mouse_overridden() {
-            if let Some((mx, my)) = self.current_lerp_pos {
-                if let Ok(mut lock) = GLOBAL_GAZE_POS.lock() {
-                    *lock = Some((mx, my));
+        // Détection de prise de contrôle par la souris physique
+        if let Some(phys_mouse) = get_physical_cursor_pos() {
+            let is_overridden = self.is_mouse_overridden();
+
+            let trigger = if is_overridden {
+                // En mode override, tout micro-mouvement continu (> 2 px) prolonge le délai
+                let dist = match self.last_detected_mouse_pos {
+                    Some(prev) => {
+                        let dx = (phys_mouse.0 - prev.0) as f32;
+                        let dy = (phys_mouse.1 - prev.1) as f32;
+                        dx.hypot(dy)
+                    }
+                    None => 0.0,
+                };
+                dist > 2.0
+            } else {
+                // En suivi oculaire normal, ne déclencher QUE si la position réelle s'écarte
+                // de celle où l'eye-tracking vient de positionner le curseur.
+                if let Some(expected) = self.last_eye_applied_cursor {
+                    let dx = (phys_mouse.0 - expected.0) as f32;
+                    let dy = (phys_mouse.1 - expected.1) as f32;
+                    dx.hypot(dy) > 12.0
+                } else {
+                    false
                 }
-                return (mx, my, None);
+            };
+
+            if trigger {
+                self.trigger_mouse_override(phys_mouse, work_area_offset, ppp);
             }
+            self.last_detected_mouse_pos = Some(phys_mouse);
+        }
+
+        if self.is_mouse_overridden() {
+            let ppp_safe = if ppp > 0.0 { ppp } else { 1.0 };
+            let (mx, my) = if let Some(phys) = get_physical_cursor_pos() {
+                let lx = (phys.0 as f32 / ppp_safe) - work_area_offset.0;
+                let ly = (phys.1 as f32 / ppp_safe) - work_area_offset.1;
+                self.current_lerp_pos = Some((lx, ly));
+                (lx, ly)
+            } else {
+                self.current_lerp_pos.unwrap_or((screen_w * 0.5, screen_h * 0.5))
+            };
+            if let Ok(mut lock) = GLOBAL_GAZE_POS.lock() {
+                *lock = Some((mx, my));
+            }
+            return (mx, my, None);
         }
 
         // Enregistrement dans le buffer circulaire pour détection instantanée de saccade sur 2 frames
@@ -3380,55 +3556,28 @@ pub fn start_wmf_camera_worker() {
 
 /// Mesure de repli réactive basée sur le curseur système pour permettre le test et calibrage sans webcam
 fn poll_mouse_fallback_sample() {
-    #[cfg(windows)]
-    unsafe {
-        use windows::Win32::Foundation::POINT;
-        use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
-        let mut pt = POINT { x: 0, y: 0 };
-        if GetCursorPos(&mut pt).is_ok() {
-            let screen_w = GetSystemMetrics(SM_CXSCREEN).max(800) as f32;
-            let screen_h = GetSystemMetrics(SM_CYSCREEN).max(600) as f32;
-            let norm_x = (((pt.x as f32 / screen_w) - 0.5) * 2.0).clamp(-1.0, 1.0);
-            let norm_y = (((pt.y as f32 / screen_h) - 0.5) * 2.0).clamp(-1.0, 1.0);
-            update_fallback_debug_state(norm_x.clamp(-1.0, 1.0), norm_y.clamp(-1.0, 1.0));
-            set_latest_raw_gaze(RawGazeMeasurement {
-                eye_x: norm_x.clamp(-1.0, 1.0),
-                eye_y: norm_y.clamp(-1.0, 1.0),
-                head_yaw: 0.0,
-                head_pitch: 0.0,
-                timestamp: Instant::now(),
-            });
-            return;
-        }
-    }
+    if let Some(pt) = get_physical_cursor_pos() {
+        #[cfg(windows)]
+        let (screen_w, screen_h) = unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+            (
+                GetSystemMetrics(SM_CXSCREEN).max(800) as f32,
+                GetSystemMetrics(SM_CYSCREEN).max(600) as f32,
+            )
+        };
+        #[cfg(not(windows))]
+        let (screen_w, screen_h) = (1920.0f32, 1080.0f32);
 
-    #[cfg(not(windows))]
-    {
-        if let Some((x, y)) = crate::window_util::get_global_cursor_pos() {
-            let screen_w = 1920.0f32;
-            let screen_h = 1080.0f32;
-            let norm_x = (((x as f32 / screen_w) - 0.5) * 2.0).clamp(-1.0, 1.0);
-            let norm_y = (((y as f32 / screen_h) - 0.5) * 2.0).clamp(-1.0, 1.0);
-            update_fallback_debug_state(norm_x, norm_y);
-            set_latest_raw_gaze(RawGazeMeasurement {
-                eye_x: norm_x,
-                eye_y: norm_y,
-                head_yaw: 0.0,
-                head_pitch: 0.0,
-                timestamp: Instant::now(),
-            });
-            return;
-        }
-
-        let sample = RawGazeMeasurement {
-            eye_x: 0.0,
-            eye_y: 0.0,
+        let norm_x = (((pt.0 as f32 / screen_w) - 0.5) * 2.0).clamp(-1.0, 1.0);
+        let norm_y = (((pt.1 as f32 / screen_h) - 0.5) * 2.0).clamp(-1.0, 1.0);
+        update_fallback_debug_state(norm_x, norm_y);
+        set_latest_raw_gaze(RawGazeMeasurement {
+            eye_x: norm_x,
+            eye_y: norm_y,
             head_yaw: 0.0,
             head_pitch: 0.0,
             timestamp: Instant::now(),
-        };
-        update_fallback_debug_state(0.0, 0.0);
-        set_latest_raw_gaze(sample);
+        });
     }
 }
 
