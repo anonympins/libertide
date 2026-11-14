@@ -1296,7 +1296,7 @@ pub fn parse_agent_response(raw: &str) -> AgentResponsePayload {
         clean
     };
 
-    if let Ok(mut payload) = serde_json::from_str::<AgentResponsePayload>(unquoted) {
+    if let Ok( payload) = serde_json::from_str::<AgentResponsePayload>(unquoted) {
         if payload.narration.trim().is_empty() && payload.actions.is_empty() {
             return AgentResponsePayload {
                 narration: String::new(),
@@ -1920,7 +1920,37 @@ pub fn build_fallback_navigation_zones(window_title: &str, targets: &[NumberedEl
     };
 
     if targets.is_empty() {
-        return (format!("Fenêtre {clean_win_title}. Aucun contrôle interactif direct détecté."), Vec::new());
+        let (rect, click_x, click_y) = {
+            #[cfg(windows)]
+            {
+                let wa = get_desktop_work_area();
+                ([wa.left + 40, wa.top + 40, wa.right - 40, wa.bottom - 40], (wa.left + wa.right) / 2, (wa.top + wa.bottom) / 2)
+            }
+            #[cfg(not(windows))]
+            {
+                ([100, 100, 1200, 800], 650, 450)
+            }
+        };
+        let default_target = NumberedElementTarget {
+            index: 1,
+            click_x,
+            click_y,
+            rect,
+            name: format!("Zone de lecture / Contenu ({clean_win_title})"),
+            role: "lecture textuelle".to_string(),
+            shortcut: "Entrée".to_string(),
+            value: String::new(),
+            window_id: None,
+        };
+        let default_zone = NavigationZone {
+            title: format!("Contenu ({clean_win_title})"),
+            description: "Zone principale de la fenêtre".to_string(),
+            click_x,
+            click_y,
+            rect,
+            targets: vec![default_target],
+        };
+        return (format!("Fenêtre {clean_win_title} prête."), vec![default_zone]);
     }
 
     // Regroupement par "features" / intentions fonctionnelles (façon mini-site accessible)
@@ -1960,7 +1990,7 @@ pub fn build_fallback_navigation_zones(window_title: &str, targets: &[NumberedEl
     let mut fallback_zones = Vec::new();
     let mut next_target_idx = 1usize;
 
-    let mut add_feature_zone = |zones: &mut Vec<NavigationZone>, title: &str, desc: &str, mut group: Vec<NumberedElementTarget>, next_idx: &mut usize| {
+    let add_feature_zone = |zones: &mut Vec<NavigationZone>, title: &str, desc: &str, mut group: Vec<NumberedElementTarget>, next_idx: &mut usize| {
         if group.is_empty() {
             return;
         }

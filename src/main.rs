@@ -30,6 +30,8 @@ mod devices;
 mod local_llm;
 mod agent_backend;
 mod instrument;
+mod eyetracking;
+pub use eyetracking::*;
 pub use agent_backend::*;
 pub use locale::*;
 
@@ -92,6 +94,9 @@ pub struct OverlayApp {
     settings_tab: SettingsTab,
     dwell_state: DwellState,
     last_trackball_input: Instant,
+
+    // Contrôle par le regard sans matériel (Eye-Tracking webcam standard)
+    eye_tracker: eyetracking::EyeTrackingController,
 
     // Accessibilité : Ciblage par numéros & Mode contacteur unique (Switch Access)
     numbered_targets: Vec<NumberedElementTarget>,
@@ -400,6 +405,7 @@ impl OverlayApp {
             settings_tab: SettingsTab::LlmProvider,
             dwell_state: DwellState::new_with_delay(dwell_millis, dwell_activation_ms),
             last_trackball_input: Instant::now() - Duration::from_secs(1),
+            eye_tracker: eyetracking::EyeTrackingController::default(),
 
             numbered_targets: Vec::new(),
             numbered_chunk_offset: 0,
@@ -580,8 +586,12 @@ impl OverlayApp {
         cancel_all_scheduled_tasks();
         floating_window::stop_live_subtitles();
         crate::audio::stop_live_subtitles();
-        self.toggle_switch_access_mode(Some(false));
-        clear_screen_numbered_badges();
+        eyetracking::set_eye_tracking_enabled(false);
+        self.eye_tracker.cancel_calibration();
+        if let Ok(mut lock) = eyetracking::GLOBAL_GAZE_POS.lock() {
+            *lock = None;
+        }
+        clear_all_screen_overlays();
         self.switch_access_mode = false;
         SWITCH_HOOK_ENABLED.store(false, Ordering::SeqCst);
         automation::reset_switch_keys();
@@ -717,11 +727,12 @@ impl OverlayApp {
         self.switch_access_mode = force_state.unwrap_or(!self.switch_access_mode);
         SWITCH_HOOK_ENABLED.store(self.switch_access_mode, Ordering::SeqCst);
         automation::reset_switch_keys();
-        clear_screen_numbered_badges();
 
         if self.switch_access_mode {
+            self.dictation_mode = false;
+            IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
             self.is_hidden = true;
-            self.switch_step = SwitchAccessStep::Windows;
+            self.switch_step = SwitchAccessStep::Zones;
             self.switch_windows = collect_switch_candidate_windows();
             self.switch_auto_scroll = self.is_single_switch_mode();
             self.switch_active_zone_index = None;
@@ -750,7 +761,6 @@ impl OverlayApp {
                 self.switch_focus_index = active_idx.unwrap_or(0);
                 let cur_win = self.switch_windows[self.switch_focus_index].clone();
                 self.switch_active_window_id = Some(cur_win.id);
-                self.switch_step = SwitchAccessStep::Windows;
                 self.numbered_last_hwnd = Some(cur_win.id);
                 self.numbered_targets.clear();
 
@@ -768,7 +778,6 @@ impl OverlayApp {
                     }
                     set_global_cursor_pos(cur_win.click_x, cur_win.click_y);
                     self.hover_last_cursor_pos = Some((cur_win.click_x, cur_win.click_y));
-                    clear_screen_numbered_badges();
                 }
                 #[cfg(not(windows))]
                 {
@@ -777,18 +786,7 @@ impl OverlayApp {
                     self.hover_last_cursor_pos = Some((cur_win.click_x, cur_win.click_y));
                 }
 
-                // Pré-chargement des zones et analyse UIA de la fenêtre active en tâche de fond
-                self.refresh_numbered_targets_for_window(cur_win.id);
-
-                let win_title = if cur_win.title.trim().is_empty() {
-                    "Fenêtre".to_string()
-                } else {
-                    cur_win.title.trim().to_string()
-                };
-                let vocal_msg = format!("Fenêtre {} : {}", self.switch_focus_index + 1, win_title);
-                self.hover_last_announced_target = Some(cur_win.id as usize);
-                let _ = self.tts_sender.send(TtsCommand::Stop);
-                let _ = self.tts_sender.send(TtsCommand::Speak(vocal_msg));
+                self.transition_to_zones_for_window(cur_win.id, &cur_win.title);
             } else {
                 let msg = t!("speech.switch_no_windows").to_string();
                 self.chat_history.push(ChatEntry {
@@ -818,7 +816,7 @@ impl OverlayApp {
             self.hover_controls_speech_enabled = false;
             self.hover_physical_mouse_moved = false;
             self.numbered_input_buffer.clear();
-            clear_screen_numbered_badges();
+            clear_all_screen_overlays();
             play_earcon(Earcon::MicClose);
 
             // Restauration de la géométrie de la capsule egui sur macOS/Linux
@@ -1023,6 +1021,91 @@ impl eframe::App for OverlayApp {
             }
         }
 
+        let work_area = get_desktop_work_area_scaled(&ctx);
+
+        // --- Traitement du pointage Eye-Tracking (Webcam / Regard) ---
+        let eye_tracking_needed = eyetracking::is_eye_tracking_enabled()
+            || self.eye_tracker.calibration.is_active
+            || eyetracking::is_dev_mode()
+            || eyetracking::is_eye_debug_overlay_visible();
+        if eye_tracking_needed {
+            eyetracking::ensure_camera_worker_running();
+            let (screen_w, screen_h) = (work_area.w, work_area.h);
+            let raw_gaze_opt = eyetracking::get_latest_raw_gaze();
+
+            // Détection automatique et analyse des cibles pour le snapping même hors contacteur
+            if eyetracking::is_eye_tracking_enabled() && self.numbered_targets.is_empty() && !self.is_scan_in_progress {
+                #[cfg(windows)]
+                {
+                    let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+                    if !fg.0.is_null() && !is_window_hung(fg) {
+                        let mut fg_pid = 0u32;
+                        unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(fg, Some(&mut fg_pid)) };
+                        if fg_pid != std::process::id() {
+                            self.refresh_numbered_targets_for_window(fg.0 as isize);
+                        }
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    self.refresh_numbered_targets_for_window(1);
+                }
+            }
+
+            let (norm_x, norm_y, yaw, pitch) = if let Some(m) = raw_gaze_opt {
+                (m.eye_x, m.eye_y, m.head_yaw, m.head_pitch)
+            } else {
+                // Repli temporaire fluide si la caméra démarre
+                let raw_cursor = get_global_cursor_pos().unwrap_or(((work_area.x * ppp + screen_w * ppp / 2.0) as i32, (work_area.y * ppp + screen_h * ppp / 2.0) as i32));
+                let local_x = (raw_cursor.0 as f32 / ppp) - work_area.x;
+                let local_y = (raw_cursor.1 as f32 / ppp) - work_area.y;
+                let nx = ((local_x / screen_w.max(1.0)).clamp(0.0, 1.0) - 0.5) * 2.0;
+                let ny = ((local_y / screen_h.max(1.0)).clamp(0.0, 1.0) - 0.5) * 2.0;
+                (nx, ny, 0.0, 0.0)
+            };
+
+            let (gaze_x, gaze_y, snapped_idx) = self.eye_tracker.process_gaze_input_scaled(
+                norm_x,
+                norm_y,
+                yaw,
+                pitch,
+                screen_w,
+                screen_h,
+                (work_area.x, work_area.y),
+                ppp,
+                &self.numbered_targets,
+            );
+
+            // N'altérer la position physique de la souris que si l'Eye-Tracking est actif et hors calibration
+            if !self.eye_tracker.calibration.is_active && eyetracking::is_eye_tracking_enabled() {
+                let abs_x = ((work_area.x + gaze_x) * ppp).round() as i32;
+                let abs_y = ((work_area.y + gaze_y) * ppp).round() as i32;
+                self.hover_last_cursor_pos = Some((abs_x, abs_y));
+                set_global_cursor_pos(abs_x, abs_y);
+
+                // Si le regard est fixé sur un contrôle interactif en mode survol
+                if let Some(target_idx) = snapped_idx {
+                    if let Some(target) = self.numbered_targets.iter().find(|t| t.index == target_idx) {
+                        #[cfg(windows)]
+                        draw_screen_control_border(target.rect, false);
+                    }
+                    if self.switch_access_mode && self.hover_last_announced_target != Some(target_idx) {
+                        if let Some(target) = self.numbered_targets.iter().find(|t| t.index == target_idx).cloned() {
+                            self.hover_last_announced_target = Some(target_idx);
+                            self.hover_cursor_still_since = Instant::now();
+                            self.narrate_numbered_target(&target);
+                        }
+                    }
+                } else if !self.switch_access_mode {
+                    #[cfg(windows)]
+                    set_overlay_focused_border(None);
+                }
+            }
+            ctx.request_repaint();
+        } else {
+            eyetracking::stop_camera_worker();
+        }
+
         let trimmed_input = self.input_text.trim();
         if trimmed_input != self.last_suggestion_query {
             self.last_suggestion_query = trimmed_input.to_string();
@@ -1035,7 +1118,11 @@ impl eframe::App for OverlayApp {
 
         let has_suggestions = !self.input_suggestions.is_empty();
         let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-        let work_area = get_desktop_work_area_scaled(&ctx);
+
+        if self.eye_tracker.calibration.is_active {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(work_area.w, work_area.h)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(work_area.x, work_area.y)));
+        }
 
         #[cfg(not(windows))]
         if self.switch_access_mode {
@@ -1044,6 +1131,7 @@ impl eframe::App for OverlayApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(work_area.x, work_area.y)));
         }
 
+        let was_calibrating = self.eye_tracker.calibration.is_active;
         let overlay_layout = compute_and_sync_overlay_geometry(
             &ctx,
             &work_area,
@@ -1055,7 +1143,7 @@ impl eframe::App for OverlayApp {
             self.chat_height,
             has_suggestions,
             self.show_api_key_modal,
-            is_maximized,
+            is_maximized || was_calibrating,
         );
         let win_w = overlay_layout.win_w;
         let active_win_h = overlay_layout.active_win_h;
@@ -1552,6 +1640,40 @@ impl eframe::App for OverlayApp {
                         if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx, false);
                         }
+                        return;
+                    }
+
+                    // Contrôle vocal du snapping / aimant oculaire
+                    if norm_prompt.contains("active le snapping")
+                        || norm_prompt.contains("activer le snapping")
+                        || norm_prompt.contains("active l'aimant")
+                        || norm_prompt.contains("activer l'aimant")
+                        || norm_prompt.contains("aimant sur les controles")
+                        || norm_prompt.contains("aimant sur les contrôles")
+                        || norm_prompt.contains("snapping eyetracking")
+                        || norm_prompt.contains("snapping eye tracking")
+                    {
+                        eyetracking::set_eye_snapping_enabled(true);
+                        self.eye_tracker.snapping_enabled = true;
+                        play_earcon(Earcon::Success);
+                        let reply = "Snapping et aimant magnétique de l'eye-tracking activés sur les contrôles.".to_string();
+                        self.chat_history.push(ChatEntry { role: ChatRole::Agent, text: reply.clone(), timestamp: current_time_str(), quick_suggestions: Vec::new(), screen_size_kb: None });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                        return;
+                    }
+                    if norm_prompt.contains("desactive le snapping")
+                        || norm_prompt.contains("désactive le snapping")
+                        || norm_prompt.contains("desactiver le snapping")
+                        || norm_prompt.contains("désactiver le snapping")
+                        || norm_prompt.contains("desactive l'aimant")
+                        || norm_prompt.contains("désactive l'aimant")
+                    {
+                        eyetracking::set_eye_snapping_enabled(false);
+                        self.eye_tracker.snapping_enabled = false;
+                        play_earcon(Earcon::Success);
+                        let reply = "Snapping de l'eye-tracking désactivé.".to_string();
+                        self.chat_history.push(ChatEntry { role: ChatRole::Agent, text: reply.clone(), timestamp: current_time_str(), quick_suggestions: Vec::new(), screen_size_kb: None });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                         return;
                     }
 
@@ -2183,6 +2305,15 @@ impl eframe::App for OverlayApp {
             self.stop_speaking();
             if self.dictation_mode {
                 self.exit_dictation_mode();
+            } else if eyetracking::is_eye_tracking_enabled() || self.eye_tracker.calibration.is_active {
+                eyetracking::set_eye_tracking_enabled(false);
+                self.eye_tracker.cancel_calibration();
+                self.position_initialized = false;
+                if let Ok(mut lock) = eyetracking::GLOBAL_GAZE_POS.lock() {
+                    *lock = None;
+                }
+                play_earcon(Earcon::MicClose);
+                ctx.request_repaint();
             } else if self.switch_access_mode {
                 if self.switch_step == SwitchAccessStep::Elements {
                     if !self.switch_zones.is_empty() {
@@ -2291,8 +2422,12 @@ impl eframe::App for OverlayApp {
                 self.last_applied_scan_sequence = result.sequence;
                 self.is_scan_in_progress = false;
 
-                let is_current_window = self.switch_active_window_id == Some(result.hwnd);
+                let is_current_window = self.switch_active_window_id == Some(result.hwnd)
+                    || self.numbered_last_hwnd == Some(result.hwnd);
                 if is_current_window {
+                if !self.switch_access_mode {
+                    self.numbered_targets = result.targets.clone();
+                } else {
                 let (_, fb_zones) = build_fallback_navigation_zones("", &result.targets);
                 self.switch_zones = fb_zones;
 
@@ -2346,6 +2481,7 @@ impl eframe::App for OverlayApp {
                         self.numbered_targets = result.targets.clone();
                     }
                 }
+                }
                 if self.switch_step == SwitchAccessStep::Elements && self.switch_focus_index >= self.numbered_targets.len() {
                     self.switch_focus_index = 0;
                 }
@@ -2359,7 +2495,8 @@ impl eframe::App for OverlayApp {
         }
 
         // Actualisation automatique avec debounce pour le mode survol/numéros (UIA + OCR)
-        if self.switch_access_mode && !self.dictation_mode {
+        let eye_tracking_active = eyetracking::is_eye_tracking_enabled() && !self.eye_tracker.calibration.is_active;
+        if self.switch_access_mode || eye_tracking_active {
             #[cfg(windows)]
             {
                 let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
@@ -2399,6 +2536,15 @@ impl eframe::App for OverlayApp {
                     let user_navigating = self.last_switch_input.elapsed() < Duration::from_millis(600);
 
                     if win_changed {
+                        self.numbered_last_hwnd = cur_hwnd_id;
+                        self.switch_active_window_id = cur_hwnd_id;
+                        self.numbered_last_win_rect = cur_rect;
+                        self.numbered_chunk_offset = 0;
+                        self.numbered_input_buffer.clear();
+
+                        if !self.switch_access_mode {
+                            self.refresh_numbered_targets_for_window(target_hwnd.0 as isize);
+                        } else {
                         // Changement de fenêtre manuel (clic barre des tâches, Alt+Tab, etc.) :
                         // Réveil immédiat de la détection UIA et de l'analyse OCR pour la nouvelle fenêtre
                         self.switch_windows = collect_switch_candidate_windows();
@@ -2431,28 +2577,25 @@ impl eframe::App for OverlayApp {
                         }
 
                         self.switch_focus_index = new_win_idx.unwrap_or(0);
-                        self.numbered_last_hwnd = cur_hwnd_id;
-                        self.switch_active_window_id = cur_hwnd_id;
-                        self.numbered_last_win_rect = cur_rect;
-                        self.switch_step = SwitchAccessStep::Windows;
-                        self.numbered_chunk_offset = 0;
-                        self.numbered_input_buffer.clear();
+                        self.switch_step = SwitchAccessStep::Zones;
 
-                        self.refresh_numbered_targets_for_window(target_hwnd.0 as isize);
+                        if let Some(rect) = cur_rect {
+                            draw_screen_orange_border(rect);
+                        }
 
                         let win_num = self.switch_focus_index + 1;
                         let vocal_msg = format!("Fenêtre {} : {}", win_num, display_title);
                         self.hover_last_announced_target = Some(target_hwnd.0 as usize);
-                        let _ = self.tts_sender.send(TtsCommand::Stop);
-                        let _ = self.tts_sender.send(TtsCommand::Speak(vocal_msg));
+                        self.transition_to_zones_for_window(target_hwnd.0 as isize, &display_title);
                         ctx.request_repaint();
+                        }
                     } else if rect_changed && !user_navigating {
                         if !self.is_scan_in_progress {
                             self.refresh_numbered_targets_for_window(target_hwnd.0 as isize);
                         }
-                    } else if (self.switch_step == SwitchAccessStep::Windows || self.switch_step == SwitchAccessStep::Elements) && !user_navigating && !self.is_scan_in_progress {
-                        let should_periodic_refresh = self.numbered_last_refresh.elapsed() >= Duration::from_millis(5000);
-
+                    } else if (!user_navigating || !self.switch_access_mode) && !self.is_scan_in_progress {
+                        let scan_interval = if self.switch_access_mode { Duration::from_millis(5000) } else { Duration::from_millis(2500) };
+                        let should_periodic_refresh = self.numbered_last_refresh.elapsed() >= scan_interval;
                         if should_periodic_refresh {
                             self.refresh_numbered_targets_for_window(target_hwnd.0 as isize);
                         }
@@ -2462,7 +2605,8 @@ impl eframe::App for OverlayApp {
             #[cfg(not(windows))]
             {
                 let user_navigating = self.last_switch_input.elapsed() < Duration::from_millis(600);
-                if self.switch_step == SwitchAccessStep::Elements && !user_navigating && !self.is_scan_in_progress && self.numbered_last_refresh.elapsed() >= Duration::from_millis(3500) {
+                let scan_interval = if self.switch_access_mode { Duration::from_millis(3500) } else { Duration::from_millis(2500) };
+                if (!user_navigating || !self.switch_access_mode) && !self.is_scan_in_progress && self.numbered_last_refresh.elapsed() >= scan_interval {
                     if let Some(wid) = self.switch_active_window_id {
                         self.refresh_numbered_targets_for_window(wid);
                     }
@@ -2509,7 +2653,6 @@ impl eframe::App for OverlayApp {
             let is_single_switch = self.is_single_switch_mode();
             let auto_scan_interval = Duration::from_millis(1800);
             let auto_scan_tick = is_single_switch
-                && !self.dictation_mode
                 && self.status != AgentStatus::Speaking
                 && self.last_switch_input.elapsed() >= Duration::from_millis(600)
                 && self.switch_last_tick.elapsed() >= auto_scan_interval;
@@ -3122,10 +3265,6 @@ impl eframe::App for OverlayApp {
                                 let _ = self.tts_sender.send(TtsCommand::Speak(vocal_read));
                                 ctx.request_repaint();
                             } else if cur_target.role == "champ de saisie" || cur_target.role == "zone de texte" {
-                                clear_screen_numbered_badges();
-                                self.numbered_targets.clear();
-                                self.switch_zones.clear();
-                                self.switch_active_zone_index = None;
                                 let click_x = cur_target.click_x;
                                 let click_y = cur_target.click_y;
                                 crate::automation::IS_EXTERNAL_TEXT_INPUT_FOCUSED.store(true, Ordering::SeqCst);
@@ -3252,6 +3391,7 @@ impl eframe::App for OverlayApp {
 
                                 let _ = self.tts_sender.send(TtsCommand::Stop);
                                 let _ = self.tts_sender.send(TtsCommand::Speak(vocal_read));
+                                self.sync_switch_access_overlays();
                                 ctx.request_repaint();
                             } else {
                             let click_x = cur_target.click_x;
@@ -3514,6 +3654,9 @@ impl eframe::App for OverlayApp {
 
         if self.is_hidden {
             self.sync_switch_access_overlays();
+            if eyetracking::should_show_eye_debug() {
+                eyetracking::show_eye_debug_floating_window(&ctx, &theme);
+            }
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
                 .show(ui, |ui| {
@@ -3649,6 +3792,89 @@ impl eframe::App for OverlayApp {
                     }
                 });
             return;
+        }
+
+        // Mire de calibration 9 points plein écran pour l'Eye-Tracking
+        if self.eye_tracker.calibration.is_active {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.eye_tracker.cancel_calibration();
+                eyetracking::set_eye_tracking_enabled(false);
+                if let Ok(mut lock) = eyetracking::GLOBAL_GAZE_POS.lock() {
+                    *lock = None;
+                }
+                self.position_initialized = false;
+                play_earcon(Earcon::MicClose);
+                ctx.request_repaint();
+                return;
+            }
+
+            let painter = ui.painter();
+            let (scr_w, scr_h) = (work_area.w, work_area.h);
+            if let Some((target_x, target_y)) = self.eye_tracker.calibration.current_screen_target(scr_w, scr_h) {
+                let center = egui::pos2(target_x, target_y);
+                let progress = self.eye_tracker.calibration.progress();
+                let p_idx = self.eye_tracker.calibration.current_point_index + 1;
+
+                // Fond assombri sur l'écran entier
+                painter.rect_filled(
+                    egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(scr_w, scr_h)),
+                    egui::CornerRadius::ZERO,
+                    egui::Color32::from_rgba_unmultiplied(10, 12, 16, 225),
+                );
+
+                // Anneau d'accumulation progressive
+                painter.circle_stroke(
+                    center,
+                    32.0,
+                    egui::Stroke::new(3.0, egui::Color32::from_rgb(0, 180, 255)),
+                );
+                painter.circle_filled(
+                    center,
+                    30.0 * progress,
+                    egui::Color32::from_rgba_unmultiplied(0, 230, 118, 180),
+                );
+                painter.circle_filled(center, 7.0, egui::Color32::WHITE);
+
+                // Indication textuelle
+                let text = format!("Fixez le point ({}/9) — Échap pour quitter", p_idx);
+                painter.text(
+                    egui::pos2(center.x, center.y + 44.0),
+                    egui::Align2::CENTER_CENTER,
+                    text,
+                    egui::FontId::proportional(18.0),
+                    egui::Color32::WHITE,
+                );
+            } else {
+                // Fin de calibration atteinte
+                self.eye_tracker.calibration.is_active = false;
+                self.position_initialized = false;
+                ctx.request_repaint();
+            }
+            ctx.request_repaint();
+            return;
+        }
+
+        // Réticule de visée du regard lorsque l'Eye-Tracking est actif
+        if eyetracking::is_eye_tracking_enabled() {
+            if let Ok(gaze_guard) = eyetracking::GLOBAL_GAZE_POS.lock() {
+                if let Some((gx, gy)) = *gaze_guard {
+                    let p = ui.painter();
+                    let center = egui::pos2(gx, gy);
+                    let is_snapped = self.eye_tracker.last_snapped_target_id.is_some() && self.eye_tracker.snapping_enabled;
+                    let (reticle_radius, stroke_color, core_color) = if is_snapped {
+                        (22.0, egui::Color32::from_rgb(0, 230, 118), egui::Color32::from_rgb(0, 230, 118))
+                    } else {
+                        (18.0, egui::Color32::from_rgba_unmultiplied(0, 229, 255, 140), egui::Color32::from_rgb(0, 229, 255))
+                    };
+                    p.circle_stroke(center, reticle_radius, egui::Stroke::new(2.0, stroke_color));
+                    p.circle_filled(center, 4.0, core_color);
+                }
+            }
+        }
+
+        // Vignette flottante de retour de caméra avec détection oculaire
+        if eyetracking::should_show_eye_debug() {
+            eyetracking::show_eye_debug_floating_window(&ctx, &theme);
         }
 
         egui::CentralPanel::default()
