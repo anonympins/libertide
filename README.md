@@ -1,7 +1,7 @@
 
 # <img src="public/favicon-256x256.png" width="64" alt="Libertide Overlay Interface" valign="middle"> Libertide
 > **Empowering everyone to use their computer with complete freedom and autonomy.**  
-> Libertide is a lightweight, high-performance assistive desktop overlay combining intelligent voice control, anti-tremor hover navigation, click-by-number badges, and single-switch access to eliminate physical barriers without requiring expensive proprietary hardware.
+> Libertide is a lightweight, high-performance assistive desktop overlay combining intelligent voice control, AI webcam & hardware eye-tracking with magnetic snapping, anti-tremor hover navigation, click-by-number badges, and single-switch access to eliminate physical barriers without requiring expensive proprietary hardware.
 
 [![Version](https://img.shields.io/github/v/release/anonympins/libertide?label=Version)](https://github.com/anonympins/libertide/releases)
 [![License](https://img.shields.io/github/license/anonympins/libertide?label=License)](https://github.com/anonympins/libertide/blob/main/LICENSE)
@@ -54,7 +54,15 @@ Eliminates precision aiming fatigue and accidental clicks caused by tremors:
   - **Pointer Dwell**: Keep the pointer still over the target to auto-trigger (configurable 0–2500&nbsp;ms dwell delay).
 - **Stable Badge Reconciliation**: An intelligent reconciliation engine preserves badge numbers across dynamic screen updates and small scrolling adjustments, preventing confusing badge renumbering.
 
-### 2. 🔘 Hierarchical Single-Switch Access
+### 2. 👁️ Zero-Hardware Webcam & Hardware Eye Tracking
+Navigate and target interactively with your gaze:
+- **100% Local Neural Webcam Tracking (L2CS-Net)**: Runs an embedded ultra-lightweight ONNX neural model (~2.6 MB) on any standard RGB laptop or desktop webcam. Calculates 3D gaze pitch/yaw in real time without external servers.
+- **Universal Hardware Tracker Bridge**: Native client support for high-precision hardware eye trackers via **OpenGaze TCP (port 4242)** (Tobii Eye Tracker bridge, GazePoint GP3, Pupil Labs) and **OpenTrack UDP (port 4242)**.
+- **Sub-Pixel One Euro (1€) Anti-Jitter Filter**: Suppresses natural ocular micro-tremors and involuntary saccades while preserving instant, zero-latency response on intentional gaze shifts.
+- **Semantic Magnetic Snapping**: The gaze cursor is automatically and smoothly attracted to nearby buttons, links, inputs, and badges with temporal hysteresis, preventing gaze jitter between adjacent targets.
+- **Fast Calibration & Instant Tare**: 9-point smooth pursuit / grid calibration or instant 1-point center gaze tare and camera pitch compensation directly from the overlay.
+
+### 3. 🔘 Hierarchical Single-Switch Access
 Designed for users with single-movement abilities (micro-switch, puff-and-sip, single switch, or spacebar):
 - **Cascading 3-Step Navigation**: Window Level ➔ Region/Zone Level ➔ Individual Control Level.
 - **Semantic Summaries**: As each window or zone is selected, Libertide synthesizes what is inside so you know where you are without hunting visually.
@@ -87,18 +95,22 @@ Complex information is extracted and projected into accessible floating window c
 - **Active Timers Dashboard**: Visual progress bars, real-time countdown clocks, and quick-cancel buttons with Click & Dwell support directly inside the Assistance panel.
 - **Ethical Proactive Companion**: Periodic background check-ins (~22 minutes with natural timing jitter) cycling through posture/hydration advice (`CareAndComfort`), curiosities (`KnowledgeAndQuestions`), empathy (`EmotionalSupportAndEmpathy`), and ambient music (`RadioAndMusicStream`). Automatically suspends when the user is typing, dictating, or in emergency mode.
 
-### 6. 📺 Twitch Live Stream State & Interactive Chat
+### 6. 🎵 Accessible Musical Instrument & Rhythm Toy
+- **Adaptive 8-Pad Synth & Drum Machine**: Built-in sound synthesis engine (Kick, Snare, Hi-Hat, Clap, Bass, Synths, Zen Bells, 8-Bit Retro) playable via single-switch scanning, dwell hover, or keyboard.
+- **Expressive Modulation**: Morphing pitch-bend and auto-wah filters with 4/4 rhythmic quantization to prevent accidental machine-gun triggers.
+
+### 7. 📺 Twitch Live Stream State & Interactive Chat
 - **Live Metadata & Viewer Counter**: Real-time stream detection showing live status, viewer count with a logarithmic activity color gradient (mint, cyan, amber, coral, magenta), and current broadcast titles.
 - **One-Click Stream Joining**: Direct *"🌐 Join on Twitch"* action in the active chat header to watch broadcasts in your default browser.
 
-### 7. 🛡️ Removal of Web Obstacles & Transaction Safety
+### 8. 🛡️ Removal of Web Obstacles & Transaction Safety
 - **Automatic Barrier Dismissal**: Automatically detects and dismisses invasive cookie consent banners and push notification prompts.
 - **Protected Payment Guardrail**: The agent can search products, compare prices, and manage shopping carts, but **strictly stops before checkout/payment screens**, requiring explicit user confirmation.
 
 - **Zero Accessibility Dead-Ends**: Works seamlessly on legacy software, Java Swing apps, canvas elements, games, or remote desktops where OS accessibility APIs (UIA, AX, AT-SPI) lack metadata.
 - **Instant Actionability**: An embedded high-speed OCR engine detects textual and button areas, assigning them clickable badges and hover narrations.
 
-### 7. 🎨 Visual Comfort & Custom Accessibility Themes (WCAG AAA)
+### 9. 🎨 Visual Comfort & Custom Accessibility Themes (WCAG AAA)
 The interface adapts dynamically to your eyesight:
 - **Dynamic Zoom**: Say *"Zoom in"*, *"Enlarge text"*, or use UI buttons to scale from 70% to 250%.
 - **Multilingual Accessibility**: Toggle effortlessly between French, English, or Automatic System Language via settings or by voice (*"Passer en anglais"*, *"Passer en français"*).
@@ -129,9 +141,9 @@ The interface adapts dynamically to your eyesight:
   ➔ Golden numbered badges overlay every clickable link and control.
   ➔ Speak *"Click 4"* or type `4` on the numeric keypad to open it.
 
-### 📺 3. Live video and audio subtitles
-- Say *"Active les sous-titres"* / *"Start subtitles"*:
-  ➔ Libertide captures system audio output in loopback and displays real-time subtitles in a high-contrast floating card accompanied by a live 16-band spectrum equalizer.
+### 👁️ 3. Hands-free control with Eye Tracking & Dwell
+- Turn on Eye Tracking: point with your gaze towards any control or link.
+  ➔ Libertide magnetizes the cursor directly onto the target, outlines it, and auto-triggers via dwell timer without requiring any physical hands or switch click.
 
 ### 🖱️ 3. Clicking without shaking
 - **With gaze or mouse**: Point at the target area: Libertide outlines it and speaks the button label (*"Close window"*, *"Search"*), executing upon dwell timer expiration or single switch tap.
@@ -140,6 +152,10 @@ The interface adapts dynamically to your eyesight:
 - *"Put the browser on the left and my notes on the right"*  
   ➔ Windows snap edge-to-edge automatically.
 - *"Mute sound"* / *"Louder"*.
+
+### 📺 5. Live video and audio subtitles
+- Say *"Active les sous-titres"* / *"Start subtitles"*:
+  ➔ Libertide captures system audio output in loopback and displays real-time subtitles in a high-contrast floating card accompanied by a live 16-band spectrum equalizer.
 
 ### ⏱️ 5. Reminders and deferred commands
 - *"Remind me to take my medication in 30 minutes"*
@@ -168,8 +184,8 @@ The interface adapts dynamically to your eyesight:
 | **`Spacebar`** / **`Enter`** | Confirms/clicks the focused badge or selected element; validates number buffer immediately. |
 | **`Tab` / `Shift+Tab` / Arrow Keys** | Steps forward/backward through switch access targets or regions. |
 | **`Middle Mouse Button`** | Instantly silences text-to-speech reading. |
-| **`Escape`** | **Safety & Emergency Stop**: immediately aborts agent execution, silences voice, exits dictation, or navigates back one step. |
-
+| **`Escape`** | **Safety & Emergency Stop**: immediately aborts agent execution, exits eye-tracking calibration, silences voice, exits dictation, or navigates back one step. |
+ 
 ---
 
 ## 🚀 Getting Started in 3 Steps
@@ -183,7 +199,7 @@ Download the binary built for your OS from the Releases page:
 ### Step 2: Plug in your existing devices
 Libertide requires no specialized hardware:
 - Built-in microphone or any USB headset.
-- Any standard mouse, trackball, trackpad, eye-tracker, or adaptive switch.
+- Any standard webcam (for AI gaze tracking), mouse, trackball, trackpad, eye-tracker (Tobii, GazePoint), or adaptive switch.
 
 ### Step 3: Configure your AI provider
 To process natural language commands, configure your preferred LLM provider:
@@ -246,6 +262,8 @@ Libertide understands English, French, and most modern languages:
 | Category | What you can say out loud |
 | :--- | :--- |
 | **Interface Control** | *"Hide"* • *"Show up"* • *"Emergency stop"* • *"Stop"* |
+| **Eye Tracking & Gaze** | *"Active le snapping"* • *"Désactive le snapping"* • *"Tare"* |
+| **Instrument & Rhythm** | *"Boîte à rythme"* • *"Mode musique"* • *"Lance la musique"* |
 | **Window Focus** | *"Focus Chrome"* • *"Mets le bloc-notes au premier plan"* • *"Passe sur VS Code"* |
 | **Live Subtitles** | *"Active les sous-titres"* • *"Arrête les sous-titres"* • *"Start subtitles"* • *"Stop subtitles"* |
 | **Pointing & Clicking Help** | *"Hover mode"* • *"Numbers"* / *"Badges"* • *"Click 3"* • *"Switch mode"* |
@@ -262,6 +280,9 @@ Libertide understands English, French, and most modern languages:
 
 **Does Libertide work without expensive assistive hardware?**  
 Yes, absolutely. That is the core mission: a standard webcam, any basic microphone, and a regular mouse or keyboard spacebar are all you need.
+
+**Can I use professional eye-trackers like Tobii or GazePoint?**  
+Yes. While Libertide provides a full built-in neural gaze tracker using standard webcams (via L2CS-Net ONNX), it also natively connects over TCP/UDP to OpenGaze and OpenTrack protocols for high-frequency hardware trackers.
 
 **How does Libertide handle apps without native accessibility tags (canvas, legacy tools)?**  
 Libertide includes an embedded OCR engine that scans visual screen regions in real time. Visual labels and controls in custom apps or remote desktops are automatically recognized, read aloud, and assigned click badges.
