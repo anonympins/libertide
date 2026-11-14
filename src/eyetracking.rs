@@ -696,6 +696,8 @@ pub const EYETRACKING_ONNX_FILENAME: &str = "L2CSNet_gaze.onnx";
 
 /// Miroirs publics de référence pour les poids ONNX de L2CS-Net (Estimation 3D du regard)
 pub const DEFAULT_EYETRACKING_MODEL_URLS: &[&str] = &[
+    "https://github.com/anonympins/libertide/releases/latest/download/L2CSNet_gaze.onnx",
+    "https://github.com/anonympins/libertide/releases/download/models/L2CSNet_gaze.onnx",
     "https://raw.githubusercontent.com/anonympins/libertide/refs/heads/main/models/L2CSNet_gaze.onnx",
     "https://huggingface.co/qualcomm/L2CS-Net/resolve/main/L2CSNet.onnx",
     "https://huggingface.co/spaces/Ankush98/L2CS-Net-Gaze-Estimation/resolve/main/models/L2CSNet_gaze.onnx",

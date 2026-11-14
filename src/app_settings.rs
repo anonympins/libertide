@@ -1444,7 +1444,7 @@ impl OverlayApp {
 
                                         ui.add_space(4.0);
                                         ui.label(
-                                            egui::RichText::new("Pilotez l'ordinateur avec vos yeux à l'aide d'une webcam standard. Le filtre 1€ et l'aimant sémantique calibrent et attirent le curseur vers les contrôles réels de l'écran.")
+                                            egui::RichText::new("Pointage oculaire haute précision sans matériel infrarouge coûteux : le modèle ONNX L2CS-Net hébergé sur GitHub, couplé au filtre 1€ et au magnétisme sémantique, rivalise avec les dispositifs professionnels de pointage oculaire.")
                                                 .size(10.5)
                                                 .color(theme.text_secondary),
                                         );
