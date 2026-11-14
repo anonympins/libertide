@@ -1993,7 +1993,7 @@ impl EyeTrackingController {
         let effective_target_x = (snapped_phys_x / ppp) - work_area_offset.0;
         let effective_target_y = (snapped_phys_y / ppp) - work_area_offset.1;
 
-        // 5. Interpolation réactive calquée sur la dynamique du regard
+        // 5. Simulation physique d'inertie & glisse feutrée (effet boule de billard)
         let now = Instant::now();
         let dt = self
             .last_lerp_timestamp
@@ -2002,16 +2002,50 @@ impl EyeTrackingController {
             .clamp(0.001, 0.1);
         self.last_lerp_timestamp = Some(now);
 
-        let (cur_x, cur_y) = self.current_lerp_pos.unwrap_or((effective_target_x, effective_target_y));
-        let cur_x = if cur_x.is_finite() { cur_x } else { effective_target_x };
-        let cur_y = if cur_y.is_finite() { cur_y } else { effective_target_y };
+        let (mut cur_x, mut cur_y) = self.current_lerp_pos.unwrap_or((effective_target_x, effective_target_y));
+        if !cur_x.is_finite() { cur_x = effective_target_x; }
+        if !cur_y.is_finite() { cur_y = effective_target_y; }
 
-        // Suivi direct et vif : le One Euro gère le jitter sans latence
-        let lerp_factor = (1.0 - (-35.0 * dt).exp()).clamp(0.0, 1.0);
-        let local_x = (cur_x + (effective_target_x - cur_x) * lerp_factor).clamp(0.0, screen_w);
-        let local_y = (cur_y + (effective_target_y - cur_y) * lerp_factor).clamp(0.0, screen_h);
+        let (mut vel_x, mut vel_y) = self.cursor_vel;
+        if !vel_x.is_finite() { vel_x = 0.0; }
+        if !vel_y.is_finite() { vel_y = 0.0; }
 
-        self.cursor_vel = ((local_x - cur_x) / dt.max(0.001), (local_y - cur_y) / dt.max(0.001));
+        // Modèle dynamique d'ordre 2 :
+        // omega = réactivité / célérité du déplacement (20 rad/s = temps de stabilisation ~200ms)
+        // zeta  = coefficient d'amortissement (0.88 = glisse fluide avec décélération douce feutrée sans oscillation)
+        let omega = 20.0f32;
+        let zeta = 0.88f32;
+        let k = omega * omega;
+        let c = 2.0 * zeta * omega;
+
+        // Sous-échantillonnage temporel (pas de 2ms) pour garantir une intégration symplectique sans dérive
+        let sub_dt = 0.002f32;
+        let steps = (dt / sub_dt).ceil().max(1.0).min(50.0) as usize;
+        let step_dt = dt / steps as f32;
+
+        for _ in 0..steps {
+            let fx = k * (effective_target_x - cur_x) - c * vel_x;
+            let fy = k * (effective_target_y - cur_y) - c * vel_y;
+
+            vel_x += fx * step_dt;
+            vel_y += fy * step_dt;
+
+            cur_x += vel_x * step_dt;
+            cur_y += vel_y * step_dt;
+        }
+
+        // Seuil d'accrochage à l'arrêt complet pour éviter les micro-frémissements sous le pixel
+        if (effective_target_x - cur_x).hypot(effective_target_y - cur_y) < 0.8 && vel_x.hypot(vel_y) < 8.0 {
+            cur_x = effective_target_x;
+            cur_y = effective_target_y;
+            vel_x = 0.0;
+            vel_y = 0.0;
+        }
+
+        let local_x = cur_x.clamp(0.0, screen_w);
+        let local_y = cur_y.clamp(0.0, screen_h);
+
+        self.cursor_vel = (vel_x, vel_y);
         self.current_lerp_pos = Some((local_x, local_y));
         self.last_target_local = Some((local_x, local_y));
 
