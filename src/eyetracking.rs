@@ -1830,8 +1830,8 @@ impl EyeTrackingController {
                 let mut cy = [0.0; GAZE_MODEL_TERMS];
                 cx[0] = target_x - (raw_x * screen_w * 0.5 * sens);
                 cx[1] = screen_w * 0.5 * sens;
-                cy[0] = target_y - (raw_y * screen_h * 0.5 * sens);
-                cy[2] = screen_h * 0.5 * sens;
+                cy[0] = target_y - (raw_y * screen_h * 0.5 * sens * 1.45);
+                cy[2] = screen_h * 0.5 * sens * 1.45;
                 self.model.rms_error_px = 35.0;
                 self.model.is_trained = true;
                 self.model.save_to_file();
@@ -1989,22 +1989,29 @@ impl EyeTrackingController {
         if is_eye_continuous_mode() {
             // Déviation par rapport au centre calibré (offset_x, offset_y)
             // effective_raw_x intègre déjà is_eye_invert_x()
-            let raw_vec_x = (effective_raw_x - self.offset_x) * 1.50;
-            let raw_vec_y = (effective_raw_y - self.offset_y) * 1.50;
+            let raw_vec_x = (effective_raw_x - self.offset_x) * 1.60;
+            // Gain Y décisif (2.80) : compense l'amplitude angulaire verticale réduite de l'œil (~11.5° vs ~25°)
+            let raw_vec_y = (effective_raw_y - self.offset_y) * 2.80;
 
             // Filtrage One Euro du vecteur de force pour gommer tout bruit de caméra floue
             let (filt_fx, filt_fy) = self.filter.filter((raw_vec_x, raw_vec_y));
-            let mag = filt_fx.hypot(filt_fy);
-            let deadzone = get_eye_joystick_threshold_a();
+            let deadzone_x = get_eye_joystick_threshold_a();
+            // Seuil de zone morte en Y réduit de 35% : toute légère inclinaison verticale déclenche immédiatement le curseur
+            let deadzone_y = (deadzone_x * 0.65).max(0.004);
+
+            // Distance normalisée par rapport à l'ellipse de zone morte
+            let norm_dist = ((filt_fx / deadzone_x).powi(2) + (filt_fy / deadzone_y).powi(2)).sqrt();
 
             // Calcul de la poussée vectorielle (vitesse cible en px/sec)
-            let (target_vx, target_vy) = if mag > deadzone {
-                let excess = ((mag - deadzone) / (1.0 - deadzone)).clamp(0.0, 1.5);
-                // Courbe de sensibilité accrue (1.2 au lieu de 1.6) et vitesse max amplifiée
-                let curve = excess.powf(1.2);
-                let max_speed = 1800.0 * self.sensitivity;
-                let dir_x = filt_fx / mag;
-                let dir_y = filt_fy / mag;
+            let (target_vx, target_vy) = if norm_dist > 1.0 {
+                let excess = (norm_dist - 1.0).clamp(0.0, 1.5);
+                let curve = excess.powf(1.15);
+                let max_speed = 1850.0 * self.sensitivity;
+
+                let scaled_fy = filt_fy * 1.35;
+                let dir_len = filt_fx.hypot(scaled_fy).max(1e-4);
+                let dir_x = filt_fx / dir_len;
+                let dir_y = scaled_fy / dir_len;
                 (dir_x * curve * max_speed, dir_y * curve * max_speed)
             } else {
                 (0.0, 0.0)
@@ -2080,7 +2087,7 @@ impl EyeTrackingController {
             let center_y = screen_h * 0.5;
             (
                 center_x + (effective_raw_x * center_x * self.sensitivity) + self.offset_x,
-                center_y + (effective_raw_y * center_y * self.sensitivity) + self.offset_y,
+                center_y + (effective_raw_y * center_y * self.sensitivity * 1.45) + self.offset_y,
             )
         };
 
@@ -2893,8 +2900,8 @@ pub fn extract_pupil_and_head_pose(
             // Normalisation dynamique sans butée artificielle de +45°
             let pitch_offset = get_camera_pitch_offset();
             let compensated_pitch = pitch_deg + pitch_offset;
-            // Échelle angulaire naturelle : ~16° d'amplitude verticale
-            let norm_y = (compensated_pitch / 16.0).clamp(-1.0, 1.0);
+            // Échelle angulaire naturelle décisive : amplitude verticale humaine ~11.5° (au lieu de 16°)
+            let norm_y = (compensated_pitch / 11.5).clamp(-1.0, 1.0);
 
             // Construction du retour vidéo brut complet avec annotations dynamiques
             let (preview, prev_w, prev_h, left_eye, right_eye) =
@@ -2987,7 +2994,7 @@ pub fn extract_pupil_and_head_pose(
     let norm_x = ((dx_l + dx_r) * 0.5).clamp(-1.0, 1.0);
     // Compensation fixe dans le fallback pupillaire :
     let baseline_down_offset = 0.45;
-    let norm_y = ((((dy_l + dy_r) * 0.5) - baseline_down_offset) * 1.35).clamp(-1.0, 1.0);
+    let norm_y = ((((dy_l + dy_r) * 0.5) - baseline_down_offset) * 1.85).clamp(-1.0, 1.0);
 
     let (preview, prev_w, prev_h, left_eye, right_eye) =
         build_raw_camera_preview(frame, width, height, format, face_roi, norm_x, norm_y);
@@ -3143,7 +3150,7 @@ fn run_opentrack_udp_loop(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 
                 // Conversion angulaire en coordonnées normalisées de regard
                 let norm_x = (yaw / 18.0).clamp(-1.0, 1.0);
-                let norm_y = (-pitch / 14.0).clamp(-1.0, 1.0);
+                let norm_y = (-pitch / 11.5).clamp(-1.0, 1.0);
 
                 set_latest_raw_gaze(RawGazeMeasurement {
                     eye_x: norm_x,
