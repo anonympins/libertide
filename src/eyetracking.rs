@@ -75,7 +75,7 @@ pub static EYE_SNAPPING_ENABLED: AtomicBool = AtomicBool::new(true);
 pub static EYE_TRACKING_SENSITIVITY: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 pub static EYE_OFFSET_X: AtomicU32 = AtomicU32::new((0f32).to_bits());
 pub static EYE_OFFSET_Y: AtomicU32 = AtomicU32::new((0.0f32).to_bits());
-pub static EYE_CAMERA_PITCH_OFFSET: AtomicU32 = AtomicU32::new((0.0f32).to_bits());
+pub static EYE_CAMERA_PITCH_OFFSET: AtomicU32 = AtomicU32::new((-16.0f32).to_bits());
 
 pub fn get_camera_pitch_offset() -> f32 {
     f32::from_bits(EYE_CAMERA_PITCH_OFFSET.load(Ordering::Relaxed))
@@ -89,8 +89,14 @@ pub fn set_camera_pitch_offset(offset: f32) {
     std::env::set_var("EYE_CAMERA_PITCH_OFFSET", val_str);
 }
 
-/// Ancienne fonction de tare de pitch (désactivée : compensation fixe de +45° active)
+/// Tare instantanée du pitch caméra sur le regard neutre actuel
 pub fn tare_camera_pitch_to_current_gaze() {
+    if let Some(raw) = get_latest_raw_gaze() {
+        let current_offset = get_camera_pitch_offset();
+        let new_offset = current_offset - raw.head_pitch;
+        set_camera_pitch_offset(new_offset);
+        crate::overlay::play_earcon(crate::overlay::Earcon::Success);
+    }
 }
 pub static EYE_INVERT_X: AtomicBool = AtomicBool::new(false);
 pub static EYE_INVERT_Y: AtomicBool = AtomicBool::new(false);
@@ -475,10 +481,19 @@ pub fn show_eye_debug_floating_window(ctx: &egui::Context, theme: &ThemeColors) 
                     set_eye_offset_y(off_y + 30.0);
                 }
                 ui.label(
-                    egui::RichText::new("Pitch: +45° fixe")
+                    egui::RichText::new(format!("Pitch Off: {:+.0}°", get_camera_pitch_offset()))
                         .size(10.0)
                         .color(egui::Color32::from_rgb(255, 180, 100)),
                 );
+                if ui.small_button("Tare").on_hover_text("Calibrer le pitch neutre sur votre regard actuel").clicked() {
+                    tare_camera_pitch_to_current_gaze();
+                }
+                if ui.small_button("▲").on_hover_text("Monter le pitch (+2°)").clicked() {
+                    set_camera_pitch_offset(get_camera_pitch_offset() + 2.0);
+                }
+                if ui.small_button("▼").on_hover_text("Descendre le pitch (-2°)").clicked() {
+                    set_camera_pitch_offset(get_camera_pitch_offset() - 2.0);
+                }
                 let mut inv = is_eye_invert_x();
                 if ui.checkbox(&mut inv, egui::RichText::new("Inv X").size(10.0)).on_hover_text("Inverser l'axe horizontal X").changed() {
                     set_eye_invert_x(inv);
@@ -1479,7 +1494,7 @@ impl Default for EyeTrackingController {
             .ok()
             .or_else(|| read_env_var_from_file(".env", "EYE_CAMERA_PITCH_OFFSET"))
             .and_then(|s| s.trim().parse::<f32>().ok())
-            .unwrap_or(0.0);
+            .unwrap_or(-16.0);
         EYE_CAMERA_PITCH_OFFSET.store(pitch_offset.to_bits(), Ordering::Relaxed);
 
         let invert_x = std::env::var("EYE_INVERT_X")
@@ -1500,7 +1515,7 @@ impl Default for EyeTrackingController {
             .ok()
             .or_else(|| read_env_var_from_file(".env", "EYE_CONTINUOUS_MODE"))
             .map(|s| s.trim().eq_ignore_ascii_case("true") || s.trim() == "1")
-            .unwrap_or(true);
+            .unwrap_or(false);
         EYE_CONTINUOUS_MODE.store(continuous, Ordering::Relaxed);
 
         let threshold_a = std::env::var("EYE_JOYSTICK_THRESHOLD_A")
@@ -1641,11 +1656,16 @@ impl EyeTrackingController {
             let raw_y = if is_eye_invert_y() { -raw.eye_y } else { raw.eye_y };
 
             if is_eye_continuous_mode() {
-                // En mode joystick, recentrer calibre le zéro du manche (tare du regard neutre)
-                set_eye_offset_x(raw.eye_x);
-                set_eye_offset_y(raw.eye_y);
-                self.offset_x = raw.eye_x;
-                self.offset_y = raw.eye_y;
+                // Tare automatique du pitch pour annuler la pente naturelle vers l'écran
+                let current_pitch_offset = get_camera_pitch_offset();
+                let new_pitch_offset = current_pitch_offset - raw.head_pitch;
+                set_camera_pitch_offset(new_pitch_offset);
+
+                // Tare du manche joystick sur les coordonnées oculaires brutes actuelles
+                set_eye_offset_x(raw_x);
+                set_eye_offset_y(0.0);
+                self.offset_x = raw_x;
+                self.offset_y = 0.0;
                 self.cursor_vel = (0.0, 0.0);
                 self.current_lerp_pos = Some((target_x, target_y));
                 self.confirmed_pred_gaze = Some((target_x, target_y));
@@ -1838,9 +1858,10 @@ impl EyeTrackingController {
         self.last_lerp_timestamp = Some(now);
 
         if is_eye_continuous_mode() {
-            // Poussée vectorielle directe : regard à gauche -> déplacement vers la gauche
-            let raw_vec_x = (raw_eye_x - self.offset_x) * (if is_eye_invert_x() { -1.0 } else { 1.0 });
-            let raw_vec_y = (raw_eye_y - self.offset_y) * (if is_eye_invert_y() { -1.0 } else { 1.0 }) * 1.50;
+            // Déviation par rapport au centre calibré (offset_x, offset_y)
+            // effective_raw_x intègre déjà is_eye_invert_x()
+            let raw_vec_x = (effective_raw_x - self.offset_x) * 1.50;
+            let raw_vec_y = (effective_raw_y - self.offset_y) * 1.50;
 
             // Filtrage One Euro du vecteur de force pour gommer tout bruit de caméra floue
             let (filt_fx, filt_fy) = self.filter.filter((raw_vec_x, raw_vec_y));
@@ -1940,28 +1961,9 @@ impl EyeTrackingController {
         // 2. Filtrage One Euro (stabilisation haute fidélité sans latence sur les saccades)
         let (filt_x, filt_y) = self.filter.filter((raw_screen_x, raw_screen_y));
 
-        // 3. Zone morte adaptative de micro-fixation pour bloquer le jitter physiologique
-        let confirmed = self.confirmed_pred_gaze.unwrap_or((filt_x, filt_y));
-        let fix_dx = filt_x - confirmed.0;
-        let fix_dy = filt_y - confirmed.1;
-        let fix_dist = fix_dx.hypot(fix_dy);
-
-        const FIXATION_DEADZONE_PX: f32 = 30.0;
-        let target_local_x;
-        let target_local_y;
-
-        if fix_dist < FIXATION_DEADZONE_PX {
-            // Micro-mouvement dans le champ de fixation : verrouillage stable
-            let creep = 0.08;
-            target_local_x = confirmed.0 + fix_dx * creep;
-            target_local_y = confirmed.1 + fix_dy * creep;
-            self.confirmed_pred_gaze = Some((target_local_x, target_local_y));
-        } else {
-            // Saccade oculaire franche : libération immédiate vers la nouvelle cible
-            target_local_x = filt_x;
-            target_local_y = filt_y;
-            self.confirmed_pred_gaze = Some((filt_x, filt_y));
-        }
+        let target_local_x = filt_x;
+        let target_local_y = filt_y;
+        self.confirmed_pred_gaze = Some((filt_x, filt_y));
 
         self.last_raw_gaze = Some((effective_raw_x, effective_raw_y));
 
@@ -1991,7 +1993,7 @@ impl EyeTrackingController {
         let effective_target_x = (snapped_phys_x / ppp) - work_area_offset.0;
         let effective_target_y = (snapped_phys_y / ppp) - work_area_offset.1;
 
-        // 5. Interpolation dynamique (Critically Damped Spring)
+        // 5. Interpolation réactive calquée sur la dynamique du regard
         let now = Instant::now();
         let dt = self
             .last_lerp_timestamp
@@ -2004,40 +2006,12 @@ impl EyeTrackingController {
         let cur_x = if cur_x.is_finite() { cur_x } else { effective_target_x };
         let cur_y = if cur_y.is_finite() { cur_y } else { effective_target_y };
 
-        let (vel_x, vel_y) = self.cursor_vel;
-        let vel_x = if vel_x.is_finite() { vel_x } else { 0.0 };
-        let vel_y = if vel_y.is_finite() { vel_y } else { 0.0 };
+        // Suivi direct et vif : le One Euro gère le jitter sans latence
+        let lerp_factor = (1.0 - (-35.0 * dt).exp()).clamp(0.0, 1.0);
+        let local_x = (cur_x + (effective_target_x - cur_x) * lerp_factor).clamp(0.0, screen_w);
+        let local_y = (cur_y + (effective_target_y - cur_y) * lerp_factor).clamp(0.0, screen_h);
 
-        let vec_x = effective_target_x - cur_x;
-        let vec_y = effective_target_y - cur_y;
-        let dist = vec_x.hypot(vec_y);
-
-        // Rigidité adaptative du ressort : douce sur les ajustements, très rapide sur les sauts
-        let saccade_factor = ((dist - 8.0) / 90.0).clamp(0.0, 1.0);
-        let omega = 12.0 + saccade_factor * 18.0;
-        let exp_term = (-omega * dt).exp();
-
-        let diff_x = cur_x - effective_target_x;
-        let temp_x = (vel_x + omega * diff_x) * dt;
-        let mut local_x = effective_target_x + (diff_x + temp_x) * exp_term;
-        let mut new_vel_x = (vel_x - omega * temp_x) * exp_term;
-
-        let diff_y = cur_y - effective_target_y;
-        let temp_y = (vel_y + omega * diff_y) * dt;
-        let mut local_y = effective_target_y + (diff_y + temp_y) * exp_term;
-        let mut new_vel_y = (vel_y - omega * temp_y) * exp_term;
-
-        if dist < 1.5 && new_vel_x.hypot(new_vel_y) < 20.0 {
-            local_x = effective_target_x;
-            local_y = effective_target_y;
-            new_vel_x = 0.0;
-            new_vel_y = 0.0;
-        }
-
-        local_x = local_x.clamp(0.0, screen_w);
-        local_y = local_y.clamp(0.0, screen_h);
-
-        self.cursor_vel = (new_vel_x, new_vel_y);
+        self.cursor_vel = ((local_x - cur_x) / dt.max(0.001), (local_y - cur_y) / dt.max(0.001));
         self.current_lerp_pos = Some((local_x, local_y));
         self.last_target_local = Some((local_x, local_y));
 
@@ -2136,9 +2110,9 @@ pub fn run_l2cs_inference(input_tensor: &[f32]) -> Option<(f32, f32)> {
         }
     };
 
-    // Ordre par défaut L2CS-Net : Output 0 = Yaw (fc_yaw), Output 1 = Pitch (fc_pitch)
-    let mut y_idx = 0usize;
-    let mut p_idx = 1usize;
+    // Ordre natif PyTorch / L2CS-Net : Output 0 = Pitch (fc_pitch), Output 1 = Yaw (fc_yaw)
+    let mut p_idx = 0usize;
+    let mut y_idx = 1usize;
     for (i, out_meta) in session.outputs().iter().enumerate() {
         let lower = out_meta.name().to_lowercase();
         if lower.contains("pitch") {
@@ -2164,12 +2138,12 @@ pub fn run_l2cs_inference(input_tensor: &[f32]) -> Option<(f32, f32)> {
         let (_, combined_slice) = outputs[0].try_extract_tensor::<f32>().ok()?;
 
         if combined_slice.len() == 2 {
-            let yaw = decode_l2cs_tensor_or_logits(&combined_slice[0..1]);
-            let pitch = decode_l2cs_tensor_or_logits(&combined_slice[1..2]);
+            let pitch = decode_l2cs_tensor_or_logits(&combined_slice[0..1]);
+            let yaw = decode_l2cs_tensor_or_logits(&combined_slice[1..2]);
             Some((pitch, yaw))
         } else if combined_slice.len() >= 180 {
-            let yaw = decode_l2cs_tensor_or_logits(&combined_slice[..90]);
-            let pitch = decode_l2cs_tensor_or_logits(&combined_slice[90..180]);
+            let pitch = decode_l2cs_tensor_or_logits(&combined_slice[..90]);
+            let yaw = decode_l2cs_tensor_or_logits(&combined_slice[90..180]);
             Some((pitch, yaw))
         } else {
             None
@@ -2756,7 +2730,8 @@ pub fn extract_pupil_and_head_pose(
             // Normalisation dynamique sans butée artificielle de +45°
             let pitch_offset = get_camera_pitch_offset();
             let compensated_pitch = pitch_deg + pitch_offset;
-            let norm_y = (compensated_pitch / 14.0).clamp(-1.0, 1.0);
+            // Échelle angulaire naturelle : ~16° d'amplitude verticale
+            let norm_y = (compensated_pitch / 16.0).clamp(-1.0, 1.0);
 
             // Construction du retour vidéo brut complet avec annotations dynamiques
             let (preview, prev_w, prev_h, left_eye, right_eye) =
