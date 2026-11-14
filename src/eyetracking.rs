@@ -1,3 +1,5 @@
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
@@ -17,6 +19,8 @@ extern "system" {
     fn GetAsyncKeyState(vKey: i32) -> i16;
 }
 
+pub static ESCAPE_PRESSED: AtomicBool = AtomicBool::new(false);
+
 /// Indique si la touche Échap (VK_ESCAPE = 0x1B) est actuellement pressée physiquement
 #[inline]
 pub fn is_escape_key_pressed() -> bool {
@@ -26,7 +30,7 @@ pub fn is_escape_key_pressed() -> bool {
     }
     #[cfg(not(windows))]
     {
-        false
+        ESCAPE_PRESSED.load(Ordering::Relaxed)
     }
 }
 
@@ -39,6 +43,72 @@ pub fn check_and_stop_eye_tracking_on_escape() -> bool {
         true
     } else {
         false
+    }
+}
+
+// ============================================================================
+// Source de Suivi Oculaire (Webcam IA vs Hardware Eye Trackers)
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EyeTrackerSource {
+    /// Webcam RGB standard + réseau de neurones L2CS-Net ONNX (zéro matériel requis)
+    WebcamNeural,
+    /// Hardware OpenGaze : Tobii Bridge, GazePoint GP3, Pupil Labs, The Eye Tribe (TCP port 4242)
+    OpenGazeTcp,
+    /// Hardware OpenTrack / FreeTrack / TrackIR bridge (UDP port 4242)
+    OpenTrackUdp,
+}
+
+pub static EYE_TRACKER_SOURCE: AtomicU32 = AtomicU32::new(0);
+pub static EYE_HARDWARE_CONNECTED: AtomicBool = AtomicBool::new(false);
+pub static EYE_HARDWARE_HZ: AtomicU32 = AtomicU32::new(0);
+pub static EYE_HARDWARE_ADDR: Mutex<String> = Mutex::new(String::new());
+
+pub fn get_eye_tracker_source() -> EyeTrackerSource {
+    match EYE_TRACKER_SOURCE.load(Ordering::Relaxed) {
+        1 => EyeTrackerSource::OpenGazeTcp,
+        2 => EyeTrackerSource::OpenTrackUdp,
+        _ => EyeTrackerSource::WebcamNeural,
+    }
+}
+
+pub fn set_eye_tracker_source(source: EyeTrackerSource) {
+    let val = match source {
+        EyeTrackerSource::WebcamNeural => 0,
+        EyeTrackerSource::OpenGazeTcp => 1,
+        EyeTrackerSource::OpenTrackUdp => 2,
+    };
+    let prev = EYE_TRACKER_SOURCE.swap(val, Ordering::SeqCst);
+    if prev != val {
+        let name = match source {
+            EyeTrackerSource::WebcamNeural => "webcam",
+            EyeTrackerSource::OpenGazeTcp => "opengaze",
+            EyeTrackerSource::OpenTrackUdp => "opentrack",
+        };
+        let _ = write_env_var_to_file(".env", "EYE_TRACKER_SOURCE", name);
+        std::env::set_var("EYE_TRACKER_SOURCE", name);
+        // Redémarrer le worker de capture sur la nouvelle source matérielle
+        stop_camera_worker();
+        ensure_camera_worker_running();
+    }
+}
+
+pub fn is_eye_hardware_connected() -> bool {
+    EYE_HARDWARE_CONNECTED.load(Ordering::Relaxed)
+}
+
+pub fn get_eye_hardware_hz() -> u32 {
+    EYE_HARDWARE_HZ.load(Ordering::Relaxed)
+}
+
+pub fn get_eye_hardware_addr() -> String {
+    EYE_HARDWARE_ADDR.lock().map(|g| g.clone()).unwrap_or_else(|_| "127.0.0.1:4242".to_string())
+}
+
+pub fn set_eye_hardware_addr(addr: impl Into<String>) {
+    if let Ok(mut g) = EYE_HARDWARE_ADDR.lock() {
+        *g = addr.into();
     }
 }
 
@@ -323,6 +393,53 @@ pub fn render_eye_preview_widget(ui: &mut egui::Ui, desired_width: f32) {
     ensure_camera_worker_running();
     ui.ctx().request_repaint_after(Duration::from_millis(33));
 
+    let source = get_eye_tracker_source();
+    if source != EyeTrackerSource::WebcamNeural {
+        // HUD visuel pour les trackers matériels (Tobii, GazePoint, OpenTrack)
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(desired_width, 110.0), egui::Sense::hover());
+        let painter = ui.painter();
+        painter.rect_filled(rect, egui::CornerRadius::same(8), egui::Color32::from_rgb(14, 18, 24));
+
+        let is_connected = is_eye_hardware_connected();
+        let stroke_color = if is_connected { egui::Color32::from_rgb(0, 230, 118) } else { egui::Color32::from_rgb(255, 140, 0) };
+        painter.rect_stroke(rect, egui::CornerRadius::same(8), egui::Stroke::new(1.5, stroke_color), egui::StrokeKind::Outside);
+
+        let center = rect.center();
+        let title = match source {
+            EyeTrackerSource::OpenGazeTcp => "🎯 Hardware Eye Tracker (OpenGaze / Tobii / GazePoint)",
+            EyeTrackerSource::OpenTrackUdp => "📡 Hardware Eye Tracker (OpenTrack / FreeTrack)",
+            _ => "",
+        };
+        painter.text(egui::pos2(center.x, rect.min.y + 16.0), egui::Align2::CENTER_CENTER, title, egui::FontId::proportional(12.0), egui::Color32::WHITE);
+
+        // Cible réticule
+        let raw_gaze = get_latest_raw_gaze().unwrap_or_default();
+        let reticle_x = center.x + raw_gaze.eye_x * (rect.width() * 0.40);
+        let reticle_y = center.y + 10.0 + raw_gaze.eye_y * (rect.height() * 0.28);
+        let target_pos = egui::pos2(reticle_x, reticle_y);
+
+        painter.circle_stroke(target_pos, 14.0, egui::Stroke::new(1.5, stroke_color));
+        painter.circle_filled(target_pos, 3.5, stroke_color);
+        painter.line_segment([egui::pos2(target_pos.x - 18.0, target_pos.y), egui::pos2(target_pos.x + 18.0, target_pos.y)], egui::Stroke::new(1.0, stroke_color));
+        painter.line_segment([egui::pos2(target_pos.x, target_pos.y - 18.0), egui::pos2(target_pos.x, target_pos.y + 18.0)], egui::Stroke::new(1.0, stroke_color));
+
+        let hz = get_eye_hardware_hz();
+        let status_desc = if is_connected {
+            format!("Connecté (Fréquence : {} Hz) — Gaze: ({:+.2}, {:+.2})", hz, raw_gaze.eye_x, raw_gaze.eye_y)
+        } else {
+            let addr = get_eye_hardware_addr();
+            format!("En attente du flux matériel sur {}...", addr)
+        };
+        painter.text(
+            egui::pos2(center.x, rect.max.y - 14.0),
+            egui::Align2::CENTER_CENTER,
+            status_desc,
+            egui::FontId::proportional(10.5),
+            if is_connected { egui::Color32::from_rgb(0, 230, 118) } else { egui::Color32::from_rgb(255, 180, 50) },
+        );
+        return;
+    }
+
     if let Some(debug_state) = get_eye_debug_state() {
         if debug_state.width > 0 && debug_state.height > 0 && !debug_state.preview_crop.is_empty() {
             let texture = {
@@ -579,6 +696,7 @@ pub const EYETRACKING_ONNX_FILENAME: &str = "L2CSNet_gaze.onnx";
 
 /// Miroirs publics de référence pour les poids ONNX de L2CS-Net (Estimation 3D du regard)
 pub const DEFAULT_EYETRACKING_MODEL_URLS: &[&str] = &[
+    "https://raw.githubusercontent.com/anonympins/libertide/refs/heads/main/models/L2CSNet_gaze.onnx",
     "https://huggingface.co/qualcomm/L2CS-Net/resolve/main/L2CSNet.onnx",
     "https://huggingface.co/spaces/Ankush98/L2CS-Net-Gaze-Estimation/resolve/main/models/L2CSNet_gaze.onnx",
 ];
@@ -796,7 +914,7 @@ pub fn ensure_eyetracking_model_downloaded(event_tx: &Sender<AgentEvent>) -> Res
         NEURAL_MODEL_LOADED.store(true, Ordering::Relaxed);
         Ok(get_eyetracking_model_path())
     } else {
-        Err(format!("Impossible de télécharger le modèle Iris ({last_error}). Vous pouvez déposer manuellement iris.onnx dans models/eyetracking/"))
+        Err(format!("Impossible de télécharger le modèle L2CS-Net ({last_error}). Vous pouvez déposer manuellement L2CSNet_gaze.onnx dans models/ ou models/eyetracking/"))
     }
 }
 
@@ -1525,6 +1643,17 @@ impl Default for EyeTrackingController {
             .unwrap_or(0.025);
         let threshold_a = if threshold_a < 0.005 { 0.025 } else { threshold_a };
         EYE_JOYSTICK_THRESHOLD_A.store(threshold_a.to_bits(), Ordering::Relaxed);
+
+        let source_str = std::env::var("EYE_TRACKER_SOURCE")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "EYE_TRACKER_SOURCE"))
+            .unwrap_or_else(|| "webcam".to_string());
+        let source = match source_str.to_lowercase().as_str() {
+            "opengaze" | "tobii" | "gazepoint" => EyeTrackerSource::OpenGazeTcp,
+            "opentrack" | "freetrack" => EyeTrackerSource::OpenTrackUdp,
+            _ => EyeTrackerSource::WebcamNeural,
+        };
+        set_eye_tracker_source(source);
 
         let mouse_override_ms = std::env::var("EYE_MOUSE_DEBOUNCE_MS")
             .ok()
@@ -2884,6 +3013,168 @@ pub fn extract_pupil_and_head_pose(
 }
 
 // ============================================================================
+// 7b. Pilotes Réseau Matériels : OpenGaze (Tobii/GazePoint) & OpenTrack (UDP)
+// ============================================================================
+
+/// Extrait un attribut float d'une balise XML OpenGaze (ex: FPOGX="0.5123")
+fn parse_opengaze_xml_attr(line: &str, attr: &str) -> Option<f32> {
+    let pattern = format!("{attr}=\"");
+    if let Some(pos) = line.find(&pattern) {
+        let rest = &line[pos + pattern.len()..];
+        if let Some(end) = rest.find('"') {
+            return rest[..end].trim().parse::<f32>().ok();
+        }
+    }
+    None
+}
+
+/// Boucle client TCP pour le protocole OpenGaze (GazePoint GP3, Tobii OpenGaze bridge, Pupil Labs)
+fn run_opengaze_client_loop(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!("[Hardware Eye Tracker] Connexion au serveur OpenGaze sur {addr}...");
+    let mut stream = TcpStream::connect(addr)?;
+    stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+
+    // Initialisation du flux OpenGaze standard
+    let init_cmds = "<SET ID=\"ENABLE_SEND_POG_FIX\" STATE=\"1\" />\r\n<SET ID=\"ENABLE_SEND_DATA\" STATE=\"1\" />\r\n";
+    stream.write_all(init_cmds.as_bytes())?;
+    stream.flush()?;
+
+    EYE_HARDWARE_CONNECTED.store(true, Ordering::SeqCst);
+    set_camera_device_name("GazePoint / Tobii OpenGaze");
+    println!("[Hardware Eye Tracker] Connecté au flux matériel OpenGaze !");
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    let mut frame_count = 0u32;
+    let mut last_hz_time = Instant::now();
+
+    while is_camera_worker_running() {
+        let active = is_eye_tracking_enabled() || is_calibration_active() || is_dev_mode() || is_eye_debug_overlay_visible();
+        if !active {
+            std::thread::sleep(Duration::from_millis(40));
+            continue;
+        }
+        if check_and_stop_eye_tracking_on_escape() {
+            std::thread::sleep(Duration::from_millis(40));
+            continue;
+        }
+
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break, // Déconnexion du serveur
+            Ok(_) => {
+                // Analyse du paquet <REC FPOGX="..." FPOGY="..." FPOGV="1" />
+                if line.contains("<REC") {
+                    let x_opt = parse_opengaze_xml_attr(&line, "FPOGX").or_else(|| parse_opengaze_xml_attr(&line, "BPOGX"));
+                    let y_opt = parse_opengaze_xml_attr(&line, "FPOGY").or_else(|| parse_opengaze_xml_attr(&line, "BPOGY"));
+                    let valid = parse_opengaze_xml_attr(&line, "FPOGV").or_else(|| parse_opengaze_xml_attr(&line, "BPOGV")).unwrap_or(1.0) > 0.5;
+
+                    if valid {
+                        if let (Some(x), Some(y)) = (x_opt, y_opt) {
+                            // Conversion des coordonnées normalisées de l'écran [0.0..1.0] -> [-1.0..+1.0]
+                            let norm_x = ((x - 0.5) * 2.0).clamp(-1.0, 1.0);
+                            let norm_y = ((y - 0.5) * 2.0).clamp(-1.0, 1.0);
+
+                            set_latest_raw_gaze(RawGazeMeasurement {
+                                eye_x: norm_x,
+                                eye_y: norm_y,
+                                head_yaw: 0.0,
+                                head_pitch: 0.0,
+                                timestamp: Instant::now(),
+                            });
+                            update_fallback_debug_state(norm_x, norm_y);
+
+                            frame_count += 1;
+                            if last_hz_time.elapsed() >= Duration::from_secs(1) {
+                                EYE_HARDWARE_HZ.store(frame_count, Ordering::Relaxed);
+                                frame_count = 0;
+                                last_hz_time = Instant::now();
+                            }
+                        }
+                    }
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut || e.kind() == std::io::ErrorKind::WouldBlock => {
+                continue;
+            }
+            Err(_) => break,
+        }
+    }
+
+    EYE_HARDWARE_CONNECTED.store(false, Ordering::SeqCst);
+    EYE_HARDWARE_HZ.store(0, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Boucle réceptrice UDP pour le protocole OpenTrack / FreeTrack (port 4242)
+fn run_opentrack_udp_loop(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    println!("[Hardware Eye Tracker] Écoute des paquets OpenTrack UDP sur 0.0.0.0:{port}...");
+    let socket = UdpSocket::bind(format!("0.0.0.0:{port}"))?;
+    socket.set_read_timeout(Some(Duration::from_millis(500)))?;
+
+    EYE_HARDWARE_CONNECTED.store(true, Ordering::SeqCst);
+    set_camera_device_name("OpenTrack / FreeTrack (UDP)");
+
+    let mut buf = [0u8; 128];
+    let mut frame_count = 0u32;
+    let mut last_hz_time = Instant::now();
+
+    while is_camera_worker_running() {
+        let active = is_eye_tracking_enabled() || is_calibration_active() || is_dev_mode() || is_eye_debug_overlay_visible();
+        if !active {
+            std::thread::sleep(Duration::from_millis(40));
+            continue;
+        }
+        if check_and_stop_eye_tracking_on_escape() {
+            std::thread::sleep(Duration::from_millis(40));
+            continue;
+        }
+
+        match socket.recv_from(&mut buf) {
+            Ok((len, _src)) if len >= 48 => {
+                // 6 doubles (little endian) : [x, y, z, yaw, pitch, roll]
+                let mut doubles = [0.0f64; 6];
+                for i in 0..6 {
+                    let b = &buf[i * 8..(i + 1) * 8];
+                    doubles[i] = f64::from_le_bytes(b.try_into().unwrap_or_default());
+                }
+                let yaw = doubles[3] as f32;
+                let pitch = doubles[4] as f32;
+
+                // Conversion angulaire en coordonnées normalisées de regard
+                let norm_x = (yaw / 18.0).clamp(-1.0, 1.0);
+                let norm_y = (-pitch / 14.0).clamp(-1.0, 1.0);
+
+                set_latest_raw_gaze(RawGazeMeasurement {
+                    eye_x: norm_x,
+                    eye_y: norm_y,
+                    head_yaw: yaw,
+                    head_pitch: pitch,
+                    timestamp: Instant::now(),
+                });
+                update_fallback_debug_state(norm_x, norm_y);
+
+                frame_count += 1;
+                if last_hz_time.elapsed() >= Duration::from_secs(1) {
+                    EYE_HARDWARE_HZ.store(frame_count, Ordering::Relaxed);
+                    frame_count = 0;
+                    last_hz_time = Instant::now();
+                }
+            }
+            Ok(_) => continue,
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut || e.kind() == std::io::ErrorKind::WouldBlock => {
+                continue;
+            }
+            Err(_) => break,
+        }
+    }
+
+    EYE_HARDWARE_CONNECTED.store(false, Ordering::SeqCst);
+    EYE_HARDWARE_HZ.store(0, Ordering::Relaxed);
+    Ok(())
+}
+
+// ============================================================================
 // 7. Pilote d'Acquisition Vidéo Nokhwa (Moderne, Multiplateforme)
 // ============================================================================
 
@@ -3033,7 +3324,23 @@ pub fn start_camera_worker() {
         .name("eyetracking-camera".to_string())
         .spawn(move || {
             println!("[Eye-Tracking] Démarrage du thread d'acquisition vidéo (nokhwa)...");
-            // Petite pause de sécurité (100ms) pour permettre aux drivers WMF de se réinitialiser
+            
+            let source = get_eye_tracker_source();
+            match source {
+                EyeTrackerSource::OpenGazeTcp => {
+                    let addr = get_eye_hardware_addr();
+                    let _ = run_opengaze_client_loop(&addr);
+                    return;
+                }
+                EyeTrackerSource::OpenTrackUdp => {
+                    let _ = run_opentrack_udp_loop(4242);
+                    return;
+                }
+                EyeTrackerSource::WebcamNeural => {
+                    // Poursuite standard via webcam nokhwa
+                }
+            }
+            
             std::thread::sleep(Duration::from_millis(100));
 
             match run_camera() {
@@ -3088,6 +3395,22 @@ fn poll_mouse_fallback_sample() {
 
     #[cfg(not(windows))]
     {
+        if let Some((x, y)) = crate::window_util::get_global_cursor_pos() {
+            let screen_w = 1920.0f32;
+            let screen_h = 1080.0f32;
+            let norm_x = (((x as f32 / screen_w) - 0.5) * 2.0).clamp(-1.0, 1.0);
+            let norm_y = (((y as f32 / screen_h) - 0.5) * 2.0).clamp(-1.0, 1.0);
+            update_fallback_debug_state(norm_x, norm_y);
+            set_latest_raw_gaze(RawGazeMeasurement {
+                eye_x: norm_x,
+                eye_y: norm_y,
+                head_yaw: 0.0,
+                head_pitch: 0.0,
+                timestamp: Instant::now(),
+            });
+            return;
+        }
+
         let sample = RawGazeMeasurement {
             eye_x: 0.0,
             eye_y: 0.0,

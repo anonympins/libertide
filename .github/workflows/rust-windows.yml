@@ -101,6 +101,9 @@ jobs:
           }
           if (Test-Path README.md) { Copy-Item README.md dist/ }
           if (Test-Path LICENSE) { Copy-Item LICENSE dist/ }
+          # Exclusion stricte des modèles neuronaux volumineux
+          if (Test-Path dist/models) { Remove-Item -Recurse -Force dist/models }
+          Get-ChildItem -Path dist -Include "*.onnx","*.bin","*.gguf","*.tflite","*.tar.bz2","*.tmp" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force
           Compress-Archive -Path dist/* -DestinationPath "libertide-windows-x64.zip"
 
       - name: Upload build artifact

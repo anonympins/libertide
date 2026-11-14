@@ -1086,7 +1086,6 @@ impl eframe::App for OverlayApp {
                 // Si le regard est fixé sur un contrôle interactif en mode survol
                 if let Some(target_idx) = snapped_idx {
                     if let Some(target) = self.numbered_targets.iter().find(|t| t.index == target_idx) {
-                        #[cfg(windows)]
                         draw_screen_control_border(target.rect, false);
                     }
                     if self.switch_access_mode && self.hover_last_announced_target != Some(target_idx) {
@@ -1097,7 +1096,6 @@ impl eframe::App for OverlayApp {
                         }
                     }
                 } else if !self.switch_access_mode {
-                    #[cfg(windows)]
                     set_overlay_focused_border(None);
                 }
             }

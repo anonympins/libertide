@@ -1270,6 +1270,10 @@ pub fn install_switch_keyboard_hook() {
 
                 match event.event_type {
                     rdev::EventType::KeyPress(key) => {
+                        if matches!(key, rdev::Key::Escape) {
+                            crate::eyetracking::ESCAPE_PRESSED.store(true, Ordering::Relaxed);
+                        }
+
                         // Raccourcis globaux
                         let global_evt = match key {
                             rdev::Key::F7 => Some(crate::types::SwitchKeyEvent::ToggleSwitch),
@@ -1346,6 +1350,10 @@ pub fn install_switch_keyboard_hook() {
                         }
                     }
                     rdev::EventType::KeyRelease(key) => {
+                        if matches!(key, rdev::Key::Escape) {
+                            crate::eyetracking::ESCAPE_PRESSED.store(false, Ordering::Relaxed);
+                        }
+
                         if !is_switch_on || is_dictation || is_typing {
                             return;
                         }

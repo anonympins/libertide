@@ -1307,6 +1307,33 @@ impl OverlayApp {
                                     .corner_radius(egui::CornerRadius::same(8))
                                     .inner_margin(egui::Margin::symmetric(10, 8))
                                     .show(ui, |ui| {
+                                                // Sélecteur de source de tracking (Webcam vs Hardware)
+                                                let cur_source = crate::eyetracking::get_eye_tracker_source();
+                                                ui.horizontal(|ui| {
+                                                    ui.label(egui::RichText::new("Matériel / Source de capture :").size(11.0).color(egui::Color32::WHITE).strong());
+                                                });
+                                                ui.add_space(2.0);
+                                                ui.horizontal_wrapped(|ui| {
+                                                    let is_webcam = cur_source == crate::eyetracking::EyeTrackerSource::WebcamNeural;
+                                                    if ui.selectable_label(is_webcam, "📷 Webcam standard (IA L2CS-Net)").clicked() && !is_webcam {
+                                                        crate::eyetracking::set_eye_tracker_source(crate::eyetracking::EyeTrackerSource::WebcamNeural);
+                                                        play_earcon(Earcon::Success);
+                                                    }
+                                                    let is_opengaze = cur_source == crate::eyetracking::EyeTrackerSource::OpenGazeTcp;
+                                                    if ui.selectable_label(is_opengaze, "🎯 Hardware OpenGaze (Tobii / GazePoint / Pupil)").clicked() && !is_opengaze {
+                                                        crate::eyetracking::set_eye_tracker_source(crate::eyetracking::EyeTrackerSource::OpenGazeTcp);
+                                                        play_earcon(Earcon::Success);
+                                                    }
+                                                    let is_opentrack = cur_source == crate::eyetracking::EyeTrackerSource::OpenTrackUdp;
+                                                    if ui.selectable_label(is_opentrack, "📡 Hardware OpenTrack (UDP 4242)").clicked() && !is_opentrack {
+                                                        crate::eyetracking::set_eye_tracker_source(crate::eyetracking::EyeTrackerSource::OpenTrackUdp);
+                                                        play_earcon(Earcon::Success);
+                                                    }
+                                                });
+                                                ui.add_space(4.0);
+                                                ui.separator();
+                                                ui.add_space(4.0);
+
                                         let mut eye_on = crate::eyetracking::is_eye_tracking_enabled();
                                         if ui.checkbox(&mut eye_on, "Activer l'Eye-Tracking par webcam").changed() {
                                             crate::eyetracking::set_eye_tracking_enabled(eye_on);
@@ -1441,7 +1468,7 @@ impl OverlayApp {
                                         } else {
                                             ui.horizontal(|ui| {
                                                 let event_tx_clone = self.event_sender.clone();
-                                                if ui.button(egui::RichText::new("📥 Télécharger le modèle neuronal IA (~2.6 Mo)").strong().color(theme.accent)).on_hover_text("Télécharge les poids MediaPipe Iris pour un suivi subpixel précis.").clicked() {
+                                                if ui.button(egui::RichText::new("📥 Télécharger le modèle neuronal IA (L2CS-Net)").strong().color(theme.accent)).on_hover_text("Télécharge le modèle L2CS-Net ONNX pour le suivi oculaire 3D.").clicked() {
                                                     std::thread::spawn(move || {
                                                         let _ = crate::eyetracking::ensure_eyetracking_model_downloaded(&event_tx_clone);
                                                     });
