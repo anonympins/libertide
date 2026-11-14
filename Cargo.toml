@@ -1,11 +1,12 @@
 [package]
 name = "libertide"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2021"
 
 [features]
 default = ["sherpa"]
 vulkan = ["llama-cpp-2/vulkan"]
+metal = ["llama-cpp-2/metal"]
 sherpa = ["dep:sherpa-rs", "sherpa-rs/tts"]
 
 [dependencies]
@@ -21,6 +22,8 @@ rust-i18n = "4.2.4"
 llama-cpp-2 = { version = "0.1" }
 sherpa-rs = { version = "0.6.8", optional = true, features = ["tts"] }
 rdev = "0.5.3"
+nokhwa = { version = "0.10.11", features = ["input-msmf", "nokhwa-bindings-macos", "nokhwa-bindings-linux", "nokhwa-bindings-windows"]}
+ort = "2.0.0-rc.9"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ocrs = "0.13.1"

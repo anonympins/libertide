@@ -148,11 +148,7 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
             if width < 120 || height < 80 {
                 continue;
             }
-            let screen_rect = [r.left, r.top, r.right, r.bottom];
-            if crate::ocr::capture_window_rgba(hwnd, screen_rect).is_none() {
-                continue;
-            }
-            screen_rect
+            [r.left, r.top, r.right, r.bottom]
         };
 
         let click_x = rect[0] + ((rect[2] - rect[0]) / 2);
@@ -232,7 +228,6 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
     items
         .into_iter()
         .filter(|w| w.width >= 100 && w.height >= 60)
-        .filter(|w| crate::ocr::capture_window_rgba(HWND::NULL, [w.x, w.y, w.x + w.width, w.y + w.height]).is_some())
         .map(|w| {
             let hash = w.id.as_bytes().iter().fold(0isize, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as isize));
             SwitchWindowTarget {
@@ -275,9 +270,6 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
                     continue;
                 }
                 let rect = [x, y, x + w, y + h];
-                if crate::ocr::capture_window_rgba(HWND::NULL, rect).is_none() {
-                    continue;
-                }
 
                 let hash = win_id.as_bytes().iter().fold(0isize, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as isize));
                 candidates.push(SwitchWindowTarget {
@@ -1278,6 +1270,10 @@ pub fn install_switch_keyboard_hook() {
 
                 match event.event_type {
                     rdev::EventType::KeyPress(key) => {
+                        if matches!(key, rdev::Key::Escape) {
+                            crate::eyetracking::ESCAPE_PRESSED.store(true, Ordering::Relaxed);
+                        }
+
                         // Raccourcis globaux
                         let global_evt = match key {
                             rdev::Key::F7 => Some(crate::types::SwitchKeyEvent::ToggleSwitch),
@@ -1354,6 +1350,10 @@ pub fn install_switch_keyboard_hook() {
                         }
                     }
                     rdev::EventType::KeyRelease(key) => {
+                        if matches!(key, rdev::Key::Escape) {
+                            crate::eyetracking::ESCAPE_PRESSED.store(false, Ordering::Relaxed);
+                        }
+
                         if !is_switch_on || is_dictation || is_typing {
                             return;
                         }
@@ -1926,14 +1926,15 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
             }
         }
 
-        // 2. Si l'utilisateur est en cours de dictée ou tape dans un champ de texte Libertide,
-        // laisser passer les frappes courantes (lettres, chiffres, ponctuation) vers l'application active.
+        // 2. Si l'utilisateur tape activement dans un champ de texte interne de Libertide,
+        // laisser passer les frappes vers l'UI Libertide.
         let is_user_typing = IS_USER_TYPING.load(Ordering::Relaxed);
-        if is_dictation || is_user_typing {
+        if is_user_typing {
             return CallNextHookEx(None, code, wparam, lparam);
         }
 
-        // 3. Si le mode survol / contacteur n'est pas activé, laisser passer les touches de navigation standard.
+        // 3. Si le mode survol / contacteur n'est pas activé, laisser passer les touches normales.
+        // (En dictée pure hors survol, la frappe clavier normale continue de fonctionner).
         if !is_switch_hook_on {
             return CallNextHookEx(None, code, wparam, lparam);
         }
@@ -1996,10 +1997,10 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
 
         let switch_event = match vk {
             0x09 => Some(if is_shift { SwitchKeyEvent::Prev } else { SwitchKeyEvent::Next }), // Tab / Shift+Tab
-            // Précédent : Flèche Gauche (0x25)
-            0x25 => Some(SwitchKeyEvent::Prev),
-            // Suivant : Flèche Droite (0x27)
-            0x27 => Some(SwitchKeyEvent::Next),
+            // Précédent : Flèche Gauche (0x25), Flèche Haut (0x26), Page Up (0x21)
+            0x25 | 0x26 | 0x21 => Some(SwitchKeyEvent::Prev),
+            // Suivant : Flèche Droite (0x27), Flèche Bas (0x28), Page Down (0x22)
+            0x27 | 0x28 | 0x22 => Some(SwitchKeyEvent::Next),
             // Sélection : Entrée, Espace
             0x0D | 0x20 => Some(SwitchKeyEvent::Select),
             // Retour / Sortie : Backspace (Retour arrière)

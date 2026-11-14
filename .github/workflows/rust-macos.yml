@@ -70,22 +70,35 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
+            ~/Library/Caches/sherpa-rs/
+            target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      - name: Prepare build environment
+        run: |
+          mkdir -p target/release/deps target/debug/deps
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$(pwd)/target/release/deps:$(pwd)/target/debug/deps:${DYLD_FALLBACK_LIBRARY_PATH:-}" >> $GITHUB_ENV
+
       - name: Run tests (release)
-        run: cargo test --release
+        run: cargo test --release --features metal
 
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --release --features metal
 
       - name: Prepare distribution package
         run: |
           mkdir -p dist
           cp target/release/libertide dist/libertide
+          SHERPA_LIB_DIR=$(find "$HOME/Library/Caches/sherpa-rs" -type d -name "lib" 2>/dev/null | head -n 1)
+          if [ -n "$SHERPA_LIB_DIR" ]; then
+            cp -f "$SHERPA_LIB_DIR"/*.dylib dist/ 2>/dev/null || true
+          fi
           [ -f README.md ] && cp README.md dist/
           [ -f LICENSE ] && cp LICENSE dist/
+          # Exclusion stricte des modèles neuronaux volumineux
+          rm -rf dist/models dist/*.onnx dist/*.bin dist/*.gguf dist/*.tflite dist/*.tar.bz2 dist/*.tmp 2>/dev/null || true
           tar -czvf libertide-macos-arm64.tar.gz -C dist .
 
       - name: Upload build artifact

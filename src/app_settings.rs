@@ -373,6 +373,16 @@ impl OverlayApp {
                     .inner_margin(egui::Margin::symmetric(12, 10)),
             )
             .show(ctx, |ui| {
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    if crate::eyetracking::is_eye_tracking_enabled() || crate::eyetracking::is_calibration_active() {
+                        crate::eyetracking::set_eye_tracking_enabled(false);
+                        self.eye_tracker.cancel_calibration();
+                        play_earcon(Earcon::Navigation);
+                    } else {
+                        self.show_api_key_modal = false;
+                        self.api_key_error = None;
+                    }
+                }
                 ui.style_mut().visuals.window_fill = theme.control_bg;
                 ui.style_mut().visuals.window_stroke = egui::Stroke::new(1.0, theme.border);
                 ui.style_mut().visuals.widgets.inactive.bg_fill = theme.control_bg;
@@ -1279,6 +1289,215 @@ impl OverlayApp {
                                     });
 
                                 ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(6.0);
+
+                                // 4. Contrôle par le regard (Eye-Tracking webcam sans matériel)
+                                ui.label(
+                                    egui::RichText::new("👁️ Contrôle oculaire (Eye-Tracking webcam standard)")
+                                        .size(12.0)
+                                        .color(theme.accent)
+                                        .strong(),
+                                );
+                                ui.add_space(4.0);
+
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                                // Sélecteur de source de tracking (Webcam vs Hardware)
+                                                let cur_source = crate::eyetracking::get_eye_tracker_source();
+                                                ui.horizontal(|ui| {
+                                                    ui.label(egui::RichText::new("Matériel / Source de capture :").size(11.0).color(egui::Color32::WHITE).strong());
+                                                });
+                                                ui.add_space(2.0);
+                                                ui.horizontal_wrapped(|ui| {
+                                                    let is_webcam = cur_source == crate::eyetracking::EyeTrackerSource::WebcamNeural;
+                                                    if ui.selectable_label(is_webcam, "📷 Webcam standard (IA L2CS-Net)").clicked() && !is_webcam {
+                                                        crate::eyetracking::set_eye_tracker_source(crate::eyetracking::EyeTrackerSource::WebcamNeural);
+                                                        play_earcon(Earcon::Success);
+                                                    }
+                                                    let is_opengaze = cur_source == crate::eyetracking::EyeTrackerSource::OpenGazeTcp;
+                                                    if ui.selectable_label(is_opengaze, "🎯 Hardware OpenGaze (Tobii / GazePoint / Pupil)").clicked() && !is_opengaze {
+                                                        crate::eyetracking::set_eye_tracker_source(crate::eyetracking::EyeTrackerSource::OpenGazeTcp);
+                                                        play_earcon(Earcon::Success);
+                                                    }
+                                                    let is_opentrack = cur_source == crate::eyetracking::EyeTrackerSource::OpenTrackUdp;
+                                                    if ui.selectable_label(is_opentrack, "📡 Hardware OpenTrack (UDP 4242)").clicked() && !is_opentrack {
+                                                        crate::eyetracking::set_eye_tracker_source(crate::eyetracking::EyeTrackerSource::OpenTrackUdp);
+                                                        play_earcon(Earcon::Success);
+                                                    }
+                                                });
+                                                ui.add_space(4.0);
+                                                ui.separator();
+                                                ui.add_space(4.0);
+
+                                        let mut eye_on = crate::eyetracking::is_eye_tracking_enabled();
+                                        if ui.checkbox(&mut eye_on, "Activer l'Eye-Tracking par webcam").changed() {
+                                            crate::eyetracking::set_eye_tracking_enabled(eye_on);
+                                            play_earcon(Earcon::Success);
+                                        }
+                                        ui.add_space(3.0);
+
+                                        // Sensibilité d'échelle du regard
+                                        let mut sens = crate::eyetracking::get_eye_tracking_sensitivity();
+                                        let prev_sens = sens;
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("Sensibilité du regard :").size(11.0).color(theme.text_secondary));
+                                            let slider = egui::Slider::new(&mut sens, 0.20..=2.00)
+                                                .step_by(0.05)
+                                                .custom_formatter(|v, _| format!("{:.2}x", v));
+                                            ui.add(slider).on_hover_text("Coefficient d'atténuation (0.75 par défaut). Rapproche les vecteurs angulaires de la géométrie physique de l'écran.");
+                                            if ui.small_button("0.75").on_hover_text("Rétablir la sensibilité optimale par défaut (0.75)").clicked() {
+                                                sens = 0.75;
+                                            }
+                                        });
+                                        if (sens - prev_sens).abs() > 0.001 {
+                                            crate::eyetracking::set_eye_tracking_sensitivity(sens);
+                                            self.eye_tracker.sensitivity = sens;
+                                        }
+                                        ui.add_space(3.0);
+
+                                        let mut snapping_on = crate::eyetracking::is_eye_snapping_enabled();
+                                        if ui.checkbox(&mut snapping_on, "🧲 Aimant / Snapping automatique sur les contrôles (Boutons, Liens, Champs)").changed() {
+                                            crate::eyetracking::set_eye_snapping_enabled(snapping_on);
+                                            self.eye_tracker.snapping_enabled = snapping_on;
+                                            play_earcon(Earcon::Success);
+                                        }
+                                        ui.add_space(3.0);
+
+                                        if snapping_on {
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new("Rayon de l'aimant :").size(11.0).color(theme.text_secondary));
+                                                let slider = egui::Slider::new(&mut self.eye_tracker.snap_radius, 40.0..=220.0)
+                                                    .suffix(" px")
+                                                    .step_by(5.0);
+                                                if ui.add(slider).on_hover_text("Distance en pixels à laquelle le regard est magnétiquement attiré vers le contrôle le plus proche.").changed() {
+                                                    let val_str = format!("{:.0}", self.eye_tracker.snap_radius);
+                                                    let _ = write_env_var_to_file(".env", "EYE_SNAP_RADIUS", &val_str);
+                                                    std::env::set_var("EYE_SNAP_RADIUS", &val_str);
+                                                }
+                                            });
+                                            ui.add_space(3.0);
+                                        }
+                                        ui.add_space(3.0);
+
+                                            let mut debounce_ms = self.eye_tracker.mouse_override_debounce.as_millis() as u64;
+                                            let prev_ms = debounce_ms;
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new("Reprise en main souris (délai de pause) :").size(11.0).color(theme.text_secondary));
+                                                let slider = egui::Slider::new(&mut debounce_ms, 500..=5000)
+                                                    .suffix(" ms")
+                                                    .step_by(250.0);
+                                                ui.add(slider).on_hover_text("Délai pendant lequel l'eye-tracking cède entièrement la priorité à la souris physique dès qu'un mouvement manuel est détecté.");
+                                            });
+                                            if debounce_ms != prev_ms {
+                                                self.eye_tracker.mouse_override_debounce = Duration::from_millis(debounce_ms);
+                                                let val_str = debounce_ms.to_string();
+                                                let _ = write_env_var_to_file(".env", "EYE_MOUSE_DEBOUNCE_MS", &val_str);
+                                                std::env::set_var("EYE_MOUSE_DEBOUNCE_MS", &val_str);
+                                            }
+                                            ui.add_space(2.0);
+                                            ui.label(egui::RichText::new("💡 Astuce : Appuyez sur Échap à tout moment pour couper instantanément le suivi oculaire.").size(10.0).italics().color(theme.text_secondary));
+                                            ui.add_space(3.0);
+
+                                        // Statut de la calibration persistée
+                                        let is_trained = self.eye_tracker.model.is_trained;
+                                        ui.horizontal(|ui| {
+                                            if is_trained {
+                                                let rms = self.eye_tracker.model.rms_error_px;
+                                                let prec = (100.0 - (rms / 250.0 * 100.0)).clamp(10.0, 99.0);
+                                                ui.label(egui::RichText::new(format!("✓ Modèle calibré (Précision: {:.0}%, Erreur RMS: {:.1}px)", prec, rms)).size(11.0).color(egui::Color32::from_rgb(0, 230, 118)).strong());
+                                                if ui.small_button("🗑").on_hover_text("Effacer la calibration persistée").clicked() {
+                                                    self.eye_tracker.reset_calibration();
+                                                }
+                                            } else {
+                                                ui.label(egui::RichText::new("⚪ Non calibré (utilise les gains neutres par défaut)").size(11.0).color(theme.text_secondary));
+                                            }
+                                        });
+                                        ui.add_space(4.0);
+
+                                        let cam_active = crate::eyetracking::is_camera_active();
+                                        let cam_name = crate::eyetracking::get_camera_device_name();
+                                        ui.horizontal(|ui| {
+                                            if cam_active {
+                                                let display = if !cam_name.is_empty() { cam_name } else { "Webcam active".to_string() };
+                                                ui.label(egui::RichText::new(format!("🟢 Caméra active : {display}")).size(11.0).color(egui::Color32::from_rgb(0, 230, 118)).strong());
+                                            } else {
+                                                ui.label(egui::RichText::new("⚪ Caméra en veille").size(11.0).color(theme.text_secondary));
+                                            }
+                                        });
+
+                                        if let Some(measurement) = crate::eyetracking::get_latest_raw_gaze() {
+                                            ui.add_space(2.0);
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "👁️ Iris détecté : X {:+.2}, Y {:+.2} | Tête : Yaw {:+.2}",
+                                                    measurement.eye_x, measurement.eye_y, measurement.head_yaw
+                                                ))
+                                                .size(10.5)
+                                                .color(theme.accent),
+                                            );
+                                        }
+
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            egui::RichText::new("Pilotez l'ordinateur avec vos yeux à l'aide d'une webcam standard. Le filtre 1€ et l'aimant sémantique calibrent et attirent le curseur vers les contrôles réels de l'écran.")
+                                                .size(10.5)
+                                                .color(theme.text_secondary),
+                                        );
+                                        ui.add_space(6.0);
+
+                                        let is_installed = crate::eyetracking::is_eyetracking_model_installed();
+                                        let is_downloading = self.active_download.as_ref().map_or(false, |dl| dl.label.contains("Eye-Tracking") || dl.label.contains("Iris"));
+
+                                        if is_downloading {
+                                            if let Some(ref dl) = self.active_download {
+                                                ui.add(egui::ProgressBar::new(dl.percent / 100.0).text(format!("Téléchargement IA : {:.1}% ({:.1}/{:.1} Mo - {:.1} Mo/s)", dl.percent, dl.downloaded_mb, dl.total_mb, dl.speed_mb_s)).animate(true));
+                                            }
+                                        } else if is_installed {
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new("✓ Modèle neuronal Iris installé").size(11.0).color(egui::Color32::from_rgb(100, 225, 130)).strong());
+                                                if ui.small_button("🗑").on_hover_text("Supprimer le modèle du disque").clicked() {
+                                                    let _ = crate::eyetracking::delete_eyetracking_model();
+                                                    play_earcon(Earcon::Success);
+                                                }
+                                            });
+                                        } else {
+                                            ui.horizontal(|ui| {
+                                                let event_tx_clone = self.event_sender.clone();
+                                                if ui.button(egui::RichText::new("📥 Télécharger le modèle neuronal IA (L2CS-Net)").strong().color(theme.accent)).on_hover_text("Télécharge le modèle L2CS-Net ONNX pour le suivi oculaire 3D.").clicked() {
+                                                    std::thread::spawn(move || {
+                                                        let _ = crate::eyetracking::ensure_eyetracking_model_downloaded(&event_tx_clone);
+                                                    });
+                                                    play_earcon(Earcon::Navigation);
+                                                }
+                                            });
+                                        }
+
+                                        ui.add_space(6.0);
+                                        ui.horizontal(|ui| {
+                                            if ui.button("🎯 Calibrage 9 points").on_hover_text("Lance une mire de 9 points fixes sur l'écran pour calibrer la matrice de regard.").clicked() {
+                                                self.eye_tracker.start_calibration();
+                                                crate::eyetracking::ensure_camera_worker_running();
+                                                self.show_api_key_modal = false;
+                                                play_earcon(Earcon::Success);
+                                            }
+
+                                            let (screen_w, screen_h) = {
+                                                let wa = crate::overlay::get_desktop_work_area_scaled(ui.ctx());
+                                                (wa.w, wa.h)
+                                            };
+                                            if ui.button("📍 Recalibrer le centre (1 point)").on_hover_text("Fixez le centre de l'écran et cliquez ici pour réaligner instantanément le zéro sans refaire les 9 points.").clicked() {
+                                                self.eye_tracker.recenter_center_gaze(screen_w, screen_h);
+                                                self.show_api_key_modal = false;
+                                            }
+                                        });
+                                    });
+
+                                ui.add_space(8.0);
                                 ui.horizontal(|ui| {
                                     let close_a11y_btn = ui.button(t!("ui.btn_close"));
                                     if make_widget_accessible_and_activated(ui, &close_a11y_btn, theme.accent) {
@@ -2126,6 +2345,10 @@ impl OverlayApp {
                                             }
                                         });
                                     });
+
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(6.0);
 
                                 ui.add_space(8.0);
                                 ui.separator();

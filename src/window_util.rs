@@ -856,6 +856,41 @@ pub fn get_global_cursor_pos() -> Option<(i32, i32)> {
     None
 }
 
+
+#[cfg(windows)]
+pub fn clear_all_screen_overlays() {
+    if let Ok(mut state) = OVERLAY_STATE.lock() {
+        state.targets.clear();
+        state.zones.clear();
+        state.focused_border = None;
+        state.orange_border = None;
+        state.is_visible = false;
+        render_overlay_state(&state);
+    }
+    if let Ok(guard) = BADGE_OVERLAY_HWND.lock() {
+        if let Some(hwnd) = *guard {
+            extern "system" {
+                fn ShowWindow(hwnd: *mut std::ffi::c_void, nCmdShow: i32) -> i32;
+                fn SetWindowPos(hwnd: *mut std::ffi::c_void, hWndInsertAfter: *mut std::ffi::c_void, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) -> i32;
+            }
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd as _,
+                    std::ptr::null_mut(),
+                    0, 0, 0, 0,
+                    0x0080 | 0x0002 | 0x0001 | 0x0004 | 0x0010, // SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+                );
+                let _ = ShowWindow(hwnd as _, 0); // SW_HIDE
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn clear_all_screen_overlays() {
+    clear_screen_numbered_badges();
+}
+
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn get_global_cursor_pos() -> Option<(i32, i32)> {
     if crate::automation::is_wayland_session() {

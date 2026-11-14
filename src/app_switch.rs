@@ -105,7 +105,16 @@ impl OverlayApp {
                         let focused_idx = self.numbered_targets.first().map(|t| t.index);
                         draw_screen_numbered_badges(&self.numbered_targets, self.zoom_factor, focused_idx);
                     } else {
-                        clear_screen_numbered_badges();
+                        if let Some(win_id) = self.switch_active_window_id {
+                            #[cfg(windows)]
+                            {
+                                let hwnd = windows::Win32::Foundation::HWND(win_id as _);
+                                let mut r = windows::Win32::Foundation::RECT::default();
+                                if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut r).is_ok() } {
+                                    draw_screen_orange_border([r.left, r.top, r.right, r.bottom]);
+                                }
+                            }
+                        }
                     }
                 }
                 SwitchAccessStep::Zones => {
