@@ -127,6 +127,8 @@ jobs:
           fi
           [ -f README.md ] && cp README.md dist/
           [ -f LICENSE ] && cp LICENSE dist/
+          # Exclusion stricte des modèles neuronaux volumineux
+          rm -rf dist/models dist/*.onnx dist/*.bin dist/*.gguf dist/*.tflite dist/*.tar.bz2 dist/*.tmp 2>/dev/null || true
           tar -czvf libertide-linux-x64.tar.gz -C dist .
 
       - name: Upload build artifact

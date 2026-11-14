@@ -3,6 +3,45 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.8.2] - 2026-11-14
+
+### 🎯 Hardware Eye Tracker Interoperability & OpenGaze / OpenTrack (`eyetracking.rs`, `app_settings.rs`)
+- **Seamless Hardware Eye Tracker Support (Tobii, GazePoint GP3, Pupil Labs, The Eye Tribe, OpenTrack)**:
+  - Added native multi-backend ingestion (`EyeTrackerSource`): users can now toggle between standard webcam AI inference (`WebcamNeural`) and dedicated high-frequency hardware trackers (`OpenGazeTcp` on port 4242, `OpenTrackUdp` on port 4242).
+  - Direct OpenGaze XML protocol parser (`run_opengaze_client_loop`) streaming sub-millisecond gaze points at 60Hz-250Hz with 0% CPU/GPU overhead when hardware eye tracking is active.
+
+### 👁️ Universal Webcam Eye-Tracking & Neural Gaze Control (`eyetracking.rs`, `main.rs`, `app_settings.rs`, `window_util.rs`)
+- **Zero-Hardware Neural Gaze Inference (L2CS-Net ONNX Engine)**:
+  - Implemented real-time 3D gaze estimation (`run_l2cs_inference`, `direct_preprocess_l2cs`) powered by L2CS-Net in ONNX Runtime (`L2CSNet_gaze.onnx`), predicting 3D head pose and eye orientation (pitch/yaw) from any standard RGB webcam without requiring specialized infrared or Tobii hardware.
+  - Dynamic facial region detection (`detect_face_region`) leveraging normalized skin chrominance clustering with temporal damping, positioning eye orbits precisely at ~38% of crop height.
+  - Bilinear anti-aliasing preprocessor directly converting raw camera frames (YUY2, RGB24, RGB32, NV12) into ImageNet-normalized NCHW tensors `[1, 3, 224, 224]`.
+  - Dual-output Softmax expectation decoder (`decode_l2cs_binned_softmax`) converting binned logits across 90 angular bins into continuous pitch and yaw degrees.
+
+- **One Euro 2D Jitter Filtering & Kinetic Ballistic Inertia (`OneEuroFilter2D`, `EyeTrackingController`)**:
+  - Dual-speed One Euro adaptive filtering ($f_{min} = 0.70$ Hz, $\beta = 0.035$) dampening physiological micro-tremors and ocular jitter during fixations while maintaining zero perceptible lag on rapid saccades.
+  - Order-2 symplectic ballistic inertia model (2 ms sub-step integration, $\omega = 20.0$ rad/s, $\zeta = 0.88$) generating natural momentum and soft deceleration towards gaze points.
+
+- **Semantic Gaze Snapping & Target Gravity Wells (`snap_gaze_to_target_sticky`)**:
+  - Sticky magnetic gravity well pulling the gaze point towards interactive buttons, hyperlinks, form inputs, and numbered badges within a configurable radius (`snap_radius`, default 95 px).
+  - Temporal hysteresis margin (220 ms) preventing ocular ping-pong oscillations when gazing across dense clusters of interactive controls.
+
+- **Multi-Mode Calibration & Instant 1-Point Dynamic Recenter (`CalibrationSession`, `GazePolynomialModel`)**:
+  - 9-point screen calibration matrix mapping raw eye measurements to display pixel coordinates via biquadratic 2D polynomial regression (6 parameters) with Ridge regularization ($\lambda = 0.5$) and RMS outlier rejection (< 260 px).
+  - Smooth pursuit harmonic Lissajous curve calibration (`SmoothPursuitCurve`) and instant 1-point center calibration (`recenter_center_gaze`, `recenter_to_cursor`).
+  - Persistent calibration configuration saved to `models/eyetracking/calibration.json`.
+
+- **Continuous Gaze Joystick Mode & Ergonomic Fine-Tuning (`is_eye_continuous_mode`)**:
+  - Added continuous joystick vector force mode translating eye/head angle deltas into smooth proportional cursor velocity with deadzone rejection (`get_eye_joystick_threshold_a`), enabling effortless navigation on large multi-monitor setups without ocular fatigue.
+  - Dual-axis inversion toggles (`EYE_INVERT_X`, `EYE_INVERT_Y`) and automated pitch camera tare calibration (`tare_camera_pitch_to_current_gaze`).
+  - Physical mouse priority takeover with configurable debounce cooldown (`mouse_override_debounce`).
+
+- **Cross-Platform Camera Driver & Live HUD Overlay (Windows / macOS / Linux)**:
+  - Multiplatform video acquisition via `nokhwa` (MediaFoundation on Windows, AVFoundation on macOS, V4L2 on Linux).
+  - Standalone HUD camera preview window (`show_eye_debug_floating_window`) displaying real-time eye tracking bounding boxes, pupil reticles, and 3D directional gaze rays.
+  - Native cross-platform emergency stop: pressing physical `Escape` immediately disengages eye tracking and cancels calibration across all operating systems.
+
+---
+
 ## [0.8.1] - 2026-11-12
 
 ### 🎯 Rewritten Hover Mode & Cross-Platform Parity (`main.rs`, `automation.rs`, `window_util.rs`, `ocr.rs`)

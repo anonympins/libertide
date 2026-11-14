@@ -17,8 +17,8 @@ use windows::Win32::System::Com::{
 use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, WindowFromPoint,
+    EnumWindows, GetClassNameW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+    IsIconic, IsWindowVisible, WindowFromPoint,
 };
 
 #[cfg(windows)]
@@ -63,11 +63,35 @@ fn apply_window_occlusion_mask(target_hwnd: HWND, rect: [i32; 4], buffer: &mut [
             return BOOL(1);
         }
 
+        // Ignorer les fenêtres transparentes (WS_EX_TRANSPARENT)
+        let ex_style = windows::Win32::UI::WindowsAndMessaging::GetWindowLongW(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::GWL_EXSTYLE,
+        ) as u32;
+        if (ex_style & windows::Win32::UI::WindowsAndMessaging::WS_EX_TRANSPARENT.0) != 0 {
+            return BOOL(1);
+        }
+
+        let mut class_buf = [0u16; 64];
+        let clen = GetClassNameW(hwnd, &mut class_buf);
+        if clen > 0 {
+            let cname = String::from_utf16_lossy(&class_buf[..clen as usize]);
+            if cname.contains("LibertideBadgeLayeredOverlay") || cname.contains("LayeredOverlay") {
+                return BOOL(1);
+            }
+        }
+
         let mut pid = 0u32;
         let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
         let is_libertide = pid == ctx.current_pid;
 
         if hwnd == ctx.target_hwnd {
+            ctx.passed_target = true;
+            return BOOL(1);
+        }
+
+        // Les fenêtres d'overlay ou masquées de Libertide ne doivent jamais occulter la capture
+        if is_libertide && ((ex_style & 0x00080000 /* WS_EX_LAYERED */) != 0) {
             ctx.passed_target = true;
             return BOOL(1);
         }
