@@ -1945,28 +1945,49 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
             }
         }
 
-        // 2. Si l'utilisateur tape activement dans un champ de texte interne de Libertide,
-        // laisser passer les frappes vers l'UI Libertide.
-        let is_user_typing = IS_USER_TYPING.load(Ordering::Relaxed);
-        if is_user_typing {
-            return CallNextHookEx(None, code, wparam, lparam);
-        }
+        let overlay_hwnd = FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()));
+        let fg_hwnd = GetForegroundWindow();
+        let is_libertide_fg = !overlay_hwnd.0.is_null() && fg_hwnd == overlay_hwnd;
+        let is_user_typing = IS_USER_TYPING.load(Ordering::Relaxed) && is_libertide_fg;
 
         // 2b. Interception prioritaire de la touche Entrée pour l'Eye-Tracking (Clic par le regard)
         let is_eye_active = crate::eyetracking::is_eye_tracking_enabled()
             && !crate::eyetracking::is_calibration_active();
 
         if is_eye_active && !is_dictation && vk == 0x0D && ((!is_ctrl && !is_alt) || is_powertoys) {
+            if is_user_typing {
+                return CallNextHookEx(None, code, wparam, lparam);
+            }
+
             crate::eyetracking::ENTER_PRESSED.store(is_down, Ordering::Relaxed);
+            let vk_idx = (vk as usize) & 0xFF;
+            let now = Instant::now();
             if is_down {
-                let vk_idx = (vk as usize) & 0xFF;
                 let mut already_down = false;
                 if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
                     already_down = keys[vk_idx];
+                    if already_down {
+                        if let Ok(times) = HOOK_KEYS_DOWN_TIME.lock() {
+                            if let Some(t) = times[vk_idx] {
+                                if now.duration_since(t) > Duration::from_millis(500) {
+                                    already_down = false;
+                                }
+                            } else {
+                                already_down = false;
+                            }
+                        }
+                    }
                     keys[vk_idx] = true;
                 }
                 if !already_down {
+                    if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+                        times[vk_idx] = Some(now);
+                    }
+                    eprintln!("[Hook] Entrée pressée -> Demande de clic Eye-Tracking");
                     crate::eyetracking::request_gaze_click();
+                    std::thread::spawn(|| {
+                        crate::eyetracking::perform_system_gaze_click();
+                    });
                     if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
                         q.push(SwitchKeyEvent::GazeClick);
                     }
@@ -1974,10 +1995,19 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                 }
             } else if is_up {
                 if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
-                    keys[0x0D] = false;
+                    keys[vk_idx] = false;
+                }
+                if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+                    times[vk_idx] = None;
                 }
             }
             return windows::Win32::Foundation::LRESULT(1);
+        }
+
+        // 2. Si l'utilisateur tape activement dans un champ de texte interne de Libertide,
+        // laisser passer les frappes vers l'UI Libertide.
+        if is_user_typing {
+            return CallNextHookEx(None, code, wparam, lparam);
         }
 
         // 3. Si le mode survol / contacteur n'est pas activé, laisser passer les touches normales.
@@ -1988,11 +2018,10 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
 
         #[cfg(windows)]
         {
-            let overlay = FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()));
-            if !overlay.0.is_null() && IsIconic(overlay).as_bool() && is_switch_hook_on {
+            if !overlay_hwnd.0.is_null() && IsIconic(overlay_hwnd).as_bool() && is_switch_hook_on {
                 // Si la fenêtre Libertide était minimisée (iconique), on la restaure discrètement
                 // afin que la boucle d'événements winit/eframe continue de dépiler les touches.
-                let _ = ShowWindow(overlay, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE);
+                let _ = ShowWindow(overlay_hwnd, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE);
             }
         }
 

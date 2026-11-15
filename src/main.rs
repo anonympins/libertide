@@ -846,31 +846,14 @@ impl OverlayApp {
             Some(pos) => pos,
             None => return,
         };
+        eprintln!("[Eye-Tracking] Clic (Entrée) déclenché aux coordonnées physiques ({}, {})", cur_x, cur_y);
 
         let pause_dur = self.eye_tracker.pause_duration_on_click;
         self.eye_tracker.freeze_gaze(pause_dur);
         self.last_trackball_input = Instant::now();
         self.last_switch_input = Instant::now();
 
-        #[cfg(windows)]
-        {
-            std::thread::spawn(move || unsafe {
-                use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
-                use windows::Win32::UI::Input::KeyboardAndMouse::{
-                    mouse_event, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-                };
-                let _ = SetCursorPos(cur_x, cur_y);
-                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                std::thread::sleep(Duration::from_millis(30));
-                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-            });
-        }
-        #[cfg(not(windows))]
-        {
-            crate::ui::click_element(cur_x, cur_y, None, None);
-        }
-
-        play_earcon(Earcon::Success);
+        crate::eyetracking::perform_system_gaze_click();
     }
 
     pub fn restore_window_if_minimized(&mut self, ctx: &egui::Context) {
@@ -970,8 +953,19 @@ impl eframe::App for OverlayApp {
 
         update_last_external_focus();
 
-        // Détection de saisie dans l'UI Libertide : seul un TextEdit de Libertide actif libère les touches
-        let is_egui_text_focused = !self.is_hidden && ctx.memory(|m| {
+        #[cfg(windows)]
+        let is_libertide_fg = {
+            use windows::core::w;
+            use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetForegroundWindow};
+            let overlay = unsafe { FindWindowW(None, w!("Libertide overlay")).unwrap_or(windows::Win32::Foundation::HWND(std::ptr::null_mut())) };
+            let fg = unsafe { GetForegroundWindow() };
+            !overlay.0.is_null() && fg == overlay
+        };
+        #[cfg(not(windows))]
+        let is_libertide_fg = true;
+
+        // Détection de saisie dans l'UI Libertide : seul un TextEdit de Libertide actif au premier plan libère les touches
+        let is_egui_text_focused = !self.is_hidden && is_libertide_fg && ctx.memory(|m| {
             m.has_focus(egui::Id::NULL.with("prompt_input_text"))
                 || m.has_focus(egui::Id::NULL.with("api_key_input_field"))
                 || m.has_focus(egui::Id::NULL.with("model_input_field"))
@@ -984,9 +978,8 @@ impl eframe::App for OverlayApp {
                 || m.has_focus(egui::Id::NULL.with("voice_reference_text_input"))
                 || m.has_focus(egui::Id::NULL.with("voice_test_text_input"))
         });
-        let is_typing = !self.is_hidden && (ctx.egui_wants_keyboard_input()
-            || self.show_api_key_modal
-            || is_egui_text_focused);
+        // Seul un champ de texte explicite en cours d'édition doit bloquer le clic eye-tracking
+        let is_typing = !self.is_hidden && is_libertide_fg && (self.show_api_key_modal || is_egui_text_focused);
         crate::automation::IS_USER_TYPING.store(is_typing, Ordering::Relaxed);
 
         self.dictation_mode = IS_DICTATION_ACTIVE.load(Ordering::SeqCst);
@@ -1069,7 +1062,7 @@ impl eframe::App for OverlayApp {
         let enter_physically_pressed = eyetracking::is_enter_key_pressed();
         let is_eye_on = eyetracking::is_eye_tracking_enabled() && !self.eye_tracker.calibration.is_active;
 
-        if is_eye_on && !is_typing && !self.show_api_key_modal {
+        if is_eye_on && !is_typing {
             let gaze_click_queued = eyetracking::GAZE_CLICK_REQUESTED.swap(false, Ordering::SeqCst);
             if (enter_physically_pressed && !self.enter_was_physically_down) || gaze_click_queued {
                 self.enter_was_physically_down = true;
@@ -2286,7 +2279,7 @@ impl eframe::App for OverlayApp {
 
         if hook_events.contains(&SwitchKeyEvent::GazeClick) {
             let is_eye_on = eyetracking::is_eye_tracking_enabled() && !self.eye_tracker.calibration.is_active;
-            if is_eye_on && !is_typing && !self.show_api_key_modal && self.last_eye_click_time.elapsed() >= Duration::from_millis(250) {
+            if is_eye_on && !is_typing && self.last_eye_click_time.elapsed() >= Duration::from_millis(250) {
                 self.last_eye_click_time = Instant::now();
                 self.trigger_gaze_click();
                 ctx.request_repaint();
@@ -4392,10 +4385,6 @@ impl eframe::App for OverlayApp {
                                             false,
                                             &theme,
                                         );
-
-                                        if response.has_focus() {
-                                            crate::automation::IS_USER_TYPING.store(true, Ordering::Relaxed);
-                                        }
 
                                         if let Some(pasted) = pending_paste_fallback {
                                             if self.input_text == prev_text {

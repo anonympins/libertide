@@ -307,6 +307,56 @@ pub fn set_calibration_active(active: bool) {
 pub static CAMERA_DEVICE_NAME: Mutex<String> = Mutex::new(String::new());
 pub static LATEST_RAW_GAZE: Mutex<Option<RawGazeMeasurement>> = Mutex::new(None);
 pub static GLOBAL_GAZE_POS: Mutex<Option<(f32, f32)>> = Mutex::new(None);
+pub static GAZE_FREEZE_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+pub static LAST_GLOBAL_GAZE_CLICK: Mutex<Option<Instant>> = Mutex::new(None);
+
+pub fn freeze_gaze_global(duration: Duration) {
+    if let Ok(mut g) = GAZE_FREEZE_UNTIL.lock() {
+        *g = Some(Instant::now() + duration);
+    }
+}
+
+pub fn is_gaze_frozen_global() -> bool {
+    if let Ok(g) = GAZE_FREEZE_UNTIL.lock() {
+        if let Some(until) = *g {
+            return Instant::now() < until;
+        }
+    }
+    false
+}
+
+/// Exécute un clic système physique direct aux coordonnées actuelles de la souris
+pub fn perform_system_gaze_click() {
+    let now = Instant::now();
+    if let Ok(mut last) = LAST_GLOBAL_GAZE_CLICK.lock() {
+        if let Some(t) = *last {
+            if now.duration_since(t) < Duration::from_millis(220) {
+                return;
+            }
+        }
+        *last = Some(now);
+    }
+
+    freeze_gaze_global(Duration::from_millis(600));
+
+    let (cur_x, cur_y) = match get_physical_cursor_pos() {
+        Some(pos) => pos,
+        None => return,
+    };
+
+    eprintln!("[Eye-Tracking] Clic système physique déclenché à ({}, {})", cur_x, cur_y);
+
+    #[cfg(windows)]
+    unsafe {
+        crate::ui::click_element(cur_x, cur_y, None, None);
+    }
+    #[cfg(not(windows))]
+    {
+        crate::ui::click_element(cur_x, cur_y, None, None);
+    }
+
+    crate::overlay::play_earcon(crate::overlay::Earcon::Success);
+}
 static CAMERA_WORKER_HANDLE: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 static CAMERA_START_LOCK: Mutex<()> = Mutex::new(());
 static L2CS_SESSION: Mutex<Option<ort::session::Session>> = Mutex::new(None);
@@ -2025,6 +2075,7 @@ impl EyeTrackingController {
 
     /// Fige temporairement le déplacement oculaire pendant une durée donnée (ex: post-clic)
     pub fn freeze_gaze(&mut self, duration: Duration) {
+        freeze_gaze_global(duration);
         self.freeze_until = Some(Instant::now() + duration);
         self.cursor_vel = (0.0, 0.0);
     }
@@ -2033,7 +2084,7 @@ impl EyeTrackingController {
         if let Some(until) = self.freeze_until {
             Instant::now() < until
         } else {
-            false
+            is_gaze_frozen_global()
         }
     }
 
