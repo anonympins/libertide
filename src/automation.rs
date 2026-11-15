@@ -1273,6 +1273,9 @@ pub fn install_switch_keyboard_hook() {
                         if matches!(key, rdev::Key::Escape) {
                             crate::eyetracking::ESCAPE_PRESSED.store(true, Ordering::Relaxed);
                         }
+                        if matches!(key, rdev::Key::Return) {
+                            crate::eyetracking::ENTER_PRESSED.store(true, Ordering::Relaxed);
+                        }
 
                         // Raccourcis globaux
                         let global_evt = match key {
@@ -1286,6 +1289,19 @@ pub fn install_switch_keyboard_hook() {
                         if let Some(evt) = global_evt {
                             if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
                                 q.push(evt);
+                            }
+                            trigger_repaint();
+                            return;
+                        }
+
+                        // Détection globale d'Entrée pour le clic par le regard (Eye-Tracking)
+                        let is_eye_active = crate::eyetracking::is_eye_tracking_enabled()
+                            && !crate::eyetracking::is_calibration_active();
+
+                        if is_eye_active && !is_dictation && !is_typing && matches!(key, rdev::Key::Return) {
+                            crate::eyetracking::request_gaze_click();
+                            if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                q.push(crate::types::SwitchKeyEvent::GazeClick);
                             }
                             trigger_repaint();
                             return;
@@ -1352,6 +1368,9 @@ pub fn install_switch_keyboard_hook() {
                     rdev::EventType::KeyRelease(key) => {
                         if matches!(key, rdev::Key::Escape) {
                             crate::eyetracking::ESCAPE_PRESSED.store(false, Ordering::Relaxed);
+                        }
+                        if matches!(key, rdev::Key::Return) {
+                            crate::eyetracking::ENTER_PRESSED.store(false, Ordering::Relaxed);
                         }
 
                         if !is_switch_on || is_dictation || is_typing {
@@ -1931,6 +1950,34 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         let is_user_typing = IS_USER_TYPING.load(Ordering::Relaxed);
         if is_user_typing {
             return CallNextHookEx(None, code, wparam, lparam);
+        }
+
+        // 2b. Interception prioritaire de la touche Entrée pour l'Eye-Tracking (Clic par le regard)
+        let is_eye_active = crate::eyetracking::is_eye_tracking_enabled()
+            && !crate::eyetracking::is_calibration_active();
+
+        if is_eye_active && !is_dictation && vk == 0x0D && ((!is_ctrl && !is_alt) || is_powertoys) {
+            crate::eyetracking::ENTER_PRESSED.store(is_down, Ordering::Relaxed);
+            if is_down {
+                let vk_idx = (vk as usize) & 0xFF;
+                let mut already_down = false;
+                if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
+                    already_down = keys[vk_idx];
+                    keys[vk_idx] = true;
+                }
+                if !already_down {
+                    crate::eyetracking::request_gaze_click();
+                    if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                        q.push(SwitchKeyEvent::GazeClick);
+                    }
+                    trigger_repaint();
+                }
+            } else if is_up {
+                if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
+                    keys[0x0D] = false;
+                }
+            }
+            return windows::Win32::Foundation::LRESULT(1);
         }
 
         // 3. Si le mode survol / contacteur n'est pas activé, laisser passer les touches normales.

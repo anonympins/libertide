@@ -1,4 +1,5 @@
 use std::sync::atomic::Ordering;
+use rust_i18n::t;
 use std::time::{Duration, Instant};
 use eframe::egui;
 
@@ -451,7 +452,7 @@ impl OverlayApp {
                                 let is_voice_active = self.settings_tab == SettingsTab::Voice;
                                 let tab_voice = ui.selectable_label(
                                     is_voice_active,
-                                    egui::RichText::new("🗣️ Voix")
+                                    egui::RichText::new(t!("ui.settings_tab_voice"))
                                         .size(12.0)
                                         .color(if is_voice_active { theme.accent } else { theme.text_secondary })
                                         .strong(),
@@ -1294,7 +1295,7 @@ impl OverlayApp {
 
                                 // 4. Contrôle par le regard (Eye-Tracking webcam sans matériel)
                                 ui.label(
-                                    egui::RichText::new("👁️ Contrôle oculaire (Eye-Tracking webcam standard)")
+                                    egui::RichText::new(t!("eyetracking.title"))
                                         .size(12.0)
                                         .color(theme.accent)
                                         .strong(),
@@ -1310,22 +1311,22 @@ impl OverlayApp {
                                                 // Sélecteur de source de tracking (Webcam vs Hardware)
                                                 let cur_source = crate::eyetracking::get_eye_tracker_source();
                                                 ui.horizontal(|ui| {
-                                                    ui.label(egui::RichText::new("Matériel / Source de capture :").size(11.0).color(egui::Color32::WHITE).strong());
+                                                    ui.label(egui::RichText::new(t!("eyetracking.source_header")).size(11.0).color(egui::Color32::WHITE).strong());
                                                 });
                                                 ui.add_space(2.0);
                                                 ui.horizontal_wrapped(|ui| {
                                                     let is_webcam = cur_source == crate::eyetracking::EyeTrackerSource::WebcamNeural;
-                                                    if ui.selectable_label(is_webcam, "📷 Webcam standard (IA L2CS-Net)").clicked() && !is_webcam {
+                                                    if ui.selectable_label(is_webcam, t!("eyetracking.source_webcam")).clicked() && !is_webcam {
                                                         crate::eyetracking::set_eye_tracker_source(crate::eyetracking::EyeTrackerSource::WebcamNeural);
                                                         play_earcon(Earcon::Success);
                                                     }
                                                     let is_opengaze = cur_source == crate::eyetracking::EyeTrackerSource::OpenGazeTcp;
-                                                    if ui.selectable_label(is_opengaze, "🎯 Hardware OpenGaze (Tobii / GazePoint / Pupil)").clicked() && !is_opengaze {
+                                                    if ui.selectable_label(is_opengaze, t!("eyetracking.source_opengaze")).clicked() && !is_opengaze {
                                                         crate::eyetracking::set_eye_tracker_source(crate::eyetracking::EyeTrackerSource::OpenGazeTcp);
                                                         play_earcon(Earcon::Success);
                                                     }
                                                     let is_opentrack = cur_source == crate::eyetracking::EyeTrackerSource::OpenTrackUdp;
-                                                    if ui.selectable_label(is_opentrack, "📡 Hardware OpenTrack (UDP 4242)").clicked() && !is_opentrack {
+                                                    if ui.selectable_label(is_opentrack, t!("eyetracking.source_opentrack")).clicked() && !is_opentrack {
                                                         crate::eyetracking::set_eye_tracker_source(crate::eyetracking::EyeTrackerSource::OpenTrackUdp);
                                                         play_earcon(Earcon::Success);
                                                     }
@@ -1335,7 +1336,7 @@ impl OverlayApp {
                                                 ui.add_space(4.0);
 
                                         let mut eye_on = crate::eyetracking::is_eye_tracking_enabled();
-                                        if ui.checkbox(&mut eye_on, "Activer l'Eye-Tracking par webcam").changed() {
+                                        if ui.checkbox(&mut eye_on, t!("eyetracking.enable_checkbox")).changed() {
                                             crate::eyetracking::set_eye_tracking_enabled(eye_on);
                                             play_earcon(Earcon::Success);
                                         }
@@ -1345,21 +1346,21 @@ impl OverlayApp {
                                         let current_pitch = crate::eyetracking::get_camera_pitch_offset();
                                         let mut pitch_val = current_pitch;
                                         ui.horizontal(|ui| {
-                                            ui.label(egui::RichText::new("Hauteur du regard (Pitch caméra) :").size(11.0).color(theme.text_secondary));
-                                            if ui.small_button("➖").on_hover_text("Diminuer le pitch de 1.0° (incliner vers le haut)").clicked() {
+                                            ui.label(egui::RichText::new(t!("eyetracking.pitch_label")).size(11.0).color(theme.text_secondary));
+                                            if ui.small_button("➖").on_hover_text(t!("eyetracking.pitch_minus_tooltip")).clicked() {
                                                 crate::eyetracking::set_camera_pitch_offset(current_pitch - 1.0);
                                             }
                                             let slider = egui::Slider::new(&mut pitch_val, -60.0..=30.0)
                                                 .step_by(0.5)
                                                 .suffix("°")
                                                 .show_value(true);
-                                            if ui.add(slider).on_hover_text("Ajuste l'axe neutre du regard par rapport à l'inclinaison de votre webcam.").changed() {
+                                            if ui.add(slider).on_hover_text(t!("eyetracking.pitch_slider_tooltip")).changed() {
                                                 crate::eyetracking::set_camera_pitch_offset(pitch_val);
                                             }
-                                            if ui.small_button("➕").on_hover_text("Augmenter le pitch de 1.0° (incliner vers le bas)").clicked() {
+                                            if ui.small_button("➕").on_hover_text(t!("eyetracking.pitch_plus_tooltip")).clicked() {
                                                 crate::eyetracking::set_camera_pitch_offset(current_pitch + 1.0);
                                             }
-                                            if ui.small_button("🎯 Tare").on_hover_text("Calibrer instantanément le pitch neutre sur votre regard actuel").clicked() {
+                                            if ui.small_button(t!("eyetracking.pitch_tare_btn")).on_hover_text(t!("eyetracking.pitch_tare_tooltip")).clicked() {
                                                 crate::eyetracking::tare_camera_pitch_to_current_gaze();
                                             }
                                         });
@@ -1367,11 +1368,11 @@ impl OverlayApp {
 
                                         ui.horizontal(|ui| {
                                             let mut inv_x = crate::eyetracking::is_eye_invert_x();
-                                            if ui.checkbox(&mut inv_x, "Inverser X").on_hover_text("Inverser l'axe horizontal du regard").changed() {
+                                            if ui.checkbox(&mut inv_x, t!("eyetracking.invert_x")).on_hover_text(t!("eyetracking.invert_x_tooltip")).changed() {
                                                 crate::eyetracking::set_eye_invert_x(inv_x);
                                             }
                                             let mut inv_y = crate::eyetracking::is_eye_invert_y();
-                                            if ui.checkbox(&mut inv_y, "Inverser Y").on_hover_text("Inverser l'axe vertical du regard").changed() {
+                                            if ui.checkbox(&mut inv_y, t!("eyetracking.invert_y")).on_hover_text(t!("eyetracking.invert_y_tooltip")).changed() {
                                                 crate::eyetracking::set_eye_invert_y(inv_y);
                                             }
                                         });
@@ -1381,12 +1382,12 @@ impl OverlayApp {
                                         let mut sens = crate::eyetracking::get_eye_tracking_sensitivity();
                                         let prev_sens = sens;
                                         ui.horizontal(|ui| {
-                                            ui.label(egui::RichText::new("Sensibilité du regard :").size(11.0).color(theme.text_secondary));
+                                            ui.label(egui::RichText::new(t!("eyetracking.sensitivity_label")).size(11.0).color(theme.text_secondary));
                                             let slider = egui::Slider::new(&mut sens, 0.20..=2.00)
                                                 .step_by(0.05)
                                                 .custom_formatter(|v, _| format!("{:.2}x", v));
-                                            ui.add(slider).on_hover_text("Coefficient d'atténuation (0.75 par défaut). Rapproche les vecteurs angulaires de la géométrie physique de l'écran.");
-                                            if ui.small_button("0.75").on_hover_text("Rétablir la sensibilité optimale par défaut (0.75)").clicked() {
+                                            ui.add(slider).on_hover_text(t!("eyetracking.sensitivity_tooltip"));
+                                            if ui.small_button("0.75").on_hover_text(t!("eyetracking.sensitivity_reset_tooltip")).clicked() {
                                                 sens = 0.75;
                                             }
                                         });
@@ -1397,7 +1398,7 @@ impl OverlayApp {
                                         ui.add_space(3.0);
 
                                         let mut snapping_on = crate::eyetracking::is_eye_snapping_enabled();
-                                        if ui.checkbox(&mut snapping_on, "🧲 Aimant / Snapping automatique sur les contrôles (Boutons, Liens, Champs)").changed() {
+                                        if ui.checkbox(&mut snapping_on, t!("eyetracking.snapping_checkbox")).changed() {
                                             crate::eyetracking::set_eye_snapping_enabled(snapping_on);
                                             self.eye_tracker.snapping_enabled = snapping_on;
                                             play_earcon(Earcon::Success);
@@ -1406,11 +1407,11 @@ impl OverlayApp {
 
                                         if snapping_on {
                                             ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("Rayon de l'aimant :").size(11.0).color(theme.text_secondary));
+                                                ui.label(egui::RichText::new(t!("eyetracking.snap_radius_label")).size(11.0).color(theme.text_secondary));
                                                 let slider = egui::Slider::new(&mut self.eye_tracker.snap_radius, 40.0..=220.0)
                                                     .suffix(" px")
                                                     .step_by(5.0);
-                                                if ui.add(slider).on_hover_text("Distance en pixels à laquelle le regard est magnétiquement attiré vers le contrôle le plus proche.").changed() {
+                                                if ui.add(slider).on_hover_text(t!("eyetracking.snap_radius_tooltip")).changed() {
                                                     let val_str = format!("{:.0}", self.eye_tracker.snap_radius);
                                                     let _ = write_env_var_to_file(".env", "EYE_SNAP_RADIUS", &val_str);
                                                     std::env::set_var("EYE_SNAP_RADIUS", &val_str);
@@ -1423,11 +1424,11 @@ impl OverlayApp {
                                             let mut debounce_ms = self.eye_tracker.mouse_override_debounce.as_millis() as u64;
                                             let prev_ms = debounce_ms;
                                             ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("Reprise en main souris (délai de pause) :").size(11.0).color(theme.text_secondary));
+                                                ui.label(egui::RichText::new(t!("eyetracking.mouse_debounce_label")).size(11.0).color(theme.text_secondary));
                                                 let slider = egui::Slider::new(&mut debounce_ms, 500..=5000)
                                                     .suffix(" ms")
                                                     .step_by(250.0);
-                                                ui.add(slider).on_hover_text("Délai pendant lequel l'eye-tracking cède entièrement la priorité à la souris physique dès qu'un mouvement manuel est détecté.");
+                                                ui.add(slider).on_hover_text(t!("eyetracking.mouse_debounce_tooltip"));
                                             });
                                             if debounce_ms != prev_ms {
                                                 self.eye_tracker.mouse_override_debounce = Duration::from_millis(debounce_ms);
@@ -1436,7 +1437,7 @@ impl OverlayApp {
                                                 std::env::set_var("EYE_MOUSE_DEBOUNCE_MS", &val_str);
                                             }
                                             ui.add_space(2.0);
-                                            ui.label(egui::RichText::new("💡 Astuce : Appuyez sur Échap à tout moment pour couper instantanément le suivi oculaire.").size(10.0).italics().color(theme.text_secondary));
+                                            ui.label(egui::RichText::new(t!("eyetracking.escape_tip")).size(10.0).italics().color(theme.text_secondary));
                                             ui.add_space(3.0);
 
                                         // Statut de la calibration persistée
@@ -1445,12 +1446,13 @@ impl OverlayApp {
                                             if is_trained {
                                                 let rms = self.eye_tracker.model.rms_error_px;
                                                 let prec = (100.0 - (rms / 250.0 * 100.0)).clamp(10.0, 99.0);
-                                                ui.label(egui::RichText::new(format!("✓ Modèle calibré (Précision: {:.0}%, Erreur RMS: {:.1}px)", prec, rms)).size(11.0).color(egui::Color32::from_rgb(0, 230, 118)).strong());
-                                                if ui.small_button("🗑").on_hover_text("Effacer la calibration persistée").clicked() {
+                                                let calib_str = t!("eyetracking.calibrated_status", precision = format!("{:.0}", prec), rms = format!("{:.1}", rms)).to_string();
+                                                ui.label(egui::RichText::new(calib_str).size(11.0).color(egui::Color32::from_rgb(0, 230, 118)).strong());
+                                                if ui.small_button("🗑").on_hover_text(t!("eyetracking.delete_calib_tooltip")).clicked() {
                                                     self.eye_tracker.reset_calibration();
                                                 }
                                             } else {
-                                                ui.label(egui::RichText::new("⚪ Non calibré (utilise les gains neutres par défaut)").size(11.0).color(theme.text_secondary));
+                                                ui.label(egui::RichText::new(t!("eyetracking.uncalibrated_status")).size(11.0).color(theme.text_secondary));
                                             }
                                         });
                                         ui.add_space(4.0);
@@ -1459,20 +1461,24 @@ impl OverlayApp {
                                         let cam_name = crate::eyetracking::get_camera_device_name();
                                         ui.horizontal(|ui| {
                                             if cam_active {
-                                                let display = if !cam_name.is_empty() { cam_name } else { "Webcam active".to_string() };
-                                                ui.label(egui::RichText::new(format!("🟢 Caméra active : {display}")).size(11.0).color(egui::Color32::from_rgb(0, 230, 118)).strong());
+                                                let display = if !cam_name.is_empty() { cam_name } else { t!("eyetracking.camera_default_name").to_string() };
+                                                let active_cam_str = t!("eyetracking.camera_active", name = display).to_string();
+                                                ui.label(egui::RichText::new(active_cam_str).size(11.0).color(egui::Color32::from_rgb(0, 230, 118)).strong());
                                             } else {
-                                                ui.label(egui::RichText::new("⚪ Caméra en veille").size(11.0).color(theme.text_secondary));
+                                                ui.label(egui::RichText::new(t!("eyetracking.camera_idle")).size(11.0).color(theme.text_secondary));
                                             }
                                         });
 
                                         if let Some(measurement) = crate::eyetracking::get_latest_raw_gaze() {
                                             ui.add_space(2.0);
+                                            let iris_str = t!(
+                                                "eyetracking.iris_detected",
+                                                x = format!("{:+.2}", measurement.eye_x),
+                                                y = format!("{:+.2}", measurement.eye_y),
+                                                yaw = format!("{:+.2}", measurement.head_yaw)
+                                            ).to_string();
                                             ui.label(
-                                                egui::RichText::new(format!(
-                                                    "👁️ Iris détecté : X {:+.2}, Y {:+.2} | Tête : Yaw {:+.2}",
-                                                    measurement.eye_x, measurement.eye_y, measurement.head_yaw
-                                                ))
+                                                egui::RichText::new(iris_str)
                                                 .size(10.5)
                                                 .color(theme.accent),
                                             );
@@ -1480,7 +1486,7 @@ impl OverlayApp {
 
                                         ui.add_space(4.0);
                                         ui.label(
-                                            egui::RichText::new("Pointage oculaire haute précision sans matériel infrarouge coûteux : le modèle ONNX L2CS-Net hébergé sur GitHub, couplé au filtre 1€ et au magnétisme sémantique, rivalise avec les dispositifs professionnels de pointage oculaire.")
+                                            egui::RichText::new(t!("eyetracking.tech_description"))
                                                 .size(10.5)
                                                 .color(theme.text_secondary),
                                         );
@@ -1491,12 +1497,19 @@ impl OverlayApp {
 
                                         if is_downloading {
                                             if let Some(ref dl) = self.active_download {
-                                                ui.add(egui::ProgressBar::new(dl.percent / 100.0).text(format!("Téléchargement IA : {:.1}% ({:.1}/{:.1} Mo - {:.1} Mo/s)", dl.percent, dl.downloaded_mb, dl.total_mb, dl.speed_mb_s)).animate(true));
+                                                let prog_str = t!(
+                                                    "eyetracking.model_downloading",
+                                                    percent = format!("{:.1}", dl.percent),
+                                                    downloaded = format!("{:.1}", dl.downloaded_mb),
+                                                    total = format!("{:.1}", dl.total_mb),
+                                                    speed = format!("{:.1}", dl.speed_mb_s)
+                                                ).to_string();
+                                                ui.add(egui::ProgressBar::new(dl.percent / 100.0).text(prog_str).animate(true));
                                             }
                                         } else if is_installed {
                                             ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("✓ Modèle neuronal Iris installé").size(11.0).color(egui::Color32::from_rgb(100, 225, 130)).strong());
-                                                if ui.small_button("🗑").on_hover_text("Supprimer le modèle du disque").clicked() {
+                                                ui.label(egui::RichText::new(t!("eyetracking.model_installed")).size(11.0).color(egui::Color32::from_rgb(100, 225, 130)).strong());
+                                                if ui.small_button("🗑").on_hover_text(t!("eyetracking.model_delete_tooltip")).clicked() {
                                                     let _ = crate::eyetracking::delete_eyetracking_model();
                                                     play_earcon(Earcon::Success);
                                                 }
@@ -1504,7 +1517,7 @@ impl OverlayApp {
                                         } else {
                                             ui.horizontal(|ui| {
                                                 let event_tx_clone = self.event_sender.clone();
-                                                if ui.button(egui::RichText::new("📥 Télécharger le modèle neuronal IA (L2CS-Net)").strong().color(theme.accent)).on_hover_text("Télécharge le modèle L2CS-Net ONNX pour le suivi oculaire 3D.").clicked() {
+                                                if ui.button(egui::RichText::new(t!("eyetracking.download_model_btn")).strong().color(theme.accent)).on_hover_text(t!("eyetracking.download_model_tooltip")).clicked() {
                                                     std::thread::spawn(move || {
                                                         let _ = crate::eyetracking::ensure_eyetracking_model_downloaded(&event_tx_clone);
                                                     });
@@ -1515,7 +1528,7 @@ impl OverlayApp {
 
                                         ui.add_space(6.0);
                                         ui.horizontal(|ui| {
-                                            if ui.button("🎯 Calibrage 9 points").on_hover_text("Lance une mire de 9 points fixes sur l'écran pour calibrer la matrice de regard.").clicked() {
+                                            if ui.button(t!("eyetracking.calibration_9_btn")).on_hover_text(t!("eyetracking.calibration_9_tooltip")).clicked() {
                                                 self.eye_tracker.start_calibration();
                                                 crate::eyetracking::ensure_camera_worker_running();
                                                 self.show_api_key_modal = false;
@@ -1526,7 +1539,7 @@ impl OverlayApp {
                                                 let wa = crate::overlay::get_desktop_work_area_scaled(ui.ctx());
                                                 (wa.w, wa.h)
                                             };
-                                            if ui.button("📍 Recalibrer le centre (1 point)").on_hover_text("Fixez le centre de l'écran et cliquez ici pour réaligner instantanément le zéro sans refaire les 9 points.").clicked() {
+                                            if ui.button(t!("eyetracking.recenter_1_btn")).on_hover_text(t!("eyetracking.recenter_1_tooltip")).clicked() {
                                                 self.eye_tracker.recenter_center_gaze(screen_w, screen_h);
                                                 self.show_api_key_modal = false;
                                             }

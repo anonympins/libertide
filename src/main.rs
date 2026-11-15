@@ -93,6 +93,8 @@ pub struct OverlayApp {
     theme: AppTheme,
     settings_tab: SettingsTab,
     dwell_state: DwellState,
+    enter_was_physically_down: bool,
+    last_eye_click_time: Instant,
     last_trackball_input: Instant,
 
     // Contrôle par le regard sans matériel (Eye-Tracking webcam standard)
@@ -404,6 +406,8 @@ impl OverlayApp {
             theme,
             settings_tab: SettingsTab::LlmProvider,
             dwell_state: DwellState::new_with_delay(dwell_millis, dwell_activation_ms),
+            enter_was_physically_down: false,
+            last_eye_click_time: Instant::now() - Duration::from_secs(1),
             last_trackball_input: Instant::now() - Duration::from_secs(1),
             eye_tracker: eyetracking::EyeTrackingController::default(),
 
@@ -837,6 +841,38 @@ impl OverlayApp {
         }
     }
 
+    pub fn trigger_gaze_click(&mut self) {
+        let (cur_x, cur_y) = match eyetracking::get_physical_cursor_pos() {
+            Some(pos) => pos,
+            None => return,
+        };
+
+        let pause_dur = self.eye_tracker.pause_duration_on_click;
+        self.eye_tracker.freeze_gaze(pause_dur);
+        self.last_trackball_input = Instant::now();
+        self.last_switch_input = Instant::now();
+
+        #[cfg(windows)]
+        {
+            std::thread::spawn(move || unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+                use windows::Win32::UI::Input::KeyboardAndMouse::{
+                    mouse_event, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+                };
+                let _ = SetCursorPos(cur_x, cur_y);
+                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                std::thread::sleep(Duration::from_millis(30));
+                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+            });
+        }
+        #[cfg(not(windows))]
+        {
+            crate::ui::click_element(cur_x, cur_y, None, None);
+        }
+
+        play_earcon(Earcon::Success);
+    }
+
     pub fn restore_window_if_minimized(&mut self, ctx: &egui::Context) {
         let mut is_min = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
         #[cfg(windows)]
@@ -1028,6 +1064,25 @@ impl eframe::App for OverlayApp {
             || self.eye_tracker.calibration.is_active
             || eyetracking::is_dev_mode()
             || eyetracking::is_eye_debug_overlay_visible();
+
+        // Détection de l'appui sur Entrée pour déclencher le clic et figer le regard
+        let enter_physically_pressed = eyetracking::is_enter_key_pressed();
+        let is_eye_on = eyetracking::is_eye_tracking_enabled() && !self.eye_tracker.calibration.is_active;
+
+        if is_eye_on && !is_typing && !self.show_api_key_modal {
+            let gaze_click_queued = eyetracking::GAZE_CLICK_REQUESTED.swap(false, Ordering::SeqCst);
+            if (enter_physically_pressed && !self.enter_was_physically_down) || gaze_click_queued {
+                self.enter_was_physically_down = true;
+                if self.last_eye_click_time.elapsed() >= Duration::from_millis(250) {
+                    self.last_eye_click_time = Instant::now();
+                    self.trigger_gaze_click();
+                    ctx.request_repaint();
+                }
+            } else if !enter_physically_pressed {
+                self.enter_was_physically_down = false;
+            }
+        }
+
         if eye_tracking_needed {
             eyetracking::ensure_camera_worker_running();
             let (screen_w, screen_h) = (work_area.w, work_area.h);
@@ -1078,13 +1133,13 @@ impl eframe::App for OverlayApp {
 
             // N'altérer la position physique de la souris que si l'Eye-Tracking est actif, hors calibration et hors override souris
             if !self.eye_tracker.calibration.is_active && eyetracking::is_eye_tracking_enabled() {
-                if !self.eye_tracker.is_mouse_overridden() {
+                if !self.eye_tracker.is_mouse_overridden() && !self.eye_tracker.is_frozen() {
                     let abs_x = ((work_area.x + gaze_x) * ppp).round() as i32;
                     let abs_y = ((work_area.y + gaze_y) * ppp).round() as i32;
                     self.hover_last_cursor_pos = Some((abs_x, abs_y));
                     self.eye_tracker.last_eye_applied_cursor = Some((abs_x, abs_y));
                     set_global_cursor_pos(abs_x, abs_y);
-                } else {
+                } else if self.eye_tracker.is_mouse_overridden() {
                     self.eye_tracker.last_eye_applied_cursor = None;
                 }
 
@@ -2229,6 +2284,14 @@ impl eframe::App for OverlayApp {
         let egui_f9 = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F9));
         let egui_f4 = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F4));
 
+        if hook_events.contains(&SwitchKeyEvent::GazeClick) {
+            let is_eye_on = eyetracking::is_eye_tracking_enabled() && !self.eye_tracker.calibration.is_active;
+            if is_eye_on && !is_typing && !self.show_api_key_modal && self.last_eye_click_time.elapsed() >= Duration::from_millis(250) {
+                self.last_eye_click_time = Instant::now();
+                self.trigger_gaze_click();
+                ctx.request_repaint();
+            }
+        }
         if (egui_f8 || hook_events.contains(&SwitchKeyEvent::ToggleDictation))
             && self.last_switch_input.elapsed() >= Duration::from_millis(200)
         {
@@ -3839,7 +3902,7 @@ impl eframe::App for OverlayApp {
                 painter.circle_filled(center, 7.0, egui::Color32::WHITE);
 
                 // Indication textuelle
-                let text = format!("Fixez le point ({}/9) — Échap pour quitter", p_idx);
+                let text = t!("eyetracking.calibration_instruction", current = p_idx, total = 9).to_string();
                 painter.text(
                     egui::pos2(center.x, center.y + 44.0),
                     egui::Align2::CENTER_CENTER,
@@ -4071,7 +4134,7 @@ impl eframe::App for OverlayApp {
                                     let status_badge = if self.dictation_mode {
                                         t!("ui.dictation_badge").to_string()
                                     } else if eyetracking::is_eye_tracking_enabled() && self.eye_tracker.is_mouse_overridden() {
-                                        "🖱️ Souris prioritaire (Eye-tracking en veille)".to_string()
+                                        t!("eyetracking.mouse_override_badge").to_string()
                                     } else if self.switch_access_mode {
                                         if self.switch_step == SwitchAccessStep::Windows {
                                             if !self.switch_windows.is_empty() {

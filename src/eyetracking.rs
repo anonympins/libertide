@@ -31,6 +31,25 @@ pub fn get_physical_cursor_pos() -> Option<(i32, i32)> {
 }
 
 pub static ESCAPE_PRESSED: AtomicBool = AtomicBool::new(false);
+pub static ENTER_PRESSED: AtomicBool = AtomicBool::new(false);
+pub static GAZE_CLICK_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub fn request_gaze_click() {
+    GAZE_CLICK_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+/// Indique si la touche Entrée (VK_RETURN = 0x0D) est actuellement pressée physiquement
+#[inline]
+pub fn is_enter_key_pressed() -> bool {
+    #[cfg(windows)]
+    unsafe {
+        (GetAsyncKeyState(0x0D) as u16 & 0x8000) != 0
+    }
+    #[cfg(not(windows))]
+    {
+        ENTER_PRESSED.load(Ordering::Relaxed)
+    }
+}
 
 /// Indique si la touche Échap (VK_ESCAPE = 0x1B) est actuellement pressée physiquement
 #[inline]
@@ -1686,6 +1705,8 @@ pub struct EyeTrackingController {
     pub last_detected_mouse_pos: Option<(i32, i32)>,
     pub mouse_override_until: Option<Instant>,
     pub mouse_override_debounce: Duration,
+    pub freeze_until: Option<Instant>,
+    pub pause_duration_on_click: Duration,
 }
 
 impl Default for EyeTrackingController {
@@ -1815,6 +1836,8 @@ impl Default for EyeTrackingController {
             last_detected_mouse_pos: None,
             mouse_override_until: None,
             mouse_override_debounce: Duration::from_millis(mouse_override_ms),
+            freeze_until: None,
+            pause_duration_on_click: Duration::from_millis(650),
         }
     }
 }
@@ -1837,6 +1860,7 @@ impl EyeTrackingController {
         self.last_eye_applied_cursor = None;
         self.last_detected_mouse_pos = None;
         self.mouse_override_until = None;
+        self.freeze_until = None;
     }
 
     pub fn cancel_calibration(&mut self) {
@@ -1856,6 +1880,7 @@ impl EyeTrackingController {
         self.last_eye_applied_cursor = None;
         self.last_detected_mouse_pos = None;
         self.mouse_override_until = None;
+        self.freeze_until = None;
         if let Ok(mut lock) = GLOBAL_GAZE_POS.lock() {
             *lock = None;
         }
@@ -1892,6 +1917,7 @@ impl EyeTrackingController {
         self.last_snap_timestamp = None;
         self.last_eye_applied_cursor = None;
         self.last_detected_mouse_pos = None;
+        self.freeze_until = None;
         if let Ok(mut lock) = GLOBAL_GAZE_POS.lock() {
             *lock = None;
         }
@@ -1997,6 +2023,20 @@ impl EyeTrackingController {
         overridden
     }
 
+    /// Fige temporairement le déplacement oculaire pendant une durée donnée (ex: post-clic)
+    pub fn freeze_gaze(&mut self, duration: Duration) {
+        self.freeze_until = Some(Instant::now() + duration);
+        self.cursor_vel = (0.0, 0.0);
+    }
+
+    pub fn is_frozen(&self) -> bool {
+        if let Some(until) = self.freeze_until {
+            Instant::now() < until
+        } else {
+            false
+        }
+    }
+
     pub fn trigger_mouse_override(&mut self, current_phys: (i32, i32), work_area_offset: (f32, f32), ppp: f32) {
         let now = Instant::now();
         self.mouse_override_until = Some(now + self.mouse_override_debounce);
@@ -2041,6 +2081,16 @@ impl EyeTrackingController {
     ) -> (f32, f32, Option<usize>) {
         if self.handle_escape_if_pressed() {
             return (screen_w / 2.0, screen_h / 2.0, None);
+        }
+
+        if self.is_frozen() {
+            if let Some(phys) = get_physical_cursor_pos() {
+                self.last_detected_mouse_pos = Some(phys);
+                self.last_eye_applied_cursor = Some(phys);
+            }
+            if let Some((pos_x, pos_y)) = self.current_lerp_pos {
+                return (pos_x, pos_y, self.last_snapped_target_id);
+            }
         }
 
         if !is_eye_tracking_enabled() && !is_dev_mode() && !self.calibration.is_active && !is_calibration_active() {
@@ -2688,14 +2738,72 @@ pub fn detect_face_region(
     (min_x, max_x, min_y, max_y)
 }
 
-/// Prétraitement avec interpolation bilinéaire anti-aliasing vers le tenseur NCHW [1, 3, 224, 224] normalisé ImageNet
-pub fn direct_preprocess_l2cs(
+/// Filtre passe-bas séparable en boîte 2D ultra-rapide (O(N)) pour estimer la carte d'illumination locale
+fn separable_box_blur_224(src: &[f32], radius: usize) -> Vec<f32> {
+    const W: usize = L2CS_INPUT_SIZE;
+    const H: usize = L2CS_INPUT_SIZE;
+    let mut temp = vec![0.0f32; W * H];
+    let mut dst = vec![0.0f32; W * H];
+
+    // Passe horizontale
+    for y in 0..H {
+        let row_offset = y * W;
+        let mut sum = 0.0f32;
+        let mut count = 0usize;
+
+        for x in 0..=radius.min(W - 1) {
+            sum += src[row_offset + x];
+            count += 1;
+        }
+        for x in 0..W {
+            if x + radius < W && x > 0 {
+                sum += src[row_offset + x + radius];
+                count += 1;
+            }
+            if x > radius {
+                sum -= src[row_offset + x - radius - 1];
+                count -= 1;
+            }
+            temp[row_offset + x] = sum / count.max(1) as f32;
+        }
+    }
+
+    // Passe verticale
+    for x in 0..W {
+        let mut sum = 0.0f32;
+        let mut count = 0usize;
+
+        for y in 0..=radius.min(H - 1) {
+            sum += temp[y * W + x];
+            count += 1;
+        }
+        for y in 0..H {
+            if y + radius < H && y > 0 {
+                sum += temp[(y + radius) * W + x];
+                count += 1;
+            }
+            if y > radius {
+                sum -= temp[(y - radius - 1) * W + x];
+                count -= 1;
+            }
+            dst[y * W + x] = sum / count.max(1) as f32;
+        }
+    }
+
+    dst
+}
+
+/// Prétraitement avec :
+/// 1. Suppression des reflets spéculaires (glints / saturation)
+/// 2. Normalisation de l'illumination par Retinex / Self-Quotient Image (division de fond)
+/// 3. Mesure du gradient vectoriel d'asymétrie lumineuse (horizontal / vertical)
+pub fn direct_preprocess_l2cs_with_illumination(
     frame: &[u8],
     width: usize,
     height: usize,
     format: PixelFormat,
     face_roi: (usize, usize, usize, usize),
-) -> Vec<f32> {
+) -> (Vec<f32>, f32, f32) {
     const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
     const STD: [f32; 3] = [0.229, 0.224, 0.225];
 
@@ -2704,49 +2812,117 @@ pub fn direct_preprocess_l2cs(
     let roi_h = (max_y.saturating_sub(min_y)).max(1) as f32;
 
     let plane_size = L2CS_INPUT_SIZE * L2CS_INPUT_SIZE;
-    let mut tensor = vec![0.0f32; 3 * plane_size];
-
-    // Rehaussement de contraste dynamique pour caméras floues ou sous-exposées
-    let mut min_val = 255u8;
-    let mut max_val = 0u8;
-    let sample_steps = 16;
-    for sy in 0..sample_steps {
-        let py = min_y + (sy * (max_y.saturating_sub(min_y))) / sample_steps;
-        for sx in 0..sample_steps {
-            let px = min_x + (sx * (max_x.saturating_sub(min_x))) / sample_steps;
-            let (r, g, b) = sample_pixel_rgb(frame, width, height, format, px, py);
-            min_val = min_val.min(r).min(g).min(b);
-            max_val = max_val.max(r).max(g).max(b);
-        }
-    }
-    let range = (max_val as f32 - min_val as f32).max(25.0);
-    let contrast_scale = 255.0 / range;
+    let mut raw_r = vec![0.0f32; plane_size];
+    let mut raw_g = vec![0.0f32; plane_size];
+    let mut raw_b = vec![0.0f32; plane_size];
+    let mut raw_lum = vec![0.0f32; plane_size];
 
     let step_x = roi_w / L2CS_INPUT_SIZE as f32;
     let step_y = roi_h / L2CS_INPUT_SIZE as f32;
 
+    // 1. Échantillonnage bilinéaire et atténuation des reflets spéculaires (Glints)
     for out_y in 0..L2CS_INPUT_SIZE {
         let fy = min_y as f32 + (out_y as f32 + 0.5) * step_y;
         for out_x in 0..L2CS_INPUT_SIZE {
             let fx = min_x as f32 + (out_x as f32 + 0.5) * step_x;
             let (r_f255, g_f255, b_f255) = sample_pixel_rgb_bilinear(frame, width, height, format, fx, fy);
-
-            let r_stretched = ((r_f255 - min_val as f32) * contrast_scale).clamp(0.0, 255.0);
-            let g_stretched = ((g_f255 - min_val as f32) * contrast_scale).clamp(0.0, 255.0);
-            let b_stretched = ((b_f255 - min_val as f32) * contrast_scale).clamp(0.0, 255.0);
-
-            let r_f = r_stretched / 255.0;
-            let g_f = g_stretched / 255.0;
-            let b_f = b_stretched / 255.0;
-
             let pixel_idx = out_y * L2CS_INPUT_SIZE + out_x;
-            tensor[pixel_idx] = (r_f - MEAN[0]) / STD[0];
-            tensor[plane_size + pixel_idx] = (g_f - MEAN[1]) / STD[1];
-            tensor[plane_size * 2 + pixel_idx] = (b_f - MEAN[2]) / STD[2];
+            let lum = 0.299 * r_f255 + 0.587 * g_f255 + 0.114 * b_f255;
+
+            // Suppression des reflets spéculaires / points de surbrillance cornéenne
+            let (r_comp, g_comp, b_comp, lum_comp) = if lum > 225.0 {
+                let excess = lum - 225.0;
+                let compressed_lum = 225.0 + 15.0 * (excess / 30.0).tanh();
+                let scale = compressed_lum / lum.max(1.0);
+                (r_f255 * scale, g_f255 * scale, b_f255 * scale, compressed_lum)
+            } else {
+                (r_f255, g_f255, b_f255, lum)
+            };
+
+            raw_r[pixel_idx] = r_comp;
+            raw_g[pixel_idx] = g_comp;
+            raw_b[pixel_idx] = b_comp;
+            raw_lum[pixel_idx] = lum_comp;
         }
     }
 
-    tensor
+    // 2. Mesure du gradient vectoriel d'asymétrie lumineuse (G/D et H/B)
+    let mut left_lum = 0.0f32;
+    let mut right_lum = 0.0f32;
+    let mut top_lum = 0.0f32;
+    let mut bottom_lum = 0.0f32;
+    let half_w = L2CS_INPUT_SIZE / 2;
+    let half_h = L2CS_INPUT_SIZE / 2;
+
+    for y in 0..L2CS_INPUT_SIZE {
+        let row_idx = y * L2CS_INPUT_SIZE;
+        for x in 0..L2CS_INPUT_SIZE {
+            let l = raw_lum[row_idx + x];
+            if x < half_w { left_lum += l; } else { right_lum += l; }
+            if y < half_h { top_lum += l; } else { bottom_lum += l; }
+        }
+    }
+    let half_count = (half_w * L2CS_INPUT_SIZE) as f32;
+    let mean_left = left_lum / half_count;
+    let mean_right = right_lum / half_count;
+    let mean_top = top_lum / half_count;
+    let mean_bottom = bottom_lum / half_count;
+
+    let light_bias_x = ((mean_right - mean_left) / (mean_right + mean_left + 1e-3)).clamp(-1.0, 1.0);
+    let light_bias_y = ((mean_bottom - mean_top) / (mean_bottom + mean_top + 1e-3)).clamp(-1.0, 1.0);
+
+    // 3. Normalisation Retinex / Self-Quotient Image (division de fond basse-fréquence)
+    let illumination_bg = separable_box_blur_224(&raw_lum, 14);
+    let global_mean_lum = raw_lum.iter().copied().sum::<f32>() / plane_size.max(1) as f32;
+
+    let mut norm_r = vec![0.0f32; plane_size];
+    let mut norm_g = vec![0.0f32; plane_size];
+    let mut norm_b = vec![0.0f32; plane_size];
+    let mut min_val = 255.0f32;
+    let mut max_val = 0.0f32;
+
+    for i in 0..plane_size {
+        let local_bg = illumination_bg[i];
+        let factor = global_mean_lum / (local_bg + 12.0);
+        // Fusion 75% Retinex équilibré + 25% signal direct
+        let r = (raw_r[i] * factor * 0.75 + raw_r[i] * 0.25).clamp(0.0, 255.0);
+        let g = (raw_g[i] * factor * 0.75 + raw_g[i] * 0.25).clamp(0.0, 255.0);
+        let b = (raw_b[i] * factor * 0.75 + raw_b[i] * 0.25).clamp(0.0, 255.0);
+
+        min_val = min_val.min(r).min(g).min(b);
+        max_val = max_val.max(r).max(g).max(b);
+
+        norm_r[i] = r;
+        norm_g[i] = g;
+        norm_b[i] = b;
+    }
+
+    let range = (max_val - min_val).max(25.0);
+    let contrast_scale = 255.0 / range;
+
+    let mut tensor = vec![0.0f32; 3 * plane_size];
+    for i in 0..plane_size {
+        let r_stretched = ((norm_r[i] - min_val) * contrast_scale).clamp(0.0, 255.0) / 255.0;
+        let g_stretched = ((norm_g[i] - min_val) * contrast_scale).clamp(0.0, 255.0) / 255.0;
+        let b_stretched = ((norm_b[i] - min_val) * contrast_scale).clamp(0.0, 255.0) / 255.0;
+
+        tensor[i] = (r_stretched - MEAN[0]) / STD[0];
+        tensor[plane_size + i] = (g_stretched - MEAN[1]) / STD[1];
+        tensor[plane_size * 2 + i] = (b_stretched - MEAN[2]) / STD[2];
+    }
+
+    (tensor, light_bias_x, light_bias_y)
+}
+
+/// Prétraitement avec interpolation bilinéaire anti-aliasing vers le tenseur NCHW [1, 3, 224, 224] normalisé ImageNet
+pub fn direct_preprocess_l2cs(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+    format: PixelFormat,
+    face_roi: (usize, usize, usize, usize),
+) -> Vec<f32> {
+    direct_preprocess_l2cs_with_illumination(frame, width, height, format, face_roi).0
 }
 
 /// Génère la vignette de prévisualisation à partir de l'image BRUTE complète de la caméra avec
@@ -3068,9 +3244,17 @@ pub fn extract_pupil_and_head_pose(
     // 1. Priorité absolue : Inférence neuronale directe L2CS-Net sans pré/post-traitement intermédiaire
     if is_eyetracking_model_installed() {
         let face_roi = detect_face_region(frame, width, height, format);
-        let tensor = direct_preprocess_l2cs(frame, width, height, format, face_roi);
+        let (tensor, light_bias_x, light_bias_y) =
+            direct_preprocess_l2cs_with_illumination(frame, width, height, format, face_roi);
 
-        if let Some((pitch_deg, yaw_deg)) = run_l2cs_inference(&tensor) {
+        if let Some((raw_pitch_deg, raw_yaw_deg)) = run_l2cs_inference(&tensor) {
+            // 3. Compensation vectorielle du gradient d'asymétrie lumineuse :
+            // Annule la traction mécanique artificielle exercée par les spots ou fenêtres latérales
+            let k_yaw = 3.2f32;   // Atténuation en degrés par unité d'asymétrie [-1, +1]
+            let k_pitch = 2.2f32;
+            let yaw_deg = raw_yaw_deg - (light_bias_x * k_yaw);
+            let pitch_deg = raw_pitch_deg - (light_bias_y * k_pitch);
+
             // Webcam au sommet de l'écran : calibrage angulaire pour un écran de bureau à ~60cm
             let norm_x = (yaw_deg / 15.0).clamp(-1.0, 1.0);
 
@@ -3111,8 +3295,8 @@ pub fn extract_pupil_and_head_pose(
                     if should_log {
                         *lock = Some(Instant::now());
                         println!(
-                            "[Eye-Tracking Dev] [L2CS-Net Direct] PitchBrut={:+.1}° PitchComp={:+.1}° Yaw={:+.1}° -> Gaze=({:+.2}, {:+.2})",
-                            pitch_deg, compensated_pitch, yaw_deg, norm_x, norm_y
+                            "[Eye-Tracking Dev] [L2CS-Net Direct] PitchBrut={:+.1}° PitchComp={:+.1}° Yaw={:+.1}° LightBias=({:+.2}, {:+.2}) -> Gaze=({:+.2}, {:+.2})",
+                            raw_pitch_deg, compensated_pitch, yaw_deg, light_bias_x, light_bias_y, norm_x, norm_y
                         );
                     }
                 }
@@ -3146,6 +3330,7 @@ pub fn extract_pupil_and_head_pose(
             for x in x0..x1.min(width) {
                 let (r, g, b) = sample_pixel_rgb(frame, width, height, format, x, y);
                 let lum = (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000;
+                // Ignore les reflets spéculaires saturés (> 230)
                 if lum < min_val {
                     min_val = lum;
                     best_x = x;

@@ -115,6 +115,7 @@ pub enum SwitchKeyEvent {
     Prev,
     Back,
     Escape,
+    GazeClick,
     ToggleSwitch,
     ToggleDictation,
     ToggleVoice,
