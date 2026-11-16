@@ -10,7 +10,6 @@ use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::LlamaModel;
-use llama_cpp_2::token::data_array::LlamaTokenDataArray;
 use crate::types::{estimate_token_count, AgentEvent, ChatMessage, TtsCommand};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NarrationParseState {
@@ -136,6 +135,8 @@ impl StreamingJsonNarration {
                                 || rem_trimmed.starts_with("\"quick_suggestions\"");
 
                             if is_closing {
+                                consumed = next_consumed;
+                                self.state = NarrationParseState::Finished;
                                 let remaining = self.sentence_buffer.trim().to_string();
                                 self.sentence_buffer.clear();
                                 if !remaining.is_empty() {
@@ -2688,7 +2689,7 @@ impl LocalLlamaEngine {
         let requested_gpu_layers = std::env::var("LLAMA_GPU_LAYERS")
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
-            .unwrap_or(24);
+            .unwrap_or(99);
 
         let (model, gpu_layers, gpu_enabled) = if requested_gpu_layers > 0 {
             println!(
@@ -2737,11 +2738,12 @@ impl LocalLlamaEngine {
         event_tx: Option<&Sender<AgentEvent>>,
         tts_tx: Option<&Sender<TtsCommand>>,
     ) -> Result<String, String> {
-        // Contexte étendu à 8192 tokens par défaut (ou valeur personnalisée via LLAMA_CTX_SIZE)
+        // Contexte étendu à 8192 sur GPU, sécurisé à 4096 sur CPU (ou valeur personnalisée via LLAMA_CTX_SIZE)
+        let default_ctx = if self.gpu_enabled { 8192 } else { 4096 };
         let max_ctx = std::env::var("LLAMA_CTX_SIZE")
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
-            .unwrap_or(8192);
+            .unwrap_or(default_ctx);
         // Micro-batch standard à 512 tokens : évite le goulet d'étranglement quadratique O(N^2) de 2048 tokens
         let n_batch = 512;
         let num_cpus = std::thread::available_parallelism().map_or(4, |p| p.get());
@@ -2750,12 +2752,12 @@ impl LocalLlamaEngine {
         } else if self.gpu_enabled {
             (num_cpus / 2).clamp(2, 6) as i32
         } else {
-            (num_cpus / 2).max(1).min(8) as i32
+            (num_cpus / 2).clamp(2, 4) as i32
         };
         let threads_batch = if self.gpu_enabled {
             threads.min(6)
         } else {
-            threads.min(8)
+            (num_cpus / 2).clamp(2, 6) as i32
         };
         let ctx_params = LlamaContextParams::default()
             .with_n_ctx(std::num::NonZeroU32::new(max_ctx))
@@ -2831,20 +2833,29 @@ impl LocalLlamaEngine {
             let recent_tokens = &past_tokens[penalty_window..];
             const REPEAT_PENALTY: f32 = 1.15;
 
-            // Application directe de la pénalité sur les logits des tokens récemment émis
-            let penalized_candidates = candidates.map(|mut c| {
+            // Argmax direct avec pénalité de répétition : zéro allocation heap par token (évite la corruption CRT)
+            let mut best_token = None;
+            let mut best_logit = f32::NEG_INFINITY;
+
+            for c in candidates {
+                let mut logit = c.logit();
                 if recent_tokens.contains(&c.id()) {
-                    if c.logit() > 0.0 {
-                        c.set_logit(c.logit() / REPEAT_PENALTY);
+                    if logit > 0.0 {
+                        logit /= REPEAT_PENALTY;
                     } else {
-                        c.set_logit(c.logit() * REPEAT_PENALTY);
+                        logit *= REPEAT_PENALTY;
                     }
                 }
-                c
-            });
+                if logit > best_logit {
+                    best_logit = logit;
+                    best_token = Some(c.id());
+                }
+            }
 
-            let mut candidates_p = LlamaTokenDataArray::from_iter(penalized_candidates, false);
-            let next_token = candidates_p.sample_token_greedy();
+            let next_token = match best_token {
+                Some(t) => t,
+                None => break,
+            };
 
             if vocab.is_eog(next_token) {
                 break;
@@ -2935,9 +2946,13 @@ impl LocalLlamaEngine {
             .and_then(|s| s.trim().parse::<u32>().ok())
             .unwrap_or(4096);
         let n_batch = 512;
-        let threads = std::thread::available_parallelism()
-            .map_or(4, |p| p.get())
-            .min(8) as i32;
+        let threads = if self.gpu_enabled {
+            4
+        } else {
+            std::thread::available_parallelism()
+                .map_or(2, |p| p.get() / 2)
+                .clamp(2, 4) as i32
+        };
         let ctx_params = LlamaContextParams::default()
             .with_n_ctx(std::num::NonZeroU32::new(max_ctx))
             .with_n_batch(n_batch)
@@ -2978,8 +2993,19 @@ impl LocalLlamaEngine {
                 break;
             }
             let candidates = ctx.candidates_ith(batch.n_tokens() - 1);
-            let mut candidates_p = LlamaTokenDataArray::from_iter(candidates, false);
-            let next_token = candidates_p.sample_token_greedy();
+            let mut best_token = None;
+            let mut best_logit = f32::NEG_INFINITY;
+            for c in candidates {
+                let logit = c.logit();
+                if logit > best_logit {
+                    best_logit = logit;
+                    best_token = Some(c.id());
+                }
+            }
+            let next_token = match best_token {
+                Some(t) => t,
+                None => break,
+            };
 
             if vocab.is_eog(next_token) {
                 break;
