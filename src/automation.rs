@@ -3575,6 +3575,30 @@ pub fn urlencoding_simple(query: &str) -> String {
         .collect()
 }
 
+pub fn urldecoding_simple(input: &str) -> String {
+    let mut out = Vec::new();
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+        } else if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16) {
+                out.push(byte);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
 pub fn truncate_with_notice(text: &str, max_chars: usize) -> String {
     if text.chars().count() > max_chars {
         let truncated: String = text.chars().take(max_chars).collect();
@@ -3652,10 +3676,50 @@ pub fn is_generic_textarea_target(target: &str) -> bool {
         || t == "texte"
 }
 
+fn clean_search_url_if_present(url: &str) -> Option<String> {
+    let lower = url.to_lowercase();
+    let (prefix, query_key) = if lower.contains("google.") && lower.contains("/search?") {
+        ("https://www.google.com/search?q=", "q=")
+    } else if lower.contains("youtube.com/results?") {
+        ("https://www.youtube.com/results?search_query=", "search_query=")
+    } else if lower.contains("bing.com/search?") {
+        ("https://www.bing.com/search?q=", "q=")
+    } else if lower.contains("duckduckgo.com/") && lower.contains("q=") {
+        ("https://duckduckgo.com/?q=", "q=")
+    } else if lower.contains("arte.tv") && lower.contains("/search/?q=") {
+        ("https://www.arte.tv/fr/search/?q=", "q=")
+    } else if lower.contains("twitch.tv/search?") {
+        ("https://www.twitch.tv/search?term=", "term=")
+    } else {
+        return None;
+    };
+
+    if let Some(pos) = lower.find(query_key) {
+        let after_key = &url[pos + query_key.len()..];
+        let raw_query = if let Some(amp_pos) = after_key.find('&') {
+            &after_key[..amp_pos]
+        } else {
+            after_key
+        };
+        let decoded = urldecoding_simple(raw_query);
+        let cleaned = crate::intent::clean_search_query_intent(&decoded);
+        if !cleaned.is_empty() && cleaned != decoded {
+            let reencoded = urlencoding_simple(&cleaned);
+            return Some(format!("{prefix}{reencoded}"));
+        }
+    }
+    None
+}
+
 pub fn format_url_for_navigation(raw_url: &str) -> String {
     let trimmed = raw_url.trim();
     if trimmed.is_empty() {
         return "https://www.google.com".to_string();
+    }
+
+    // Si c'est déjà une URL de recherche (Google, YouTube, Bing...), on assainit la requête
+    if let Some(cleaned_search_url) = clean_search_url_if_present(trimmed) {
+        return cleaned_search_url;
     }
 
     // 1. Détection de tous les schémas complets comportant :// (chrome://, edge://, file://, ftp://, http://, etc.)
@@ -3698,8 +3762,9 @@ pub fn format_url_for_navigation(raw_url: &str) -> String {
     if !trimmed.contains(' ') && trimmed.contains('.') {
         format!("https://{trimmed}")
     } else {
-        // 5. Repli : terme de recherche vers Google
-        format!("https://www.google.com/search?q={}", urlencoding_simple(trimmed))
+        // 5. Repli : terme de recherche vers Google avec extraction de l'intention réelle
+        let intent_query = crate::intent::clean_search_query_intent(trimmed);
+        format!("https://www.google.com/search?q={}", urlencoding_simple(&intent_query))
     }
 }
 

@@ -973,29 +973,30 @@ pub async fn call_llm_prompt(
 
             if (is_action_request || is_passive_excuse) && pass == 1 {
                 println!("[Agent Résilience] L'IA s'est défaussée sans action pour \"{}\". Forçage d'une action de recherche / média...", safe_user_instruction);
+                let intent_keywords = crate::intent::clean_search_query_intent(&safe_user_instruction);
+                let encoded_intent = url_encode(&intent_keywords);
                 let target_query = if lower_user.contains("radio") {
                     "https://www.radiofrance.fr".to_string()
                 } else if lower_user.contains("arte") {
                     let topic = if lower_user.contains("choisis") || lower_user.contains("choisi") {
                         "documentaire".to_string()
                     } else {
-                        url_encode(&safe_user_instruction)
+                        encoded_intent
                     };
                     format!("https://www.arte.tv/fr/search/?q={topic}")
                 } else if lower_user.contains("twitch") {
-                    let topic = url_encode(&safe_user_instruction);
-                    format!("https://www.twitch.tv/search?term={topic}")
+                    format!("https://www.twitch.tv/search?term={encoded_intent}")
                 } else if lower_user.contains("netflix") {
                     "https://www.netflix.com".to_string()
                 } else if lower_user.contains("vidéo") || lower_user.contains("video") || lower_user.contains("film") || lower_user.contains("youtube") {
                     let topic = if lower_user.contains("choisis") || lower_user.contains("choisi") || lower_user.trim() == "mets une vidéo" || lower_user.trim() == "lance une vidéo" {
-                        "documentaire+nature+4k"
+                        "documentaire+nature+4k".to_string()
                     } else {
-                        &url_encode(&safe_user_instruction)
+                        encoded_intent
                     };
                     format!("https://www.youtube.com/results?search_query={topic}")
                 } else {
-                    format!("https://www.google.com/search?q={}", url_encode(&safe_user_instruction))
+                    format!("https://www.google.com/search?q={encoded_intent}")
                 };
                 payload.actions.push(AgentAction::NavigateToUrl {
                     url: target_query,
@@ -1271,6 +1272,7 @@ pub async fn call_llm_prompt(
                 "\n\n[Étape {next_pass}] Vérification d'avancement pour l'objectif : \"{}\".\n\
                 - RÈGLE LINGUISTIQUE STRICTE : Traduis et formule TOUT impérativement en {system_lang} dans \"narration\" et les suggestions.\n\
                 - RÈGLE NARRATION STRICTE : Ne décris et ne cite AUCUN contrôle technique ou composant de l'écran (boutons, liens, cibles #N). Rédige une réponse fluide focalisée UNIQUEMENT sur l'information et le contenu attendu par l'utilisateur.\n\
+                - FOCUS DE FENÊTRE PRIORITAIRE : Si l'action cible une fenêtre spécifique ou si la fenêtre souhaitée n'est pas au premier plan, place {{\"action\": \"focus_window\", \"title\": \"...\"}} EN TÊTE avant toute commande.\n\
                 - POSTURE CONVIVIALE : Sois bavard, joyeux, lucide et éthique ! N'hésite pas à parler de toi pour papoter sans te focaliser sur le grand nombre d'éléments analysés.\n\
                 - TANT QUE L'OBJECTIF N'EST PAS SATISFAIT : continue les passes, choisis l'action suivante en JSON.\n\
                 - DÉTECTION DE BOUCLE : si l'action précédente a échoué ou que l'écran stagne, pivote (autre lien/bouton, scroll, navigate_back).\n\

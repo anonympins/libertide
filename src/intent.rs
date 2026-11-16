@@ -1,6 +1,266 @@
 use crate::floating_window::FloatingCard;
 use crate::overlay::normalize_for_command_match;
 
+/// Extrait l'intention réelle et les mots-clés d'une recherche en retirant les tournures
+/// conversationnelles, les injonctions orales ("cherche-moi", "peux-tu trouver") et les politesses.
+pub fn clean_search_query_intent(query: &str) -> String {
+    let mut s = query.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+
+    while (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
+        || (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2)
+        || (s.starts_with('«') && s.ends_with('»') && s.len() >= 2)
+    {
+        s = s[1..s.len() - 1].trim();
+    }
+
+    let mut working = s.to_string();
+
+    // 1. Nettoyage des suffixes de politesse et de plateforme à la fin de la phrase
+    const SUFFIXES: &[&str] = &[
+        "s'il te plaît", "s'il te plait", "s il te plait", "s il te plaît",
+        "s'il vous plaît", "s'il vous plait", "s il vous plait", "s il vous plaît",
+        "stp", "svp", "merci beaucoup", "merci d'avance", "merci",
+        "please", "thank you", "thanks",
+        "sur google", "sur internet", "sur youtube", "sur le web", "sur le net",
+        "en ligne", "online",
+    ];
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let trimmed_end = working.trim_end_matches(|c: char| c == '?' || c == '!' || c == '.' || c == ',' || c == ';' || c == ':' || c.is_whitespace());
+        if trimmed_end.len() < working.len() {
+            working = trimmed_end.to_string();
+            changed = true;
+        }
+
+        let lower = working.to_lowercase();
+        for &sfx in SUFFIXES {
+            if lower.ends_with(sfx) {
+                let cut_idx = working.len() - sfx.len();
+                working = working[..cut_idx].trim().to_string();
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    // 2. Nettoyage des préfixes conversationnels au début de la phrase
+    const PREFIXES: &[&str] = &[
+        "peux-tu me faire une recherche sur",
+        "peux-tu faire une recherche sur",
+        "pourrais-tu me chercher",
+        "pourrais-tu chercher",
+        "pourrais-tu me trouver",
+        "pourrais-tu trouver",
+        "peux-tu me chercher",
+        "peux-tu me trouver",
+        "peux-tu chercher",
+        "peux-tu trouver",
+        "peux-tu me dire",
+        "peux-tu regarder",
+        "fais une recherche sur internet pour",
+        "fais une recherche sur internet de",
+        "fais une recherche sur google pour",
+        "fais une recherche sur google de",
+        "fais une recherche sur google",
+        "fais une recherche sur internet",
+        "fais une recherche sur le net",
+        "fais une recherche sur le web",
+        "fais une recherche sur",
+        "fais une recherche de",
+        "fais une recherche pour",
+        "fais une recherche",
+        "lance une recherche sur google pour",
+        "lance une recherche sur google de",
+        "lance une recherche sur google",
+        "lance une recherche sur internet",
+        "lance une recherche sur",
+        "lance une recherche de",
+        "lance une recherche",
+        "va sur google et cherche",
+        "va sur internet et cherche",
+        "va voir sur google",
+        "va voir sur internet",
+        "va voir",
+        "cherche-moi sur internet",
+        "cherche moi sur internet",
+        "cherche-moi sur google",
+        "cherche moi sur google",
+        "cherche-moi sur le net",
+        "cherche moi sur le net",
+        "cherche-moi sur le web",
+        "cherche moi sur le web",
+        "cherche sur internet",
+        "cherche sur google",
+        "cherche sur le net",
+        "cherche sur le web",
+        "cherche-moi",
+        "cherche moi",
+        "cherche",
+        "chercher",
+        "recherche-moi sur internet",
+        "recherche moi sur internet",
+        "recherche-moi sur google",
+        "recherche moi sur google",
+        "recherche sur internet",
+        "recherche sur google",
+        "recherche sur le net",
+        "recherche-moi",
+        "recherche moi",
+        "recherche",
+        "rechercher",
+        "trouve-moi sur internet",
+        "trouve moi sur internet",
+        "trouve-moi sur google",
+        "trouve moi sur google",
+        "trouve-moi",
+        "trouve moi",
+        "trouve",
+        "trouver",
+        "regarde sur internet pour",
+        "regarde sur google pour",
+        "regarde sur internet",
+        "regarde sur google",
+        "regarde sur le net",
+        "regarde",
+        "je voudrais savoir",
+        "je voudrais trouver",
+        "je voudrais chercher",
+        "je souhaite savoir",
+        "j'aimerais savoir",
+        "j'aimerais trouver",
+        "j aimerais savoir",
+        "j aimerais trouver",
+        "je veux savoir",
+        "je veux trouver",
+        "je cherche",
+        "dis-moi",
+        "dis moi",
+        "donne-moi",
+        "donne moi",
+        "affiche-moi",
+        "affiche moi",
+        "montre-moi",
+        "montre moi",
+        "mets-moi une vidéo de",
+        "mets moi une vidéo de",
+        "mets-moi une video de",
+        "mets moi une video de",
+        "mets une vidéo de",
+        "mets une video de",
+        "mets la vidéo de",
+        "mets la video de",
+        "mets-moi un film sur",
+        "mets moi un film sur",
+        "mets un film sur",
+        "lance-moi une vidéo de",
+        "lance moi une vidéo de",
+        "lance une vidéo de",
+        "lance une video de",
+        "mets de la musique de",
+        "mets la musique de",
+        "mets-moi de la musique de",
+        "mets moi de la musique de",
+        "mets-moi",
+        "mets moi",
+        "mets",
+        "lance-moi",
+        "lance moi",
+        "lance",
+        "lancer",
+        "ouvre",
+        "ouvrir",
+        "can you please search for",
+        "can you search google for",
+        "can you search for",
+        "could you search for",
+        "can you find me",
+        "could you find me",
+        "can you find",
+        "could you find",
+        "please search google for",
+        "please search for",
+        "search google for",
+        "search for",
+        "search",
+        "look up on google",
+        "look up",
+        "find me",
+        "find",
+        "google for",
+        "google",
+        "tell me about",
+        "what is the",
+        "what is",
+        "how to",
+    ];
+
+    let mut prefix_changed = true;
+    while prefix_changed {
+        prefix_changed = false;
+        let lower = working.to_lowercase();
+        for &pfx in PREFIXES {
+            if lower.starts_with(pfx) {
+                let rest = working[pfx.len()..].trim_start_matches(|c: char| c == ':' || c == '-' || c.is_whitespace());
+                if !rest.is_empty() {
+                    working = rest.to_string();
+                    prefix_changed = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // 3. Normalisation des questions météo courantes vers des mots-clés d'intention directs
+    let lower = working.to_lowercase();
+    const WEATHER_PATTERNS: &[(&str, &str)] = &[
+        ("quel temps fait-il à ", "météo "),
+        ("quel temps fait-il a ", "météo "),
+        ("quel temps fera-t-il à ", "météo "),
+        ("quel temps fera-t-il a ", "météo "),
+        ("quel temps il fait à ", "météo "),
+        ("quel temps il fait a ", "météo "),
+        ("quelle est la météo de ", "météo "),
+        ("quelle est la météo à ", "météo "),
+        ("quelle est la météo a ", "météo "),
+        ("quelle est la météo pour ", "météo "),
+        ("quelle est la meteo de ", "météo "),
+        ("quelle est la meteo à ", "météo "),
+        ("quelle est la meteo a ", "météo "),
+        ("quelle est la meteo pour ", "météo "),
+        ("la météo qu'il fera à ", "météo "),
+        ("la météo qu'il fera a ", "météo "),
+        ("la météo qu'il fera ", "météo "),
+        ("la meteo qu'il fera à ", "météo "),
+        ("la meteo qu'il fera a ", "météo "),
+        ("la meteo qu'il fera ", "météo "),
+        ("la météo de ", "météo "),
+        ("la météo à ", "météo "),
+        ("la météo a ", "météo "),
+        ("la meteo de ", "météo "),
+        ("la meteo à ", "météo "),
+        ("la meteo a ", "météo "),
+    ];
+
+    for &(pat, repl) in WEATHER_PATTERNS {
+        if lower.starts_with(pat) {
+            working = format!("{repl}{}", &working[pat.len()..]);
+            break;
+        }
+    }
+
+    let result = working.trim().trim_matches(|c: char| c == '"' || c == '\'' || c == '«' || c == '»').trim();
+    if result.is_empty() {
+        s.to_string()
+    } else {
+        result.to_string()
+    }
+}
+
 pub fn extract_badge_number(text: &str) -> Option<usize> {
     let lower = text.trim().to_lowercase();
     let clean = lower

@@ -590,7 +590,7 @@ impl CommandTag {
             Self::ClickElementOrButton => "Interactivité graphique directe : clics sur boutons, liens, menus, cases à cocher, onglets ou badges numérotés #N à l'écran. Actions : click_element, click_button, click_numbered_target, focus_element, scroll.",
             Self::TextInputOrDictation => "Saisie de texte au clavier, remplissage de formulaires, barres de recherche, remplacement ou effacement de champ. Actions : write_text, replace_field_text, clear_text, focus_element.",
             Self::AppManagement => "Démarrage ou fermeture d'applications locales (ex: 'ouvre le bloc-notes', 'ferme Chrome', 'lance la calculatrice'). Actions : open_app, close_app, open_search.",
-            Self::FocusWindow => "Changer de fenêtre active, basculer ou donner le focus à une autre fenêtre ou application déjà ouverte (ex: 'mets Chrome en premier plan', 'bascule sur la fenêtre Bloc-notes', 'focus Discord', 'passe sur VS Code'). Action : focus_window.",
+            Self::FocusWindow => "Changer de fenêtre active, basculer ou donner le focus à une fenêtre de son choix avant d'éventuelles commandes (ex: 'mets Chrome en premier plan', 'focus sur Bloc-notes et écris bonjour', 'va sur la fenêtre Discord', 'focus VS Code'). Action : focus_window.",
             Self::WindowManagementOrImmersion => "Organisation de l'espace de travail, redimensionnement, déplacement, disposition en mosaïque ou mode immersion fenêtrée. Actions : arrange_window, tile_windows, activate_immersion, focus_window.",
             Self::ScreenReadingOrSummary => "Lecture et résumé du contenu textuel de l'écran ou d'un fichier ouvert dans un éditeur (ex: 'de quoi parle la page ?', 'résume le document'). Actions : read_editor_content, show_floating_card, scroll.",
             Self::FloatingCardOrForm => "Affichage et fermeture de fenêtres volantes transparentes (fiches d'information Markdown, formulaires de critères, tableaux de données). Actions : show_floating_card, close_floating_card.",
@@ -843,29 +843,39 @@ pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<Comma
     }
 
     // Détection de changement ou focus de fenêtre
-    if lower.contains("focus la fenêtre")
+    let has_focus_intent = lower.contains("focus la fenêtre")
         || lower.contains("focus la fenetre")
         || lower.contains("focus fenêtre")
         || lower.contains("focus fenetre")
         || lower.contains("focus window")
+        || lower.contains("focus sur")
+        || lower.contains("focus ")
+        || lower.starts_with("focus")
         || lower.contains("change de fenêtre")
         || lower.contains("change de fenetre")
         || lower.contains("changer de fenêtre")
         || lower.contains("changer de fenetre")
-        || lower.contains("bascule sur la fenêtre")
-        || lower.contains("bascule sur la fenetre")
-        || lower.contains("basculer sur la fenêtre")
-        || lower.contains("basculer sur la fenetre")
+        || lower.contains("bascule sur")
+        || lower.contains("basculer sur")
         || lower.contains("passe sur la fenêtre")
         || lower.contains("passe sur la fenetre")
         || lower.contains("passer sur la fenêtre")
         || lower.contains("passer sur la fenetre")
+        || lower.contains("passe sur ")
+        || lower.contains("passer sur ")
+        || lower.contains("va sur la fenêtre")
+        || lower.contains("va sur la fenetre")
+        || lower.contains("dans la fenêtre")
+        || lower.contains("dans la fenetre")
+        || lower.contains("sur la fenêtre")
+        || lower.contains("sur la fenetre")
         || lower.contains("mets en premier plan")
         || lower.contains("mettre en premier plan")
         || lower.contains("au premier plan")
         || lower.contains("affiche la fenêtre")
         || lower.contains("affiche la fenetre")
         || lower.contains("activer la fenêtre")
+        || lower.contains("activer la fenetre")
         || lower.contains("refocus")
         || lower.contains("fenêtre cachée")
         || lower.contains("fenetre cachee")
@@ -873,9 +883,26 @@ pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<Comma
         || lower.contains("fenetre masquee")
         || lower.contains("en arrière-plan")
         || lower.contains("en arriere-plan")
-        || lower.contains("en arrière plan")
-    {
-        return vec![CommandTag::FocusWindow];
+        || lower.contains("en arrière plan");
+
+    if has_focus_intent {
+        let mut tags = vec![CommandTag::FocusWindow];
+        if lower.contains("écris") || lower.contains("ecris") || lower.contains("tape") || lower.contains("taper") || lower.contains("saisie") || lower.contains("saisir") || lower.contains("remplace") || lower.contains("efface") || lower.contains("write") {
+            tags.push(CommandTag::TextInputOrDictation);
+        }
+        if lower.contains("clique") || lower.contains("cliquer") || lower.contains("clic") || lower.contains("click") || lower.contains("bouton") || lower.contains("lien") || lower.contains("valide") || lower.contains("appuie") {
+            tags.push(CommandTag::ClickElementOrButton);
+        }
+        if lower.contains("cherche") || lower.contains("recherche") || lower.contains("google") || lower.contains("météo") || lower.contains("meteo") || lower.contains("search") || lower.contains("navigue") {
+            tags.push(CommandTag::WebNavigateOrSearch);
+        }
+        if lower.contains("lis") || lower.contains("lire") || lower.contains("résume") || lower.contains("resume") || lower.contains("analyse") {
+            tags.push(CommandTag::ScreenReadingOrSummary);
+        }
+        if lower.contains("son") || lower.contains("volume") || lower.contains("mute") {
+            tags.push(CommandTag::SetVolumeOrMuteUnMute);
+        }
+        return tags;
     }
 
     // Détection directe des impulsions du compagnon proactif
@@ -1172,6 +1199,10 @@ RÉTRO-ANALYSE COGNITIVE & ARRÊT STRICT SUR OBJECTIF (SELF-CHECK DE COMPLÉTION
      * Règle 1 : Ramène le navigateur au premier plan via {{"action": "focus_window", "title": "Chrome"}} (ou Edge / Firefox), ou renseigne le champ "window".
      * Règle 2 : Vise TOUJOURS un libellé court et épuré (ex: "Radio France" au lieu de "Radio France | Écoutez en ligne vos radios").
   -> Ce n'est qu'à la passe suivante, une fois la fenêtre cible bien visible et active au premier plan, que tu exécutes l'interaction (clic, texte, scroll).
+- ORDRE PRIORITAIRE DU FOCUS DE FENÊTRE :
+  Si l'utilisateur nomme, cible ou implique une fenêtre spécifique (ex: "focus sur le Bloc-notes et écris...", "va sur Chrome et cherche...", "sur la fenêtre X clique sur..."), ou si une commande doit s'exécuter dans une fenêtre qui n'est pas celle au premier plan :
+  -> Place TOUJOURS {{"action": "focus_window", "title": "Nom/titre de la fenêtre"}} EN PREMIÈRE ACTION dans le tableau "actions", avant toute autre action subséquente.
+  -> Si la demande comporte des actions subséquentes dans cette fenêtre (saisie, clic, défilement, etc.), NE T'ARRÊTE PAS après le focus : enchaîne avec l'action demandée ou poursuis avec "next_passes" > 0 jusqu'à l'accomplissement total de la tâche.
 - SI LA CIBLE EST ATTEINTE (page de films/vidéos affichée, vidéo en lecture, formulaire validé, texte saisi, information demandée lisible à l'écran) :
   -> ARRÊT STRICT ET IMMÉDIAT : renvoie impérativement "actions": [] et "next_passes": 0.
   -> INTERDICTION FORMELLE DE SUR-AGIR : Ne clique JAMAIS au hasard, ne défile pas indéfiniment et ne clique pas sur des recommandations secondaires, publicités ou menus inutiles une fois sur la destination demandée.
@@ -1195,9 +1226,7 @@ Règles de syntaxe JSON strictes :
             CommandTag::WebNavigateOrSearch => {
                 prompt.push_str(r#"
 Règles NAVIGATION WEB & RECHERCHE :
-- EXTRACTION DE L'INTENTION RÉELLE ET REFORMULATION (ANTI MOT-À-MOT) :
-  Ne copie JAMAIS mot-à-mot la phrase brute, les verbes d'injonction ou les formules de politesse de l'utilisateur dans l'URL de recherche (INTERDICTION FORMELLE d'inclure "cherche-moi", "trouve-moi", "peux-tu", "je voudrais savoir", "s'il te plaît", etc.).
-  Extrais et condense UNIQUEMENT le sujet réel et les mots-clés essentiels et pertinents (ex: si l'utilisateur dit "peux-tu me trouver la météo qu'il fera demain à Lyon s'il te plaît ?", cherche "meteo lyon demain" ; s'il dit "comment réparer un robinet qui goutte dans la cuisine", cherche "reparer robinet qui goutte").
+- EXTRACTION DE L'INTENTION RÉELLE de l'utilisateur
 - POINT DE DÉPART OBLIGATOIRE SUR GOOGLE SEARCH : Pour toute recherche d'information, météo (ex: météo Paris, prévisions), actualité ou service, le point de départ DOIT TOUJOURS ÊTRE une recherche Google via "navigate_to_url" ("https://www.google.com/search?q=mots+cles+du+sujet+reel"). INTERDICTION FORMELLE d'aller directement sur une URL présumée ou codée en dur (INTERDIT d'ouvrir directement meteofrance.com ou un site arbitraire : passe obligatoirement par Google Search d'abord).
 - RECHERCHE IMMÉDIATE SANS CONSEIL : Si l'utilisateur demande une recherche (météo, film, vidéo, information), INTERDICTION de répondre par du texte passif. Émets IMMÉDIATEMENT {"action": "navigate_to_url", "url": "https://www.google.com/search?q=...", "target": "new_tab"} avec "next_passes": 5.
 - INTERDICTION de fermer la fenêtre active (pas de "close_app" ni clic croix) pour chercher sur le web.
@@ -1284,13 +1313,17 @@ Règles APPLICATIONS :
             CommandTag::FocusWindow => {
                 prompt.push_str(r#"
 Règles FOCUS ET BASCULEMENT DE FENÊTRE (TAG FOCUS_WINDOW) :
-- FENÊTRES COUVERTES, CACHÉES OU ÉCHEC D'ACTION :
-  Si un contrôle d'une fenêtre cible n'a pas pu être atteint ou si la fenêtre souhaitée est cachée par la fenêtre active en cours, utilise impérativement "focus_window" pour la faire passer au premier plan.
-- L'utilisateur demande d'activer, basculer ou donner le focus à une fenêtre ou application déjà ouverte (ex: "mets Chrome en premier plan", "va sur la fenêtre Discord", "focus le bloc-notes").
-- Consulte la liste des fenêtres ouvertes dans [État actuel de l'écran].
-- Émets l'action "focus_window" avec le titre ou nom exact de la cible : {"action": "focus_window", "title": "Titre exact de la fenêtre"}.
-- INTERDICTION FORMELLE d'utiliser "open_app" ou de relancer le logiciel si sa fenêtre est déjà présente à l'écran.
-- Dès que la fenêtre est activée ou si elle est déjà au premier plan, arrête la boucle avec "actions": [], "next_passes": 0.
+- FOCUS PRIORITAIRE AVANT TOUTE COMMANDE :
+  Si l'utilisateur demande d'agir sur ou dans une fenêtre spécifique (ex: "focus sur le Bloc-notes et écris...", "va sur Chrome et cherche...", "sur la fenêtre X clique...", "dans Edge ouvre..."), tu DOIS IMPÉRATIVEMENT émettre {"action": "focus_window", "title": "Titre exact de la fenêtre"} EN TOUTE PREMIÈRE ACTION dans le tableau "actions", avant toute autre action subséquente.
+- BASCULEMENT DE FENÊTRE SEUL :
+  Si la demande consiste uniquement à changer de fenêtre ou l'amener au premier plan (ex: "mets Chrome en premier plan", "va sur la fenêtre Discord", "focus le bloc-notes", "passe sur VS Code") :
+  Émets l'action {"action": "focus_window", "title": "Titre exact de la fenêtre"} avec "actions": [{"action": "focus_window", "title": "..."}]. Dès que la fenêtre est au premier plan et qu'aucune autre commande n'a été demandée, conclus avec "next_passes": 0.
+- ENCHAÎNEMENT D'ACTIONS APRÈS FOCUS :
+  Si l'utilisateur a demandé d'effectuer des actions dans cette fenêtre (ex: taper du texte, cliquer sur un bouton/lien, lancer une recherche) :
+  NE T'ARRÊTE PAS après le focus de la fenêtre ! Place "focus_window" en premier dans "actions", enchaîne avec la première action demandée dans cette fenêtre (ou prévois "next_passes" > 0 pour l'exécuter dès que la fenêtre sera en premier plan).
+- FENÊTRES COUVERTES OU CACHÉES :
+  Si un contrôle cible est masqué ou n'a pas répondu, utilise impérativement "focus_window" pour ramener la bonne fenêtre au premier plan avant d'interagir.
+- INTERDICTION FORMELLE d'utiliser "open_app" ou de relancer le logiciel si sa fenêtre est déjà présente dans [État actuel de l'écran] : utilise toujours "focus_window".
 "#);
             }
             CommandTag::WindowManagementOrImmersion => {
@@ -2898,7 +2931,9 @@ pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<Command
             } else if clean.to_lowercase().contains("page") || clean.to_lowercase().contains("site") || clean.to_lowercase().contains("écran") || clean.to_lowercase().contains("ecran") {
                 vec![CommandTag::WebpageAnalysis, CommandTag::ScreenReadingOrSummary]
             } else if clean.to_lowercase().contains("fenêtre") || clean.to_lowercase().contains("fenetre") {
-                vec![CommandTag::FocusWindow, CommandTag::WindowManagementOrImmersion]
+                vec![CommandTag::FocusWindow, CommandTag::ClickElementOrButton]
+            } else if clean.to_lowercase().contains("focus") {
+                vec![CommandTag::FocusWindow, CommandTag::ClickElementOrButton]
             } else if clean.to_lowercase().contains("rythme")
                 || clean.to_lowercase().contains("rhythm")
                 || clean.to_lowercase().contains("instrument")

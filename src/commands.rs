@@ -305,6 +305,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     }
                 }
                 if found_hwnd.is_none() {
+                    user_windows = list_user_windows();
                     if let Some(t) = title.as_deref().filter(|s| !s.trim().is_empty()) {
                         found_hwnd = find_windows_matching(t, &user_windows, active_user_hwnd).first().copied();
                     }
@@ -321,6 +322,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         let is_browser = is_browser_hwnd(hwnd, win_title);
                         force_foreground_window(hwnd);
                         restore_if_iconic(hwnd);
+                        std::thread::sleep(Duration::from_millis(80));
                         if is_browser {
                             focus_browser_address_bar(hwnd);
                         }

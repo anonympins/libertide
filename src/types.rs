@@ -935,6 +935,10 @@ impl QuickSuggestionItem {
                 AgentAction::ClickElement { target_name, .. } => Some(format!("Cliquer {target_name}")),
                 AgentAction::ClickButton { button_name, .. } => Some(format!("Cliquer {button_name}")),
                 AgentAction::CloseApp { name } => Some(format!("Fermer {name}")),
+                AgentAction::FocusWindow { title, .. } => {
+                    let t = title.as_deref().unwrap_or("la fenêtre");
+                    Some(format!("Activer la fenêtre {t}"))
+                }
                 AgentAction::Scroll { direction, .. } => Some(format!("Faire défiler ({direction})")),
                 AgentAction::ReadEditorContent { window, .. } => Some(format!("Lire le fichier ({})", window.as_deref().unwrap_or("éditeur"))),
                 AgentAction::Dictate { text, .. } => {

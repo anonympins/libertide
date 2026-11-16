@@ -66,6 +66,7 @@ pub struct OverlayApp {
     live_transcript: String,
     input_text: String,
     is_recording: bool,
+    mic_manually_disabled: bool,
     whisper_ready: bool,
     smoothed_audio_level: f32,
     continuous_mode: bool,
@@ -374,6 +375,7 @@ impl OverlayApp {
             input_text: String::new(),
             smoothed_audio_level: 0.0,
             is_recording: false,
+            mic_manually_disabled: false,
             whisper_ready: false,
             continuous_mode: true,
             dictation_mode: false,
@@ -677,6 +679,7 @@ impl OverlayApp {
     }
 
     fn enter_dictation_mode(&mut self) {
+        self.mic_manually_disabled = false;
         self.dictation_mode = true;
         self.continuous_mode = true;
         IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
@@ -706,6 +709,7 @@ impl OverlayApp {
     fn exit_dictation_mode(&mut self) {
         self.dictation_mode = false;
         self.continuous_mode = false;
+        self.mic_manually_disabled = true;
         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
         play_earcon(Earcon::Success);
         let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
@@ -895,7 +899,7 @@ impl OverlayApp {
     }
 
     fn start_recording(&mut self, _ctx: &egui::Context, play_sound: bool) {
-        if self.status == AgentStatus::EmergencyStopped || self.voice_is_recording_sample {
+        if self.status == AgentStatus::EmergencyStopped || self.voice_is_recording_sample || self.mic_manually_disabled {
             return;
         }
         self.stop_speaking();
@@ -916,6 +920,7 @@ impl OverlayApp {
     fn stop_recording(&mut self) {
         self.is_recording = false;
         self.continuous_mode = false;
+        self.mic_manually_disabled = true;
         let _ = self.audio_sender.send(AudioCommand::Stop);
         play_earcon(Earcon::MicClose);
         set_mic_audio_level(0.0);
@@ -928,8 +933,10 @@ impl OverlayApp {
             return;
         }
         if self.is_recording {
-            self.stop_recording(); // This will trigger prompt processing if text is present
+            self.mic_manually_disabled = true;
+            self.stop_recording();
         } else {
+            self.mic_manually_disabled = false;
             self.start_recording(ctx, true);
         }
     }
@@ -1054,9 +1061,7 @@ impl eframe::App for OverlayApp {
 
         // --- Traitement du pointage Eye-Tracking (Webcam / Regard) ---
         let eye_tracking_needed = eyetracking::is_eye_tracking_enabled()
-            || self.eye_tracker.calibration.is_active
-            || eyetracking::is_dev_mode()
-            || eyetracking::is_eye_debug_overlay_visible();
+            || self.eye_tracker.calibration.is_active;
 
         // Détection de l'appui sur Entrée pour déclencher le clic et figer le regard
         let enter_physically_pressed = eyetracking::is_enter_key_pressed();
@@ -1245,9 +1250,10 @@ impl eframe::App for OverlayApp {
                             self.is_recording = true;
                         } else if new_status == AgentStatus::Idle {
                             self.is_recording = false;
-                            if (self.dictation_mode
-                                || (prev_status == AgentStatus::Thinking && self.continuous_mode)
-                                || (prev_status == AgentStatus::Speaking && self.continuous_mode))
+                            if !self.mic_manually_disabled
+                                && (self.dictation_mode
+                                    || (prev_status == AgentStatus::Thinking && self.continuous_mode)
+                                    || (prev_status == AgentStatus::Speaking && self.continuous_mode))
                                 && !crate::audio::is_live_subtitles_active()
                                 && self.whisper_ready
                                 && !self.show_api_key_modal
@@ -1449,9 +1455,63 @@ impl eframe::App for OverlayApp {
                     let norm_prompt = normalize_for_command_match(&prompt);
                     if norm_prompt.trim().is_empty() {
                         println!("[Voice] Bruit parasite ignoré (aucun mot détecté) : aucune requête LLM.");
-                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                        if !self.mic_manually_disabled && self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx, false);
                         }
+                        return;
+                    }
+
+                    // Commandes directes de contrôle du microphone
+                    if norm_prompt == "coupe le micro"
+                        || norm_prompt == "couper le micro"
+                        || norm_prompt == "eteins le micro"
+                        || norm_prompt == "éteins le micro"
+                        || norm_prompt == "eteindre le micro"
+                        || norm_prompt == "éteindre le micro"
+                        || norm_prompt == "desactive le micro"
+                        || norm_prompt == "désactive le micro"
+                        || norm_prompt == "desactiver le micro"
+                        || norm_prompt == "désactiver le micro"
+                        || norm_prompt == "arrete le micro"
+                        || norm_prompt == "arrête le micro"
+                        || norm_prompt == "ferme le micro"
+                        || norm_prompt == "mute micro"
+                        || norm_prompt == "mute mic"
+                        || norm_prompt == "stop micro"
+                        || norm_prompt == "stop mic"
+                    {
+                        self.mic_manually_disabled = true;
+                        self.stop_recording();
+                        play_earcon(Earcon::MicClose);
+                        let reply = "Microphone éteint.".to_string();
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: reply.clone(),
+                            timestamp: current_time_str(),
+                            quick_suggestions: vec![QuickSuggestionItem::Text("Activer le micro".to_string())],
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                        return;
+                    }
+                    if norm_prompt == "active le micro"
+                        || norm_prompt == "activer le micro"
+                        || norm_prompt == "allume le micro"
+                        || norm_prompt == "allumer le micro"
+                        || norm_prompt == "unmute micro"
+                        || norm_prompt == "unmute mic"
+                    {
+                        self.mic_manually_disabled = false;
+                        self.start_recording(&ctx, true);
+                        let reply = "Microphone activé.".to_string();
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: reply.clone(),
+                            timestamp: current_time_str(),
+                            quick_suggestions: vec![QuickSuggestionItem::Text("Couper le micro".to_string())],
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                         return;
                     }
 
@@ -1975,7 +2035,7 @@ impl eframe::App for OverlayApp {
                             self.continuous_mode = true;
                         } else if !prompt.trim().is_empty() {
                             self.status = AgentStatus::Thinking;
-                            self.continuous_mode = true;
+                            self.continuous_mode = !self.mic_manually_disabled;
                             self.input_text.clear();
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::User,
@@ -1998,7 +2058,8 @@ impl eframe::App for OverlayApp {
                             continue;
                         }
                     }
-                    if self.continuous_mode
+                    if !self.mic_manually_disabled
+                        && self.continuous_mode
                         && !crate::audio::is_live_subtitles_active()
                         && self.status != AgentStatus::EmergencyStopped
                         && !self.show_api_key_modal
@@ -2017,7 +2078,8 @@ impl eframe::App for OverlayApp {
                             || m.has_focus(egui::Id::NULL.with("api_key_input_field"))
                             || m.has_focus(egui::Id::NULL.with("model_input_field"))
                     });
-                    if self.continuous_mode
+                    if !self.mic_manually_disabled
+                        && self.continuous_mode
                         && self.status != AgentStatus::EmergencyStopped
                         && self.status != AgentStatus::Speaking
                         && !self.show_api_key_modal
@@ -2075,7 +2137,7 @@ impl eframe::App for OverlayApp {
                         }
                     }
                     self.live_transcript.clear();
-                    if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                    if !self.mic_manually_disabled && self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                         self.start_recording(&ctx, false);
                     }
                 }
@@ -2278,7 +2340,7 @@ impl eframe::App for OverlayApp {
         let egui_f4 = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F4));
 
         if hook_events.contains(&SwitchKeyEvent::GazeClick) {
-            let is_eye_on = eyetracking::is_eye_tracking_enabled() && !self.eye_tracker.calibration.is_active;
+            let is_eye_on = is_eye_tracking_enabled() && !self.eye_tracker.calibration.is_active;
             if is_eye_on && !is_typing && self.last_eye_click_time.elapsed() >= Duration::from_millis(250) {
                 self.last_eye_click_time = Instant::now();
                 self.trigger_gaze_click();
@@ -4481,7 +4543,7 @@ impl eframe::App for OverlayApp {
                                             if self.is_recording {
                                                 self.stop_recording();
                                             }
-                                            self.continuous_mode = true;
+                                            self.continuous_mode = !self.mic_manually_disabled;
                                             self.input_text.clear();
                                             self.input_suggestions.clear();
                                             self.last_suggestion_query.clear();
@@ -4551,7 +4613,7 @@ impl eframe::App for OverlayApp {
                                             if self.is_recording {
                                                 self.stop_recording();
                                             }
-                                            self.continuous_mode = true;
+                                            self.continuous_mode = !self.mic_manually_disabled;
                                             self.input_suggestions.clear();
                                             self.last_suggestion_query.clear();
                                             self.auto_scroll_to_bottom = true;
@@ -5166,7 +5228,7 @@ impl eframe::App for OverlayApp {
                                             self.stop_recording();
                                         }
                                         self.status = AgentStatus::Thinking;
-                                        self.continuous_mode = true;
+                                        self.continuous_mode = !self.mic_manually_disabled;
                                         self.live_transcript.clear();
 
                                         let norm_prompt = normalize_for_command_match(&prompt);
@@ -5680,7 +5742,7 @@ impl eframe::App for OverlayApp {
                         self.stop_recording();
                     }
                     self.status = AgentStatus::Thinking;
-                    self.continuous_mode = true;
+                    self.continuous_mode = !self.mic_manually_disabled;
                     self.live_transcript.clear();
 
                     if let Some(card) = is_read_card_intent(&prompt, &self.floating_cards) {

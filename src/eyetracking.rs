@@ -120,7 +120,9 @@ pub fn set_eye_tracker_source(source: EyeTrackerSource) {
         std::env::set_var("EYE_TRACKER_SOURCE", name);
         // Redémarrer le worker de capture sur la nouvelle source matérielle
         stop_camera_worker();
-        ensure_camera_worker_running();
+        if is_eye_tracking_enabled() || is_calibration_active() {
+            ensure_camera_worker_running();
+        }
     }
 }
 
@@ -368,9 +370,9 @@ pub fn set_show_eye_debug_overlay(show: bool) {
     if prev == show {
         return;
     }
-    if show {
+    if show && (is_eye_tracking_enabled() || is_calibration_active()) {
         ensure_camera_worker_running();
-    } else if !is_dev_mode() && !is_eye_tracking_enabled() && !is_calibration_active() {
+    } else if !is_eye_tracking_enabled() && !is_calibration_active() {
         stop_camera_worker();
     }
 }
@@ -395,8 +397,7 @@ pub fn set_dev_mode(dev: bool) {
 
 /// Indique si l'overlay de débogage des yeux doit être affiché à l'écran
 pub fn should_show_eye_debug() -> bool {
-    if (is_dev_mode() || is_eye_tracking_enabled()) && !is_calibration_active() && is_eye_debug_overlay_visible() {
-        ensure_camera_worker_running();
+    if is_eye_tracking_enabled() && !is_calibration_active() && is_eye_debug_overlay_visible() {
         true
     } else {
         false
@@ -456,9 +457,9 @@ pub fn set_eye_tracking_enabled(enabled: bool) {
         }
         ensure_camera_worker_running();
     } else {
-        // Ne pas arrêter le worker si le mode dev, la calibration ou l'encadré debug ont besoin de la caméra
-        if !is_dev_mode() && !is_calibration_active() && !is_eye_debug_overlay_visible() {
+        if !is_calibration_active() {
             stop_camera_worker();
+            set_show_eye_debug_overlay(false);
         }
         if !is_dev_mode() && !is_calibration_active() {
             if let Ok(mut guard) = EYE_DEBUG_STATE.lock() {
@@ -475,7 +476,9 @@ static PREVIEW_TEXTURE_CACHE: Mutex<Option<(Instant, egui::TextureHandle)>> = Mu
 
 /// Dessine la vignette vidéo avec les boîtes vertes et réticules oculaires dans l'interface egui
 pub fn render_eye_preview_widget(ui: &mut egui::Ui, desired_width: f32) {
-    ensure_camera_worker_running();
+    if is_eye_tracking_enabled() || is_calibration_active() {
+        ensure_camera_worker_running();
+    }
     ui.ctx().request_repaint_after(Duration::from_millis(33));
 
     let source = get_eye_tracker_source();
@@ -739,7 +742,7 @@ pub fn is_camera_worker_running() -> bool {
 }
 
 pub fn is_camera_active() -> bool {
-    (is_eye_tracking_enabled() || is_calibration_active() || is_dev_mode()) && is_camera_worker_running()
+    (is_eye_tracking_enabled() || is_calibration_active()) && is_camera_worker_running()
 }
 
 /// Active ou désactive le suivi caméra de façon idempotente (sans redémarrer inutilement)
@@ -764,6 +767,9 @@ pub fn set_camera_device_name(name: impl Into<String>) {
 }
 
 pub fn ensure_camera_worker_running() {
+    if !is_eye_tracking_enabled() && !is_calibration_active() {
+        return;
+    }
     if !is_camera_worker_running() {
         start_camera_worker();
     }
@@ -1767,7 +1773,7 @@ impl Default for EyeTrackingController {
             .map(|s| s.trim().eq_ignore_ascii_case("true") || s.trim() == "1")
             .unwrap_or(false);
         EYE_TRACKING_ENABLED.store(enabled, Ordering::Relaxed);
-        if enabled || is_dev_mode() {
+        if enabled {
             start_camera_worker();
         }
 
@@ -1850,7 +1856,12 @@ impl Default for EyeTrackingController {
             "opentrack" | "freetrack" => EyeTrackerSource::OpenTrackUdp,
             _ => EyeTrackerSource::WebcamNeural,
         };
-        set_eye_tracker_source(source);
+        let source_val = match source {
+            EyeTrackerSource::WebcamNeural => 0,
+            EyeTrackerSource::OpenGazeTcp => 1,
+            EyeTrackerSource::OpenTrackUdp => 2,
+        };
+        EYE_TRACKER_SOURCE.store(source_val, Ordering::Relaxed);
 
         let mouse_override_ms = std::env::var("EYE_MOUSE_DEBOUNCE_MS")
             .ok()
@@ -3470,10 +3481,9 @@ fn run_opengaze_client_loop(addr: &str) -> Result<(), Box<dyn std::error::Error>
     let mut last_hz_time = Instant::now();
 
     while is_camera_worker_running() {
-        let active = is_eye_tracking_enabled() || is_calibration_active() || is_dev_mode() || is_eye_debug_overlay_visible();
+        let active = is_eye_tracking_enabled() || is_calibration_active();
         if !active {
-            std::thread::sleep(Duration::from_millis(40));
-            continue;
+            break;
         }
         if check_and_stop_eye_tracking_on_escape() {
             std::thread::sleep(Duration::from_millis(40));
@@ -3541,10 +3551,9 @@ fn run_opentrack_udp_loop(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let mut last_hz_time = Instant::now();
 
     while is_camera_worker_running() {
-        let active = is_eye_tracking_enabled() || is_calibration_active() || is_dev_mode() || is_eye_debug_overlay_visible();
+        let active = is_eye_tracking_enabled() || is_calibration_active();
         if !active {
-            std::thread::sleep(Duration::from_millis(40));
-            continue;
+            break;
         }
         if check_and_stop_eye_tracking_on_escape() {
             std::thread::sleep(Duration::from_millis(40));
@@ -3600,6 +3609,9 @@ fn run_opentrack_udp_loop(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 // ============================================================================
 
 fn run_camera() -> Result<(), Box<dyn std::error::Error>> {
+    if !is_eye_tracking_enabled() && !is_calibration_active() {
+        return Ok(());
+    }
     let mut camera_opt = None;
     let mut last_err = String::new();
 
@@ -3649,13 +3661,9 @@ fn run_camera() -> Result<(), Box<dyn std::error::Error>> {
     let mut consecutive_errors: u32 = 0;
 
     while is_camera_worker_running() {
-        let active = is_eye_tracking_enabled()
-            || is_calibration_active()
-            || is_dev_mode()
-            || is_eye_debug_overlay_visible();
+        let active = is_eye_tracking_enabled() || is_calibration_active();
         if !active {
-            std::thread::sleep(Duration::from_millis(40));
-            continue;
+            break;
         }
 
         if check_and_stop_eye_tracking_on_escape() {
@@ -3718,6 +3726,9 @@ fn run_camera() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Démarre le thread de capture vidéo en arrière-plan avec protection contre le multi-spawn
 pub fn start_camera_worker() {
+    if !is_eye_tracking_enabled() && !is_calibration_active() {
+        return;
+    }
     let _guard = match CAMERA_START_LOCK.try_lock() {
         Ok(g) => g,
         Err(_) => return, // Un démarrage est déjà en cours
@@ -3821,8 +3832,10 @@ fn poll_mouse_fallback_sample() {
 fn run_fallback_camera_loop() {
     while is_camera_worker_running() {
         let _ = check_and_stop_eye_tracking_on_escape();
-        if is_eye_tracking_enabled() || is_calibration_active() || is_dev_mode() {
+        if is_eye_tracking_enabled() || is_calibration_active() {
             poll_mouse_fallback_sample();
+        } else {
+            break;
         }
         std::thread::sleep(Duration::from_millis(33));
     }
