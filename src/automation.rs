@@ -3185,26 +3185,17 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
         let _ = AllowSetForegroundWindow(ASFW_ANY);
 
         let current_thread_id = GetCurrentThreadId();
-        let mut target_pid = 0u32;
-        let target_thread_id = GetWindowThreadProcessId(hwnd, Some(&mut target_pid));
         let fg_thread_id = if !fg_hwnd.0.is_null() {
             GetWindowThreadProcessId(fg_hwnd, None)
         } else {
             0
         };
 
-        if current_thread_id != target_thread_id && target_thread_id != 0 {
-            let _ = AttachThreadInput(current_thread_id, target_thread_id, 1);
-            if fg_thread_id != 0 && fg_thread_id != target_thread_id {
-                let _ = AttachThreadInput(fg_thread_id, target_thread_id, 1);
-            }
+        if fg_thread_id != 0 && current_thread_id != fg_thread_id {
+            let _ = AttachThreadInput(current_thread_id, fg_thread_id, 1);
             let _ = BringWindowToTop(hwnd);
             let _ = SetForegroundWindow(hwnd);
-
-            if fg_thread_id != 0 && fg_thread_id != target_thread_id {
-                let _ = AttachThreadInput(fg_thread_id, target_thread_id, 0);
-            }
-            let _ = AttachThreadInput(current_thread_id, target_thread_id, 0);
+            let _ = AttachThreadInput(current_thread_id, fg_thread_id, 0);
         } else {
             let _ = BringWindowToTop(hwnd);
             let _ = SetForegroundWindow(hwnd);

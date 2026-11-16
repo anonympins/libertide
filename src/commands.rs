@@ -529,18 +529,6 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         }
                         feedback.push(format!("Défilement vers le bas ({steps} pas) effectué."));
                     }
-
-                    std::thread::sleep(Duration::from_millis(150));
-                    let scrolled_summary = summarize_screen_state(if win_title.is_empty() { None } else { Some(win_title) }, false);
-                    if !scrolled_summary.trim().is_empty() {
-                        if let Ok(mut lock) = LAST_SCREEN_SUMMARY.lock() {
-                            *lock = Some(scrolled_summary.clone());
-                        }
-                        feedback.push(format!(
-                            "[Contenu et éléments révélés après défilement] :\n{}",
-                            truncate_with_notice(&scrolled_summary, 2500)
-                        ));
-                    }
                 }
             }
             AgentAction::KillProcess { pid, name } => {

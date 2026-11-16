@@ -1614,6 +1614,9 @@ pub fn draw_screen_zones_and_targets(
 #[cfg(windows)]
 pub fn clear_screen_numbered_badges() {
     if let Ok(mut state) = OVERLAY_STATE.lock() {
+        if !state.is_visible && state.targets.is_empty() && state.zones.is_empty() && state.focused_border.is_none() && state.orange_border.is_none() {
+            return;
+        }
         state.targets.clear();
         state.zones.clear();
         state.focused_border = None;

@@ -1989,7 +1989,7 @@ pub fn extract_inner_text(uia: &IUIAutomation, element: &IUIAutomationElement, m
         }
 
         if let Ok(cond) = uia.ControlViewCondition() {
-            if let Ok(children) = element.FindAll(TreeScope_Descendants, &cond) {
+            if let Ok(children) = element.FindAll(windows::Win32::UI::Accessibility::TreeScope_Children, &cond) {
                 let child_count = children.Length().unwrap_or(0).min(8);
                 let mut collected = String::new();
                 for ci in 0..child_count {
