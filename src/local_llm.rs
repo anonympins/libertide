@@ -2790,7 +2790,7 @@ impl LocalLlamaEngine {
 
         let total_tokens = tokens.len();
         let chunk_size = (n_batch as usize).min(total_tokens);
-        let mut batch = LlamaBatch::new(chunk_size, 0);
+        let mut batch = LlamaBatch::new(chunk_size, 1);
 
         let mut current_pos = 0i32;
         println!(
@@ -2804,6 +2804,9 @@ impl LocalLlamaEngine {
         for chunk in tokens.chunks(chunk_size) {
             batch.clear();
             for token in chunk {
+                if current_pos >= max_ctx as i32 {
+                    break;
+                }
                 let is_last = (current_pos as usize + 1) == total_tokens;
                 batch.add(*token, current_pos, &[0], is_last).map_err(|e| e.to_string())?;
                 current_pos += 1;
@@ -2964,20 +2967,29 @@ impl LocalLlamaEngine {
             .map_err(|e| format!("Erreur création contexte router: {e}"))?;
 
         let vocab = self.model.vocab();
-        let tokens = vocab.tokenize(formatted_prompt.as_bytes(), false, true);
+        let mut tokens = vocab.tokenize(formatted_prompt.as_bytes(), false, true);
 
         if tokens.is_empty() {
             return Ok(String::new());
         }
 
+        // Tronquage impératif pour éviter tout dépassement de buffer dans le KV cache GGML
+        let max_prompt_tokens = (max_ctx as usize).saturating_sub(max_tokens.max(64));
+        if tokens.len() > max_prompt_tokens {
+            tokens.truncate(max_prompt_tokens);
+        }
+
         let total_tokens = tokens.len();
-        let chunk_size = (n_batch as usize).min(total_tokens);
-        let mut batch = LlamaBatch::new(chunk_size, 0);
+        let chunk_size = (n_batch as usize).min(total_tokens).max(1);
+        let mut batch = LlamaBatch::new(chunk_size, 1);
         let mut current_pos = 0i32;
 
         for chunk in tokens.chunks(chunk_size) {
             batch.clear();
             for token in chunk {
+                if current_pos >= max_ctx as i32 {
+                    break;
+                }
                 let is_last = (current_pos as usize + 1) == total_tokens;
                 batch.add(*token, current_pos, &[0], is_last).map_err(|e| e.to_string())?;
                 current_pos += 1;
