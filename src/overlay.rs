@@ -327,10 +327,6 @@ pub fn render_accessible_input(
     ui.memory_mut(|m| m.interested_in_focus(id, layer_id));
     let had_focus = ui.memory(|m| m.has_focus(id));
 
-    if had_focus {
-        crate::automation::IS_USER_TYPING.store(true, Ordering::Relaxed);
-    }
-
     // Gestion universelle du collage (Ctrl+V / Shift+Insert / Événement Paste OS)
     let paste_hit = ui.input(|i| {
         i.events.iter().any(|e| match e {
@@ -378,9 +374,6 @@ pub fn render_accessible_input(
     };
 
     let now_focused = response.has_focus() || ui.memory(|m| m.has_focus(id));
-    if now_focused {
-        crate::automation::IS_USER_TYPING.store(true, Ordering::Relaxed);
-    }
 
 
     // Raccourcis Copier / Couper au clavier

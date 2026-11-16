@@ -41,7 +41,7 @@ use windows::Win32::UI::Accessibility::{
 };
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+    mouse_event, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
     VIRTUAL_KEY,
 };
@@ -249,43 +249,26 @@ pub fn click_element(
         return;
     }
 
-    // 3. Clic souris physique avec clampage géométrique strict
-    let safe_x = click_x.clamp(work_area.left + 2, (work_area.right - 2).max(work_area.left + 2));
-    let safe_y = click_y.clamp(work_area.top + 2, (work_area.bottom - 2).max(work_area.top + 2));
+    // 3. Clic souris physique : ne pas restreindre le curseur au work area si aucun élément spécifique n'est ciblé
+    let safe_x = if element.is_some() {
+        click_x.clamp(work_area.left + 2, (work_area.right - 2).max(work_area.left + 2))
+    } else {
+        click_x
+    };
+    let safe_y = if element.is_some() {
+        click_y.clamp(work_area.top + 2, (work_area.bottom - 2).max(work_area.top + 2))
+    } else {
+        click_y
+    };
 
     unsafe {
         let _ = SetCursorPos(safe_x, safe_y);
-        std::thread::sleep(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(20));
 
-        let mouse_down = INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: 0,
-                    dy: 0,
-                    mouseData: 0,
-                    dwFlags: MOUSEEVENTF_LEFTDOWN,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        let mouse_up = INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: 0,
-                    dy: 0,
-                    mouseData: 0,
-                    dwFlags: MOUSEEVENTF_LEFTUP,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        SendInput(&[mouse_down], std::mem::size_of::<INPUT>() as i32);
-        std::thread::sleep(Duration::from_millis(40));
-        SendInput(&[mouse_up], std::mem::size_of::<INPUT>() as i32);
+        // mouse_event garantit la génération native du clic au niveau du sous-système Windows
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        std::thread::sleep(Duration::from_millis(35));
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
     }
 }
 
@@ -2006,7 +1989,7 @@ pub fn extract_inner_text(uia: &IUIAutomation, element: &IUIAutomationElement, m
         }
 
         if let Ok(cond) = uia.ControlViewCondition() {
-            if let Ok(children) = element.FindAll(TreeScope_Descendants, &cond) {
+            if let Ok(children) = element.FindAll(windows::Win32::UI::Accessibility::TreeScope_Children, &cond) {
                 let child_count = children.Length().unwrap_or(0).min(8);
                 let mut collected = String::new();
                 for ci in 0..child_count {

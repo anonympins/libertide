@@ -1273,6 +1273,9 @@ pub fn install_switch_keyboard_hook() {
                         if matches!(key, rdev::Key::Escape) {
                             crate::eyetracking::ESCAPE_PRESSED.store(true, Ordering::Relaxed);
                         }
+                        if matches!(key, rdev::Key::Return) {
+                            crate::eyetracking::ENTER_PRESSED.store(true, Ordering::Relaxed);
+                        }
 
                         // Raccourcis globaux
                         let global_evt = match key {
@@ -1286,6 +1289,19 @@ pub fn install_switch_keyboard_hook() {
                         if let Some(evt) = global_evt {
                             if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
                                 q.push(evt);
+                            }
+                            trigger_repaint();
+                            return;
+                        }
+
+                        // Détection globale d'Entrée pour le clic par le regard (Eye-Tracking)
+                        let is_eye_active = crate::eyetracking::is_eye_tracking_enabled()
+                            && !crate::eyetracking::is_calibration_active();
+
+                        if is_eye_active && !is_dictation && !is_typing && matches!(key, rdev::Key::Return) {
+                            crate::eyetracking::request_gaze_click();
+                            if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                q.push(crate::types::SwitchKeyEvent::GazeClick);
                             }
                             trigger_repaint();
                             return;
@@ -1352,6 +1368,9 @@ pub fn install_switch_keyboard_hook() {
                     rdev::EventType::KeyRelease(key) => {
                         if matches!(key, rdev::Key::Escape) {
                             crate::eyetracking::ESCAPE_PRESSED.store(false, Ordering::Relaxed);
+                        }
+                        if matches!(key, rdev::Key::Return) {
+                            crate::eyetracking::ENTER_PRESSED.store(false, Ordering::Relaxed);
                         }
 
                         if !is_switch_on || is_dictation || is_typing {
@@ -1926,9 +1945,67 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
             }
         }
 
+        let overlay_hwnd = FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()));
+        let fg_hwnd = GetForegroundWindow();
+        let is_libertide_fg = !overlay_hwnd.0.is_null() && fg_hwnd == overlay_hwnd;
+        let is_user_typing = IS_USER_TYPING.load(Ordering::Relaxed) && is_libertide_fg;
+
+        // 2b. Interception prioritaire de la touche Entrée pour l'Eye-Tracking (Clic par le regard)
+        let is_eye_active = crate::eyetracking::is_eye_tracking_enabled()
+            && !crate::eyetracking::is_calibration_active();
+
+        if is_eye_active && !is_dictation && vk == 0x0D && ((!is_ctrl && !is_alt) || is_powertoys) {
+            if is_user_typing {
+                return CallNextHookEx(None, code, wparam, lparam);
+            }
+
+            crate::eyetracking::ENTER_PRESSED.store(is_down, Ordering::Relaxed);
+            let vk_idx = (vk as usize) & 0xFF;
+            let now = Instant::now();
+            if is_down {
+                let mut already_down = false;
+                if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
+                    already_down = keys[vk_idx];
+                    if already_down {
+                        if let Ok(times) = HOOK_KEYS_DOWN_TIME.lock() {
+                            if let Some(t) = times[vk_idx] {
+                                if now.duration_since(t) > Duration::from_millis(500) {
+                                    already_down = false;
+                                }
+                            } else {
+                                already_down = false;
+                            }
+                        }
+                    }
+                    keys[vk_idx] = true;
+                }
+                if !already_down {
+                    if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+                        times[vk_idx] = Some(now);
+                    }
+                    eprintln!("[Hook] Entrée pressée -> Demande de clic Eye-Tracking");
+                    crate::eyetracking::request_gaze_click();
+                    std::thread::spawn(|| {
+                        crate::eyetracking::perform_system_gaze_click();
+                    });
+                    if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                        q.push(SwitchKeyEvent::GazeClick);
+                    }
+                    trigger_repaint();
+                }
+            } else if is_up {
+                if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
+                    keys[vk_idx] = false;
+                }
+                if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+                    times[vk_idx] = None;
+                }
+            }
+            return windows::Win32::Foundation::LRESULT(1);
+        }
+
         // 2. Si l'utilisateur tape activement dans un champ de texte interne de Libertide,
         // laisser passer les frappes vers l'UI Libertide.
-        let is_user_typing = IS_USER_TYPING.load(Ordering::Relaxed);
         if is_user_typing {
             return CallNextHookEx(None, code, wparam, lparam);
         }
@@ -1941,11 +2018,10 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
 
         #[cfg(windows)]
         {
-            let overlay = FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()));
-            if !overlay.0.is_null() && IsIconic(overlay).as_bool() && is_switch_hook_on {
+            if !overlay_hwnd.0.is_null() && IsIconic(overlay_hwnd).as_bool() && is_switch_hook_on {
                 // Si la fenêtre Libertide était minimisée (iconique), on la restaure discrètement
                 // afin que la boucle d'événements winit/eframe continue de dépiler les touches.
-                let _ = ShowWindow(overlay, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE);
+                let _ = ShowWindow(overlay_hwnd, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE);
             }
         }
 
@@ -3109,26 +3185,17 @@ pub fn force_foreground_window(hwnd: HWND) -> bool {
         let _ = AllowSetForegroundWindow(ASFW_ANY);
 
         let current_thread_id = GetCurrentThreadId();
-        let mut target_pid = 0u32;
-        let target_thread_id = GetWindowThreadProcessId(hwnd, Some(&mut target_pid));
         let fg_thread_id = if !fg_hwnd.0.is_null() {
             GetWindowThreadProcessId(fg_hwnd, None)
         } else {
             0
         };
 
-        if current_thread_id != target_thread_id && target_thread_id != 0 {
-            let _ = AttachThreadInput(current_thread_id, target_thread_id, 1);
-            if fg_thread_id != 0 && fg_thread_id != target_thread_id {
-                let _ = AttachThreadInput(fg_thread_id, target_thread_id, 1);
-            }
+        if fg_thread_id != 0 && current_thread_id != fg_thread_id {
+            let _ = AttachThreadInput(current_thread_id, fg_thread_id, 1);
             let _ = BringWindowToTop(hwnd);
             let _ = SetForegroundWindow(hwnd);
-
-            if fg_thread_id != 0 && fg_thread_id != target_thread_id {
-                let _ = AttachThreadInput(fg_thread_id, target_thread_id, 0);
-            }
-            let _ = AttachThreadInput(current_thread_id, target_thread_id, 0);
+            let _ = AttachThreadInput(current_thread_id, fg_thread_id, 0);
         } else {
             let _ = BringWindowToTop(hwnd);
             let _ = SetForegroundWindow(hwnd);
@@ -3499,6 +3566,30 @@ pub fn urlencoding_simple(query: &str) -> String {
         .collect()
 }
 
+pub fn urldecoding_simple(input: &str) -> String {
+    let mut out = Vec::new();
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+        } else if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16) {
+                out.push(byte);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
 pub fn truncate_with_notice(text: &str, max_chars: usize) -> String {
     if text.chars().count() > max_chars {
         let truncated: String = text.chars().take(max_chars).collect();
@@ -3576,10 +3667,50 @@ pub fn is_generic_textarea_target(target: &str) -> bool {
         || t == "texte"
 }
 
+fn clean_search_url_if_present(url: &str) -> Option<String> {
+    let lower = url.to_lowercase();
+    let (prefix, query_key) = if lower.contains("google.") && lower.contains("/search?") {
+        ("https://www.google.com/search?q=", "q=")
+    } else if lower.contains("youtube.com/results?") {
+        ("https://www.youtube.com/results?search_query=", "search_query=")
+    } else if lower.contains("bing.com/search?") {
+        ("https://www.bing.com/search?q=", "q=")
+    } else if lower.contains("duckduckgo.com/") && lower.contains("q=") {
+        ("https://duckduckgo.com/?q=", "q=")
+    } else if lower.contains("arte.tv") && lower.contains("/search/?q=") {
+        ("https://www.arte.tv/fr/search/?q=", "q=")
+    } else if lower.contains("twitch.tv/search?") {
+        ("https://www.twitch.tv/search?term=", "term=")
+    } else {
+        return None;
+    };
+
+    if let Some(pos) = lower.find(query_key) {
+        let after_key = &url[pos + query_key.len()..];
+        let raw_query = if let Some(amp_pos) = after_key.find('&') {
+            &after_key[..amp_pos]
+        } else {
+            after_key
+        };
+        let decoded = urldecoding_simple(raw_query);
+        let cleaned = crate::intent::clean_search_query_intent(&decoded);
+        if !cleaned.is_empty() && cleaned != decoded {
+            let reencoded = urlencoding_simple(&cleaned);
+            return Some(format!("{prefix}{reencoded}"));
+        }
+    }
+    None
+}
+
 pub fn format_url_for_navigation(raw_url: &str) -> String {
     let trimmed = raw_url.trim();
     if trimmed.is_empty() {
         return "https://www.google.com".to_string();
+    }
+
+    // Si c'est déjà une URL de recherche (Google, YouTube, Bing...), on assainit la requête
+    if let Some(cleaned_search_url) = clean_search_url_if_present(trimmed) {
+        return cleaned_search_url;
     }
 
     // 1. Détection de tous les schémas complets comportant :// (chrome://, edge://, file://, ftp://, http://, etc.)
@@ -3622,8 +3753,9 @@ pub fn format_url_for_navigation(raw_url: &str) -> String {
     if !trimmed.contains(' ') && trimmed.contains('.') {
         format!("https://{trimmed}")
     } else {
-        // 5. Repli : terme de recherche vers Google
-        format!("https://www.google.com/search?q={}", urlencoding_simple(trimmed))
+        // 5. Repli : terme de recherche vers Google avec extraction de l'intention réelle
+        let intent_query = crate::intent::clean_search_query_intent(trimmed);
+        format!("https://www.google.com/search?q={}", urlencoding_simple(&intent_query))
     }
 }
 

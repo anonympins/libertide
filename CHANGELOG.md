@@ -3,6 +3,60 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.8.3] - 2026-11-16
+
+### 🛑 Deadlock Elimination, UIA Timeouts & Performance Guards (`automation.rs`, `ui.rs`, `commands.rs`, `window_util.rs`)
+- **Win32 Cross-Thread Input Deadlock Prevention (`force_foreground_window`)**:
+  - Fixed critical thread hang (`STATUS_APPLICATION_HANG` / `0xcfffffff`) caused by incorrect cross-thread message queue attachment in `force_foreground_window`.
+  - The calling thread now cleanly attaches its input queue to the foreground window thread (`AttachThreadInput(current_thread_id, fg_thread_id, 1)`), avoiding circular wait deadlocks between Libertide's GUI message pump and external targets (e.g., Google Chrome).
+- **UIA Transaction Timeouts (`IUIAutomation2`)**:
+  - Configured strict connection and transaction timeouts (`SetTransactionTimeout(150)`, `SetConnectionTimeout(150)`) via `IUIAutomation2` on polling focus checkers (`has_focused_text_input`, `has_focused_textarea`), ensuring uncooperative background windows cannot stall the main UI loop.
+  - Bounded viewport traversal timeouts (`800 ms`) in `extract_scrollable_viewports_content`.
+- **Combinatorial Subtree Explosion Fix (`extract_inner_text`)**:
+  - Replaced $O(N^2)$ recursive deep DOM exploration (`TreeScope_Descendants`) with shallow element child iteration (`TreeScope_Children`), resolving severe hangs on complex web renderers (e.g., YouTube video comment sections).
+- **Elimination of Redundant Scroll Summaries (`AgentAction::Scroll`)**:
+  - Removed duplicate synchronous `summarize_screen_state` execution within `execute_system_actions` during scroll events, eliminating double RPC round-trips before agent backend re-evaluation.
+- **GDI Redraw Thrashing Guard (`clear_screen_numbered_badges`)**:
+  - Added early-exit state validation to avoid clearing and blitting the transparent layered GDI overlay on every frame when no overlays or badges are active.
+
+### 🧠 Local LLM Reloading, GPU Diagnostics & Inference (`local_llm.rs`)
+- **Runtime Engine Invalidation & Dynamic Reload**:
+  - Added engine cache invalidation upon preset selection changes, forcing `LOCAL_ENGINE` to cleanly re-instantiate when switching local GGUF models.
+- **GPU Acceleration Diagnostics & Prefill Tuning**:
+  - Reinforced Vulkan offload state tracking (`gpu_enabled`) and layer allocation telemetry during startup.
+  - Optimized micro-batching (`n_batch = 512`) and thread allocation logic for balanced GPU/CPU chunked prefill execution.
+
+### 📻 Autonomous Media Routing & Web Navigation (`local_llm.rs`, `intent.rs`, `commands.rs`)
+- **Streamlined Radio & Music Playback (`RadioAndMusicStream`)**:
+  - Fixed autonomous stream discovery and playback execution, preventing passive stalling or search engine dead-ends when querying radio stations or music streams.
+  - Automated cookie banner acceptance and short-title element targeting for web-based stream players.
+- **Browser Tab Focus & Web Search Optimizations**:
+  - Prioritized foreground window focus before dispatching tab selections and omnibox address bar hotkeys.
+  - Cleaned intent extraction (`clean_search_query_intent`) ensuring queries avoid conversational filler phrases when triggering navigation actions.
+
+### 👁️ Eye Tracking Ergonomics, Illumination & Pitch Compensation (`eyetracking.rs`, `main.rs`)
+- **Physical Switch Click Integration (`Enter` Gaze Click)**:
+  - Implemented physical switch/keyboard `Enter` key binding (`request_gaze_click`, `perform_system_gaze_click`) to trigger instant system clicks at the current gaze coordinates.
+  - Integrated post-click ocular freeze (`freeze_gaze`) to stabilize gaze position and prevent drift during selection confirmation.
+- **Ambient Illumination Compensation ("Anti-Sun" Glare Filter)**:
+  - Added Retinex and Self-Quotient filtering (`direct_preprocess_l2cs_with_illumination`) with corneal specular reflection (glint) suppression.
+  - Vectorial horizontal and vertical lighting gradient bias calculation, counteracting artificial gaze traction caused by uneven lateral sunlight or room spots.
+- **Automated Camera Pitch & Tilt Calibration**:
+  - Added configurable camera pitch offset (`EYE_CAMERA_PITCH_OFFSET`, `get_camera_pitch_offset`, `set_camera_pitch_offset`) to calibrate mounting tilt above or below desktop monitors.
+  - One-click instant tare (`tare_camera_pitch_to_current_gaze`) aligning the neutral pitch coordinate to the user's relaxed forward gaze.
+- **Model Distribution Mirrors**:
+  - Expanded neural eye tracking weights download mirrors for `L2CSNet_gaze.onnx` across official Hugging Face and GitHub release endpoints.
+
+### 🛑 Camera & Microphone Resource Cleanliness (`audio.rs`, `eyetracking.rs`)
+- **Graceful Hardware Worker Termination**:
+  - Ensured video capture streams (`nokhwa`) and audio input devices reliably terminate and release camera/microphone OS handles on escape or mode toggle.
+
+### 🌐 Internationalization & Locales (`locales/`)
+- **Updated Locale Strings**:
+  - Enriched localized dictionaries for new eye tracking settings, tare calibration buttons, and audio status indicators.
+
+---
+
 ## [0.8.2] - 2026-11-14
 
 ### 🎯 Hardware Eye Tracker Interoperability & OpenGaze / OpenTrack (`eyetracking.rs`, `app_settings.rs`)

@@ -66,6 +66,7 @@ pub struct OverlayApp {
     live_transcript: String,
     input_text: String,
     is_recording: bool,
+    mic_manually_disabled: bool,
     whisper_ready: bool,
     smoothed_audio_level: f32,
     continuous_mode: bool,
@@ -93,6 +94,8 @@ pub struct OverlayApp {
     theme: AppTheme,
     settings_tab: SettingsTab,
     dwell_state: DwellState,
+    enter_was_physically_down: bool,
+    last_eye_click_time: Instant,
     last_trackball_input: Instant,
 
     // Contrôle par le regard sans matériel (Eye-Tracking webcam standard)
@@ -372,6 +375,7 @@ impl OverlayApp {
             input_text: String::new(),
             smoothed_audio_level: 0.0,
             is_recording: false,
+            mic_manually_disabled: false,
             whisper_ready: false,
             continuous_mode: true,
             dictation_mode: false,
@@ -404,6 +408,8 @@ impl OverlayApp {
             theme,
             settings_tab: SettingsTab::LlmProvider,
             dwell_state: DwellState::new_with_delay(dwell_millis, dwell_activation_ms),
+            enter_was_physically_down: false,
+            last_eye_click_time: Instant::now() - Duration::from_secs(1),
             last_trackball_input: Instant::now() - Duration::from_secs(1),
             eye_tracker: eyetracking::EyeTrackingController::default(),
 
@@ -673,6 +679,7 @@ impl OverlayApp {
     }
 
     fn enter_dictation_mode(&mut self) {
+        self.mic_manually_disabled = false;
         self.dictation_mode = true;
         self.continuous_mode = true;
         IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
@@ -702,6 +709,7 @@ impl OverlayApp {
     fn exit_dictation_mode(&mut self) {
         self.dictation_mode = false;
         self.continuous_mode = false;
+        self.mic_manually_disabled = true;
         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
         play_earcon(Earcon::Success);
         let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
@@ -837,6 +845,21 @@ impl OverlayApp {
         }
     }
 
+    pub fn trigger_gaze_click(&mut self) {
+        let (cur_x, cur_y) = match eyetracking::get_physical_cursor_pos() {
+            Some(pos) => pos,
+            None => return,
+        };
+        eprintln!("[Eye-Tracking] Clic (Entrée) déclenché aux coordonnées physiques ({}, {})", cur_x, cur_y);
+
+        let pause_dur = self.eye_tracker.pause_duration_on_click;
+        self.eye_tracker.freeze_gaze(pause_dur);
+        self.last_trackball_input = Instant::now();
+        self.last_switch_input = Instant::now();
+
+        crate::eyetracking::perform_system_gaze_click();
+    }
+
     pub fn restore_window_if_minimized(&mut self, ctx: &egui::Context) {
         let mut is_min = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
         #[cfg(windows)]
@@ -876,7 +899,7 @@ impl OverlayApp {
     }
 
     fn start_recording(&mut self, _ctx: &egui::Context, play_sound: bool) {
-        if self.status == AgentStatus::EmergencyStopped || self.voice_is_recording_sample {
+        if self.status == AgentStatus::EmergencyStopped || self.voice_is_recording_sample || self.mic_manually_disabled {
             return;
         }
         self.stop_speaking();
@@ -897,6 +920,7 @@ impl OverlayApp {
     fn stop_recording(&mut self) {
         self.is_recording = false;
         self.continuous_mode = false;
+        self.mic_manually_disabled = true;
         let _ = self.audio_sender.send(AudioCommand::Stop);
         play_earcon(Earcon::MicClose);
         set_mic_audio_level(0.0);
@@ -909,8 +933,10 @@ impl OverlayApp {
             return;
         }
         if self.is_recording {
-            self.stop_recording(); // This will trigger prompt processing if text is present
+            self.mic_manually_disabled = true;
+            self.stop_recording();
         } else {
+            self.mic_manually_disabled = false;
             self.start_recording(ctx, true);
         }
     }
@@ -934,8 +960,19 @@ impl eframe::App for OverlayApp {
 
         update_last_external_focus();
 
-        // Détection de saisie dans l'UI Libertide : seul un TextEdit de Libertide actif libère les touches
-        let is_egui_text_focused = !self.is_hidden && ctx.memory(|m| {
+        #[cfg(windows)]
+        let is_libertide_fg = {
+            use windows::core::w;
+            use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetForegroundWindow};
+            let overlay = unsafe { FindWindowW(None, w!("Libertide overlay")).unwrap_or(windows::Win32::Foundation::HWND(std::ptr::null_mut())) };
+            let fg = unsafe { GetForegroundWindow() };
+            !overlay.0.is_null() && fg == overlay
+        };
+        #[cfg(not(windows))]
+        let is_libertide_fg = true;
+
+        // Détection de saisie dans l'UI Libertide : seul un TextEdit de Libertide actif au premier plan libère les touches
+        let is_egui_text_focused = !self.is_hidden && is_libertide_fg && ctx.memory(|m| {
             m.has_focus(egui::Id::NULL.with("prompt_input_text"))
                 || m.has_focus(egui::Id::NULL.with("api_key_input_field"))
                 || m.has_focus(egui::Id::NULL.with("model_input_field"))
@@ -948,9 +985,8 @@ impl eframe::App for OverlayApp {
                 || m.has_focus(egui::Id::NULL.with("voice_reference_text_input"))
                 || m.has_focus(egui::Id::NULL.with("voice_test_text_input"))
         });
-        let is_typing = !self.is_hidden && (ctx.egui_wants_keyboard_input()
-            || self.show_api_key_modal
-            || is_egui_text_focused);
+        // Seul un champ de texte explicite en cours d'édition doit bloquer le clic eye-tracking
+        let is_typing = !self.is_hidden && is_libertide_fg && (self.show_api_key_modal || is_egui_text_focused);
         crate::automation::IS_USER_TYPING.store(is_typing, Ordering::Relaxed);
 
         self.dictation_mode = IS_DICTATION_ACTIVE.load(Ordering::SeqCst);
@@ -1025,9 +1061,26 @@ impl eframe::App for OverlayApp {
 
         // --- Traitement du pointage Eye-Tracking (Webcam / Regard) ---
         let eye_tracking_needed = eyetracking::is_eye_tracking_enabled()
-            || self.eye_tracker.calibration.is_active
-            || eyetracking::is_dev_mode()
-            || eyetracking::is_eye_debug_overlay_visible();
+            || self.eye_tracker.calibration.is_active;
+
+        // Détection de l'appui sur Entrée pour déclencher le clic et figer le regard
+        let enter_physically_pressed = eyetracking::is_enter_key_pressed();
+        let is_eye_on = eyetracking::is_eye_tracking_enabled() && !self.eye_tracker.calibration.is_active;
+
+        if is_eye_on && !is_typing {
+            let gaze_click_queued = eyetracking::GAZE_CLICK_REQUESTED.swap(false, Ordering::SeqCst);
+            if (enter_physically_pressed && !self.enter_was_physically_down) || gaze_click_queued {
+                self.enter_was_physically_down = true;
+                if self.last_eye_click_time.elapsed() >= Duration::from_millis(250) {
+                    self.last_eye_click_time = Instant::now();
+                    self.trigger_gaze_click();
+                    ctx.request_repaint();
+                }
+            } else if !enter_physically_pressed {
+                self.enter_was_physically_down = false;
+            }
+        }
+
         if eye_tracking_needed {
             eyetracking::ensure_camera_worker_running();
             let (screen_w, screen_h) = (work_area.w, work_area.h);
@@ -1076,12 +1129,17 @@ impl eframe::App for OverlayApp {
                 &self.numbered_targets,
             );
 
-            // N'altérer la position physique de la souris que si l'Eye-Tracking est actif et hors calibration
+            // N'altérer la position physique de la souris que si l'Eye-Tracking est actif, hors calibration et hors override souris
             if !self.eye_tracker.calibration.is_active && eyetracking::is_eye_tracking_enabled() {
-                let abs_x = ((work_area.x + gaze_x) * ppp).round() as i32;
-                let abs_y = ((work_area.y + gaze_y) * ppp).round() as i32;
-                self.hover_last_cursor_pos = Some((abs_x, abs_y));
-                set_global_cursor_pos(abs_x, abs_y);
+                if !self.eye_tracker.is_mouse_overridden() && !self.eye_tracker.is_frozen() {
+                    let abs_x = ((work_area.x + gaze_x) * ppp).round() as i32;
+                    let abs_y = ((work_area.y + gaze_y) * ppp).round() as i32;
+                    self.hover_last_cursor_pos = Some((abs_x, abs_y));
+                    self.eye_tracker.last_eye_applied_cursor = Some((abs_x, abs_y));
+                    set_global_cursor_pos(abs_x, abs_y);
+                } else if self.eye_tracker.is_mouse_overridden() {
+                    self.eye_tracker.last_eye_applied_cursor = None;
+                }
 
                 // Si le regard est fixé sur un contrôle interactif en mode survol
                 if let Some(target_idx) = snapped_idx {
@@ -1192,9 +1250,10 @@ impl eframe::App for OverlayApp {
                             self.is_recording = true;
                         } else if new_status == AgentStatus::Idle {
                             self.is_recording = false;
-                            if (self.dictation_mode
-                                || (prev_status == AgentStatus::Thinking && self.continuous_mode)
-                                || (prev_status == AgentStatus::Speaking && self.continuous_mode))
+                            if !self.mic_manually_disabled
+                                && (self.dictation_mode
+                                    || (prev_status == AgentStatus::Thinking && self.continuous_mode)
+                                    || (prev_status == AgentStatus::Speaking && self.continuous_mode))
                                 && !crate::audio::is_live_subtitles_active()
                                 && self.whisper_ready
                                 && !self.show_api_key_modal
@@ -1396,9 +1455,63 @@ impl eframe::App for OverlayApp {
                     let norm_prompt = normalize_for_command_match(&prompt);
                     if norm_prompt.trim().is_empty() {
                         println!("[Voice] Bruit parasite ignoré (aucun mot détecté) : aucune requête LLM.");
-                        if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                        if !self.mic_manually_disabled && self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                             self.start_recording(&ctx, false);
                         }
+                        return;
+                    }
+
+                    // Commandes directes de contrôle du microphone
+                    if norm_prompt == "coupe le micro"
+                        || norm_prompt == "couper le micro"
+                        || norm_prompt == "eteins le micro"
+                        || norm_prompt == "éteins le micro"
+                        || norm_prompt == "eteindre le micro"
+                        || norm_prompt == "éteindre le micro"
+                        || norm_prompt == "desactive le micro"
+                        || norm_prompt == "désactive le micro"
+                        || norm_prompt == "desactiver le micro"
+                        || norm_prompt == "désactiver le micro"
+                        || norm_prompt == "arrete le micro"
+                        || norm_prompt == "arrête le micro"
+                        || norm_prompt == "ferme le micro"
+                        || norm_prompt == "mute micro"
+                        || norm_prompt == "mute mic"
+                        || norm_prompt == "stop micro"
+                        || norm_prompt == "stop mic"
+                    {
+                        self.mic_manually_disabled = true;
+                        self.stop_recording();
+                        play_earcon(Earcon::MicClose);
+                        let reply = "Microphone éteint.".to_string();
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: reply.clone(),
+                            timestamp: current_time_str(),
+                            quick_suggestions: vec![QuickSuggestionItem::Text("Activer le micro".to_string())],
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(reply));
+                        return;
+                    }
+                    if norm_prompt == "active le micro"
+                        || norm_prompt == "activer le micro"
+                        || norm_prompt == "allume le micro"
+                        || norm_prompt == "allumer le micro"
+                        || norm_prompt == "unmute micro"
+                        || norm_prompt == "unmute mic"
+                    {
+                        self.mic_manually_disabled = false;
+                        self.start_recording(&ctx, true);
+                        let reply = "Microphone activé.".to_string();
+                        self.chat_history.push(ChatEntry {
+                            role: ChatRole::Agent,
+                            text: reply.clone(),
+                            timestamp: current_time_str(),
+                            quick_suggestions: vec![QuickSuggestionItem::Text("Couper le micro".to_string())],
+                            screen_size_kb: None,
+                        });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(reply));
                         return;
                     }
 
@@ -1922,7 +2035,7 @@ impl eframe::App for OverlayApp {
                             self.continuous_mode = true;
                         } else if !prompt.trim().is_empty() {
                             self.status = AgentStatus::Thinking;
-                            self.continuous_mode = true;
+                            self.continuous_mode = !self.mic_manually_disabled;
                             self.input_text.clear();
                             self.chat_history.push(ChatEntry {
                                 role: ChatRole::User,
@@ -1945,7 +2058,8 @@ impl eframe::App for OverlayApp {
                             continue;
                         }
                     }
-                    if self.continuous_mode
+                    if !self.mic_manually_disabled
+                        && self.continuous_mode
                         && !crate::audio::is_live_subtitles_active()
                         && self.status != AgentStatus::EmergencyStopped
                         && !self.show_api_key_modal
@@ -1964,7 +2078,8 @@ impl eframe::App for OverlayApp {
                             || m.has_focus(egui::Id::NULL.with("api_key_input_field"))
                             || m.has_focus(egui::Id::NULL.with("model_input_field"))
                     });
-                    if self.continuous_mode
+                    if !self.mic_manually_disabled
+                        && self.continuous_mode
                         && self.status != AgentStatus::EmergencyStopped
                         && self.status != AgentStatus::Speaking
                         && !self.show_api_key_modal
@@ -2022,7 +2137,7 @@ impl eframe::App for OverlayApp {
                         }
                     }
                     self.live_transcript.clear();
-                    if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                    if !self.mic_manually_disabled && self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
                         self.start_recording(&ctx, false);
                     }
                 }
@@ -2224,6 +2339,14 @@ impl eframe::App for OverlayApp {
         let egui_f9 = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F9));
         let egui_f4 = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F4));
 
+        if hook_events.contains(&SwitchKeyEvent::GazeClick) {
+            let is_eye_on = is_eye_tracking_enabled() && !self.eye_tracker.calibration.is_active;
+            if is_eye_on && !is_typing && self.last_eye_click_time.elapsed() >= Duration::from_millis(250) {
+                self.last_eye_click_time = Instant::now();
+                self.trigger_gaze_click();
+                ctx.request_repaint();
+            }
+        }
         if (egui_f8 || hook_events.contains(&SwitchKeyEvent::ToggleDictation))
             && self.last_switch_input.elapsed() >= Duration::from_millis(200)
         {
@@ -3834,7 +3957,7 @@ impl eframe::App for OverlayApp {
                 painter.circle_filled(center, 7.0, egui::Color32::WHITE);
 
                 // Indication textuelle
-                let text = format!("Fixez le point ({}/9) — Échap pour quitter", p_idx);
+                let text = t!("eyetracking.calibration_instruction", current = p_idx, total = 9).to_string();
                 painter.text(
                     egui::pos2(center.x, center.y + 44.0),
                     egui::Align2::CENTER_CENTER,
@@ -3858,13 +3981,16 @@ impl eframe::App for OverlayApp {
                 if let Some((gx, gy)) = *gaze_guard {
                     let p = ui.painter();
                     let center = egui::pos2(gx, gy);
-                    let is_snapped = self.eye_tracker.last_snapped_target_id.is_some() && self.eye_tracker.snapping_enabled;
-                    let (reticle_radius, stroke_color, core_color) = if is_snapped {
+                    let is_mouse_active = self.eye_tracker.is_mouse_overridden();
+                    let is_snapped = self.eye_tracker.last_snapped_target_id.is_some() && self.eye_tracker.snapping_enabled && !is_mouse_active;
+                    let (reticle_radius, stroke_color, core_color) = if is_mouse_active {
+                        (14.0, egui::Color32::from_rgba_unmultiplied(255, 170, 0, 120), egui::Color32::from_rgb(255, 170, 0))
+                    } else if is_snapped {
                         (22.0, egui::Color32::from_rgb(0, 230, 118), egui::Color32::from_rgb(0, 230, 118))
                     } else {
                         (18.0, egui::Color32::from_rgba_unmultiplied(0, 229, 255, 140), egui::Color32::from_rgb(0, 229, 255))
                     };
-                    p.circle_stroke(center, reticle_radius, egui::Stroke::new(2.0, stroke_color));
+                    p.circle_stroke(center, reticle_radius, egui::Stroke::new(if is_mouse_active { 1.2 } else { 2.0 }, stroke_color));
                     p.circle_filled(center, 4.0, core_color);
                 }
             }
@@ -4062,6 +4188,8 @@ impl eframe::App for OverlayApp {
                                     let prov_name = self.current_agent_model_display_name();
                                     let status_badge = if self.dictation_mode {
                                         t!("ui.dictation_badge").to_string()
+                                    } else if eyetracking::is_eye_tracking_enabled() && self.eye_tracker.is_mouse_overridden() {
+                                        t!("eyetracking.mouse_override_badge").to_string()
                                     } else if self.switch_access_mode {
                                         if self.switch_step == SwitchAccessStep::Windows {
                                             if !self.switch_windows.is_empty() {
@@ -4103,6 +4231,8 @@ impl eframe::App for OverlayApp {
 
                                     let badge_color = if self.dictation_mode {
                                         egui::Color32::from_rgb(255, 205, 70)
+                                    } else if eyetracking::is_eye_tracking_enabled() && self.eye_tracker.is_mouse_overridden() {
+                                        egui::Color32::from_rgb(255, 170, 0)
                                     } else if self.switch_access_mode {
                                         egui::Color32::from_rgb(255, 140, 0)
                                     } else if self.status == AgentStatus::Listening {
@@ -4318,10 +4448,6 @@ impl eframe::App for OverlayApp {
                                             &theme,
                                         );
 
-                                        if response.has_focus() {
-                                            crate::automation::IS_USER_TYPING.store(true, Ordering::Relaxed);
-                                        }
-
                                         if let Some(pasted) = pending_paste_fallback {
                                             if self.input_text == prev_text {
                                                 self.input_text = pasted;
@@ -4417,7 +4543,7 @@ impl eframe::App for OverlayApp {
                                             if self.is_recording {
                                                 self.stop_recording();
                                             }
-                                            self.continuous_mode = true;
+                                            self.continuous_mode = !self.mic_manually_disabled;
                                             self.input_text.clear();
                                             self.input_suggestions.clear();
                                             self.last_suggestion_query.clear();
@@ -4487,7 +4613,7 @@ impl eframe::App for OverlayApp {
                                             if self.is_recording {
                                                 self.stop_recording();
                                             }
-                                            self.continuous_mode = true;
+                                            self.continuous_mode = !self.mic_manually_disabled;
                                             self.input_suggestions.clear();
                                             self.last_suggestion_query.clear();
                                             self.auto_scroll_to_bottom = true;
@@ -5102,7 +5228,7 @@ impl eframe::App for OverlayApp {
                                             self.stop_recording();
                                         }
                                         self.status = AgentStatus::Thinking;
-                                        self.continuous_mode = true;
+                                        self.continuous_mode = !self.mic_manually_disabled;
                                         self.live_transcript.clear();
 
                                         let norm_prompt = normalize_for_command_match(&prompt);
@@ -5616,7 +5742,7 @@ impl eframe::App for OverlayApp {
                         self.stop_recording();
                     }
                     self.status = AgentStatus::Thinking;
-                    self.continuous_mode = true;
+                    self.continuous_mode = !self.mic_manually_disabled;
                     self.live_transcript.clear();
 
                     if let Some(card) = is_read_card_intent(&prompt, &self.floating_cards) {
