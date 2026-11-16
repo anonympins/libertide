@@ -1,6 +1,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::mpsc::Sender;
@@ -81,13 +81,15 @@ impl StreamingJsonNarration {
                     }
                 }
                 NarrationParseState::InsideValue { mut escape } => {
-                    let mut chars = self.buffer.chars();
+                    let mut chars = self.buffer.char_indices();
                     let mut consumed = 0;
+                    let mut should_break = false;
 
-                    while let Some(c) = chars.next() {
-                        consumed += c.len_utf8();
+                    while let Some((idx, c)) = chars.next() {
+                        let next_consumed = idx + c.len_utf8();
                         if self.in_unicode {
                             self.unicode_hex.push(c);
+                            consumed = next_consumed;
                             if self.unicode_hex.len() == 4 {
                                 if let Ok(code) = u32::from_str_radix(&self.unicode_hex, 16) {
                                     if let Some(ch) = char::from_u32(code) {
@@ -113,18 +115,62 @@ impl StreamingJsonNarration {
                                 other => self.sentence_buffer.push(other),
                             }
                             escape = false;
+                            consumed = next_consumed;
                         } else if c == '\\' {
                             escape = true;
+                            consumed = next_consumed;
                         } else if c == '"' {
-                            self.state = NarrationParseState::Finished;
-                            let remaining = self.sentence_buffer.trim().to_string();
-                            self.sentence_buffer.clear();
-                            if !remaining.is_empty() {
-                                completed.push(remaining);
+                            let rem = &self.buffer[next_consumed..];
+                            let rem_trimmed = rem.trim_start();
+                            if rem_trimmed.is_empty() {
+                                // Fin de chunk atteinte : attendre le prochain chunk pour vérifier si c'est la fin du champ
+                                should_break = true;
+                                break;
                             }
-                            break;
+
+                            // Vérification si ce guillemet ferme réellement le champ narration
+                            let is_closing = rem_trimmed.starts_with(',')
+                                || rem_trimmed.starts_with('}')
+                                || rem_trimmed.starts_with("\"actions\"")
+                                || rem_trimmed.starts_with("\"next_passes\"")
+                                || rem_trimmed.starts_with("\"quick_suggestions\"");
+
+                            if is_closing {
+                                let remaining = self.sentence_buffer.trim().to_string();
+                                self.sentence_buffer.clear();
+                                if !remaining.is_empty() {
+                                    completed.push(remaining);
+                                }
+                                should_break = true;
+                                break;
+                            } else {
+                                // Guillemet double interne au texte : conserver sous forme d'apostrophe pour éviter de tronquer
+                                self.sentence_buffer.push('\'');
+                                consumed = next_consumed;
+                            }
                         } else {
+                            // Détection si le modèle a omis le guillemet fermant et enchaîne directement sur la clé suivante
+                            if c == '\n' || c == '\r' {
+                                let rem = &self.buffer[next_consumed..];
+                                let rem_trimmed = rem.trim_start();
+                                if rem_trimmed.starts_with("\"actions\"")
+                                    || rem_trimmed.starts_with("\"next_passes\"")
+                                    || rem_trimmed.starts_with("\"quick_suggestions\"")
+                                {
+                                    consumed = next_consumed;
+                                    self.state = NarrationParseState::Finished;
+                                    let remaining = self.sentence_buffer.trim().to_string();
+                                    self.sentence_buffer.clear();
+                                    if !remaining.is_empty() {
+                                        completed.push(remaining);
+                                    }
+                                    should_break = true;
+                                    break;
+                                }
+                            }
+
                             self.sentence_buffer.push(c);
+                            consumed = next_consumed;
                             if c == '.' || c == '!' || c == '?' || c == '\n' {
                                 let trimmed = self.sentence_buffer.trim().to_string();
                                 if trimmed.len() >= 3 {
@@ -138,6 +184,9 @@ impl StreamingJsonNarration {
                     self.buffer.drain(..consumed);
                     if self.state != NarrationParseState::Finished {
                         self.state = NarrationParseState::InsideValue { escape };
+                    }
+                    if should_break && self.state != NarrationParseState::Finished {
+                        break;
                     }
                 }
                 NarrationParseState::Finished => break,
@@ -667,6 +716,24 @@ pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<Comma
         || lower.contains("play music")
     {
         return vec![CommandTag::RadioAndMusicStream, CommandTag::GeneralChitChat];
+    }
+
+    // Détection immédiate radio / webradio / stations
+    if lower.contains("station radio")
+        || lower.contains("station de radio")
+        || lower.contains("la radio")
+        || lower.contains("une radio")
+        || lower.contains("mets la radio")
+        || lower.contains("met la radio")
+        || lower.contains("écoute la radio")
+        || lower.contains("ecoute la radio")
+        || lower.contains("écouter la radio")
+        || lower.contains("ecouter la radio")
+        || lower.contains("france inter")
+        || lower.contains("france info")
+        || lower.contains("webradio")
+    {
+        return vec![CommandTag::RadioAndMusicStream, CommandTag::WebNavigateOrSearch];
     }
 
     // Détection immédiate des tâches planifiées, rappels, timers et chronomètres
@@ -1211,6 +1278,8 @@ RÉTRO-ANALYSE COGNITIVE & ARRÊT STRICT SUR OBJECTIF (SELF-CHECK DE COMPLÉTION
 
 Règles de syntaxe JSON strictes :
 - N'échappe JAMAIS les apostrophes simples : écris "d'accueil", "l'écran", "c'est" et SURTOUT PAS "d\'accueil" ou "l\'écran".
+- RÈGLE ABSOLUE SUR LES GUILLEMETS DANS "narration" : N'utilise JAMAIS de guillemets doubles (") à l'intérieur du texte de "narration". Si tu dois citer un nom de fichier, un mot ou une application, utilise STRICTEMENT des apostrophes simples '...' (ex: 'local_llm.rs', 'Chrome', et SURTOUT PAS "local_llm.rs").
+- RÈGLE DE FERMETURE DU JSON : Referme TOUJOURS soigneusement la valeur "narration" avec son guillemet fermant " suivi d'une virgule avant "actions" ou "next_passes". Reste sur du texte fluide sans sauts de ligne non protégés.
 - Dans "target_name" de "click_element" ou "button_name" de "click_button", écris UNIQUEMENT le texte lisible ou titre du bouton/lien, SANS préfixe (#id), SANS type ([lien]), SANS URL.
 - VÉRIFICATION D'ACCOMPLISSEMENT DE L'OBJECTIF AVANT ARRÊT : Avant de renvoyer "actions": [], vérifie rigoureusement que la demande initiale de l'utilisateur est concrètement et intégralement accomplie à l'écran. Si l'écran affiche encore une page intermédiaire (résultats de recherche, formulaire non validé, cookies en attente, flux audio non démarré), INTERDICTION de t'arrêter : continue vers l'action concrète suivante avec "next_passes" > 0.
 - ARRÊT STRICT UNIQUEMENT DÈS OBJECTIF RÉELLEMENT ATTEINT : Dès que l'objectif principal demandé par l'utilisateur est pleinement terminé (application ouverte, information trouvée, média/radio en lecture, action ou texte saisi), ARRÊTE : renvoie STRICTEMENT "actions": [], "next_passes": 0, et résume le résultat dans "narration" en {lang_name}.
@@ -1414,12 +1483,15 @@ Règles ACCESSIBILITÉ COGNITIVE & FALC (FACILE À LIRE ET À COMPRENDRE) :
             CommandTag::RadioAndMusicStream => {
                 prompt.push_str(r#"
 Règles STRATÉGIE RADIO & STREAMING AUDIO :
+- RECHERCHE WEB IMMÉDIATE SANS BLA-BLA NI CONSEIL PASSIF : Si l'utilisateur demande d'écouter la radio ou de la musique, INTERDICTION FORMELLE d'interagir avec les fenêtres locales, éditeurs de code (VS Code, terminal) ou menus actuellement affichés à l'écran. Émets IMMÉDIATEMENT une action "navigate_to_url" vers Google Search pour trouver le flux avec "next_passes": 5.
+- CHOIX AUTONOME EN CAS DE CONSIGNE OUVERTE : Si l'utilisateur ne précise pas la station (ex: "met une station radio", "mets la radio", "mets de la musique") : INTERDICTION ABSOLUE de refuser ou de demander des précisions. CHOISIS IMMÉDIATEMENT toi-même une grande station généraliste ou musicale (ex: France Inter ou FIP) et lance directement la recherche Google : {"action": "navigate_to_url", "url": "https://www.google.com/search?q=ecouter+france+inter+en+direct", "target": "new_tab"} avec "next_passes": 5.
+- STATION SPÉCIFIQUE (France Inter, RTL, FIP, NRJ, etc.) : Lance directement la recherche Google correspondante : {"action": "navigate_to_url", "url": "https://www.google.com/search?q=ecouter+[nom+station]+en+direct", "target": "new_tab"}.
 - BOÎTE À RYTHME & INSTRUMENT ADAPTÉ : Si l'utilisateur demande la boîte à rythme, un instrument musical adapté, un mini-jeu musical ou de faire du rythme/des sons : utilise l'action {"action": "show_floating_card", "id": "instrument_toy", "title": "🎵 Boîte à Rythme & Instrument", "card_type": "instrument", "data": {}} avec next_passes: 0.
-- Étape 1 : Ouvre immédiatement le flux radio ou la page officielle via "navigate_to_url" (ex: "https://www.radiofrance.fr/franceinter" ou recherche Google directe "https://www.google.com/search?q=écouter+france+inter+en+direct").
+- Étape 1 : Lancement de la recherche Google directe via "navigate_to_url" (ex: "https://www.google.com/search?q=ecouter+france+inter+en+direct").
 - Étape 2 (Bannière cookies & Focus) : Si le navigateur n'est pas actif ou si le clic précédent a échoué, remets-le au premier plan avec {"action": "focus_window", "title": "Chrome"} (ou le nom du navigateur détecté). Dès l'arrivée, clique systématiquement sur le bouton d'acceptation ("Tout accepter", "Accepter").
 - Étape 3 (Ciblage court) : Pour cliquer sur le résultat de recherche, utilise UNIQUEMENT le nom court de la station ou du site (ex: "Radio France" ou "France Inter", SURTOUT PAS le titre complet avec pipes "Radio France | Écoutez...").
-- Étape 3 (Lancement audio) : Cherche et clique sur le bouton de lecture en direct ("Écouter le direct", "Direct", "Play", "Lecture") ou sur l'élément [@audio:...] / [@video:...].
-- Étape 4 (Anti-terminal) : N'ouvre JAMAIS de console pour le son. Règle le volume avec "set_volume" ou "accessibility_shortcut": "space".
+- Étape 4 (Lancement audio) : Cherche et clique sur le bouton de lecture en direct ("Écouter le direct", "Direct", "Play", "Lecture") ou sur l'élément [@audio:...] / [@video:...].
+- Étape 5 (Anti-terminal) : N'ouvre JAMAIS de console pour le son. Règle le volume avec "set_volume" ou "accessibility_shortcut": "space".
 - Étape 5 (Clôture) : Dès que le flux audio démarre, ARRÊTE les passes ("actions": [], "next_passes": 0) et confirme oralement la station en cours dans "narration".
 "#);
             }
@@ -1723,7 +1795,7 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
             }
             CommandTag::RadioAndMusicStream => {
                 prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"instrument_toy\", \"title\": \"🎵 Boîte à Rythme & Instrument\", \"card_type\": \"instrument\", \"data\": {}}\n");
-                prompt.push_str("- {\"action\": \"navigate_to_url\", \"url\": \"https://www.radiofrance.fr/...\", \"target\": \"new_tab\"}\n");
+                prompt.push_str("- {\"action\": \"navigate_to_url\", \"url\": \"https://www.google.com/search?q=ecouter+france+inter+en+direct\", \"target\": \"new_tab\"}\n");
                 prompt.push_str("- {\"action\": \"click_button\", \"button_name\": \"Écouter le direct\"}\n");
                 prompt.push_str("- {\"action\": \"set_volume\", \"command\": \"up\"|\"down\"|\"mute\"|\"unmute\"}\n");
             }
@@ -2099,6 +2171,78 @@ fn repair_actions_field(json_str: &str) -> String {
     }
 }
 
+/// Récupère et répare un champ "narration" non fermé, avec guillemets internes ou sauts de ligne bruts
+fn repair_narration_field(json_str: &str) -> String {
+    let Some(narr_pos) = json_str.find("\"narration\"") else {
+        return json_str.to_string();
+    };
+
+    let after_key = &json_str[narr_pos + 11..];
+    let Some(colon_offset) = after_key.find(':') else {
+        return json_str.to_string();
+    };
+
+    let after_colon = &after_key[colon_offset + 1..];
+    let Some(quote_offset) = after_colon.find('"') else {
+        return json_str.to_string();
+    };
+
+    let val_start = narr_pos + 11 + colon_offset + 1 + quote_offset + 1;
+    let after_val_start = &json_str[val_start..];
+
+    let keys = ["\"actions\"", "\"next_passes\"", "\"quick_suggestions\""];
+    let mut next_key_idx = None;
+    for key in &keys {
+        if let Some(pos) = after_val_start.find(key) {
+            match next_key_idx {
+                None => next_key_idx = Some(pos),
+                Some(min_pos) if pos < min_pos => next_key_idx = Some(pos),
+                _ => {}
+            }
+        }
+    }
+
+    let end_pos = match next_key_idx {
+        Some(pos) => val_start + pos,
+        None => {
+            if let Some(brace_pos) = after_val_start.rfind('}') {
+                val_start + brace_pos
+            } else {
+                json_str.len()
+            }
+        }
+    };
+
+    let raw_val = &json_str[val_start..end_pos];
+    let mut trimmed_val = raw_val.trim();
+
+    if trimmed_val.ends_with(',') {
+        trimmed_val = trimmed_val[..trimmed_val.len() - 1].trim();
+    }
+    if trimmed_val.ends_with('"') && !trimmed_val.ends_with("\\\"") {
+        trimmed_val = trimmed_val[..trimmed_val.len() - 1].trim();
+    }
+
+    let cleaned_text = trimmed_val
+        .replace('"', "'")
+        .replace('\r', " ")
+        .replace('\n', " ");
+    let serialized_val = serde_json::to_string(cleaned_text.trim()).unwrap_or_else(|_| format!("\"{}\"", cleaned_text.trim()));
+
+    let mut result = String::with_capacity(json_str.len() + 32);
+    result.push_str(&json_str[..val_start - 1]);
+    result.push_str(&serialized_val);
+
+    let suffix = &json_str[end_pos..];
+    if next_key_idx.is_some() && !suffix.trim_start().starts_with(',') {
+        result.push_str(",\n  ");
+    } else {
+        result.push(' ');
+    }
+    result.push_str(suffix);
+    result
+}
+
 /// Nettoie et fiabilise le JSON généré par le LLM local avant désérialisation
 fn sanitize_json_output(raw: &str) -> String {
     let trimmed = raw.trim();
@@ -2142,6 +2286,10 @@ fn sanitize_json_output(raw: &str) -> String {
     }
 
     let mut repaired = repair_actions_field(&cleaned);
+    if serde_json::from_str::<serde_json::Value>(&repaired).is_err() {
+        let narr_fixed = repair_narration_field(&cleaned);
+        repaired = repair_actions_field(&narr_fixed);
+    }
 
     // Garde-fou programmatique : si "actions" est vide ([] ou absent), forcer "next_passes": 0
     if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&repaired) {
@@ -2490,8 +2638,22 @@ pub fn ensure_llama_model_downloaded(event_tx: &Sender<AgentEvent>) -> Result<Pa
     ensure_llama_model_downloaded_for_preset(get_active_preset(), event_tx)
 }
 
+static GLOBAL_BACKEND: Mutex<Option<Arc<LlamaBackend>>> = Mutex::new(None);
+
+/// Obtient ou initialise l'instance unique du backend Llama pour l'ensemble du processus
+pub fn get_or_init_backend() -> Result<Arc<LlamaBackend>, String> {
+    let mut lock = GLOBAL_BACKEND.lock().map_err(|e| e.to_string())?;
+    if let Some(ref backend) = *lock {
+        return Ok(Arc::clone(backend));
+    }
+    let backend = LlamaBackend::init().map_err(|e| format!("LlamaBackend init: {e}"))?;
+    let arc = Arc::new(backend);
+    *lock = Some(Arc::clone(&arc));
+    Ok(arc)
+}
+
 pub struct LocalLlamaEngine {
-    backend: LlamaBackend,
+    backend: Arc<LlamaBackend>,
     model: LlamaModel,
     gpu_layers: u32,
     gpu_enabled: bool,
@@ -2522,11 +2684,11 @@ impl LocalLlamaEngine {
             eprintln!("[Local Llama Load] ATTENTION : Fichier GGUF introuvable ou inaccessible via std::fs::metadata");
         }
 
-        let backend = LlamaBackend::init().map_err(|e| format!("LlamaBackend init: {e}"))?;
+        let backend = get_or_init_backend()?;
         let requested_gpu_layers = std::env::var("LLAMA_GPU_LAYERS")
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
-            .unwrap_or(99);
+            .unwrap_or(24);
 
         let (model, gpu_layers, gpu_enabled) = if requested_gpu_layers > 0 {
             println!(
@@ -2626,7 +2788,7 @@ impl LocalLlamaEngine {
 
         let total_tokens = tokens.len();
         let chunk_size = (n_batch as usize).min(total_tokens);
-        let mut batch = LlamaBatch::new(chunk_size, 1);
+        let mut batch = LlamaBatch::new(chunk_size, 0);
 
         let mut current_pos = 0i32;
         println!(
@@ -2795,7 +2957,7 @@ impl LocalLlamaEngine {
 
         let total_tokens = tokens.len();
         let chunk_size = (n_batch as usize).min(total_tokens);
-        let mut batch = LlamaBatch::new(chunk_size, 1);
+        let mut batch = LlamaBatch::new(chunk_size, 0);
         let mut current_pos = 0i32;
 
         for chunk in tokens.chunks(chunk_size) {
@@ -2942,6 +3104,11 @@ pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<Command
                 || clean.to_lowercase().contains("music mode")
             {
                 vec![CommandTag::RadioAndMusicStream]
+            } else if clean.to_lowercase().contains("radio")
+                || clean.to_lowercase().contains("france inter")
+                || clean.to_lowercase().contains("webradio")
+            {
+                vec![CommandTag::RadioAndMusicStream, CommandTag::WebNavigateOrSearch]
         } else if clean.to_lowercase().contains("minuteur") || clean.to_lowercase().contains("rappel") || clean.to_lowercase().contains("timer") || clean.to_lowercase().contains("alarme") {
             vec![CommandTag::ScheduleTask]
             } else if clean.ends_with('?') {
