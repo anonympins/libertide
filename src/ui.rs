@@ -41,9 +41,8 @@ use windows::Win32::UI::Accessibility::{
 };
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    mouse_event, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
-    VIRTUAL_KEY,
+    mouse_event, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, VIRTUAL_KEY,
 };
 #[cfg(not(windows))]
 pub use crate::automation::{AsWindowTarget, NumberedElementTarget, VIRTUAL_KEY};

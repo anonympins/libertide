@@ -31,6 +31,7 @@ mod local_llm;
 mod agent_backend;
 mod instrument;
 mod eyetracking;
+mod virtual_keyboard;
 pub use eyetracking::*;
 pub use agent_backend::*;
 pub use locale::*;
@@ -40,7 +41,7 @@ use floating_window::{update_open_floating_cards, FloatingCard, FloatingCardOutp
 use automation::*;
 use fs_util::*;
 use intent::*;
-use theme::{localized_theme_desc, localized_theme_name, AppTheme, SettingsTab};
+use theme::{AppTheme, SettingsTab};
 use tts::{sanitize_for_tts, spawn_tts_worker};
 use twitch::spawn_twitch_worker;
 use window_util::*;
@@ -385,7 +386,7 @@ impl OverlayApp {
             voice_clone_url_input,
             voice_reference_wav_input,
             voice_reference_text_input,
-            voice_test_text_input: "Bonjour, ceci est un test de synthèse vocale avec Libertide.".to_string(),
+            voice_test_text_input: t!("voice.test_default_phrase").to_string(),
             voice_status_feedback: None,
             voice_is_recording_sample: false,
             voice_record_append: false,
@@ -401,7 +402,7 @@ impl OverlayApp {
                 .filter(|s| s == "male" || s == "female" || s == "homme" || s == "femme")
                 .map(|s| if s == "male" || s == "homme" { "male".to_string() } else { "female".to_string() })
                 .unwrap_or_else(|| "female".to_string()),
-            voice_guide_phrase: "« Bonjour, je configure ma voix personnalisée dans Libertide. Ce court extrait audio sert de référence pour le modèle de clonage vocal. »".to_string(),
+            voice_guide_phrase: t!("voice.guide_default_phrase").to_string(),
             voice_guide_generating: false,
             voice_guide_rx: None,
             llm_config: llm_config.clone(),
@@ -503,6 +504,12 @@ impl OverlayApp {
             || self.active_disability_presets.contains(&DisabilityPreset::MotorSwitch)
     }
 
+    pub fn has_motor_disability(&self) -> bool {
+        self.active_disability_presets.contains(&DisabilityPreset::MotorSwitch)
+            || self.active_disability_presets.contains(&DisabilityPreset::Tremor)
+            || self.switch_access_mode
+    }
+
     pub fn open_instrument_card(&mut self) {
         let title = t!("instrument.title").to_string();
         let card = FloatingCard::new("instrument_toy", title, FloatingContentType::Instrument);
@@ -517,6 +524,22 @@ impl OverlayApp {
 
     pub fn is_instrument_open(&self) -> bool {
         self.floating_cards.iter().any(|c| c.id == "instrument_toy" && c.open)
+    }
+
+    pub fn open_keyboard_card(&mut self) {
+        let title = t!("keyboard.title").to_string();
+        let card = FloatingCard::new("virtual_keyboard", title, FloatingContentType::VirtualKeyboard);
+        if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == "virtual_keyboard") {
+            existing.open = true;
+        } else {
+            self.floating_cards.push(card);
+        }
+        update_open_floating_cards(&self.floating_cards);
+        play_earcon(Earcon::Success);
+    }
+
+    pub fn is_keyboard_open(&self) -> bool {
+        self.floating_cards.iter().any(|c| c.id == "virtual_keyboard" && c.open)
     }
 
     fn draw_avatar(&self, ui: &mut egui::Ui, center: egui::Pos2, base_radius: f32, time: f64) {
@@ -557,7 +580,7 @@ impl OverlayApp {
             VoiceProfile::Paul => t!("speech.voice_paul").to_string(),
             VoiceProfile::Sylvie => t!("speech.voice_sylvie").to_string(),
             VoiceProfile::Jean => t!("speech.voice_jean").to_string(),
-            VoiceProfile::Clone => "Voix clonée personnalisée activée.".to_string(),
+            VoiceProfile::Clone => t!("speech.voice_clone").to_string(),
         };
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
@@ -1664,6 +1687,18 @@ impl eframe::App for OverlayApp {
                         let _ = self.tts_sender.send(TtsCommand::Speak(msg));
                         return;
                     }
+                    if norm_prompt.contains("clavier virtuel")
+                        || norm_prompt.contains("ouvre le clavier")
+                        || norm_prompt.contains("afficher le clavier")
+                        || norm_prompt.contains("mode clavier")
+                        || norm_prompt.contains("virtual keyboard")
+                    {
+                        self.open_keyboard_card();
+                        let msg = "Clavier virtuel ouvert.".to_string();
+                        self.chat_history.push(ChatEntry { role: ChatRole::Agent, text: msg.clone(), timestamp: current_time_str(), quick_suggestions: Vec::new(), screen_size_kb: None });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+                        return;
+                    }
 
                     // Traitement du zoom adaptatif vocal
                     if norm_prompt.contains("grossis") || norm_prompt.contains("zoom plus") || norm_prompt.contains("agrandis") || norm_prompt.contains("zoom in")
@@ -1743,8 +1778,6 @@ impl eframe::App for OverlayApp {
                     }
 
                     let (locale, _) = get_system_locale_language();
-                    let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
-
                     if is_switch_access_command(&prompt) {
                         mark_hover_nav_asked();
                         self.toggle_switch_access_mode(None);
@@ -2705,7 +2738,6 @@ impl eframe::App for OverlayApp {
                         }
 
                         let win_num = self.switch_focus_index + 1;
-                        let vocal_msg = format!("Fenêtre {} : {}", win_num, display_title);
                         self.hover_last_announced_target = Some(target_hwnd.0 as usize);
                         self.transition_to_zones_for_window(target_hwnd.0 as isize, &display_title);
                         ctx.request_repaint();
@@ -4455,39 +4487,6 @@ impl eframe::App for OverlayApp {
                                             }
                                         }
 
-                                        response.context_menu(|ui| {
-                                            if ui.button(t!("ui.ctx_paste")).clicked() {
-                                                if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
-                                                    let clean_clip = clip.replace(['\r', '\n'], " ");
-                                                    let trimmed_clean = clean_clip.trim().to_string();
-                                                    if !trimmed_clean.is_empty() {
-                                                        self.input_text = trimmed_clean;
-                                                        self.stop_speaking();
-                                                        play_earcon(Earcon::Success);
-                                                    }
-                                                }
-                                                ui.memory_mut(|m| m.request_focus(input_id));
-                                                ui.close();
-                                            }
-                                            if ui.button(t!("ui.ctx_copy_all")).clicked() {
-                                                set_clipboard_text(&self.input_text);
-                                                ctx.copy_text(self.input_text.clone());
-                                                play_earcon(Earcon::Success);
-                                                ui.close();
-                                            }
-                                            if ui.button(t!("ui.ctx_cut_all")).clicked() {
-                                                set_clipboard_text(&self.input_text);
-                                                ctx.copy_text(self.input_text.clone());
-                                                self.input_text.clear();
-                                                play_earcon(Earcon::Success);
-                                                ui.close();
-                                            }
-                                            if ui.button(t!("ui.ctx_clear")).clicked() {
-                                                self.input_text.clear();
-                                                ui.close();
-                                            }
-                                        });
-
                                         let copy_hit = ctx.input(|i| {
                                             i.events.iter().any(|e| match e {
                                                 egui::Event::Copy => true,
@@ -4826,36 +4825,81 @@ impl eframe::App for OverlayApp {
                                             self.toggle_recording(ui.ctx());
                                         }
 
-                                        let dict_id = ui.make_persistent_id("dwell_btn_dict");
-                                        let dict_prog = self.dwell_state.get_progress(dict_id);
-                                        let dict_sub = if self.dictation_mode { t!("ui.btn_dictation_active").to_string() } else { t!("ui.btn_dictation").to_string() };
-                                        let dict_resp = render_accessible_icon_button(
-                                            ui,
-                                            "✍",
-                                            &dict_sub,
-                                            &t!("ui.btn_dictation_tooltip"),
-                                            self.dictation_mode,
-                                            dict_prog,
-                                            Some(egui::Color32::from_rgb(215, 155, 30)),
-                                            None,
-                                        );
-                                        let (dict_dwell, _) = self.dwell_state.update(dict_id, dict_resp.hovered());
-                                        let is_dict_key = dict_resp.has_focus() && ui.input(|i| {
-                                            i.events.iter().any(|ev| match ev {
-                                                egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
-                                                egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
-                                                _ => false,
-                                            })
-                                        });
-                                        if dict_resp.clicked() || dict_dwell || is_dict_key {
-                                            if self.dictation_mode {
-                                                self.exit_dictation_mode();
-                                            } else {
-                                                self.enter_dictation_mode();
+                                        // 3. Bouton Contrôle Oculaire / Eye-Tracking (si modèle installé)
+                                        if crate::eyetracking::is_eyetracking_model_installed() {
+                                            let eye_id = ui.make_persistent_id("dwell_btn_eyetracking");
+                                            let eye_prog = self.dwell_state.get_progress(eye_id);
+                                            let is_eye_on = crate::eyetracking::is_eye_tracking_enabled();
+                                            let eye_sub = if is_eye_on { t!("ui.btn_eyetracking_active").to_string() } else { t!("ui.btn_eyetracking").to_string() };
+                                            let eye_resp = render_accessible_icon_button(
+                                                ui,
+                                                "👁",
+                                                &eye_sub,
+                                                &t!("ui.btn_eyetracking_tooltip"),
+                                                is_eye_on,
+                                                eye_prog,
+                                                Some(egui::Color32::from_rgb(0, 229, 255)),
+                                                Some(egui::Color32::from_rgb(0, 245, 255)),
+                                            );
+                                            let (eye_dwell, _) = self.dwell_state.update(eye_id, eye_resp.hovered());
+                                            let is_eye_key = eye_resp.has_focus() && ui.input(|i| {
+                                                i.events.iter().any(|ev| match ev {
+                                                    egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                                    egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                                    _ => false,
+                                                })
+                                            });
+                                            if eye_resp.clicked() || eye_dwell || is_eye_key {
+                                                let new_state = !is_eye_on;
+                                                crate::eyetracking::set_eye_tracking_enabled(new_state);
+                                                if new_state {
+                                                    play_earcon(Earcon::Success);
+                                                } else {
+                                                    self.eye_tracker.cancel_calibration();
+                                                    if let Ok(mut lock) = crate::eyetracking::GLOBAL_GAZE_POS.lock() {
+                                                        *lock = None;
+                                                    }
+                                                    play_earcon(Earcon::MicClose);
+                                                }
                                             }
                                         }
 
-                                        // 4. Bouton Musique / Rythme (Boîte à rythme & Instrument adapté) - disponible pour tous
+                                        // 4. Bouton Clavier Virtuel Adapté
+                                        if self.has_motor_disability() || self.is_keyboard_open() {
+                                            let kbd_id = ui.make_persistent_id("dwell_btn_keyboard");
+                                            let kbd_prog = self.dwell_state.get_progress(kbd_id);
+                                            let is_kbd_open = self.is_keyboard_open();
+                                            let kbd_sub = if is_kbd_open { t!("ui.btn_keyboard_active").to_string() } else { t!("ui.btn_keyboard").to_string() };
+                                            let kbd_resp = render_accessible_icon_button(
+                                                ui,
+                                                "⌨",
+                                                &kbd_sub,
+                                                &t!("ui.btn_keyboard_tooltip"),
+                                                is_kbd_open,
+                                                kbd_prog,
+                                                Some(egui::Color32::from_rgb(0, 180, 255)),
+                                                Some(egui::Color32::from_rgb(0, 210, 255)),
+                                            );
+                                            let (kbd_dwell, _) = self.dwell_state.update(kbd_id, kbd_resp.hovered());
+                                            let is_kbd_key = kbd_resp.has_focus() && ui.input(|i| {
+                                                i.events.iter().any(|ev| match ev {
+                                                    egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                                    egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                                    _ => false,
+                                                })
+                                            });
+                                            if kbd_resp.clicked() || kbd_dwell || is_kbd_key {
+                                                if is_kbd_open {
+                                                self.floating_cards.retain(|c| c.id != "virtual_keyboard");
+                                                crate::floating_window::update_open_floating_cards(&self.floating_cards);
+                                                play_earcon(Earcon::MicClose);
+                                            } else {
+                                                self.open_keyboard_card();
+                                            }
+                                            }
+                                        }
+
+                                        // 5. Bouton Musique / Rythme (Boîte à rythme & Instrument adapté) - disponible pour tous
                                         let rhythm_id = ui.make_persistent_id("dwell_btn_rhythm");
                                         let rhythm_prog = self.dwell_state.get_progress(rhythm_id);
                                         let is_open = self.is_instrument_open();

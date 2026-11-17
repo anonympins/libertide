@@ -89,6 +89,9 @@ pub fn update_open_floating_cards(cards: &[FloatingCard]) {
                     FloatingContentType::Instrument => {
                         ("instrument", t!("instrument.card_summary").to_string())
                     }
+                    FloatingContentType::VirtualKeyboard => {
+                        ("virtual_keyboard", t!("keyboard.card_summary").to_string())
+                    }
                     FloatingContentType::Form { fields, .. } => {
                         let f_summary = fields.iter().map(|f| f.label.clone()).collect::<Vec<_>>().join(", ");
                         ("form", format!("Fields: {}", f_summary))
@@ -189,6 +192,7 @@ pub enum FloatingContentType {
         history: Vec<String>,
     },
     Instrument,
+    VirtualKeyboard,
 }
 
 fn default_submit_label() -> String {
@@ -415,6 +419,9 @@ impl FloatingCard {
             "instrument" | "rhythm" | "drum_machine" | "boite_a_rythme" | "musique" => {
                 FloatingContentType::Instrument
             }
+            "virtual_keyboard" | "keyboard" | "clavier" => {
+                FloatingContentType::VirtualKeyboard
+            }
             _ => {
                 let text = if let Some(s) = data.as_str() {
                     s.to_string()
@@ -536,6 +543,9 @@ impl FloatingCard {
             FloatingContentType::Instrument => {
                 speech.push_str(&t!("instrument.speech_description"));
             }
+            FloatingContentType::VirtualKeyboard => {
+                speech.push_str(&t!("keyboard.speech_description"));
+            }
         }
         speech
     }
@@ -553,6 +563,7 @@ impl FloatingCard {
             FloatingContentType::Markdown { .. } => "📄",
             FloatingContentType::Subtitles { .. } => "🎙️",
             FloatingContentType::Instrument => "🎵",
+            FloatingContentType::VirtualKeyboard => "⌨️",
         };
         let viewport_title = format!("{icon_prefix} {}", self.title);
 
@@ -562,6 +573,7 @@ impl FloatingCard {
             FloatingContentType::Markdown { .. } => [560.0, 380.0],
             FloatingContentType::Table { .. } => [580.0, 340.0],
             FloatingContentType::Instrument => [640.0, 420.0],
+            FloatingContentType::VirtualKeyboard => [660.0, 360.0],
             _ => [480.0, 280.0],
         };
 
@@ -1162,6 +1174,11 @@ impl FloatingCard {
                                 }
                                 FloatingContentType::Instrument => {
                                     crate::instrument::render_instrument_view(ui, dwell_state, theme);
+                                }
+                                FloatingContentType::VirtualKeyboard => {
+                                    if let Some(out) = crate::virtual_keyboard::render_keyboard_view(ui, dwell_state, theme) {
+                                        requested_output = Some(out);
+                                    }
                                 }
                             }
                         });
@@ -2289,8 +2306,13 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
             continue;
         }
 
-        if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") || trimmed.starts_with("• ") {
-            let item_content = &trimmed[2..].trim();
+        let bullet_item = trimmed.strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+            .or_else(|| trimmed.strip_prefix("+ "))
+            .or_else(|| trimmed.strip_prefix("• "));
+
+        if let Some(raw_item_content) = bullet_item {
+            let item_content = raw_item_content.trim();
             let (bullet, bullet_color) = match indent_level {
                 0 => ("•", theme.accent),
                 1 => ("◦", theme.accent_text),

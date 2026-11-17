@@ -29,8 +29,8 @@ impl OverlayApp {
         std::env::set_var("VOICE_CLONE_GENDER", clean);
         let _ = write_env_var_to_file(".env", "VOICE_CLONE_GENDER", clean);
 
-        let gender_label = if clean == "male" { "homme" } else { "femme" };
-        self.voice_status_feedback = Some(format!("Genre configuré : {gender_label}. Chargement du modèle de voix..."));
+        let gender_label = if clean == "male" { t!("voice.gender_male") } else { t!("voice.gender_female") };
+        self.voice_status_feedback = Some(t!("voice.status_gender_configured", gender = gender_label).to_string());
         play_earcon(Earcon::Navigation);
 
         let tts_tx = self.tts_sender.clone();
@@ -43,10 +43,8 @@ impl OverlayApp {
             match crate::tts::ensure_voice_clone_model_for_gender(&model_dir, &clean_string) {
                 Ok(()) => {
                     let _ = tts_tx.send(TtsCommand::SetGender(VoiceProfile::Clone));
-                    let _ = event_tx.send(AgentEvent::SilentNarration(format!(
-                        "Modèle vocal cloné ({}) chargé avec succès.",
-                        if clean_string == "male" { "homme" } else { "femme" }
-                    )));
+                    let g_label = if clean_string == "male" { t!("voice.gender_male") } else { t!("voice.gender_female") };
+                    let _ = event_tx.send(AgentEvent::SilentNarration(t!("voice.status_model_loaded", gender = g_label).to_string()));
                 }
                 Err(e) => {
                     eprintln!("[TTS Clone] Erreur chargement modèle {clean_string}: {e}");
@@ -636,7 +634,7 @@ impl OverlayApp {
                                             ui.add_space(4.0);
 
                                             let mut model_to_delete = None;
-                                            for preset in local_llm::MODEL_PRESETS {
+                                            for preset in local_llm::TEXT_PRESETS {
                                                 let is_active = active_preset.id == preset.id;
                                                 let is_installed = local_llm::is_preset_downloaded(preset);
 
@@ -1022,7 +1020,7 @@ impl OverlayApp {
                                     .show(ui, |ui| {
                                         for &preset in DisabilityPreset::ALL {
                                             let mut is_checked = self.active_disability_presets.contains(&preset);
-                                            ui.horizontal(|ui| {
+                                            ui.horizontal_wrapped(|ui| {
                                                 let chk_resp = ui.checkbox(&mut is_checked, preset.display_name());
                                                 let chk_id = ui.make_persistent_id(format!("dwell_preset_{:?}", preset));
                                                 let is_toggle_hit = make_toggle_accessible(ui, &chk_resp, theme.accent);
@@ -1030,40 +1028,37 @@ impl OverlayApp {
                                                     self.toggle_disability_preset(preset, ctx);
                                                     play_earcon(Earcon::Success);
                                                 }
-                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                    let is_solo = is_checked && self.active_disability_presets.len() == 1;
-                                                    let solo_label = if is_solo { t!("ui.a11y_preset_solo_active").to_string() } else { t!("ui.a11y_preset_solo").to_string() };
-                                                    let solo_btn = ui.small_button(solo_label).on_hover_text(t!("ui.a11y_preset_solo_tooltip"));
-                                                    if make_widget_accessible_and_activated(ui, &solo_btn, theme.accent) {
-                                                        self.select_exclusive_disability_preset(preset, ctx);
-                                                        play_earcon(Earcon::Success);
-                                                    }
-                                            ui.add_space(4.0);
-                                            let open_inst_btn = ui.small_button("🎵 Ouvrir la Boîte à Rythme & Instrument adapté")
-                                                .on_hover_text("Ouvre le mini-jeu musical adapté au contacteur unique.");
-                                            if make_widget_accessible_and_activated(ui, &open_inst_btn, theme.accent) {
-                                                self.open_instrument_card();
-                                                self.show_api_key_modal = false;
-                                                play_earcon(Earcon::Success);
-                                            }
-                                                });
+                                                let is_solo = is_checked && self.active_disability_presets.len() == 1;
+                                                let solo_label = if is_solo { t!("ui.a11y_preset_solo_active").to_string() } else { t!("ui.a11y_preset_solo").to_string() };
+                                                let solo_btn = ui.small_button(solo_label).on_hover_text(t!("ui.a11y_preset_solo_tooltip"));
+                                                if make_widget_accessible_and_activated(ui, &solo_btn, theme.accent) {
+                                                    self.select_exclusive_disability_preset(preset, ctx);
+                                                    play_earcon(Earcon::Success);
+                                                }
                                             });
                                             ui.add_space(2.0);
                                         }
                                         ui.add_space(4.0);
-                                        ui.horizontal(|ui| {
-                                            let reset_all_btn = ui.small_button(t!("ui.a11y_reset_presets_btn"))
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                                            let reset_all_btn = ui.small_button(t!("ui.a11y_btn_reset"))
                                                 .on_hover_text(t!("ui.a11y_reset_presets_tooltip"));
                                             if make_widget_accessible_and_activated(ui, &reset_all_btn, theme.accent) {
                                                 self.active_disability_presets.clear();
                                                 self.apply_active_disability_presets(ctx);
                                                 play_earcon(Earcon::Success);
                                             }
-                                            ui.add_space(4.0);
-                                            let open_inst_btn = ui.small_button(t!("instrument.open_btn"))
+                                            let open_inst_btn = ui.small_button(t!("ui.a11y_btn_rhythm"))
                                                 .on_hover_text(t!("instrument.open_btn_tooltip"));
                                             if make_widget_accessible_and_activated(ui, &open_inst_btn, theme.accent) {
                                                 self.open_instrument_card();
+                                                self.show_api_key_modal = false;
+                                                play_earcon(Earcon::Success);
+                                            }
+                                            let open_kbd_btn = ui.small_button(t!("ui.a11y_btn_keyboard"))
+                                                .on_hover_text(t!("keyboard.open_btn_tooltip"));
+                                            if make_widget_accessible_and_activated(ui, &open_kbd_btn, theme.accent) {
+                                                self.open_keyboard_card();
                                                 self.show_api_key_modal = false;
                                                 play_earcon(Earcon::Success);
                                             }
@@ -1242,10 +1237,10 @@ impl OverlayApp {
                                         let mut auto_scan = self.switch_auto_scroll;
                                         let resp_auto_scan = ui.checkbox(
                                             &mut auto_scan,
-                                            egui::RichText::new("Défilement automatique (Balayage contacteur unique)")
+                                            egui::RichText::new(t!("ui.a11y_switch_auto_scan"))
                                                 .size(11.5)
                                                 .color(theme.text_primary),
-                                        ).on_hover_text("Active le balayage automatique cadencé en mode contacteur unique (désactivé par défaut en mode survol)");
+                                        ).on_hover_text(t!("ui.a11y_switch_auto_scan_tooltip"));
                                         let id_auto_scan = ui.make_persistent_id("dwell_switch_auto_scroll");
                                         let is_scan_key = make_toggle_accessible(ui, &resp_auto_scan, theme.accent);
                                         if resp_auto_scan.changed() || apply_dwell_to_response(ui, &mut self.dwell_state, id_auto_scan, &resp_auto_scan) || is_scan_key {
@@ -1556,7 +1551,7 @@ impl OverlayApp {
                             }
                             SettingsTab::Voice => {
                                 ui.label(
-                                    egui::RichText::new("Sélection de la voix du narrateur et clonage vocal personnalisé.")
+                                    egui::RichText::new(t!("voice.tab_desc"))
                                         .size(11.5)
                                         .color(theme.text_secondary),
                                 );
@@ -1570,7 +1565,7 @@ impl OverlayApp {
                                     .inner_margin(egui::Margin::symmetric(10, 8))
                                     .show(ui, |ui| {
                                         ui.label(
-                                            egui::RichText::new("Voix active du narrateur")
+                                            egui::RichText::new(t!("voice.active_narrator"))
                                                 .size(12.0)
                                                 .strong()
                                                 .color(theme.accent),
@@ -1581,15 +1576,15 @@ impl OverlayApp {
                                             for &profile in VoiceProfile::ALL {
                                                 let is_selected = self.voice_gender == profile;
                                                 let (icon, label) = match profile {
-                                                    VoiceProfile::Denise => ("👩", "Denise (Féminine)"),
-                                                    VoiceProfile::Henri => ("👨", "Henri (Masculin)"),
-                                                    VoiceProfile::Hortense => ("🎙️", "Hortense"),
-                                                    VoiceProfile::Paul => ("🎩", "Paul"),
-                                                    VoiceProfile::Sylvie => ("🍁", "Sylvie (CA)"),
-                                                    VoiceProfile::Jean => ("⚡", "Jean"),
+                                                    VoiceProfile::Denise => ("👩", t!("voice.profile_denise").to_string()),
+                                                    VoiceProfile::Henri => ("👨", t!("voice.profile_henri").to_string()),
+                                                    VoiceProfile::Hortense => ("🎙️", "Hortense".to_string()),
+                                                    VoiceProfile::Paul => ("🎩", "Paul".to_string()),
+                                                    VoiceProfile::Sylvie => ("🍁", "Sylvie (CA)".to_string()),
+                                                    VoiceProfile::Jean => ("⚡", "Jean".to_string()),
                                                     VoiceProfile::Clone => {
-                                                        let g = if self.voice_clone_gender == "male" { "Masculine" } else { "Féminine" };
-                                                        ("🧬", if g == "Masculine" { "Voix clonée (Masculine)" } else { "Voix clonée (Féminine)" })
+                                                        let g = if self.voice_clone_gender == "male" { t!("voice.gender_male") } else { t!("voice.gender_female") };
+                                                        ("🧬", t!("voice.profile_clone", gender = g).to_string())
                                                     }
                                                 };
                                                 let btn_text = format!("{icon} {label}");
@@ -1611,7 +1606,7 @@ impl OverlayApp {
 
                                         // Zone de test de la voix
                                         ui.label(
-                                            egui::RichText::new("Tester la voix")
+                                            egui::RichText::new(t!("voice.test_title"))
                                                 .size(11.0)
                                                 .color(egui::Color32::WHITE)
                                                 .strong(),
@@ -1632,20 +1627,20 @@ impl OverlayApp {
                                                 ui,
                                                 egui::Id::NULL.with("voice_test_text_input"),
                                                 &mut self.voice_test_text_input,
-                                                "Phrase de test audio...",
+                                                &t!("voice.test_hint"),
                                                 false,
                                                 Some((ui.available_width() - 95.0).max(120.0)),
                                                 None,
                                                 false,
                                                 theme,
                                             );
-                                            let test_btn = ui.button("🔊 Tester");
+                                            let test_btn = ui.button(t!("voice.test_btn"));
                                             let test_btn_id = ui.make_persistent_id("dwell_voice_test_btn");
                                             let test_btn_hit = make_widget_accessible_and_activated(ui, &test_btn, theme.accent);
                                             let test_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, test_btn_id, &test_btn);
                                             if test_btn_hit || test_dwell || enter_in_test_field {
                                                 let tts_text = if self.voice_test_text_input.trim().is_empty() {
-                                                    "Bonjour, ceci est un test de synthèse vocale avec Libertide.".to_string()
+                                                    t!("voice.test_default_phrase").to_string()
                                                 } else {
                                                     self.voice_test_text_input.trim().to_string()
                                                 };
@@ -1752,9 +1747,9 @@ impl OverlayApp {
 
                                                 self.set_voice_gender_silent(VoiceProfile::Clone);
                                                 if self.voice_record_append {
-                                                    self.voice_status_feedback = Some(format!("Extrait ajouté avec succès ! Durée cumulée totale : {:.1}s.", saved_dur));
+                                                    self.voice_status_feedback = Some(t!("voice.status_append_success", duration = format!("{saved_dur:.1}")).to_string());
                                                 } else {
-                                                    self.voice_status_feedback = Some(format!("Échantillon ({:.1}s) enregistré avec succès et voix clonée prête !", saved_dur));
+                                                    self.voice_status_feedback = Some(t!("voice.status_save_success", duration = format!("{saved_dur:.1}")).to_string());
                                                 }
                                                 play_earcon(Earcon::Success);
                                             }
@@ -1763,13 +1758,13 @@ impl OverlayApp {
                                 }
 
                                 ui.label(
-                                    egui::RichText::new("🧬 Entraîneur vocal instantané (Click & Record)")
+                                    egui::RichText::new(t!("voice.trainer_title"))
                                         .size(12.0)
                                         .color(theme.accent)
                                         .strong(),
                                 );
                                 ui.label(
-                                    egui::RichText::new("Enregistrez votre voix en un clic pour créer votre profil vocal de référence sans manipuler de fichiers.")
+                                    egui::RichText::new(t!("voice.trainer_desc"))
                                         .size(11.0)
                                         .color(theme.text_secondary),
                                 );
@@ -1784,7 +1779,7 @@ impl OverlayApp {
                                         // Sélecteur de genre pour la voix clonée
                                         ui.horizontal(|ui| {
                                             ui.label(
-                                                egui::RichText::new("Genre de la voix clonée :")
+                                                egui::RichText::new(t!("voice.clone_gender_label"))
                                                     .size(11.0)
                                                     .color(egui::Color32::WHITE)
                                                     .strong(),
@@ -1792,10 +1787,10 @@ impl OverlayApp {
                                             let is_female = self.voice_clone_gender != "male";
                                             let female_btn = ui.selectable_label(
                                                 is_female,
-                                                egui::RichText::new("👩 Femme (Féminin)")
+                                                egui::RichText::new(t!("voice.gender_female_btn"))
                                                     .size(11.0)
                                                     .color(if is_female { theme.accent } else { theme.text_secondary }),
-                                            ).on_hover_text("Calibre et télécharge le modèle neuronal sur une voix féminine.");
+                                            ).on_hover_text(t!("voice.gender_female_tooltip"));
                                             let female_btn_id = ui.make_persistent_id("dwell_voice_clone_gender_female");
                                             let is_female_hit = make_widget_accessible_and_activated(ui, &female_btn, theme.accent);
                                             let is_female_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, female_btn_id, &female_btn);
@@ -1806,10 +1801,10 @@ impl OverlayApp {
                                             let is_male = self.voice_clone_gender == "male";
                                             let male_btn = ui.selectable_label(
                                                 is_male,
-                                                egui::RichText::new("👨 Homme (Masculin)")
+                                                egui::RichText::new(t!("voice.gender_male_btn"))
                                                     .size(11.0)
                                                     .color(if is_male { theme.accent } else { theme.text_secondary }),
-                                            ).on_hover_text("Calibre et télécharge le modèle neuronal sur une voix masculine.");
+                                            ).on_hover_text(t!("voice.gender_male_tooltip"));
                                             let male_btn_id = ui.make_persistent_id("dwell_voice_clone_gender_male");
                                             let is_male_hit = make_widget_accessible_and_activated(ui, &male_btn, theme.accent);
                                             let is_male_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, male_btn_id, &male_btn);
@@ -1823,14 +1818,14 @@ impl OverlayApp {
 
                                         // Phrase guide
                                         ui.horizontal(|ui| {
-                                            ui.label(egui::RichText::new("Phrase recommandée à lire à voix haute :").size(10.5).color(theme.text_secondary));
+                                            ui.label(egui::RichText::new(t!("voice.guide_phrase_label")).size(10.5).color(theme.text_secondary));
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 let btn_text = if self.voice_guide_generating {
-                                                    "⏳ Génération..."
+                                                    t!("voice.guide_generating").to_string()
                                                 } else {
-                                                    "✨ Nouvelle phrase (IA)"
+                                                    t!("voice.guide_btn_new").to_string()
                                                 };
-                                                let gen_btn = ui.small_button(btn_text).on_hover_text("Demande au LLM de générer une phrase phonétiquement riche et naturelle.");
+                                                let gen_btn = ui.small_button(btn_text).on_hover_text(t!("voice.guide_btn_tooltip"));
                                                 let gen_btn_id = ui.make_persistent_id("dwell_voice_gen_phrase_btn");
                                                 let gen_btn_hit = make_widget_accessible_and_activated(ui, &gen_btn, theme.accent);
                                                 let gen_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, gen_btn_id, &gen_btn);
@@ -1864,7 +1859,7 @@ impl OverlayApp {
                                                         )
                                                         .wrap(),
                                                     );
-                                                    let copy_btn = ui.small_button("📋").on_hover_text("Copier la phrase guide");
+                                                    let copy_btn = ui.small_button("📋").on_hover_text(t!("voice.guide_copy_tooltip"));
                                                     let copy_btn_id = ui.make_persistent_id("dwell_voice_copy_phrase_btn");
                                                     let copy_btn_hit = make_widget_accessible_and_activated(ui, &copy_btn, theme.accent);
                                                     let copy_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, copy_btn_id, &copy_btn);
@@ -1883,10 +1878,10 @@ impl OverlayApp {
                                                 if sample_exists {
                                                     // Bouton ➕ Ajouter un extrait vocal (Cumuler)
                                                     let append_btn = ui.button(
-                                                        egui::RichText::new("➕ Ajouter un extrait vocal (Cumuler)")
+                                                        egui::RichText::new(t!("voice.btn_append_record"))
                                                             .strong()
                                                             .color(theme.accent),
-                                                    ).on_hover_text("Enregistre un nouvel extrait audio et l'ajoute à votre voix de référence existante.");
+                                                    ).on_hover_text(t!("voice.btn_append_record_tooltip"));
                                                     let append_btn_id = ui.make_persistent_id("dwell_voice_append_record_btn");
                                                     let append_btn_hit = make_widget_accessible_and_activated(ui, &append_btn, theme.accent);
                                                     let append_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, append_btn_id, &append_btn);
@@ -1903,11 +1898,11 @@ impl OverlayApp {
                                                                 self.voice_record_start = Some(Instant::now());
                                                                 self.voice_recorder_stop_tx = Some(stop_tx);
                                                                 self.voice_recorder_result_rx = Some(result_rx);
-                                                                self.voice_status_feedback = Some("Enregistrement du nouvel extrait... Lisez une nouvelle phrase.".to_string());
+                                                                self.voice_status_feedback = Some(t!("voice.status_recording_append").to_string());
                                                                 play_earcon(Earcon::MicOpen);
                                                             }
                                                             Err(err) => {
-                                                                self.voice_status_feedback = Some(format!("Erreur micro : {err}"));
+                                                                self.voice_status_feedback = Some(t!("voice.status_mic_error", err = err).to_string());
                                                                 play_earcon(Earcon::Error);
                                                             }
                                                         }
@@ -1915,9 +1910,9 @@ impl OverlayApp {
 
                                                     // Bouton de réinitialisation
                                                     let reset_btn = ui.button(
-                                                        egui::RichText::new("🔄 Réinitialiser")
+                                                        egui::RichText::new(t!("voice.btn_reset_record"))
                                                             .color(egui::Color32::from_rgb(255, 140, 140)),
-                                                    ).on_hover_text("Réinitialise et ré-enregistre un nouvel extrait de zéro (écrase l'échantillon précédent).");
+                                                    ).on_hover_text(t!("voice.btn_reset_record_tooltip"));
                                                     let reset_btn_id = ui.make_persistent_id("dwell_voice_reset_record_btn");
                                                     let reset_btn_hit = make_widget_accessible_and_activated(ui, &reset_btn, theme.accent);
                                                     let reset_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, reset_btn_id, &reset_btn);
@@ -1934,17 +1929,17 @@ impl OverlayApp {
                                                                 self.voice_record_start = Some(Instant::now());
                                                                 self.voice_recorder_stop_tx = Some(stop_tx);
                                                                 self.voice_recorder_result_rx = Some(result_rx);
-                                                                self.voice_status_feedback = Some("Enregistrement en cours... Lisez la phrase ci-dessus.".to_string());
+                                                                self.voice_status_feedback = Some(t!("voice.status_recording").to_string());
                                                                 play_earcon(Earcon::MicOpen);
                                                             }
                                                             Err(err) => {
-                                                                self.voice_status_feedback = Some(format!("Erreur micro : {err}"));
+                                                                self.voice_status_feedback = Some(t!("voice.status_mic_error", err = err).to_string());
                                                                 play_earcon(Earcon::Error);
                                                             }
                                                         }
                                                     }
                                                 } else {
-                                                    let rec_btn = ui.button(egui::RichText::new("🎙️ Enregistrer ma voix (3 à 10s)").strong().color(egui::Color32::WHITE));
+                                                    let rec_btn = ui.button(egui::RichText::new(t!("voice.btn_record")).strong().color(egui::Color32::WHITE));
                                                 let rec_btn_id = ui.make_persistent_id("dwell_voice_start_record_btn");
                                                 let rec_btn_hit = make_widget_accessible_and_activated(ui, &rec_btn, theme.accent);
                                                 let rec_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, rec_btn_id, &rec_btn);
@@ -1961,11 +1956,11 @@ impl OverlayApp {
                                                             self.voice_record_start = Some(Instant::now());
                                                             self.voice_recorder_stop_tx = Some(stop_tx);
                                                             self.voice_recorder_result_rx = Some(result_rx);
-                                                            self.voice_status_feedback = Some("Enregistrement en cours... Lisez la phrase ci-dessus.".to_string());
+                                                            self.voice_status_feedback = Some(t!("voice.status_recording").to_string());
                                                             play_earcon(Earcon::MicOpen);
                                                         }
                                                         Err(err) => {
-                                                            self.voice_status_feedback = Some(format!("Erreur micro : {err}"));
+                                                            self.voice_status_feedback = Some(t!("voice.status_mic_error", err = err).to_string());
                                                             play_earcon(Earcon::Error);
                                                         }
                                                     }
@@ -1979,13 +1974,13 @@ impl OverlayApp {
                                                 ui.label(egui::RichText::new("●").size(14.0).color(red_dot));
                                                 let status_str = if self.voice_record_append {
                                                     let projected = total_dur + elapsed;
-                                                    format!("Cumul en cours : +{:.1}s | Total cumulé : {:.1}s (max 15s)", elapsed, projected)
+                                                    t!("voice.recording_cumulative", elapsed = format!("{:.1}", elapsed), total = format!("{:.1}", projected)).to_string()
                                                 } else {
-                                                    format!("En cours : {:.1}s (max 15s)", elapsed)
+                                                    t!("voice.recording_in_progress", elapsed = format!("{:.1}", elapsed)).to_string()
                                                 };
                                                 ui.label(egui::RichText::new(status_str).size(11.5).strong().color(red_dot));
 
-                                                let stop_rec_btn = ui.button(egui::RichText::new("⏹️ Terminer l'enregistrement").strong().color(egui::Color32::WHITE));
+                                                let stop_rec_btn = ui.button(egui::RichText::new(t!("voice.btn_stop_record")).strong().color(egui::Color32::WHITE));
                                                 let stop_rec_id = ui.make_persistent_id("dwell_voice_stop_record_btn");
                                                 let stop_rec_hit = make_widget_accessible_and_activated(ui, &stop_rec_btn, theme.accent);
                                                 let stop_rec_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, stop_rec_id, &stop_rec_btn);
@@ -1996,9 +1991,9 @@ impl OverlayApp {
                                                     }
                                                     play_earcon(Earcon::MicClose);
                                                     if self.voice_record_append {
-                                                        self.voice_status_feedback = Some("Ingestion et cumul du nouvel extrait...".to_string());
+                                                        self.voice_status_feedback = Some(t!("voice.status_ingesting_append").to_string());
                                                     } else {
-                                                        self.voice_status_feedback = Some("Ingestion et analyse de l'échantillon...".to_string());
+                                                        self.voice_status_feedback = Some(t!("voice.status_ingesting").to_string());
                                                     }
                                                 }
                                                 ctx.request_repaint();
@@ -2006,7 +2001,7 @@ impl OverlayApp {
 
                                             // Bouton écouter l'échantillon existant
                                             if sample_exists && !self.voice_is_recording_sample {
-                                                let play_sample_btn = ui.button("▶ Écouter l'échantillon");
+                                                let play_sample_btn = ui.button(t!("voice.btn_listen_sample"));
                                                 let play_sample_id = ui.make_persistent_id("dwell_voice_play_sample_btn");
                                                 let play_sample_hit = make_widget_accessible_and_activated(ui, &play_sample_btn, theme.accent);
                                                 let play_sample_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, play_sample_id, &play_sample_btn);
@@ -2033,13 +2028,13 @@ impl OverlayApp {
                                             ui.add_space(4.0);
                                             ui.horizontal(|ui| {
                                                 ui.label(
-                                                    egui::RichText::new("✓ Échantillon vocal actif : models/voice_reference.wav")
+                                                    egui::RichText::new(t!("voice.sample_active"))
                                                         .size(10.5)
                                                         .color(egui::Color32::from_rgb(100, 225, 130)),
                                                 );
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                     ui.label(
-                                                        egui::RichText::new(format!("⏱️ Durée cumulée totale : {:.1}s", total_dur))
+                                                        egui::RichText::new(t!("voice.sample_total_duration", duration = format!("{total_dur:.1}")))
                                                             .size(11.0)
                                                             .strong()
                                                             .color(theme.accent),
@@ -2052,14 +2047,14 @@ impl OverlayApp {
                                         ui.add_space(6.0);
                                         ui.horizontal(|ui| {
                                             ui.label(
-                                                egui::RichText::new("Transcription de référence (éditable) :")
+                                                egui::RichText::new(t!("voice.reference_transcript_label"))
                                                     .size(11.0)
                                                     .color(egui::Color32::WHITE)
                                                     .strong(),
                                             );
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 if !self.voice_reference_text_input.trim().is_empty() {
-                                                    let clear_btn = ui.small_button("🗑 Effacer").on_hover_text("Effacer le texte de transcription");
+                                                    let clear_btn = ui.small_button(t!("ui.btn_clear_short")).on_hover_text(t!("voice.clear_transcript_tooltip"));
                                                     if make_widget_accessible_and_activated(ui, &clear_btn, theme.accent) {
                                                         self.voice_reference_text_input.clear();
                                                         let _ = write_env_var_to_file(".env", "VOICE_REFERENCE_TEXT", "");
@@ -2074,7 +2069,7 @@ impl OverlayApp {
                                             ui,
                                             ref_input_id,
                                             &mut self.voice_reference_text_input,
-                                            "Texte transcrit ou prononcé dans votre enregistrement de référence...",
+                                            &t!("voice.reference_transcript_hint"),
                                             true,
                                             Some(ui.available_width()),
                                             Some(46.0),
@@ -2098,7 +2093,7 @@ impl OverlayApp {
 
                                         // Informations moteur natif et serveur optionnel
                                         ui.horizontal(|ui| {
-                                            ui.label(egui::RichText::new("Moteur natif Sherpa actif (temps réel local). URL serveur de repli (optionnel) :").size(10.5).color(theme.text_secondary));
+                                            ui.label(egui::RichText::new(t!("voice.native_engine_info")).size(10.5).color(theme.text_secondary));
                                         });
                                         render_accessible_input(
                                             ui,
@@ -2124,7 +2119,7 @@ impl OverlayApp {
 
                                         ui.add_space(4.0);
                                         ui.horizontal(|ui| {
-                                            let save_clone_btn = ui.button(egui::RichText::new("💾 Enregistrer et Activer la voix clonée").strong().color(theme.accent));
+                                            let save_clone_btn = ui.button(egui::RichText::new(t!("voice.save_and_activate_btn")).strong().color(theme.accent));
                                             let save_clone_id = ui.make_persistent_id("dwell_voice_save_clone_btn");
                                             let save_btn_hit = make_widget_accessible_and_activated(ui, &save_clone_btn, theme.accent);
                                             let save_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, save_clone_id, &save_clone_btn);
@@ -2147,7 +2142,7 @@ impl OverlayApp {
                                                 }
 
                                                 self.set_voice_gender_silent(VoiceProfile::Clone);
-                                                self.voice_status_feedback = Some("Paramètres enregistrés et profil vocal cloné activé.".to_string());
+                                                self.voice_status_feedback = Some(t!("voice.status_saved_and_activated").to_string());
                                                 play_earcon(Earcon::Success);
                                             }
                                         });
