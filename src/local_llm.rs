@@ -1276,7 +1276,7 @@ Réponds STRICTEMENT avec un unique objet JSON valide, sans aucun texte ou bloc 
 Format JSON obligatoire :
 {{
   "narration": "Réponse naturelle, directe et utile rédigée impérativement en {lang_name} (2 à 3 phrases). Focalise-toi strictement sur le contenu répondant à la demande de l'utilisateur, SANS JAMAIS décrire ni citer les composants ou contrôles de l'interface.",
-  "next_passes": 5,
+  "next_passes": 0,
   "actions": [
     {{"action": "click_button", "button_name": "Texte visible exact"}}
   ],
@@ -1293,6 +1293,12 @@ STRUCTURE STRICTE DU TABLEAU "actions" :
 
 RÉTRO-ANALYSE COGNITIVE & ARRÊT STRICT SUR OBJECTIF (SELF-CHECK DE COMPLÉTION) :
 - Compare systématiquement : [État actuel de l'écran] vs [Demande initiale de l'utilisateur].
+- RÈGLES STRICTES SUR NEXT_PASSES (ARRÊT DE RÉFLEXION & ANTI-BOUCLE) :
+  * "next_passes" VAUT 0 PAR DÉFAUT : Dès que tu réponds, expliques, analyses, résumes ou que la cible est atteinte, METS STRICTEMENT "next_passes": 0 et "actions": [].
+  * UNE LONGUE ANALYSE, UN RÉSUMÉ OU UNE EXPLICATION NE DOIT JAMAIS REDÉCLENCHER DE RÉFLEXION :
+    Si ta narration contient l'analyse demandée ou si tu projettes une carte volante ("show_floating_card"), la réflexion est FINIE. Renvoie impérativement "next_passes": 0.
+  * "next_passes" ne doit être supérieur à 0 (1 à 4) STRICTEMENT ET UNIQUEMENT si une action mécanique intermédiaire concrète vient d'être initiée (ex: clic, recherche, navigation URL, cookies) et nécessite d'attendre la page suivante pour accomplir l'objectif.
+  * Si une longue analyse est délivrée, il est FORMELLEMENT INTERDIT de remettre "next_passes" > 0.
 - FENÊTRE MASQUÉE, RECUPÉRATION ET REFOCUS (RÈGLE DE RÉSILIENCE OBLIGATOIRE) :
   Si une action précédente a échoué ou si le contrôle visé (bouton, lien, champ de saisie) appartient à une fenêtre cachée ou recouverte par la fenêtre active en cours :
   -> INTERDICTION FORMELLE de retenter le clic ou la frappe aveuglément à travers la fenêtre supérieure !
@@ -1309,6 +1315,9 @@ RÉTRO-ANALYSE COGNITIVE & ARRÊT STRICT SUR OBJECTIF (SELF-CHECK DE COMPLÉTION
 - SI LA CIBLE EST ATTEINTE (page de films/vidéos affichée, vidéo en lecture, formulaire validé, texte saisi, information demandée lisible à l'écran) :
   -> ARRÊT STRICT ET IMMÉDIAT : renvoie impérativement "actions": [] et "next_passes": 0.
   -> INTERDICTION FORMELLE DE SUR-AGIR : Ne clique JAMAIS au hasard, ne défile pas indéfiniment et ne clique pas sur des recommandations secondaires, publicités ou menus inutiles une fois sur la destination demandée.
+- SI UNE ANALYSE OU RÉPONSE EST FOURNIE (synthèse de page, explication, lecture d'écran, fiche volante) :
+  -> ARRÊT STRICT ET IMMÉDIAT : renvoie impérativement "next_passes": 0 et "actions": [] (ou uniquement "show_floating_card").
+  -> UNE ANALYSE NE DOIT JAMAIS REDÉCLENCHER DE RÉFLEXION NI DE PASSE SUPPLÉMENTAIRE.
 - SI LA CIBLE N'EST PAS ENCORE ATTEINTE (page intermédiaire, moteur de recherche en attente de clic, cookies ou popups bloquantes) :
   -> Fournis l'unique action concrète suivante dans "actions" avec "next_passes" > 0.
 
@@ -1346,8 +1355,8 @@ Règles ANALYSE DE PAGE WEB (TAG WEBPAGE_ANALYSIS) :
 - L'utilisateur demande d'analyser, synthétiser, expliquer ou extraire le contenu d'une page web ou d'un site affiché à l'écran.
 - Tu DOIS exploiter en priorité les sections [État actuel de l'écran] et particulièrement [Page web - Corps textuel et résultats rendus] pour fournir une synthèse riche, structurée et précise.
 - Si le contenu est long ou structuré, projette une fenêtre volante Markdown via "show_floating_card" (card_type: "markdown", id: "analyse_page", title: "Analyse de la page", data: {"text": "..."}).
-- Si des éléments pertinents se trouvent plus bas dans la page, utilise l'action "scroll" ("direction": "down", "amount": 1).
-- Si l'analyse complète est fournie dans la narration ou la carte volante, termine la séquence avec "actions": [], "next_passes": 0.
+- RÈGLE D'ARRÊT STRICT : Dès que l'analyse est rédigée dans "narration" ou projetée dans "show_floating_card", la tâche est TERMINÉE. Renvoie IMPÉRATIVEMENT "next_passes": 0 et "actions": [] (ou uniquement le "show_floating_card"). INTERDICTION FORMELLE de relancer une passe ("next_passes": 0 obligatoire) : une analyse ne doit JAMAIS redéclencher de réflexion.
+- N'utilise "scroll" avec "next_passes": 1 QUE si l'information recherchée est manifestement tronquée et absente de l'écran actuel.
 "#);
             }
             CommandTag::NavigateInWebpage => {
@@ -1446,6 +1455,7 @@ Règles LECTURE & RÉSUMÉ D'ÉCRAN :
 - Restitution riche et descriptive : décris l'organisation de l'écran, les sections visibles et le contenu textuel essentiel pour offrir une autonomie totale aux personnes malvoyantes.
 - Lecture fichier/éditeur : "read_editor_content" (extrait le texte de l'éditeur actif).
 - Résumé : projette une fenêtre volante Markdown via "show_floating_card" (card_type: "markdown", id: "resume_page", title: "Résumé", data: {"text": "..."}).
+- RÈGLE D'ARRÊT STRICT : Dès que la lecture ou le résumé est transmis dans "narration" ou projeté via "show_floating_card", l'objectif est atteint : termine impérativement avec "actions": [], "next_passes": 0.
 - Défilement : "scroll" ("direction": "down"|"up"|"top"|"bottom", amount: 1).
 "#);
             }
@@ -2330,14 +2340,53 @@ fn sanitize_json_output(raw: &str) -> String {
     // Garde-fou programmatique : si "actions" est vide ([] ou absent), forcer "next_passes": 0
     if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&repaired) {
         if let Some(obj) = val.as_object_mut() {
-            let actions_empty = obj.get("actions")
-                .and_then(|a| a.as_array())
-                .map_or(true, |arr| arr.is_empty());
+            let actions_arr = obj.get("actions").and_then(|a| a.as_array());
+            let actions_empty = actions_arr.map_or(true, |arr| arr.is_empty());
 
-            if actions_empty {
+            let has_motor_action = actions_arr.map_or(false, |arr| {
+                arr.iter().any(|act| {
+                    act.get("action").and_then(|v| v.as_str()).map_or(false, |a| {
+                        matches!(
+                            a,
+                            "click_element"
+                                | "click_button"
+                                | "click_numbered_target"
+                                | "navigate_to_url"
+                                | "open_browser"
+                                | "open_app"
+                                | "close_app"
+                                | "write_text"
+                                | "replace_field_text"
+                                | "focus_window"
+                                | "open_search_browser"
+                                | "run_command"
+                                | "schedule_prompt"
+                        )
+                    })
+                })
+            });
+
+            let only_passive_actions = actions_arr.map_or(false, |arr| {
+                !arr.is_empty()
+                    && arr.iter().all(|act| {
+                        act.get("action").and_then(|v| v.as_str()).map_or(false, |a| {
+                            matches!(a, "show_floating_card" | "close_floating_card" | "live_subtitles")
+                        })
+                    })
+            });
+
+            let is_long_analysis = obj.get("narration")
+                .and_then(|n| n.as_str())
+                .map_or(false, |text| text.trim().len() >= 100);
+
+            if actions_empty || only_passive_actions || (is_long_analysis && !has_motor_action) {
                 obj.insert("next_passes".to_string(), serde_json::json!(0));
                 if !obj.contains_key("actions") {
                     obj.insert("actions".to_string(), serde_json::json!([]));
+                }
+            } else if let Some(np) = obj.get("next_passes").and_then(|p| p.as_i64()) {
+                if np > 5 {
+                    obj.insert("next_passes".to_string(), serde_json::json!(5));
                 }
             }
             if let Ok(serialized) = serde_json::to_string(obj) {
@@ -2348,7 +2397,8 @@ fn sanitize_json_output(raw: &str) -> String {
         // Fallback textuel de sécurité si serde_json n'arrive pas à parser l'objet complet
         let actions_empty = repaired.contains("\"actions\": []")
             || repaired.contains("\"actions\":[]")
-            || repaired.contains("\"actions\": [ ]");
+            || repaired.contains("\"actions\": [ ]")
+            || !repaired.contains("\"actions\"");
         if actions_empty {
             if let Some(pos) = repaired.find("\"next_passes\"") {
                 if let Some(colon) = repaired[pos..].find(':') {

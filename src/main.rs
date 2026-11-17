@@ -504,6 +504,12 @@ impl OverlayApp {
             || self.active_disability_presets.contains(&DisabilityPreset::MotorSwitch)
     }
 
+    pub fn has_motor_disability(&self) -> bool {
+        self.active_disability_presets.contains(&DisabilityPreset::MotorSwitch)
+            || self.active_disability_presets.contains(&DisabilityPreset::Tremor)
+            || self.switch_access_mode
+    }
+
     pub fn open_instrument_card(&mut self) {
         let title = t!("instrument.title").to_string();
         let card = FloatingCard::new("instrument_toy", title, FloatingContentType::Instrument);
@@ -4892,35 +4898,37 @@ impl eframe::App for OverlayApp {
                                         }
 
                                         // 4. Bouton Clavier Virtuel Adapté
-                                        let kbd_id = ui.make_persistent_id("dwell_btn_keyboard");
-                                        let kbd_prog = self.dwell_state.get_progress(kbd_id);
-                                        let is_kbd_open = self.is_keyboard_open();
-                                        let kbd_sub = if is_kbd_open { t!("ui.btn_keyboard_active").to_string() } else { t!("ui.btn_keyboard").to_string() };
-                                        let kbd_resp = render_accessible_icon_button(
-                                            ui,
-                                            "⌨",
-                                            &kbd_sub,
-                                            &t!("ui.btn_keyboard_tooltip"),
-                                            is_kbd_open,
-                                            kbd_prog,
-                                            Some(egui::Color32::from_rgb(0, 180, 255)),
-                                            Some(egui::Color32::from_rgb(0, 210, 255)),
-                                        );
-                                        let (kbd_dwell, _) = self.dwell_state.update(kbd_id, kbd_resp.hovered());
-                                        let is_kbd_key = kbd_resp.has_focus() && ui.input(|i| {
-                                            i.events.iter().any(|ev| match ev {
-                                                egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
-                                                egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
-                                                _ => false,
-                                            })
-                                        });
-                                        if kbd_resp.clicked() || kbd_dwell || is_kbd_key {
-                                            if is_kbd_open {
+                                        if self.has_motor_disability() || self.is_keyboard_open() {
+                                            let kbd_id = ui.make_persistent_id("dwell_btn_keyboard");
+                                            let kbd_prog = self.dwell_state.get_progress(kbd_id);
+                                            let is_kbd_open = self.is_keyboard_open();
+                                            let kbd_sub = if is_kbd_open { t!("ui.btn_keyboard_active").to_string() } else { t!("ui.btn_keyboard").to_string() };
+                                            let kbd_resp = render_accessible_icon_button(
+                                                ui,
+                                                "⌨",
+                                                &kbd_sub,
+                                                &t!("ui.btn_keyboard_tooltip"),
+                                                is_kbd_open,
+                                                kbd_prog,
+                                                Some(egui::Color32::from_rgb(0, 180, 255)),
+                                                Some(egui::Color32::from_rgb(0, 210, 255)),
+                                            );
+                                            let (kbd_dwell, _) = self.dwell_state.update(kbd_id, kbd_resp.hovered());
+                                            let is_kbd_key = kbd_resp.has_focus() && ui.input(|i| {
+                                                i.events.iter().any(|ev| match ev {
+                                                    egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                                    egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                                    _ => false,
+                                                })
+                                            });
+                                            if kbd_resp.clicked() || kbd_dwell || is_kbd_key {
+                                                if is_kbd_open {
                                                 self.floating_cards.retain(|c| c.id != "virtual_keyboard");
                                                 crate::floating_window::update_open_floating_cards(&self.floating_cards);
                                                 play_earcon(Earcon::MicClose);
                                             } else {
                                                 self.open_keyboard_card();
+                                            }
                                             }
                                         }
 
