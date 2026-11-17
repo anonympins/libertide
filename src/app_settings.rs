@@ -1022,7 +1022,7 @@ impl OverlayApp {
                                     .show(ui, |ui| {
                                         for &preset in DisabilityPreset::ALL {
                                             let mut is_checked = self.active_disability_presets.contains(&preset);
-                                            ui.horizontal(|ui| {
+                                            ui.horizontal_wrapped(|ui| {
                                                 let chk_resp = ui.checkbox(&mut is_checked, preset.display_name());
                                                 let chk_id = ui.make_persistent_id(format!("dwell_preset_{:?}", preset));
                                                 let is_toggle_hit = make_toggle_accessible(ui, &chk_resp, theme.accent);
@@ -1030,40 +1030,37 @@ impl OverlayApp {
                                                     self.toggle_disability_preset(preset, ctx);
                                                     play_earcon(Earcon::Success);
                                                 }
-                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                    let is_solo = is_checked && self.active_disability_presets.len() == 1;
-                                                    let solo_label = if is_solo { t!("ui.a11y_preset_solo_active").to_string() } else { t!("ui.a11y_preset_solo").to_string() };
-                                                    let solo_btn = ui.small_button(solo_label).on_hover_text(t!("ui.a11y_preset_solo_tooltip"));
-                                                    if make_widget_accessible_and_activated(ui, &solo_btn, theme.accent) {
-                                                        self.select_exclusive_disability_preset(preset, ctx);
-                                                        play_earcon(Earcon::Success);
-                                                    }
-                                            ui.add_space(4.0);
-                                            let open_inst_btn = ui.small_button("🎵 Ouvrir la Boîte à Rythme & Instrument adapté")
-                                                .on_hover_text("Ouvre le mini-jeu musical adapté au contacteur unique.");
-                                            if make_widget_accessible_and_activated(ui, &open_inst_btn, theme.accent) {
-                                                self.open_instrument_card();
-                                                self.show_api_key_modal = false;
-                                                play_earcon(Earcon::Success);
-                                            }
-                                                });
+                                                let is_solo = is_checked && self.active_disability_presets.len() == 1;
+                                                let solo_label = if is_solo { t!("ui.a11y_preset_solo_active").to_string() } else { t!("ui.a11y_preset_solo").to_string() };
+                                                let solo_btn = ui.small_button(solo_label).on_hover_text(t!("ui.a11y_preset_solo_tooltip"));
+                                                if make_widget_accessible_and_activated(ui, &solo_btn, theme.accent) {
+                                                    self.select_exclusive_disability_preset(preset, ctx);
+                                                    play_earcon(Earcon::Success);
+                                                }
                                             });
                                             ui.add_space(2.0);
                                         }
                                         ui.add_space(4.0);
-                                        ui.horizontal(|ui| {
-                                            let reset_all_btn = ui.small_button(t!("ui.a11y_reset_presets_btn"))
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                                            let reset_all_btn = ui.small_button("🔄 Réinitialiser")
                                                 .on_hover_text(t!("ui.a11y_reset_presets_tooltip"));
                                             if make_widget_accessible_and_activated(ui, &reset_all_btn, theme.accent) {
                                                 self.active_disability_presets.clear();
                                                 self.apply_active_disability_presets(ctx);
                                                 play_earcon(Earcon::Success);
                                             }
-                                            ui.add_space(4.0);
-                                            let open_inst_btn = ui.small_button(t!("instrument.open_btn"))
+                                            let open_inst_btn = ui.small_button("🎵 Boîte à Rythme")
                                                 .on_hover_text(t!("instrument.open_btn_tooltip"));
                                             if make_widget_accessible_and_activated(ui, &open_inst_btn, theme.accent) {
                                                 self.open_instrument_card();
+                                                self.show_api_key_modal = false;
+                                                play_earcon(Earcon::Success);
+                                            }
+                                            let open_kbd_btn = ui.small_button("⌨️ Clavier Virtuel")
+                                                .on_hover_text("Ouvre le clavier virtuel à balayage et commande oculaire.");
+                                            if make_widget_accessible_and_activated(ui, &open_kbd_btn, theme.accent) {
+                                                self.open_keyboard_card();
                                                 self.show_api_key_modal = false;
                                                 play_earcon(Earcon::Success);
                                             }
@@ -1242,10 +1239,10 @@ impl OverlayApp {
                                         let mut auto_scan = self.switch_auto_scroll;
                                         let resp_auto_scan = ui.checkbox(
                                             &mut auto_scan,
-                                            egui::RichText::new("Défilement automatique (Balayage contacteur unique)")
+                                            egui::RichText::new("Balayage automatique (contacteur)")
                                                 .size(11.5)
                                                 .color(theme.text_primary),
-                                        ).on_hover_text("Active le balayage automatique cadencé en mode contacteur unique (désactivé par défaut en mode survol)");
+                                        ).on_hover_text("Active le balayage automatique cadencé en mode contacteur unique");
                                         let id_auto_scan = ui.make_persistent_id("dwell_switch_auto_scroll");
                                         let is_scan_key = make_toggle_accessible(ui, &resp_auto_scan, theme.accent);
                                         if resp_auto_scan.changed() || apply_dwell_to_response(ui, &mut self.dwell_state, id_auto_scan, &resp_auto_scan) || is_scan_key {

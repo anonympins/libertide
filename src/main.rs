@@ -31,6 +31,7 @@ mod local_llm;
 mod agent_backend;
 mod instrument;
 mod eyetracking;
+mod virtual_keyboard;
 pub use eyetracking::*;
 pub use agent_backend::*;
 pub use locale::*;
@@ -517,6 +518,17 @@ impl OverlayApp {
 
     pub fn is_instrument_open(&self) -> bool {
         self.floating_cards.iter().any(|c| c.id == "instrument_toy" && c.open)
+    }
+
+    pub fn open_keyboard_card(&mut self) {
+        let card = FloatingCard::new("virtual_keyboard", "Clavier Virtuel Adapté", FloatingContentType::VirtualKeyboard);
+        if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == "virtual_keyboard") {
+            existing.open = true;
+        } else {
+            self.floating_cards.push(card);
+        }
+        update_open_floating_cards(&self.floating_cards);
+        play_earcon(Earcon::Success);
     }
 
     fn draw_avatar(&self, ui: &mut egui::Ui, center: egui::Pos2, base_radius: f32, time: f64) {
@@ -1661,6 +1673,18 @@ impl eframe::App for OverlayApp {
                             quick_suggestions: vec![QuickSuggestionItem::Text(t!("instrument.close_suggestion").to_string())],
                             screen_size_kb: None,
                         });
+                        let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+                        return;
+                    }
+                    if norm_prompt.contains("clavier virtuel")
+                        || norm_prompt.contains("ouvre le clavier")
+                        || norm_prompt.contains("afficher le clavier")
+                        || norm_prompt.contains("mode clavier")
+                        || norm_prompt.contains("virtual keyboard")
+                    {
+                        self.open_keyboard_card();
+                        let msg = "Clavier virtuel ouvert.".to_string();
+                        self.chat_history.push(ChatEntry { role: ChatRole::Agent, text: msg.clone(), timestamp: current_time_str(), quick_suggestions: Vec::new(), screen_size_kb: None });
                         let _ = self.tts_sender.send(TtsCommand::Speak(msg));
                         return;
                     }
