@@ -13,9 +13,10 @@
 [![macOS Build](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-macos.yml?label=macOS)](https://github.com/anonympins/libertide/actions/workflows/rust-macos.yml)
 
 <p align="center">
-  <img src="public/screenshot-1.png" alt="Libertide transparent interface" width="240">
-  <img src="public/screenshot-2.png" alt="Visual guidance and assisted hover" width="240">
-  <img src="public/screenshot-3.png" alt="Dynamic forms (flight search...)" width="240">
+  <img src="public/screenshot-1.png?v=2" alt="Libertide transparent interface" width="240">
+  <img src="public/screenshot-2.png?v=2" alt="Visual guidance and assisted hover" width="240">
+  <img src="public/screenshot-3.png?v=2" alt="LLM settings" width="240">
+  <img src="public/screenshot-4.png?v=2" alt="Twitch" width="240">
 </p>
 
 **VIDEO :**
