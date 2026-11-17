@@ -4487,39 +4487,6 @@ impl eframe::App for OverlayApp {
                                             }
                                         }
 
-                                        response.context_menu(|ui| {
-                                            if ui.button(t!("ui.ctx_paste")).clicked() {
-                                                if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
-                                                    let clean_clip = clip.replace(['\r', '\n'], " ");
-                                                    let trimmed_clean = clean_clip.trim().to_string();
-                                                    if !trimmed_clean.is_empty() {
-                                                        self.input_text = trimmed_clean;
-                                                        self.stop_speaking();
-                                                        play_earcon(Earcon::Success);
-                                                    }
-                                                }
-                                                ui.memory_mut(|m| m.request_focus(input_id));
-                                                ui.close();
-                                            }
-                                            if ui.button(t!("ui.ctx_copy_all")).clicked() {
-                                                set_clipboard_text(&self.input_text);
-                                                ctx.copy_text(self.input_text.clone());
-                                                play_earcon(Earcon::Success);
-                                                ui.close();
-                                            }
-                                            if ui.button(t!("ui.ctx_cut_all")).clicked() {
-                                                set_clipboard_text(&self.input_text);
-                                                ctx.copy_text(self.input_text.clone());
-                                                self.input_text.clear();
-                                                play_earcon(Earcon::Success);
-                                                ui.close();
-                                            }
-                                            if ui.button(t!("ui.ctx_clear")).clicked() {
-                                                self.input_text.clear();
-                                                ui.close();
-                                            }
-                                        });
-
                                         let copy_hit = ctx.input(|i| {
                                             i.events.iter().any(|e| match e {
                                                 egui::Event::Copy => true,

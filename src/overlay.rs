@@ -361,7 +361,10 @@ pub fn render_accessible_input(
         egui::TextEdit::singleline(text)
     };
 
-    edit = edit.id(id).hint_text(hint_text).password(password);
+    edit = edit
+        .id(id)
+        .hint_text(hint_text)
+        .password(password);
     if let Some(w) = desired_width {
         edit = edit.desired_width(w);
     }
