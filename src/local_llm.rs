@@ -299,23 +299,42 @@ pub const VLM_PRESETS: &[ModelPreset] = &[
     MODEL_PRESETS[7],
 ];
 
+pub const TEXT_PRESETS: &[ModelPreset] = &[
+    MODEL_PRESETS[0],
+    MODEL_PRESETS[1],
+    MODEL_PRESETS[2],
+    MODEL_PRESETS[3],
+    MODEL_PRESETS[4],
+    MODEL_PRESETS[5],
+];
+
+pub fn is_vlm_preset(preset: &ModelPreset) -> bool {
+    VLM_PRESETS.iter().any(|p| p.id == preset.id)
+}
+
 pub fn get_active_preset() -> &'static ModelPreset {
     let preset_var = std::env::var("LOCAL_LLAMA_PRESET")
         .ok()
         .or_else(|| crate::fs_util::read_env_var_from_file(".env", "LOCAL_LLAMA_PRESET"));
     if let Some(preset_id) = preset_var {
         let trimmed = preset_id.trim();
-        if let Some(p) = MODEL_PRESETS.iter().find(|p| p.id.eq_ignore_ascii_case(trimmed)) {
+        if let Some(p) = TEXT_PRESETS.iter().find(|p| p.id.eq_ignore_ascii_case(trimmed)) {
             return p;
         }
     }
     // Par défaut : Qwen 2.5 1.5B
-    &MODEL_PRESETS[0]
+    &TEXT_PRESETS[0]
 }
 
 pub fn set_active_preset(preset_id: &str) {
     std::env::set_var("LOCAL_LLAMA_PRESET", preset_id);
     let _ = crate::fs_util::write_env_var_to_file(".env", "LOCAL_LLAMA_PRESET", preset_id);
+    if let Some(p) = TEXT_PRESETS.iter().find(|p| p.id.eq_ignore_ascii_case(preset_id.trim())) {
+        std::env::set_var("LOCAL_LLAMA_MODEL", p.filename);
+        let _ = crate::fs_util::write_env_var_to_file(".env", "LOCAL_LLAMA_MODEL", p.filename);
+        std::env::set_var("LLM_MODEL", p.filename);
+        let _ = crate::fs_util::write_env_var_to_file(".env", "LLM_MODEL", p.filename);
+    }
     // Réinitialise le moteur en mémoire pour recharger le nouveau modèle au prochain appel
     if let Ok(mut lock) = LOCAL_ENGINE.lock() {
         *lock = None;
@@ -345,16 +364,26 @@ pub fn get_active_vlm_preset() -> &'static ModelPreset {
         .or_else(|| crate::fs_util::read_env_var_from_file(".env", "VLM_PRESET"));
     if let Some(preset_id) = preset_var {
         let trimmed = preset_id.trim();
-        if let Some(p) = MODEL_PRESETS.iter().find(|p| p.id.eq_ignore_ascii_case(trimmed)) {
+        if let Some(p) = VLM_PRESETS.iter().find(|p| p.id.eq_ignore_ascii_case(trimmed)) {
             return p;
         }
     }
-    MODEL_PRESETS.iter().find(|p| p.id == "qwen2.5-vl-3b").unwrap_or(&MODEL_PRESETS[0])
+    &VLM_PRESETS[0]
 }
 
 pub fn set_active_vlm_preset(preset_id: &str) {
     std::env::set_var("VLM_PRESET", preset_id);
     let _ = crate::fs_util::write_env_var_to_file(".env", "VLM_PRESET", preset_id);
+    if let Some(p) = VLM_PRESETS.iter().find(|p| p.id.eq_ignore_ascii_case(preset_id.trim())) {
+        std::env::set_var("LOCAL_VLM_MODEL", p.filename);
+        let _ = crate::fs_util::write_env_var_to_file(".env", "LOCAL_VLM_MODEL", p.filename);
+        std::env::set_var("VLM_MODEL", p.filename);
+        let _ = crate::fs_util::write_env_var_to_file(".env", "VLM_MODEL", p.filename);
+    }
+    // Réinitialise le moteur VLM en mémoire pour recharger le nouveau modèle au prochain appel
+    if let Ok(mut lock) = VLM_ENGINE.lock() {
+        *lock = None;
+    }
 }
 
 static VLM_ENGINE: Mutex<Option<LocalLlamaEngine>> = Mutex::new(None);
@@ -381,7 +410,13 @@ pub fn init_vlm_async(event_tx: Sender<AgentEvent>) {
         let preset = get_active_vlm_preset();
         println!("[Qwen-VL Async] Démarrage du chargement en arrière-plan pour {}...", preset.name);
 
-        match ensure_llama_model_downloaded_for_preset(preset, &event_tx) {
+        let model_path_res = if let Some(existing) = find_local_vlm_model_file() {
+            Ok(existing)
+        } else {
+            ensure_llama_model_downloaded_for_preset(preset, &event_tx)
+        };
+
+        match model_path_res {
             Ok(path) => {
                 match LocalLlamaEngine::load(&path) {
                     Ok(engine) => {
@@ -2450,7 +2485,11 @@ pub fn is_preset_downloaded(preset: &ModelPreset) -> bool {
 
 pub fn delete_preset_model(preset: &ModelPreset) -> Result<(), String> {
     // Décharger le modèle de la mémoire vive / VRAM pour libérer le descripteur de fichier
-    if let Ok(mut lock) = LOCAL_ENGINE.lock() {
+    if is_vlm_preset(preset) {
+        if let Ok(mut lock) = VLM_ENGINE.lock() {
+            *lock = None;
+        }
+    } else if let Ok(mut lock) = LOCAL_ENGINE.lock() {
         *lock = None;
     }
 
@@ -2484,6 +2523,16 @@ pub fn find_local_llama_model_file() -> Option<PathBuf> {
     find_model_file_for_preset(get_active_preset())
 }
 
+pub fn find_local_vlm_model_file() -> Option<PathBuf> {
+    if let Ok(env_path) = std::env::var("LOCAL_VLM_MODEL").or_else(|_| std::env::var("VLM_MODEL")) {
+        let p = PathBuf::from(env_path.trim());
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    find_model_file_for_preset(get_active_vlm_preset())
+}
+
 pub fn ensure_llama_model_downloaded_for_preset(
     preset: &ModelPreset,
     event_tx: &Sender<AgentEvent>,
@@ -2492,9 +2541,18 @@ pub fn ensure_llama_model_downloaded_for_preset(
         return Ok(existing);
     }
 
-    // Met à jour la variable pour pointer sur ce preset lors du téléchargement
-    std::env::set_var("LOCAL_LLAMA_PRESET", preset.id);
-    let _ = crate::fs_util::write_env_var_to_file(".env", "LOCAL_LLAMA_PRESET", preset.id);
+    // Met à jour les variables appropriées sans interférer entre LLM et VLM
+    if is_vlm_preset(preset) {
+        std::env::set_var("VLM_PRESET", preset.id);
+        let _ = crate::fs_util::write_env_var_to_file(".env", "VLM_PRESET", preset.id);
+        std::env::set_var("LOCAL_VLM_MODEL", preset.filename);
+        let _ = crate::fs_util::write_env_var_to_file(".env", "LOCAL_VLM_MODEL", preset.filename);
+        std::env::set_var("VLM_MODEL", preset.filename);
+        let _ = crate::fs_util::write_env_var_to_file(".env", "VLM_MODEL", preset.filename);
+    } else {
+        std::env::set_var("LOCAL_LLAMA_PRESET", preset.id);
+        let _ = crate::fs_util::write_env_var_to_file(".env", "LOCAL_LLAMA_PRESET", preset.id);
+    }
 
     let target_dir = PathBuf::from("models");
     let _ = std::fs::create_dir_all(&target_dir);

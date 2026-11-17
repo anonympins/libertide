@@ -532,6 +532,10 @@ impl OverlayApp {
         play_earcon(Earcon::Success);
     }
 
+    pub fn is_keyboard_open(&self) -> bool {
+        self.floating_cards.iter().any(|c| c.id == "virtual_keyboard" && c.open)
+    }
+
     fn draw_avatar(&self, ui: &mut egui::Ui, center: egui::Pos2, base_radius: f32, time: f64) {
         draw_avatar(
             ui,
@@ -4848,36 +4852,79 @@ impl eframe::App for OverlayApp {
                                             self.toggle_recording(ui.ctx());
                                         }
 
-                                        let dict_id = ui.make_persistent_id("dwell_btn_dict");
-                                        let dict_prog = self.dwell_state.get_progress(dict_id);
-                                        let dict_sub = if self.dictation_mode { t!("ui.btn_dictation_active").to_string() } else { t!("ui.btn_dictation").to_string() };
-                                        let dict_resp = render_accessible_icon_button(
+                                        // 3. Bouton Contrôle Oculaire / Eye-Tracking (si modèle installé)
+                                        if crate::eyetracking::is_eyetracking_model_installed() {
+                                            let eye_id = ui.make_persistent_id("dwell_btn_eyetracking");
+                                            let eye_prog = self.dwell_state.get_progress(eye_id);
+                                            let is_eye_on = crate::eyetracking::is_eye_tracking_enabled();
+                                            let eye_sub = if is_eye_on { t!("ui.btn_eyetracking_active").to_string() } else { t!("ui.btn_eyetracking").to_string() };
+                                            let eye_resp = render_accessible_icon_button(
+                                                ui,
+                                                "👁",
+                                                &eye_sub,
+                                                &t!("ui.btn_eyetracking_tooltip"),
+                                                is_eye_on,
+                                                eye_prog,
+                                                Some(egui::Color32::from_rgb(0, 229, 255)),
+                                                Some(egui::Color32::from_rgb(0, 245, 255)),
+                                            );
+                                            let (eye_dwell, _) = self.dwell_state.update(eye_id, eye_resp.hovered());
+                                            let is_eye_key = eye_resp.has_focus() && ui.input(|i| {
+                                                i.events.iter().any(|ev| match ev {
+                                                    egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                                    egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                                    _ => false,
+                                                })
+                                            });
+                                            if eye_resp.clicked() || eye_dwell || is_eye_key {
+                                                let new_state = !is_eye_on;
+                                                crate::eyetracking::set_eye_tracking_enabled(new_state);
+                                                if new_state {
+                                                    play_earcon(Earcon::Success);
+                                                } else {
+                                                    self.eye_tracker.cancel_calibration();
+                                                    if let Ok(mut lock) = crate::eyetracking::GLOBAL_GAZE_POS.lock() {
+                                                        *lock = None;
+                                                    }
+                                                    play_earcon(Earcon::MicClose);
+                                                }
+                                            }
+                                        }
+
+                                        // 4. Bouton Clavier Virtuel Adapté
+                                        let kbd_id = ui.make_persistent_id("dwell_btn_keyboard");
+                                        let kbd_prog = self.dwell_state.get_progress(kbd_id);
+                                        let is_kbd_open = self.is_keyboard_open();
+                                        let kbd_sub = if is_kbd_open { t!("ui.btn_keyboard_active").to_string() } else { t!("ui.btn_keyboard").to_string() };
+                                        let kbd_resp = render_accessible_icon_button(
                                             ui,
-                                            "✍",
-                                            &dict_sub,
-                                            &t!("ui.btn_dictation_tooltip"),
-                                            self.dictation_mode,
-                                            dict_prog,
-                                            Some(egui::Color32::from_rgb(215, 155, 30)),
-                                            None,
+                                            "⌨",
+                                            &kbd_sub,
+                                            &t!("ui.btn_keyboard_tooltip"),
+                                            is_kbd_open,
+                                            kbd_prog,
+                                            Some(egui::Color32::from_rgb(0, 180, 255)),
+                                            Some(egui::Color32::from_rgb(0, 210, 255)),
                                         );
-                                        let (dict_dwell, _) = self.dwell_state.update(dict_id, dict_resp.hovered());
-                                        let is_dict_key = dict_resp.has_focus() && ui.input(|i| {
+                                        let (kbd_dwell, _) = self.dwell_state.update(kbd_id, kbd_resp.hovered());
+                                        let is_kbd_key = kbd_resp.has_focus() && ui.input(|i| {
                                             i.events.iter().any(|ev| match ev {
                                                 egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
                                                 egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
                                                 _ => false,
                                             })
                                         });
-                                        if dict_resp.clicked() || dict_dwell || is_dict_key {
-                                            if self.dictation_mode {
-                                                self.exit_dictation_mode();
+                                        if kbd_resp.clicked() || kbd_dwell || is_kbd_key {
+                                            if is_kbd_open {
+                                                self.floating_cards.retain(|c| c.id != "virtual_keyboard");
+                                                crate::floating_window::update_open_floating_cards(&self.floating_cards);
+                                                play_earcon(Earcon::MicClose);
                                             } else {
-                                                self.enter_dictation_mode();
+                                                self.open_keyboard_card();
                                             }
                                         }
 
-                                        // 4. Bouton Musique / Rythme (Boîte à rythme & Instrument adapté) - disponible pour tous
+                                        // 5. Bouton Musique / Rythme (Boîte à rythme & Instrument adapté) - disponible pour tous
                                         let rhythm_id = ui.make_persistent_id("dwell_btn_rhythm");
                                         let rhythm_prog = self.dwell_state.get_progress(rhythm_id);
                                         let is_open = self.is_instrument_open();

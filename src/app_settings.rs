@@ -634,7 +634,7 @@ impl OverlayApp {
                                             ui.add_space(4.0);
 
                                             let mut model_to_delete = None;
-                                            for preset in local_llm::MODEL_PRESETS {
+                                            for preset in local_llm::TEXT_PRESETS {
                                                 let is_active = active_preset.id == preset.id;
                                                 let is_installed = local_llm::is_preset_downloaded(preset);
 
