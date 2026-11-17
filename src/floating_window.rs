@@ -2306,8 +2306,13 @@ pub fn render_markdown(ui: &mut egui::Ui, text: &str, card_id: &str, dwell_state
             continue;
         }
 
-        if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") || trimmed.starts_with("• ") {
-            let item_content = &trimmed[2..].trim();
+        let bullet_item = trimmed.strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+            .or_else(|| trimmed.strip_prefix("+ "))
+            .or_else(|| trimmed.strip_prefix("• "));
+
+        if let Some(raw_item_content) = bullet_item {
+            let item_content = raw_item_content.trim();
             let (bullet, bullet_color) = match indent_level {
                 0 => ("•", theme.accent),
                 1 => ("◦", theme.accent_text),
