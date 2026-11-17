@@ -90,7 +90,7 @@ pub fn update_open_floating_cards(cards: &[FloatingCard]) {
                         ("instrument", t!("instrument.card_summary").to_string())
                     }
                     FloatingContentType::VirtualKeyboard => {
-                        ("virtual_keyboard", "Clavier virtuel adapté à balayage et au regard".to_string())
+                        ("virtual_keyboard", t!("keyboard.card_summary").to_string())
                     }
                     FloatingContentType::Form { fields, .. } => {
                         let f_summary = fields.iter().map(|f| f.label.clone()).collect::<Vec<_>>().join(", ");
@@ -544,7 +544,7 @@ impl FloatingCard {
                 speech.push_str(&t!("instrument.speech_description"));
             }
             FloatingContentType::VirtualKeyboard => {
-                speech.push_str("Clavier virtuel adapté. Utilisez le balayage ou le regard pour composer et faire prononcer vos phrases.");
+                speech.push_str(&t!("keyboard.speech_description"));
             }
         }
         speech

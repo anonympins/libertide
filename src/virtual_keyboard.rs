@@ -259,6 +259,9 @@ pub fn render_keyboard_view(
     } else {
         get_active_app_language()
     };
+    if &*rust_i18n::locale() != active_lang.as_str() {
+        rust_i18n::set_locale(&active_lang);
+    }
 
     let mut output_event = None;
     let now = Instant::now();
@@ -402,19 +405,9 @@ pub fn render_keyboard_view(
         .inner_margin(egui::Margin::symmetric(12, 10))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let placeholder = match active_lang.as_str() {
-                    "en" => "Type or scan to compose a message...",
-                    "de" => "Tippen oder scannen, um eine Nachricht zu verfassen...",
-                    "es" => "Escriba o escanee para redactar un mensaje...",
-                    "it" => "Digita o scansiona per comporre un messaggio...",
-                    "pt" => "Digite ou faça varredura para compor uma mensagem...",
-                    "ru" => "Печатайте или сканируйте для сообщения...",
-                    "ja" => "入力またはスキャンでメッセージを作成...",
-                    "zh" => "输入或扫描以编写消息...",
-                    _ => "Tapez ou balayez pour composer un message...",
-                };
+                let placeholder = t!("keyboard.placeholder").to_string();
                 let display_text = if state.text_buffer.is_empty() {
-                    placeholder
+                    placeholder.as_str()
                 } else {
                     &state.text_buffer
                 };
@@ -524,19 +517,17 @@ pub fn render_keyboard_view(
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
 
-        let actions: [(&str, usize); 6] = match active_lang.as_str() {
-            "en" => [("⎵ Space", 0), ("⌫ Delete", 1), ("🗣️ Speak", 2), ("💬 Chat", 3), ("✍️ Insert", 4), ("🗑️ Clear", 5)],
-            "de" => [("⎵ Leer", 0), ("⌫ Löschen", 1), ("🗣️ Sprechen", 2), ("💬 Chat", 3), ("✍️ Einfügen", 4), ("🗑️ Leeren", 5)],
-            "es" => [("⎵ Espacio", 0), ("⌫ Borrar", 1), ("🗣️ Hablar", 2), ("💬 Chat", 3), ("✍️ Insertar", 4), ("🗑️ Vaciar", 5)],
-            "it" => [("⎵ Spazio", 0), ("⌫ Cancella", 1), ("🗣️ Parla", 2), ("💬 Chat", 3), ("✍️ Inserisci", 4), ("🗑️ Svuota", 5)],
-            "pt" => [("⎵ Espaço", 0), ("⌫ Apagar", 1), ("🗣️ Falar", 2), ("💬 Chat", 3), ("✍️ Inserir", 4), ("🗑️ Limpar", 5)],
-            "ru" => [("⎵ Пробел", 0), ("⌫ Стереть", 1), ("🗣️ Голос", 2), ("💬 Чат", 3), ("✍️ Вставить", 4), ("🗑️ Очистить", 5)],
-            "ja" => [("⎵ 空白", 0), ("⌫ 削除", 1), ("🗣️ 発声", 2), ("💬 チャット", 3), ("✍️ 挿入", 4), ("🗑️ 消去", 5)],
-            "zh" => [("⎵ 空格", 0), ("⌫ 删除", 1), ("🗣️ 朗读", 2), ("💬 对话", 3), ("✍️ 插入", 4), ("🗑️ 清空", 5)],
-            _ => [("⎵ Espace", 0), ("⌫ Effacer", 1), ("🗣️ Parler", 2), ("💬 Tchat", 3), ("✍️ Insérer", 4), ("🗑️ Vider", 5)],
-        };
+        let actions: [(String, usize); 6] = [
+            (t!("keyboard.btn_space").to_string(), 0),
+            (t!("keyboard.btn_delete").to_string(), 1),
+            (t!("keyboard.btn_speak").to_string(), 2),
+            (t!("keyboard.btn_chat").to_string(), 3),
+            (t!("keyboard.btn_insert").to_string(), 4),
+            (t!("keyboard.btn_clear").to_string(), 5),
+        ];
 
-        for (label, col_idx) in actions {
+        for (label, col_idx) in &actions {
+            let col_idx = *col_idx;
             let is_action_key = is_actions_row && state.scan_stage == ScanningStage::Key && state.current_col == col_idx;
 
             let bg = if is_action_key {
@@ -555,7 +546,7 @@ pub fn render_keyboard_view(
                 theme.text_primary
             };
 
-            let btn = egui::Button::new(egui::RichText::new(label).size(13.0).color(txt_col).strong())
+            let btn = egui::Button::new(egui::RichText::new(label.as_str()).size(13.0).color(txt_col).strong())
                 .fill(bg)
                 .stroke(egui::Stroke::new(if is_action_key { 2.5 } else { 1.0 }, theme.border))
                 .corner_radius(egui::CornerRadius::same(6))
@@ -613,18 +604,7 @@ pub fn render_keyboard_view(
 
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        let auto_scan_label = match active_lang.as_str() {
-            "en" => "Auto-Scan",
-            "de" => "Automatisches Scannen (Auto-Scan)",
-            "es" => "Escaneo automático (Auto-Scan)",
-            "it" => "Scansione automatica (Auto-Scan)",
-            "pt" => "Varredura automática (Auto-Scan)",
-            "ru" => "Автосканирование (Auto-Scan)",
-            "ja" => "自動スキャン (Auto-Scan)",
-            "zh" => "自动扫描 (Auto-Scan)",
-            _ => "Balayage automatique (Auto-Scan)",
-        };
-        ui.checkbox(&mut state.scanning_enabled, auto_scan_label);
+        ui.checkbox(&mut state.scanning_enabled, t!("keyboard.auto_scan"));
         let mut ms = state.scan_interval.as_millis() as u64;
         if ui.add(egui::Slider::new(&mut ms, 500..=3000).suffix(" ms")).changed() {
             state.scan_interval = Duration::from_millis(ms);

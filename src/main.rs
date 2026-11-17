@@ -41,7 +41,7 @@ use floating_window::{update_open_floating_cards, FloatingCard, FloatingCardOutp
 use automation::*;
 use fs_util::*;
 use intent::*;
-use theme::{localized_theme_desc, localized_theme_name, AppTheme, SettingsTab};
+use theme::{AppTheme, SettingsTab};
 use tts::{sanitize_for_tts, spawn_tts_worker};
 use twitch::spawn_twitch_worker;
 use window_util::*;
@@ -386,7 +386,7 @@ impl OverlayApp {
             voice_clone_url_input,
             voice_reference_wav_input,
             voice_reference_text_input,
-            voice_test_text_input: "Bonjour, ceci est un test de synthèse vocale avec Libertide.".to_string(),
+            voice_test_text_input: t!("voice.test_default_phrase").to_string(),
             voice_status_feedback: None,
             voice_is_recording_sample: false,
             voice_record_append: false,
@@ -402,7 +402,7 @@ impl OverlayApp {
                 .filter(|s| s == "male" || s == "female" || s == "homme" || s == "femme")
                 .map(|s| if s == "male" || s == "homme" { "male".to_string() } else { "female".to_string() })
                 .unwrap_or_else(|| "female".to_string()),
-            voice_guide_phrase: "« Bonjour, je configure ma voix personnalisée dans Libertide. Ce court extrait audio sert de référence pour le modèle de clonage vocal. »".to_string(),
+            voice_guide_phrase: t!("voice.guide_default_phrase").to_string(),
             voice_guide_generating: false,
             voice_guide_rx: None,
             llm_config: llm_config.clone(),
@@ -521,7 +521,8 @@ impl OverlayApp {
     }
 
     pub fn open_keyboard_card(&mut self) {
-        let card = FloatingCard::new("virtual_keyboard", "Clavier Virtuel Adapté", FloatingContentType::VirtualKeyboard);
+        let title = t!("keyboard.title").to_string();
+        let card = FloatingCard::new("virtual_keyboard", title, FloatingContentType::VirtualKeyboard);
         if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == "virtual_keyboard") {
             existing.open = true;
         } else {
@@ -569,7 +570,7 @@ impl OverlayApp {
             VoiceProfile::Paul => t!("speech.voice_paul").to_string(),
             VoiceProfile::Sylvie => t!("speech.voice_sylvie").to_string(),
             VoiceProfile::Jean => t!("speech.voice_jean").to_string(),
-            VoiceProfile::Clone => "Voix clonée personnalisée activée.".to_string(),
+            VoiceProfile::Clone => t!("speech.voice_clone").to_string(),
         };
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
@@ -1767,8 +1768,6 @@ impl eframe::App for OverlayApp {
                     }
 
                     let (locale, _) = get_system_locale_language();
-                    let lang_prefix = locale.split(['-', '_']).next().unwrap_or("fr");
-
                     if is_switch_access_command(&prompt) {
                         mark_hover_nav_asked();
                         self.toggle_switch_access_mode(None);
@@ -2729,7 +2728,6 @@ impl eframe::App for OverlayApp {
                         }
 
                         let win_num = self.switch_focus_index + 1;
-                        let vocal_msg = format!("Fenêtre {} : {}", win_num, display_title);
                         self.hover_last_announced_target = Some(target_hwnd.0 as usize);
                         self.transition_to_zones_for_window(target_hwnd.0 as isize, &display_title);
                         ctx.request_repaint();
