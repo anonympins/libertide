@@ -2806,17 +2806,21 @@ impl LocalLlamaEngine {
             );
             let model_params = LlamaModelParams::default().with_n_gpu_layers(requested_gpu_layers);
             println!("[Local Llama Load] Appel de LlamaModel::load_from_file (GPU)...");
-            match LlamaModel::load_from_file(&backend, &path_buf, &model_params) {
-                Ok(m) => {
+            let gpu_load_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                LlamaModel::load_from_file(&backend, &path_buf, &model_params)
+            }));
+
+            match gpu_load_res {
+                Ok(Ok(m)) => {
                     println!(
                         "[Local Llama] Modèle chargé avec succès sur GPU ({} couches déchargées en VRAM).",
                         requested_gpu_layers
                     );
                     (m, requested_gpu_layers, true)
                 }
-                Err(e) => {
+                Ok(Err(_)) | Err(_) => {
                     eprintln!(
-                        "[Local Llama] Avertissement: Échec du chargement GPU ({e}). Bascule automatique sur CPU (0 couches)..."
+                        "[Local Llama] Avertissement: Échec initialisation GPU/Vulkan. Bascule automatique sur CPU (0 couches)..."
                     );
                     let cpu_params = LlamaModelParams::default().with_n_gpu_layers(0);
                     println!("[Local Llama Load] Appel de LlamaModel::load_from_file (CPU fallback)...");

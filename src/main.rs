@@ -496,6 +496,17 @@ impl OverlayApp {
         };
         app.sync_modal_inputs_for_provider(llm_config.provider);
         update_open_floating_cards(&app.floating_cards);
+
+        if llm_config.provider == LlmProvider::Local {
+            std::thread::spawn(|| {
+                // Laisser la boucle d'affichage egui effectuer son premier rendu
+                std::thread::sleep(Duration::from_millis(1500));
+                println!("[Main] Préchargement sécurisé du LLM local après initialisation UI...");
+                local_llm::init_local_llm();
+                println!("[Main] Préchargement LLM local terminé.");
+            });
+        }
+
         app
     }
 
