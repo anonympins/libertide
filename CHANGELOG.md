@@ -3,6 +3,45 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.8.4] - 2026-11-17
+
+### 🖱️ Contextual Menu & Egui Widget ID Clash Fix (`overlay.rs`, `main.rs`)
+- **Resolution of Duplicate Context Menus & Debug ID Collision (`c8c290c`)**:
+  - Fixed red debug alert box (*"First use of WidgetID / Second use ID clashes"*) occurring on right-clicking the chat input.
+  - Disabled native `egui::TextEdit` context menu via `.show_context_menu(false)` inside `render_accessible_input`.
+  - Removed redundant `.context_menu()` invocation on the input response in `main.rs`, centralizing accessible clipboard actions (Copy, Cut, Paste, Clear) within `overlay.rs`.
+
+### 🧠 LLM Response Repair & Prompt Processing (`local_llm.rs`, `agent_backend.rs`)
+- **Inference Robustness & Parsing Guards (`f75a944`)**:
+  - Fixed JSON extraction issues on local model generations: reinforced streaming parser (`StreamingJsonNarration`) and unclosed field handling (`repair_narration_field`).
+  - Prevented infinite loops and runaway passes by strictly resetting `next_passes = 0` whenever an action array is empty or when providing complete descriptive analyses.
+  - Sanitized escaped single quotes and raw line breaks to ensure valid JSON payload reconstruction.
+
+### ♿ Motor Disability Ergonomics & Adaptive Keyboard Visibility (`main.rs`, `virtual_keyboard.rs`, `tts.rs`)
+- **Context-Aware Keyboard Action Bar Icon (`f7cebef`)**:
+  - Conditionally displays the virtual keyboard launcher button (`⌨`) in the main action bar only when motor disability presets (`MotorSwitch`, `Tremor`) or switch access navigation are enabled, or when the keyboard floating card is open.
+  - Refined prosodic punctuation pauses between speech synthesis segments to prevent cutting off words during assistive navigation.
+
+### 👁️ VLM Presets & Vision Grounding (`local_llm.rs`, `ocr.rs`, `app_settings.rs`)
+- **Dedicated Multimodal Model Presets (`bff5fd6`)**:
+  - Isolated Vision-Language Models (`VLM_PRESETS`) from text-only LLMs with independent preset selection in the LLM Settings tab:
+    - **Qwen 2 VL 2B Instruct** (`Qwen2-VL-2B-Instruct-Q4_K_M.gguf`, ~1.5 GB).
+    - **Qwen 2.5 VL 7B Instruct** (`Qwen_Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf`, ~4.7 GB).
+  - Visual GUI grounding support: automatic detection and bounding-box discovery of unlabelled icons, hamburger menus, and HTML5 canvas controls without text labels.
+
+### ⌨️ Adapted Virtual Keyboard & Word Prediction (`virtual_keyboard.rs`, `floating_window.rs`)
+- **Single-Switch & Dwell Accessible Keyboard**:
+  - Floating card viewport (`FloatingContentType::VirtualKeyboard`) featuring two-stage hierarchical auto-scanning (Row ➔ Key) with customizable dwell and keypress intervals.
+  - Dynamic word prediction bar proposing contextual vocabulary and high-frequency communication words.
+  - Action bar shortcuts: instant TTS text voicing (`Speak`), direct prompt submission to agent chat (`Chat`), clipboard pasting into foreground external applications (`Insert`), and clearing.
+
+### 🌐 Full Internationalization & Complete Locale Coverage (`locales/*.json`, `virtual_keyboard.rs`, `instrument.rs`)
+- **Exhaustive Multi-Language Dictionary & Layout Parity (`9892441`)**:
+  - Localized letter frequency arrangements and prediction dictionaries across all 9 supported languages: French, English, German, Spanish, Italian, Portuguese, Russian, Japanese, and Chinese.
+  - Full translation coverage for keyboard action labels, musical instrument sound banks, settings modals, and accessibility presets.
+
+---
+
 ## [0.8.3] - 2026-11-16
 
 ### 🛑 Deadlock Elimination, UIA Timeouts & Performance Guards (`automation.rs`, `ui.rs`, `commands.rs`, `window_util.rs`)
