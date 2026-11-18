@@ -2503,9 +2503,19 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
 }
 
 #[cfg(not(windows))]
-pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> String {
+pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> String {
+    if actions.is_empty() {
+        return "Aucune action système à exécuter.".to_string();
+    }
+    if is_request_cancelled(request_id) {
+        return "Actions interrompues par une nouvelle consigne.".to_string();
+    }
     let mut feedback = Vec::new();
     for action in actions {
+        if is_request_cancelled(request_id) {
+            feedback.push("Séquence d'actions interrompue par une nouvelle consigne.".to_string());
+            break;
+        }
         match action {
             AgentAction::Undo => {
                 if let Some(msg) = undo_last_system_action() {
@@ -2526,37 +2536,22 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 feedback.push(format!("Application '{}' lancée en arrière-plan.", name));
             }
             AgentAction::NavigateBack => {
-                #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to keystroke \"[\" using command down"]).status();
-                #[cfg(not(target_os = "macos"))]
-                let _ = std::process::Command::new("xdotool").args(["key", "alt+Left"]).status();
+                send_hotkey(&[VIRTUAL_KEY(0x12)], VIRTUAL_KEY(0x25));
                 feedback.push("Navigation arrière (page précédente) effectuée.".to_string());
             }
             AgentAction::NavigateForward => {
-                #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to keystroke \"]\" using command down"]).status();
-                #[cfg(not(target_os = "macos"))]
-                let _ = std::process::Command::new("xdotool").args(["key", "alt+Right"]).status();
+                send_hotkey(&[VIRTUAL_KEY(0x12)], VIRTUAL_KEY(0x27));
                 feedback.push("Navigation avant (page suivante) effectuée.".to_string());
             }
             AgentAction::OpenSearch => {
-                let _ = std::process::Command::new("xdotool").args(["key", "Super"]).status();
+                #[cfg(target_os = "macos")]
+                send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x20)); // Cmd+Space (Spotlight)
+                #[cfg(not(target_os = "macos"))]
+                send_hotkey(&[], VIRTUAL_KEY(0x5B)); // Touche Super (GNOME / KDE)
                 feedback.push("Recherche système locale ouverte.".to_string());
             }
             AgentAction::OpenSearchBrowser => {
-                #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("osascript")
-                    .args(["-e", "tell application \"System Events\" to keystroke \"l\" using command down"])
-                    .status();
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let user_windows = list_user_windows();
-                    if let Some(win_id) = find_best_browser_window(&user_windows, None) {
-                        let _ = std::process::Command::new("wmctrl").args(["-i", "-a", &win_id]).status();
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                    let _ = std::process::Command::new("xdotool").args(["key", "ctrl+l"]).status();
-                }
+                focus_browser_address_bar("");
                 feedback.push("Barre d'adresse / recherche navigateur sélectionnée.".to_string());
             }
             AgentAction::CloseApp { name } => {
@@ -2572,20 +2567,12 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 feedback.push(format!("Navigateur ouvert sur '{}'.", url_str));
             }
             AgentAction::FocusAddressBar { .. } => {
-                #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("osascript")
-                    .args(["-e", "tell application \"System Events\" to keystroke \"l\" using command down"])
-                    .status();
-                #[cfg(not(target_os = "macos"))]
-                let _ = std::process::Command::new("xdotool").args(["key", "ctrl+l"]).status();
+                focus_browser_address_bar("");
                 feedback.push("Barre d'adresse sélectionnée (Ctrl+L).".to_string());
             }
             AgentAction::NavigateToUrl { url, .. } => {
                 let formatted = format_url_for_navigation(url);
-                #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("open").arg(&formatted).spawn();
-                #[cfg(not(target_os = "macos"))]
-                let _ = std::process::Command::new("xdg-open").arg(&formatted).spawn();
+                open_browser_smart(&formatted);
                 feedback.push(format!("Navigation vers '{}'.", formatted));
             }
             AgentAction::WriteText { text, press_enter, .. } => {
@@ -2600,38 +2587,14 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 if press_enter.unwrap_or(false) {
                     send_hotkey(&[], VK_RETURN);
                 }
-                feedback.push(format!("Texte saisi sous X11 ({} caractères).", text.len()));
+                feedback.push(format!("Texte saisi ({} caractères).", text.len()));
             }
             AgentAction::ReplaceFieldText { text, .. } => {
-                set_clipboard_text(text);
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = std::process::Command::new("osascript")
-                        .args(["-e", "tell application \"System Events\" to keystroke \"a\" using command down\ntell application \"System Events\" to keystroke \"v\" using command down"])
-                        .status();
-                }
-                #[cfg(all(not(windows), not(target_os = "macos")))]
-                {
-                    let _ = std::process::Command::new("xdotool").args(["key", "ctrl+a", "ctrl+v"]).status();
-                }
+                let _ = replace_active_field_text(text);
                 feedback.push(format!("Texte du champ mis à jour ({} caractères).", text.len()));
             }
             AgentAction::ClearText { .. } => {
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = std::process::Command::new("osascript")
-                        .args(["-e", "tell application \"System Events\" to keystroke \"a\" using command down\ntell application \"System Events\" to key code 51"])
-                        .status();
-                }
-                #[cfg(all(not(windows), not(target_os = "macos")))]
-                {
-                    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
-                    const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
-                    const VK_BACK: VIRTUAL_KEY = VIRTUAL_KEY(0x08);
-                    send_hotkey(&[VK_CONTROL], VK_A);
-                    std::thread::sleep(Duration::from_millis(20));
-                    send_hotkey(&[], VK_BACK);
-                }
+                clear_window_text("");
                 feedback.push("Champ de texte réinitialisé.".to_string());
             }
             AgentAction::Scroll { direction, amount, .. } => {
@@ -2687,24 +2650,15 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 let cmd_lower = command.to_lowercase();
                 match cmd_lower.as_str() {
                     "newline" | "a_la_ligne" | "enter" => {
-                        #[cfg(target_os = "macos")]
-                        let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to key code 36"]).status();
-                        #[cfg(all(not(windows), not(target_os = "macos")))]
-                        let _ = std::process::Command::new("xdotool").args(["key", "Return"]).status();
+                        send_hotkey(&[], VIRTUAL_KEY(0x0D));
                         feedback.push("Curseur : à la ligne.".to_string());
                     }
                     "left" | "gauche" => {
-                        #[cfg(target_os = "macos")]
-                        let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to key code 123"]).status();
-                        #[cfg(all(not(windows), not(target_os = "macos")))]
-                        let _ = std::process::Command::new("xdotool").args(["key", "Left"]).status();
+                        send_hotkey(&[], VIRTUAL_KEY(0x25));
                         feedback.push("Curseur : vers la gauche.".to_string());
                     }
                     "right" | "droite" => {
-                        #[cfg(target_os = "macos")]
-                        let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to key code 124"]).status();
-                        #[cfg(all(not(windows), not(target_os = "macos")))]
-                        let _ = std::process::Command::new("xdotool").args(["key", "Right"]).status();
+                        send_hotkey(&[], VIRTUAL_KEY(0x27));
                         feedback.push("Curseur : vers la droite.".to_string());
                     }
                     _ => {
@@ -2786,6 +2740,8 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 }
             }
             AgentAction::ClickElement { target_name, .. } => {
+                let cleaned_name = sanitize_target_name(target_name);
+                let effective_target = if !cleaned_name.is_empty() { cleaned_name.as_str() } else { target_name.as_str() };
                 let target_num_opt = target_name
                     .trim()
                     .strip_prefix('#')
@@ -2802,14 +2758,16 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                     }
                 }
                 let elements = list_interactive_elements("");
-                if let Some(elem) = find_best_element(&elements, target_name) {
+                if let Some(elem) = find_best_element(&elements, effective_target) {
                     click_element(elem.click_x, elem.click_y, None, None);
-                    feedback.push(format!("Clic effectué sur l'élément '{target_name}'."));
+                    feedback.push(format!("Clic effectué sur l'élément '{effective_target}'."));
                 } else {
-                    feedback.push(format!("Élément '{target_name}' introuvable à l'écran."));
+                    feedback.push(format!("Élément '{effective_target}' introuvable à l'écran."));
                 }
             }
             AgentAction::ClickButton { button_name, .. } => {
+                let cleaned_name = sanitize_target_name(button_name);
+                let effective_btn = if !cleaned_name.is_empty() { cleaned_name.as_str() } else { button_name.as_str() };
                 let target_num_opt = button_name
                     .trim()
                     .strip_prefix('#')
@@ -2826,20 +2784,22 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                     }
                 }
                 let elements = list_interactive_elements("");
-                if let Some(elem) = find_best_button_element(&elements, button_name) {
+                if let Some(elem) = find_best_button_element(&elements, effective_btn) {
                     click_element(elem.click_x, elem.click_y, None, None);
-                    feedback.push(format!("Clic effectué sur le bouton '{button_name}'."));
+                    feedback.push(format!("Clic effectué sur le bouton '{effective_btn}'."));
                 } else {
-                    feedback.push(format!("Bouton '{button_name}' introuvable à l'écran."));
+                    feedback.push(format!("Bouton '{effective_btn}' introuvable à l'écran."));
                 }
             }
             AgentAction::FocusElement { target_name, .. } => {
+                let cleaned_name = sanitize_target_name(target_name);
+                let effective_target = if !cleaned_name.is_empty() { cleaned_name.as_str() } else { target_name.as_str() };
                 let elements = list_interactive_elements("");
-                if let Some(elem) = find_best_input_element(&elements, target_name).or_else(|| find_best_element(&elements, target_name)) {
+                if let Some(elem) = find_best_input_element(&elements, effective_target).or_else(|| find_best_element(&elements, effective_target)) {
                     click_element(elem.click_x, elem.click_y, None, None);
-                    feedback.push(format!("Focus positionné sur '{target_name}'."));
+                    feedback.push(format!("Focus positionné sur '{effective_target}'."));
                 } else {
-                    feedback.push(format!("Focus demandé sur '{target_name}'."));
+                    feedback.push(format!("Focus demandé sur '{effective_target}'."));
                 }
             }
             AgentAction::SetAutostart { enabled } => {
@@ -2854,17 +2814,19 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 }
             }
             AgentAction::Dictate { text, press_enter, .. } => {
-                let _ = std::process::Command::new("xdotool").args(["type", "--delay", "12", text]).status();
+                set_clipboard_text(text);
+                std::thread::sleep(Duration::from_millis(15));
+                send_paste();
                 if press_enter.unwrap_or(false) {
-                    let _ = std::process::Command::new("xdotool").args(["key", "Return"]).status();
+                    std::thread::sleep(Duration::from_millis(30));
+                    send_hotkey(&[], VIRTUAL_KEY(0x0D));
                 }
-                feedback.push(format!("Texte saisi sous X11 ({} caractères).", text.len()));
+                feedback.push(format!("Texte dicté inséré ({} caractères).", text.len()));
             }
             AgentAction::RunCommand { command } => {
                 let cmd_clean = command.trim().to_lowercase();
-                if cmd_clean.contains('+') || cmd_clean.starts_with("ctrl") || cmd_clean.starts_with("alt") {
-                    let _ = std::process::Command::new("xdotool").args(["key", &cmd_clean]).status();
-                    feedback.push(format!("Combinaison de touches '{}' envoyée via xdotool.", command));
+                if try_send_key_combination(&cmd_clean) {
+                    feedback.push(format!("Combinaison de touches '{}' envoyée.", command));
                     continue;
                 }
                 let ok = std::process::Command::new("sh").arg("-c").arg(command).spawn().is_ok();
@@ -2872,8 +2834,8 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
             }
             AgentAction::AccessibilityShortcut { shortcut } => {
                 match shortcut.as_str() {
-                    "enter" | "press_enter" => { let _ = std::process::Command::new("xdotool").args(["key", "Return"]).status(); }
-                    "open_search" => { let _ = std::process::Command::new("xdotool").args(["key", "Super"]).status(); }
+                    "enter" | "press_enter" => { send_hotkey(&[], VIRTUAL_KEY(0x0D)); }
+                    "open_search" => { send_hotkey(&[], VIRTUAL_KEY(0x5B)); }
                     "narrator_toggle" => {
                         #[cfg(target_os = "macos")]
                         let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to key code 96 using command down"]).status();
@@ -2887,37 +2849,26 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                         let _ = std::process::Command::new("gsettings").args(["set", "org.gnome.desktop.a11y.magnifier", "mag-factor", "2.0"]).status();
                     }
                     "open_search_browser" | "browser_search" => {
-                        #[cfg(target_os = "macos")]
-                        let _ = std::process::Command::new("osascript")
-                            .args(["-e", "tell application \"System Events\" to keystroke \"l\" using command down"])
-                            .status();
-                        #[cfg(not(target_os = "macos"))]
-                        let _ = std::process::Command::new("xdotool").args(["key", "ctrl+l"]).status();
+                        focus_browser_address_bar("");
                     }
-                    "escape" => { let _ = std::process::Command::new("xdotool").args(["key", "Escape"]).status(); }
-                    "copy" => { let _ = std::process::Command::new("xdotool").args(["key", "ctrl+c"]).status(); }
-                    "close_tab" => { let _ = std::process::Command::new("xdotool").args(["key", "ctrl+w"]).status(); }
-                    "refresh_page" => { let _ = std::process::Command::new("xdotool").args(["key", "F5"]).status(); }
+                    "escape" => { send_hotkey(&[], VIRTUAL_KEY(0x1B)); }
+                    "copy" => { send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x43)); }
+                    "close_tab" => { send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x57)); }
+                    "refresh_page" => { send_hotkey(&[], VIRTUAL_KEY(0x74)); }
                     "bookmarks_bar" | "toggle_bookmarks" | "favoris" => {
-                        let _ = std::process::Command::new("xdotool").args(["key", "ctrl+shift+b"]).status();
+                        send_hotkey(&[VIRTUAL_KEY(0x11), VIRTUAL_KEY(0x10)], VIRTUAL_KEY(0x42));
                     }
                     "browser_back" | "navigate_back" | "back" => {
-                        #[cfg(target_os = "macos")]
-                        let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to keystroke \"[\" using command down"]).status();
-                        #[cfg(not(target_os = "macos"))]
-                        let _ = std::process::Command::new("xdotool").args(["key", "alt+Left"]).status();
+                        send_hotkey(&[VIRTUAL_KEY(0x12)], VIRTUAL_KEY(0x25));
                     }
                     "browser_forward" | "navigate_forward" | "forward" => {
-                        #[cfg(target_os = "macos")]
-                        let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to keystroke \"]\" using command down"]).status();
-                        #[cfg(not(target_os = "macos"))]
-                        let _ = std::process::Command::new("xdotool").args(["key", "alt+Right"]).status();
+                        send_hotkey(&[VIRTUAL_KEY(0x12)], VIRTUAL_KEY(0x27));
                     }
                     other => {
-                        let _ = std::process::Command::new("xdotool").args(["key", other]).status();
+                        let _ = try_send_key_combination(other);
                     }
                 }
-                feedback.push(format!("Raccourci '{}' envoyé via xdotool.", shortcut));
+                feedback.push(format!("Raccourci '{}' envoyé.", shortcut));
             }
             AgentAction::EnableAutostart => {
                 feedback.push(set_autostart(true).unwrap_or_else(|e| e));
@@ -2990,11 +2941,9 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    let _ = std::process::Command::new("playerctl").arg("pause").spawn();
-                    let _ = std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg("pactl list sink-inputs short | awk '{print $1}' | xargs -r -I{} pactl set-sink-input-mute {} 1")
-                        .spawn();
+                    unsafe {
+                        let _ = crate::ui::mute_other_audio_sessions();
+                    }
                 }
                 feedback.push("Flux sonores externes mis en sourdine (voix Libertide préservée).".to_string());
             }
@@ -3038,6 +2987,9 @@ pub fn execute_system_actions(actions: &[AgentAction], _request_id: u64) -> Stri
                         feedback.push("Volume augmenté.".to_string());
                     }
                     _ => {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("osascript").args(["-e", "set volume output muted not (output muted of (get volume settings))"]).spawn();
+                        #[cfg(not(target_os = "macos"))]
                         let _ = std::process::Command::new("pactl")
                             .args(["set-sink-mute", "@DEFAULT_SINK@", "toggle"])
                             .spawn();

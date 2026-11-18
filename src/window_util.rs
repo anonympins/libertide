@@ -418,7 +418,7 @@ pub fn is_browser_window(title: &str) -> bool {
 }
 
 #[cfg(not(windows))]
-pub fn is_window_hung(_id: &str) -> bool {
+pub fn is_window_hung(_target: impl crate::automation::AsWindowTarget) -> bool {
     false
 }
 
@@ -892,29 +892,147 @@ pub fn clear_all_screen_overlays() {
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
+mod x11_cursor {
+    use std::sync::Mutex;
+
+    type XOpenDisplayFn = unsafe extern "C" fn(*const std::ffi::c_char) -> *mut std::ffi::c_void;
+    type XDefaultRootWindowFn = unsafe extern "C" fn(*mut std::ffi::c_void) -> usize;
+    type XQueryPointerFn = unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        usize,
+        *mut usize,
+        *mut usize,
+        *mut i32,
+        *mut i32,
+        *mut i32,
+        *mut i32,
+        *mut u32,
+    ) -> std::ffi::c_int;
+    type XWarpPointerFn = unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        usize,
+        usize,
+        i32,
+        i32,
+        u32,
+        u32,
+        i32,
+        i32,
+    ) -> std::ffi::c_int;
+    type XFlushFn = unsafe extern "C" fn(*mut std::ffi::c_void) -> std::ffi::c_int;
+
+    extern "C" {
+        fn dlopen(filename: *const std::ffi::c_char, flag: std::ffi::c_int) -> *mut std::ffi::c_void;
+        fn dlsym(handle: *mut std::ffi::c_void, symbol: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+    }
+
+    struct X11State {
+        display: *mut std::ffi::c_void,
+        root: usize,
+        query_ptr: XQueryPointerFn,
+        warp_ptr: XWarpPointerFn,
+        flush: XFlushFn,
+    }
+    unsafe impl Send for X11State {}
+    unsafe impl Sync for X11State {}
+
+    static STATE: Mutex<Option<X11State>> = Mutex::new(None);
+
+    fn get_state() -> Option<&'static Mutex<Option<X11State>>> {
+        let mut lock = STATE.lock().ok()?;
+        if lock.is_some() {
+            return Some(&STATE);
+        }
+
+        unsafe {
+            let handle = dlopen(b"libX11.so.6\0".as_ptr() as *const _, 1);
+            let handle = if handle.is_null() {
+                dlopen(b"libX11.so\0".as_ptr() as *const _, 1)
+            } else {
+                handle
+            };
+            if handle.is_null() {
+                return None;
+            }
+
+            let sym_open = dlsym(handle, b"XOpenDisplay\0".as_ptr() as *const _);
+            let sym_root = dlsym(handle, b"XDefaultRootWindow\0".as_ptr() as *const _);
+            let sym_query = dlsym(handle, b"XQueryPointer\0".as_ptr() as *const _);
+            let sym_warp = dlsym(handle, b"XWarpPointer\0".as_ptr() as *const _);
+            let sym_flush = dlsym(handle, b"XFlush\0".as_ptr() as *const _);
+
+            if sym_open.is_null() || sym_root.is_null() || sym_query.is_null() || sym_warp.is_null() || sym_flush.is_null() {
+                return None;
+            }
+
+            let open_fn: XOpenDisplayFn = std::mem::transmute(sym_open);
+            let root_fn: XDefaultRootWindowFn = std::mem::transmute(sym_root);
+            let display = open_fn(std::ptr::null());
+            if display.is_null() {
+                return None;
+            }
+            let root = root_fn(display);
+
+            *lock = Some(X11State {
+                display,
+                root,
+                query_ptr: std::mem::transmute(sym_query),
+                warp_ptr: std::mem::transmute(sym_warp),
+                flush: std::mem::transmute(sym_flush),
+            });
+        }
+        Some(&STATE)
+    }
+
+    pub fn get_cursor_pos() -> Option<(i32, i32)> {
+        let mutex = get_state()?;
+        let guard = mutex.lock().ok()?;
+        let s = guard.as_ref()?;
+        let mut root_ret = 0usize;
+        let mut child_ret = 0usize;
+        let mut root_x = 0i32;
+        let mut root_y = 0i32;
+        let mut win_x = 0i32;
+        let mut win_y = 0i32;
+        let mut mask = 0u32;
+        let ok = unsafe {
+            (s.query_ptr)(
+                s.display,
+                s.root,
+                &mut root_ret,
+                &mut child_ret,
+                &mut root_x,
+                &mut root_y,
+                &mut win_x,
+                &mut win_y,
+                &mut mask,
+            )
+        };
+        if ok != 0 {
+            Some((root_x, root_y))
+        } else {
+            None
+        }
+    }
+
+    pub fn set_cursor_pos(x: i32, y: i32) -> bool {
+        let Some(mutex) = get_state() else { return false; };
+        let Ok(guard) = mutex.lock() else { return false; };
+        let Some(s) = guard.as_ref() else { return false; };
+        unsafe {
+            (s.warp_ptr)(s.display, 0, s.root, 0, 0, 0, 0, x, y);
+            (s.flush)(s.display);
+        }
+        true
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn get_global_cursor_pos() -> Option<(i32, i32)> {
     if crate::automation::is_wayland_session() {
-        // Note : Sous Wayland sans protocole ext-foreign-toplevel ou portal d'accessibilité,
-        // la lecture absolue est restreinte par le compositeur.
         return None;
     }
-    // Remplacement du fork xdotool par XQueryPointer direct pour supprimer les 10-30ms de latence
-    if let Ok(output) = std::process::Command::new("xdotool").args(["getmouselocation", "--shell"]).output() {
-        let text = String::from_utf8_lossy(&output.stdout);
-        let mut x = None;
-        let mut y = None;
-        for line in text.lines() {
-            if let Some(val) = line.strip_prefix("X=") {
-                x = val.trim().parse::<i32>().ok();
-            } else if let Some(val) = line.strip_prefix("Y=") {
-                y = val.trim().parse::<i32>().ok();
-            }
-        }
-        if let (Some(x), Some(y)) = (x, y) {
-            return Some((x, y));
-        }
-    }
-    None
+    x11_cursor::get_cursor_pos()
 }
 
 /// Déplace physiquement le curseur de la souris à l'écran
@@ -942,6 +1060,11 @@ pub fn set_global_cursor_pos(x: i32, y: i32) {
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn set_global_cursor_pos(x: i32, y: i32) {
+    if !crate::automation::is_wayland_session() {
+        if x11_cursor::set_cursor_pos(x, y) {
+            return;
+        }
+    }
     if crate::automation::is_wayland_session() {
         let _ = std::process::Command::new("ydotool")
             .args(["mousemove", "--absolute", "-x", &x.to_string(), "-y", &y.to_string()])
