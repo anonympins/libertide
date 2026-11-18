@@ -50,6 +50,8 @@ pub enum UndoOperation {
     CustomPrompt(String),
 }
 
+pub const MAX_HISTORY_STACK_SIZE: usize = 50;
+
 #[derive(Default)]
 pub struct ActionHistoryManager {
     pub undo_stack: Vec<UndoOperation>,
@@ -59,6 +61,9 @@ pub struct ActionHistoryManager {
 impl ActionHistoryManager {
     pub fn push_undo(&mut self, op: UndoOperation) {
         self.undo_stack.push(op);
+        if self.undo_stack.len() > MAX_HISTORY_STACK_SIZE {
+            self.undo_stack.remove(0);
+        }
         self.redo_stack.clear();
     }
 
@@ -68,6 +73,11 @@ impl ActionHistoryManager {
 
     pub fn pop_redo(&mut self) -> Option<UndoOperation> {
         self.redo_stack.pop()
+    }
+
+    pub fn clear(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
     }
 }
 
@@ -255,6 +265,13 @@ pub fn execute_undo_operation(op: UndoOperation) -> (String, Option<UndoOperatio
         UndoOperation::CustomPrompt(prompt) => {
             (format!("Annulation via consigne : {prompt}"), None)
         }
+    }
+}
+
+/// Réinitialise l'ensemble des piles Undo et Redo
+pub fn clear_action_history() {
+    if let Ok(mut hist) = ACTION_HISTORY.lock() {
+        hist.clear();
     }
 }
 

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crate::audio_player::AudioPlayer;
 use crate::fs_util::read_env_var_from_file;
 use crate::set_tts_audio_level;
-use crate::types::{AgentEvent, AgentStatus, TtsCommand, VoiceGender};
+pub(crate) use crate::types::{AgentEvent, AgentStatus, TtsCommand, VoiceGender};
 
 /// Nettoie le texte Markdown/HTML et convertit les symboles en texte parlé naturel
 pub fn sanitize_for_tts(text: &str) -> String {
