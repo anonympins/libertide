@@ -418,7 +418,11 @@ pub fn init_vlm_async(event_tx: Sender<AgentEvent>) {
 
         match model_path_res {
             Ok(path) => {
-                match LocalLlamaEngine::load(&path) {
+                let vlm_gpu_layers = std::env::var("VLM_GPU_LAYERS")
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .unwrap_or(0);
+                match LocalLlamaEngine::load_with_layers(&path, vlm_gpu_layers) {
                     Ok(engine) => {
                         println!("[Qwen-VL Async] Modèle visuel {} prêt en mémoire !", preset.name);
                         let _ = event_tx.send(AgentEvent::SilentNarration(format!(
@@ -2773,6 +2777,14 @@ unsafe impl Sync for LocalLlamaEngine {}
 
 impl LocalLlamaEngine {
     pub fn load(model_path: &Path) -> Result<Self, String> {
+        let requested_gpu_layers = std::env::var("LLAMA_GPU_LAYERS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(99);
+        Self::load_with_layers(model_path, requested_gpu_layers)
+    }
+
+    pub fn load_with_layers(model_path: &Path, requested_gpu_layers: u32) -> Result<Self, String> {
         let abs_path = if model_path.is_absolute() {
             model_path.to_path_buf()
         } else if let Ok(cwd) = std::env::current_dir() {
@@ -2794,10 +2806,6 @@ impl LocalLlamaEngine {
         }
 
         let backend = get_or_init_backend()?;
-        let requested_gpu_layers = std::env::var("LLAMA_GPU_LAYERS")
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-            .unwrap_or(99);
 
         let (model, gpu_layers, gpu_enabled) = if requested_gpu_layers > 0 {
             println!(
@@ -2806,17 +2814,21 @@ impl LocalLlamaEngine {
             );
             let model_params = LlamaModelParams::default().with_n_gpu_layers(requested_gpu_layers);
             println!("[Local Llama Load] Appel de LlamaModel::load_from_file (GPU)...");
-            match LlamaModel::load_from_file(&backend, &path_buf, &model_params) {
-                Ok(m) => {
+            let gpu_load_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                LlamaModel::load_from_file(&backend, &path_buf, &model_params)
+            }));
+
+            match gpu_load_res {
+                Ok(Ok(m)) => {
                     println!(
                         "[Local Llama] Modèle chargé avec succès sur GPU ({} couches déchargées en VRAM).",
                         requested_gpu_layers
                     );
                     (m, requested_gpu_layers, true)
                 }
-                Err(e) => {
+                Ok(Err(_)) | Err(_) => {
                     eprintln!(
-                        "[Local Llama] Avertissement: Échec du chargement GPU ({e}). Bascule automatique sur CPU (0 couches)..."
+                        "[Local Llama] Avertissement: Échec initialisation GPU/Vulkan. Bascule automatique sur CPU (0 couches)..."
                     );
                     let cpu_params = LlamaModelParams::default().with_n_gpu_layers(0);
                     println!("[Local Llama Load] Appel de LlamaModel::load_from_file (CPU fallback)...");

@@ -271,35 +271,90 @@ pub fn click_element(
     }
 }
 
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CGEventCreateMouseEvent(
+        source: *const std::ffi::c_void,
+        mouseType: u32,
+        mouseCursorPosition: CGPoint,
+        mouseButton: u32,
+    ) -> *mut std::ffi::c_void;
+    fn CGEventCreateKeyboardEvent(
+        source: *mut std::ffi::c_void,
+        virtualKey: u16,
+        keyDown: bool,
+    ) -> *mut std::ffi::c_void;
+    fn CGEventKeyboardSetUnicodeString(
+        event: *mut std::ffi::c_void,
+        stringLength: usize,
+        unicodeString: *const u16,
+    );
+    fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
+    fn CFRelease(cf: *mut std::ffi::c_void);
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGPoint {
+    x: f64,
+    y: f64,
+}
+
 #[cfg(not(windows))]
 pub fn click_element(x: i32, y: i32, _element: Option<&()>, _invoke_pattern: Option<&()>) {
     #[cfg(target_os = "macos")]
     {
-        let script = format!(
-            r#"tell application "System Events" to click at {{{}, {}}}"#,
-            x, y
-        );
-        let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+        let pt = CGPoint { x: x as f64, y: y as f64 };
+        unsafe {
+            let move_evt = CGEventCreateMouseEvent(std::ptr::null(), 5 /* kCGEventMouseMoved */, pt, 0);
+            if !move_evt.is_null() {
+                CGEventPost(0, move_evt);
+                CFRelease(move_evt);
+            }
+            std::thread::sleep(Duration::from_millis(15));
+            let down_evt = CGEventCreateMouseEvent(std::ptr::null(), 1 /* kCGEventLeftMouseDown */, pt, 0);
+            if !down_evt.is_null() {
+                CGEventPost(0, down_evt);
+                CFRelease(down_evt);
+            }
+            std::thread::sleep(Duration::from_millis(30));
+            let up_evt = CGEventCreateMouseEvent(std::ptr::null(), 2 /* kCGEventLeftMouseUp */, pt, 0);
+            if !up_evt.is_null() {
+                CGEventPost(0, up_evt);
+                CFRelease(up_evt);
+            }
+        }
     }
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
-        if crate::automation::is_wayland_session() {
-            let moved = std::process::Command::new("ydotool")
-                .args(["mousemove", "--absolute", "-x", &x.to_string(), "-y", &y.to_string()])
-                .status()
-                .map_or(false, |s| s.success());
-            if moved {
-                std::thread::sleep(Duration::from_millis(25));
-                let clicked = std::process::Command::new("ydotool")
-                    .args(["click", "0xC0"])
+        crate::window_util::set_global_cursor_pos(x, y);
+        std::thread::sleep(Duration::from_millis(15));
+        let press_ok = rdev::simulate(&rdev::EventType::ButtonPress(rdev::Button::Left)).is_ok();
+        std::thread::sleep(Duration::from_millis(30));
+        let release_ok = rdev::simulate(&rdev::EventType::ButtonRelease(rdev::Button::Left)).is_ok();
+
+        if !press_ok || !release_ok {
+            if crate::automation::is_wayland_session() {
+                let moved = std::process::Command::new("ydotool")
+                    .args(["mousemove", "--absolute", "-x", &x.to_string(), "-y", &y.to_string()])
                     .status()
                     .map_or(false, |s| s.success());
-                if clicked { return; }
+                if moved {
+                    std::thread::sleep(Duration::from_millis(25));
+                    let clicked = std::process::Command::new("ydotool")
+                        .args(["click", "0xC0"])
+                        .status()
+                        .map_or(false, |s| s.success());
+                    if clicked { return; }
+                }
             }
+            let _ = std::process::Command::new("xdotool")
+                .args(["mousemove", &x.to_string(), &y.to_string(), "click", "1"])
+                .status();
         }
-        let _ = std::process::Command::new("xdotool")
-            .args(["mousemove", &x.to_string(), &y.to_string(), "click", "1"])
-            .status();
     }
 }
 
@@ -1320,18 +1375,13 @@ pub fn clear_window_text(hwnd: HWND) {
 #[cfg(not(windows))]
 pub fn clear_window_text(target: impl AsWindowTarget) {
     force_foreground_window(target);
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", "tell application \"System Events\" to keystroke \"a\" using command down\ntell application \"System Events\" to key code 51"])
-            .status();
-    }
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    {
-        let _ = std::process::Command::new("xdotool")
-            .args(["key", "--clearmodifiers", "ctrl+a", "BackSpace"])
-            .status();
-    }
+    std::thread::sleep(Duration::from_millis(30));
+    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+    const VK_A: VIRTUAL_KEY = VIRTUAL_KEY(0x41);
+    const VK_BACK: VIRTUAL_KEY = VIRTUAL_KEY(0x08);
+    send_hotkey(&[VK_CONTROL], VK_A);
+    std::thread::sleep(Duration::from_millis(30));
+    send_hotkey(&[], VK_BACK);
 }
 
 #[cfg(windows)]
@@ -1404,14 +1454,39 @@ pub fn send_char_unicode(c: char) {
 pub fn send_char_unicode(c: char) {
     #[cfg(target_os = "macos")]
     {
-        let s = c.to_string();
-        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-        let script = format!("tell application \"System Events\" to keystroke \"{escaped}\"");
-        let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+        let mut utf16_buf = [0u16; 2];
+        let encoded = c.encode_utf16(&mut utf16_buf);
+        unsafe {
+            let down = CGEventCreateKeyboardEvent(std::ptr::null_mut(), 0, true);
+            if !down.is_null() {
+                CGEventKeyboardSetUnicodeString(down, encoded.len(), encoded.as_ptr());
+                CGEventPost(0, down);
+                CFRelease(down);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            let up = CGEventCreateKeyboardEvent(std::ptr::null_mut(), 0, false);
+            if !up.is_null() {
+                CGEventKeyboardSetUnicodeString(up, encoded.len(), encoded.as_ptr());
+                CGEventPost(0, up);
+                CFRelease(up);
+            }
+        }
     }
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
-        let _ = std::process::Command::new("xdotool").args(["type", "--delay", "5", &c.to_string()]).status();
+        let vk_code = match c {
+            ' ' => Some(VIRTUAL_KEY(0x20)),
+            '\n' | '\r' => Some(VIRTUAL_KEY(0x0D)),
+            '\t' => Some(VIRTUAL_KEY(0x09)),
+            _ => None,
+        };
+        if let Some(vk) = vk_code {
+            send_hotkey(&[], vk);
+        } else {
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            let _ = std::process::Command::new("xdotool").args(["type", "--delay", "5", s]).status();
+        }
     }
 }
 
@@ -1552,12 +1627,33 @@ pub unsafe fn mute_other_audio_sessions() -> usize {
     }
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
-        let _ = std::process::Command::new("playerctl").arg("pause").spawn();
-        let _ = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("pactl list sink-inputs short | awk '{print $1}' | xargs -r -I{} pactl set-sink-input-mute {} 1")
-            .spawn();
-        1
+        let mut paused_count = 0;
+        if let Ok(conn) = zbus::blocking::Connection::session() {
+            if let Ok(reply) = conn.call_method(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                Some("org.freedesktop.DBus"),
+                "ListNames",
+                &(),
+            ) {
+                if let Ok(names) = reply.body().deserialize::<Vec<String>>() {
+                    for name in names {
+                        if name.starts_with("org.mpris.MediaPlayer2.") {
+                            let _ = conn.call_method(
+                                Some(name.as_str()),
+                                "/org/mpris/MediaPlayer2",
+                                Some("org.mpris.MediaPlayer2.Player"),
+                                "Pause",
+                                &(),
+                            );
+                            paused_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let _ = std::process::Command::new("pactl").args(["set-sink-mute", "@DEFAULT_SINK@", "1"]).spawn();
+        paused_count.max(1)
     }
 }
 // --- Fonctions et helpers internes de calcul UIA ---

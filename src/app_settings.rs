@@ -399,7 +399,7 @@ impl OverlayApp {
                             .corner_radius(egui::CornerRadius::same(4)),
                         ).on_hover_text(t!("ui.btn_close"));
                         close_btn.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), t!("ui.btn_close").to_string())
+                            egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), t!("ui.btn_close").to_string())
                         });
                         if make_widget_accessible_and_activated(ui, &close_btn, theme.accent) {
                             self.show_api_key_modal = false;

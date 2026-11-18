@@ -58,9 +58,29 @@ const CREATE_NEW_CONSOLE: u32 = 0x00000010;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-#[cfg(not(windows))]
-#[derive(Clone, Default)]
-pub struct UiaElementInfo;
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGEventCreateKeyboardEvent(source: *mut std::ffi::c_void, virtual_key: u16, key_down: bool) -> *mut std::ffi::c_void;
+    fn CGEventSetFlags(event: *mut std::ffi::c_void, flags: u64);
+    fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
+    fn CFRelease(cf: *mut std::ffi::c_void);
+
+    fn AXUIElementCreateSystemWide() -> *mut std::ffi::c_void;
+    fn AXUIElementCopyAttributeValue(
+        element: *mut std::ffi::c_void,
+        attribute: *const std::ffi::c_void,
+        value: *mut *mut std::ffi::c_void,
+    ) -> i32;
+    fn AXValueGetValue(value: *mut std::ffi::c_void, the_type: u32, value_ptr: *mut std::ffi::c_void) -> bool;
+
+    fn CFStringCreateWithCString(alloc: *mut std::ffi::c_void, c_str: *const std::os::raw::c_char, encoding: u32) -> *mut std::ffi::c_void;
+    fn CFStringGetLength(the_string: *mut std::ffi::c_void) -> isize;
+    fn CFStringGetCString(the_string: *mut std::ffi::c_void, buffer: *mut std::os::raw::c_char, buffer_size: isize, encoding: u32) -> bool;
+    fn CFGetTypeID(cf: *mut std::ffi::c_void) -> usize;
+    fn CFStringGetTypeID() -> usize;
+}
 
 #[derive(Clone, Debug)]
 pub struct SwitchWindowTarget {
@@ -818,8 +838,10 @@ pub fn trigger_window_scan_async(hwnd: HWND) {
             }
 
             if !targets.is_empty() {
-                draw_screen_numbered_badges(&targets, 1.0, None);
-                trigger_repaint();
+                if SWITCH_HOOK_ENABLED.load(Ordering::Relaxed) {
+                    draw_screen_numbered_badges(&targets, 1.0, None);
+                    trigger_repaint();
+                }
             }
 
             // 2. Passe en arrière-plan : Qwen VLM pour les zones et canvas
@@ -852,8 +874,10 @@ pub fn trigger_window_scan_async(hwnd: HWND) {
                                     t.window_id = Some(hwnd_val);
                                     base_targets.push(t);
                                 }
-                                draw_screen_numbered_badges(&base_targets, 1.0, None);
-                                trigger_repaint();
+                                if SWITCH_HOOK_ENABLED.load(Ordering::Relaxed) {
+                                    draw_screen_numbered_badges(&base_targets, 1.0, None);
+                                    trigger_repaint();
+                                }
                             }
                         }
                     })
@@ -878,8 +902,10 @@ pub fn trigger_window_scan_async_target(_target: &str) {
                 return;
             }
             if !targets.is_empty() {
-                draw_screen_numbered_badges(&targets, 1.0, None);
-                trigger_repaint();
+                if SWITCH_HOOK_ENABLED.load(Ordering::Relaxed) {
+                    draw_screen_numbered_badges(&targets, 1.0, None);
+                    trigger_repaint();
+                }
             }
 
             // Passe en arrière-plan : Qwen VLM pour les icônes et canvas
@@ -901,8 +927,10 @@ pub fn trigger_window_scan_async_target(_target: &str) {
                                     t.value = crate::ocr::visual_zone_color(next_index).to_string();
                                     base_targets.push(t);
                                 }
-                                draw_screen_numbered_badges(&base_targets, 1.0, None);
-                                trigger_repaint();
+                                if SWITCH_HOOK_ENABLED.load(Ordering::Relaxed) {
+                                    draw_screen_numbered_badges(&base_targets, 1.0, None);
+                                    trigger_repaint();
+                                }
                             }
                         }
                     })
@@ -1483,6 +1511,20 @@ impl AsWindowTarget for &String {
 impl AsWindowTarget for () {
     fn to_window_target(&self) -> String {
         String::new()
+    }
+}
+
+#[cfg(not(windows))]
+impl AsWindowTarget for crate::ocr::HWND {
+    fn to_window_target(&self) -> String {
+        String::new()
+    }
+}
+
+#[cfg(not(windows))]
+impl AsWindowTarget for isize {
+    fn to_window_target(&self) -> String {
+        self.to_string()
     }
 }
 
@@ -2332,24 +2374,55 @@ pub fn update_last_external_focus() {
 
 #[cfg(target_os = "macos")]
 pub fn update_last_external_focus() {
-    const SCRIPT: &str = r#"tell application "System Events"
-        try
-            set frontApp to first application process whose frontmost is true
-            set focusedElem to value of attribute "AXFocusedUIElement" of frontApp
-            if focusedElem is not missing value then
-                set p to position of focusedElem
-                set s to size of focusedElem
-                return (item 1 of p as text) & "," & (item 2 of p as text) & "," & ((item 1 of p) + (item 1 of s) as text) & "," & ((item 2 of p) + (item 2 of s) as text)
-            end if
-        end try
-    end tell"#;
+    unsafe {
+        let system_wide = AXUIElementCreateSystemWide();
+        if system_wide.is_null() {
+            return;
+        }
+        let k_focused = CFStringCreateWithCString(std::ptr::null_mut(), b"AXFocusedUIElement\0".as_ptr() as _, 0x08000100 /* kCFStringEncodingUTF8 */);
+        let mut focused_elem: *mut std::ffi::c_void = std::ptr::null_mut();
+        let err = AXUIElementCopyAttributeValue(system_wide, k_focused, &mut focused_elem);
+        CFRelease(k_focused);
+        CFRelease(system_wide);
 
-    if let Ok(output) = std::process::Command::new("osascript").args(["-e", SCRIPT]).output() {
-        let out_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let parts: Vec<i32> = out_str.split(',').filter_map(|s| s.parse().ok()).collect();
-        if parts.len() == 4 {
-            if let Ok(mut rlock) = LAST_FOCUSED_RECT.lock() {
-                *rlock = Some([parts[0], parts[1], parts[2], parts[3]]);
+        if err == 0 && !focused_elem.is_null() {
+            let mut rect = [0i32; 4];
+            let mut has_pos = false;
+            let mut has_size = false;
+
+            // AXPosition
+            let k_pos = CFStringCreateWithCString(std::ptr::null_mut(), b"AXPosition\0".as_ptr() as _, 0x08000100);
+            let mut pos_val: *mut std::ffi::c_void = std::ptr::null_mut();
+            if AXUIElementCopyAttributeValue(focused_elem, k_pos, &mut pos_val) == 0 && !pos_val.is_null() {
+                let mut pt = [0.0f64; 2];
+                if AXValueGetValue(pos_val, 1 /* kAXValueCGPointType */, pt.as_mut_ptr() as _) {
+                    rect[0] = pt[0] as i32;
+                    rect[1] = pt[1] as i32;
+                    has_pos = true;
+                }
+                CFRelease(pos_val);
+            }
+            CFRelease(k_pos);
+
+            // AXSize
+            let k_sz = CFStringCreateWithCString(std::ptr::null_mut(), b"AXSize\0".as_ptr() as _, 0x08000100);
+            let mut sz_val: *mut std::ffi::c_void = std::ptr::null_mut();
+            if AXUIElementCopyAttributeValue(focused_elem, k_sz, &mut sz_val) == 0 && !sz_val.is_null() {
+                let mut sz = [0.0f64; 2];
+                if AXValueGetValue(sz_val, 2 /* kAXValueCGSizeType */, sz.as_mut_ptr() as _) {
+                    rect[2] = rect[0] + sz[0] as i32;
+                    rect[3] = rect[1] + sz[1] as i32;
+                    has_size = true;
+                }
+                CFRelease(sz_val);
+            }
+            CFRelease(k_sz);
+            CFRelease(focused_elem);
+
+            if has_pos && has_size {
+                if let Ok(mut rlock) = LAST_FOCUSED_RECT.lock() {
+                    *rlock = Some(rect);
+                }
             }
         }
     }
@@ -2357,8 +2430,12 @@ pub fn update_last_external_focus() {
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn update_last_external_focus() {
-    // Intégration via AT-SPI pour récupérer le composant ayant State.FOCUSED
-    // et mettre à jour LAST_FOCUSED_RECT avec bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height
+    let elements = query_atspi_elements();
+    if let Some(focused) = elements.into_iter().find(|e| !e.value.is_empty() || e.role.contains("text") || e.role.contains("entry")) {
+        if let Ok(mut rlock) = LAST_FOCUSED_RECT.lock() {
+            *rlock = Some([focused.x, focused.y, focused.x + focused.width, focused.y + focused.height]);
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -3242,61 +3319,15 @@ pub fn send_paste() {
 pub fn send_paste() {
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", "tell application \"System Events\" to keystroke \"v\" using command down"])
-            .status();
+        const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+        const VK_V: VIRTUAL_KEY = VIRTUAL_KEY(0x56);
+        send_hotkey(&[VK_CONTROL], VK_V);
     }
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
         const VK_V: VIRTUAL_KEY = VIRTUAL_KEY(0x56);
         send_hotkey(&[VK_CONTROL], VK_V);
-    }
-}
-
-#[cfg(windows)]
-fn send_terminal_input(hwnd: HWND, text: &str, auto_enter: bool) {
-    const VK_RETURN: VIRTUAL_KEY = VIRTUAL_KEY(0x0D);
-    const VK_SHIFT: VIRTUAL_KEY = VIRTUAL_KEY(0x10);
-    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
-    const VK_INSERT: VIRTUAL_KEY = VIRTUAL_KEY(0x2D);
-    const VK_V: VIRTUAL_KEY = VIRTUAL_KEY(0x56);
-
-    let trimmed = text.trim_end_matches(['\r', '\n']);
-    let has_trailing_newline = text.ends_with('\n') || text.ends_with('\r');
-    let should_press_enter = auto_enter || has_trailing_newline;
-
-    // 1. Saisie directe de caractères Unicode : infaillible sur tous les terminaux
-    // sans dépendre du presse-papiers ni des raccourcis clavier propres à une application.
-    if trimmed.chars().count() <= 1200 {
-        for c in trimmed.chars() {
-            if c == '\n' || c == '\r' {
-                send_hotkey(&[], VK_RETURN);
-                std::thread::sleep(Duration::from_millis(20));
-            } else {
-                send_char_unicode(c);
-                std::thread::sleep(Duration::from_millis(3));
-            }
-        }
-    } else {
-        // 2. Pour les très gros textes : collage adapté au type de terminal
-        clipboard::set_text(trimmed);
-        std::thread::sleep(Duration::from_millis(40));
-
-        if is_windows_terminal(hwnd) {
-            send_hotkey(&[VK_CONTROL, VK_SHIFT], VK_V);
-        } else if is_putty_window(hwnd) {
-            send_hotkey(&[VK_SHIFT], VK_INSERT);
-        } else {
-            // ConHost / CMD / PowerShell / MinTTY
-            send_hotkey(&[VK_SHIFT], VK_INSERT);
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    if should_press_enter {
-        std::thread::sleep(Duration::from_millis(40));
-        send_hotkey(&[], VK_RETURN);
     }
 }
 
@@ -3322,154 +3353,134 @@ pub fn send_hotkey(modifiers: &[VIRTUAL_KEY], key: VIRTUAL_KEY) {
 
 #[cfg(not(windows))]
 pub fn send_hotkey(modifiers: &[VIRTUAL_KEY], key: VIRTUAL_KEY) {
-    let mut mod_strs = Vec::new();
-    for m in modifiers {
-        match m.0 {
-            0x11 => mod_strs.push("ctrl"),
-            0x10 => mod_strs.push("shift"),
-            0x12 => mod_strs.push("alt"),
-            0x5B | 0x5C => mod_strs.push("super"),
-            _ => {}
-        }
-    }
-    let key_str = match key.0 {
-        0x0D => "Return",
-        0x1B => "Escape",
-        0x09 => "Tab",
-        0x20 => "space",
-        0x08 => "BackSpace",
-        0x25 => "Left",
-        0x26 => "Up",
-        0x27 => "Right",
-        0x28 => "Down",
-        0x21 => "Page_Up",
-        0x22 => "Page_Down",
-        0x24 => "Home",
-        0x23 => "End",
-        0x54 => "t",
-        0x41 => "a",
-        0x43 => "c",
-        0x56 => "v",
-        0x57 => "w",
-        0x53 => "s",
-        0x5A => "z",
-        0x4C => "l",
-        0x44 => "d",
-        0x74 => "F5",
-        c if (0x41..=0x5A).contains(&c) => {
-            match (b'a' + (c as u8 - 0x41)) as char {
-                'a' => "a", 'b' => "b", 'c' => "c", 'd' => "d", 'e' => "e", 'f' => "f",
-                'g' => "g", 'h' => "h", 'i' => "i", 'j' => "j", 'k' => "k", 'l' => "l",
-                'm' => "m", 'n' => "n", 'o' => "o", 'p' => "p", 'q' => "q", 'r' => "r",
-                's' => "s", 't' => "t", 'u' => "u", 'v' => "v", 'w' => "w", 'x' => "x",
-                'y' => "y", 'z' => "z", _ => "",
-            }
-        }
-        _ => "",
-    };
-
-    if key_str.is_empty() && mod_strs.is_empty() {
-        return;
-    }
-
     #[cfg(target_os = "macos")]
     {
-        let using_clause = if !mod_strs.is_empty() {
-            let mac_mods: Vec<&str> = mod_strs.iter().map(|&m| match m {
-                "ctrl" => "command down",
-                "shift" => "shift down",
-                "alt" => "option down",
-                "super" => "control down",
-                _ => "",
-            }).filter(|s| !s.is_empty()).collect();
-            if !mac_mods.is_empty() {
-                format!(" using {{{}}}", mac_mods.join(", "))
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
+        let mac_keycode: u16 = match key.0 {
+            0x0D => 36,  // Return
+            0x09 => 48,  // Tab
+            0x20 => 49,  // Space
+            0x08 => 51,  // Delete/Backspace
+            0x1B => 53,  // Escape
+            0x25 => 123, // Left
+            0x27 => 124, // Right
+            0x28 => 125, // Down
+            0x26 => 126, // Up
+            0x41 => 0,   // A
+            0x53 => 1,   // S
+            0x44 => 2,   // D
+            0x46 => 3,   // F
+            0x48 => 4,   // H
+            0x47 => 5,   // G
+            0x5A => 6,   // Z
+            0x58 => 7,   // X
+            0x43 => 8,   // C
+            0x56 => 9,   // V
+            0x42 => 11,  // B
+            0x51 => 12,  // Q
+            0x57 => 13,  // W
+            0x45 => 14,  // E
+            0x52 => 15,  // R
+            0x59 => 16,  // Y
+            0x54 => 17,  // T
+            0x31 => 18,  // 1
+            0x32 => 19,  // 2
+            0x33 => 20,  // 3
+            0x34 => 21,  // 4
+            0x36 => 22,  // 6
+            0x35 => 23,  // 5
+            0x39 => 25,  // 9
+            0x37 => 26,  // 7
+            0x38 => 28,  // 8
+            0x30 => 29,  // 0
+            0x4F => 31,  // O
+            0x55 => 32,  // U
+            0x49 => 34,  // I
+            0x50 => 35,  // P
+            0x4C => 37,  // L
+            0x4A => 38,  // J
+            0x4B => 40,  // K
+            0x4E => 45,  // N
+            0x4D => 46,  // M
+            0x74 => 96,  // F5
+            _ => 0,
         };
 
-        let script = if key_str == "Return" {
-            format!("tell application \"System Events\" to key code 36{using_clause}")
-        } else if key_str == "Tab" {
-            format!("tell application \"System Events\" to key code 48{using_clause}")
-        } else if key_str == "Escape" {
-            format!("tell application \"System Events\" to key code 53{using_clause}")
-        } else if key_str == "BackSpace" {
-            format!("tell application \"System Events\" to key code 51{using_clause}")
-        } else if key_str == "space" {
-            format!("tell application \"System Events\" to key code 49{using_clause}")
-        } else if key_str == "Left" {
-            format!("tell application \"System Events\" to key code 123{using_clause}")
-        } else if key_str == "Right" {
-            format!("tell application \"System Events\" to key code 124{using_clause}")
-        } else {
-            format!("tell application \"System Events\" to keystroke \"{key_str}\"{using_clause}")
-        };
-        let _ = std::process::Command::new("osascript").args(["-e", &script]).status();
+        let mut flags: u64 = 0;
+        for m in modifiers {
+            match m.0 {
+                0x11 => flags |= 0x00100000, // kCGEventFlagMaskCommand (Cmd remplace Ctrl standard)
+                0x10 => flags |= 0x00020000, // kCGEventFlagMaskShift
+                0x12 => flags |= 0x00080000, // kCGEventFlagMaskAlternate (Option)
+                0x5B | 0x5C => flags |= 0x00040000, // kCGEventFlagMaskControl
+                _ => {}
+            }
+        }
+
+        unsafe {
+            let ev_down = CGEventCreateKeyboardEvent(std::ptr::null_mut(), mac_keycode, true);
+            if !ev_down.is_null() {
+                CGEventSetFlags(ev_down, flags);
+                CGEventPost(0 /* kCGHIDEventTap */, ev_down);
+                CFRelease(ev_down);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            let ev_up = CGEventCreateKeyboardEvent(std::ptr::null_mut(), mac_keycode, false);
+            if !ev_up.is_null() {
+                CGEventSetFlags(ev_up, flags);
+                CGEventPost(0 /* kCGHIDEventTap */, ev_up);
+                CFRelease(ev_up);
+            }
+        }
     }
 
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
-        let try_wtype = || -> bool {
-            let mut args = Vec::new();
-            for &m in &mod_strs {
-                let wm = match m {
-                    "ctrl" => "ctrl",
-                    "shift" => "shift",
-                    "alt" => "alt",
-                    "super" => "logo",
-                    other => other,
-                };
-                args.push("-M");
-                args.push(wm);
-            }
-            if !key_str.is_empty() {
-                args.push("-k");
-                args.push(key_str);
-            }
-            for &m in mod_strs.iter().rev() {
-                let wm = match m {
-                    "ctrl" => "ctrl",
-                    "shift" => "shift",
-                    "alt" => "alt",
-                    "super" => "logo",
-                    other => other,
-                };
-                args.push("-m");
-                args.push(wm);
-            }
-            std::process::Command::new("wtype").args(&args).status().map_or(false, |s| s.success())
+        let rdev_key_opt = match key.0 {
+            0x0D => Some(rdev::Key::Return),
+            0x1B => Some(rdev::Key::Escape),
+            0x09 => Some(rdev::Key::Tab),
+            0x20 => Some(rdev::Key::Space),
+            0x08 => Some(rdev::Key::Backspace),
+            0x25 => Some(rdev::Key::LeftArrow),
+            0x26 => Some(rdev::Key::UpArrow),
+            0x27 => Some(rdev::Key::RightArrow),
+            0x28 => Some(rdev::Key::DownArrow),
+            0x21 => Some(rdev::Key::PageUp),
+            0x22 => Some(rdev::Key::PageDown),
+            0x24 => Some(rdev::Key::Home),
+            0x23 => Some(rdev::Key::End),
+            0x41 => Some(rdev::Key::KeyA),
+            0x43 => Some(rdev::Key::KeyC),
+            0x44 => Some(rdev::Key::KeyD),
+            0x4C => Some(rdev::Key::KeyL),
+            0x53 => Some(rdev::Key::KeyS),
+            0x54 => Some(rdev::Key::KeyT),
+            0x56 => Some(rdev::Key::KeyV),
+            0x57 => Some(rdev::Key::KeyW),
+            0x59 => Some(rdev::Key::KeyY),
+            0x5A => Some(rdev::Key::KeyZ),
+            0x74 => Some(rdev::Key::F5),
+            _ => None,
         };
 
-        let combo = if mod_strs.is_empty() {
-            key_str.to_string()
-        } else {
-            format!("{}+{}", mod_strs.join("+"), key_str)
-        };
+        let rdev_mods: Vec<rdev::Key> = modifiers.iter().filter_map(|m| match m.0 {
+            0x11 => Some(rdev::Key::ControlLeft),
+            0x10 => Some(rdev::Key::ShiftLeft),
+            0x12 => Some(rdev::Key::Alt),
+            0x5B | 0x5C => Some(rdev::Key::MetaLeft),
+            _ => None,
+        }).collect();
 
-        let try_ydotool = || -> bool {
-            std::process::Command::new("ydotool")
-                .args(["key", &combo])
-                .status()
-                .map_or(false, |s| s.success())
-        };
-
-        let try_xdotool = || -> bool {
-            std::process::Command::new("xdotool")
-                .args(["key", "--clearmodifiers", &combo])
-                .status()
-                .map_or(false, |s| s.success())
-        };
-
-        if is_wayland_session() {
-            if try_wtype() || try_ydotool() || try_xdotool() {
-                return;
-            }
-        } else if try_xdotool() || try_wtype() || try_ydotool() {
-            return;
+        for &m in &rdev_mods {
+            let _ = rdev::simulate(&rdev::EventType::KeyPress(m));
+        }
+        if let Some(k) = rdev_key_opt {
+            let _ = rdev::simulate(&rdev::EventType::KeyPress(k));
+            std::thread::sleep(Duration::from_millis(20));
+            let _ = rdev::simulate(&rdev::EventType::KeyRelease(k));
+        }
+        for &m in rdev_mods.iter().rev() {
+            let _ = rdev::simulate(&rdev::EventType::KeyRelease(m));
         }
     }
 }
@@ -4094,75 +4105,46 @@ pub fn get_active_field_content() -> Option<String> {
 
 #[cfg(target_os = "macos")]
 pub fn get_active_field_content() -> Option<String> {
-    const SCRIPT: &str = r#"tell application "System Events"
-        try
-            set frontApp to first application process whose frontmost is true
-            set focusedElem to value of attribute "AXFocusedUIElement" of frontApp
-            if focusedElem is not missing value then
-                try
-                    set v to value of focusedElem
-                    if v is not missing value and (v as text) is not "" then return v as text
-                end try
-                try
-                    set v to value of attribute "AXValue" of focusedElem
-                    if v is not missing value and (v as text) is not "" then return v as text
-                end try
-                try
-                    set v to value of attribute "AXSelectedText" of focusedElem
-                    if v is not missing value and (v as text) is not "" then return v as text
-                end try
-            end if
-        end try
-    end tell"#;
-
-    let output = std::process::Command::new("osascript")
-        .args(["-e", SCRIPT])
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !text.is_empty() {
-            return Some(text);
+    unsafe {
+        let system_wide = AXUIElementCreateSystemWide();
+        if system_wide.is_null() {
+            return None;
         }
+        let k_focused = CFStringCreateWithCString(std::ptr::null_mut(), b"AXFocusedUIElement\0".as_ptr() as _, 0x08000100);
+        let mut focused_elem: *mut std::ffi::c_void = std::ptr::null_mut();
+        let err = AXUIElementCopyAttributeValue(system_wide, k_focused, &mut focused_elem);
+        CFRelease(k_focused);
+        CFRelease(system_wide);
+
+        if err == 0 && !focused_elem.is_null() {
+            let k_val = CFStringCreateWithCString(std::ptr::null_mut(), b"AXValue\0".as_ptr() as _, 0x08000100);
+            let mut val_ref: *mut std::ffi::c_void = std::ptr::null_mut();
+            let mut result_text = None;
+            if AXUIElementCopyAttributeValue(focused_elem, k_val, &mut val_ref) == 0 && !val_ref.is_null() {
+                if CFGetTypeID(val_ref) == CFStringGetTypeID() {
+                    let len = CFStringGetLength(val_ref);
+                    let mut buf = vec![0u8; (len * 4 + 1) as usize];
+                    if CFStringGetCString(val_ref, buf.as_mut_ptr() as _, buf.len() as isize, 0x08000100) {
+                        let s = std::ffi::CStr::from_ptr(buf.as_ptr() as _).to_string_lossy().trim().to_string();
+                        if !s.is_empty() {
+                            result_text = Some(s);
+                        }
+                    }
+                }
+                CFRelease(val_ref);
+            }
+            CFRelease(k_val);
+            CFRelease(focused_elem);
+            return result_text;
+        }
+        None
     }
-    None
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn get_active_field_content() -> Option<String> {
-    const ATSPI_FOCUSED_SCRIPT: &str = r#"
-import sys
-try:
-    import gi
-    gi.require_version('Atspi', '2.0')
-    from gi.repository import Atspi
-except Exception:
-    sys.exit(0)
-
-desktop = Atspi.get_desktop(0)
-def find_focused(accessible, depth=0):
-    if depth > 8: return None
-    try:
-        state = accessible.get_state_set()
-        if state and state.contains(Atspi.StateType.FOCUSED):
-            t = accessible.get_text_iface()
-            if t: return t.get_text(0, -1)
-        for i in range(accessible.get_child_count()):
-            res = find_focused(accessible.get_child_at_index(i), depth + 1)
-            if res is not None: return res
-    except Exception:
-        pass
-    return None
-
-txt = find_focused(desktop)
-if txt: sys.stdout.write(txt)
-"#;
-    if let Ok(output) = std::process::Command::new("python3").args(["-c", ATSPI_FOCUSED_SCRIPT]).output() {
-        let res = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !res.is_empty() { return Some(res); }
-    }
-    None
+    let elements = query_atspi_elements();
+    elements.into_iter().find(|e| !e.value.is_empty()).map(|e| e.value)
 }
 
 pub fn parse_write_command(prompt: &str) -> Option<String> {
@@ -5474,22 +5456,11 @@ pub fn execute_undo_operation(op: UndoOperation) -> (String, Option<UndoOperatio
                     std::thread::sleep(Duration::from_millis(50));
                 }
             }
-            #[cfg(windows)]
-            {
-                const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
-                const VK_W: VIRTUAL_KEY = VIRTUAL_KEY(0x57);
-                send_hotkey(&[VK_CONTROL], VK_W);
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let _ = std::process::Command::new("osascript")
-                    .args(["-e", "tell application \"System Events\" to keystroke \"w\" using command down"])
-                    .status();
-            }
-            #[cfg(all(not(windows), not(target_os = "macos")))]
-            {
-                let _ = std::process::Command::new("xdotool").args(["key", "ctrl+w"]).status();
-            }
+            #[cfg(not(windows))]
+            let _ = target_hwnd;
+            const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+            const VK_W: VIRTUAL_KEY = VIRTUAL_KEY(0x57);
+            send_hotkey(&[VK_CONTROL], VK_W);
             (
                 "Onglet ouvert fermé (Ctrl+W).".to_string(),
                 Some(UndoOperation::ReopenTab { target_hwnd }),
@@ -5504,23 +5475,12 @@ pub fn execute_undo_operation(op: UndoOperation) -> (String, Option<UndoOperatio
                     std::thread::sleep(Duration::from_millis(50));
                 }
             }
-            #[cfg(windows)]
-            {
-                const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
-                const VK_SHIFT: VIRTUAL_KEY = VIRTUAL_KEY(0x10);
-                const VK_T: VIRTUAL_KEY = VIRTUAL_KEY(0x54);
-                send_hotkey(&[VK_CONTROL, VK_SHIFT], VK_T);
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let _ = std::process::Command::new("osascript")
-                    .args(["-e", "tell application \"System Events\" to keystroke \"t\" using {command down, shift down}"])
-                    .status();
-            }
-            #[cfg(all(not(windows), not(target_os = "macos")))]
-            {
-                let _ = std::process::Command::new("xdotool").args(["key", "ctrl+shift+t"]).status();
-            }
+            #[cfg(not(windows))]
+            let _ = target_hwnd;
+            const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+            const VK_SHIFT: VIRTUAL_KEY = VIRTUAL_KEY(0x10);
+            const VK_T: VIRTUAL_KEY = VIRTUAL_KEY(0x54);
+            send_hotkey(&[VK_CONTROL, VK_SHIFT], VK_T);
             (
                 "Onglet rouvert (Ctrl+Shift+T).".to_string(),
                 Some(UndoOperation::CloseTab { target_hwnd }),
@@ -5535,22 +5495,11 @@ pub fn execute_undo_operation(op: UndoOperation) -> (String, Option<UndoOperatio
                     std::thread::sleep(Duration::from_millis(50));
                 }
             }
-            #[cfg(windows)]
-            {
-                const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
-                const VK_LEFT: VIRTUAL_KEY = VIRTUAL_KEY(0x25);
-                send_hotkey(&[VK_MENU], VK_LEFT);
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let _ = std::process::Command::new("osascript")
-                    .args(["-e", "tell application \"System Events\" to keystroke \"[\" using command down"])
-                    .status();
-            }
-            #[cfg(all(not(windows), not(target_os = "macos")))]
-            {
-                let _ = std::process::Command::new("xdotool").args(["key", "alt+Left"]).status();
-            }
+            #[cfg(not(windows))]
+            let _ = target_hwnd;
+            const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
+            const VK_LEFT: VIRTUAL_KEY = VIRTUAL_KEY(0x25);
+            send_hotkey(&[VK_MENU], VK_LEFT);
             (
                 "Retour arrière dans l'historique du navigateur.".to_string(),
                 Some(UndoOperation::NavigateForward { target_hwnd }),
@@ -5565,22 +5514,11 @@ pub fn execute_undo_operation(op: UndoOperation) -> (String, Option<UndoOperatio
                     std::thread::sleep(Duration::from_millis(50));
                 }
             }
-            #[cfg(windows)]
-            {
-                const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
-                const VK_RIGHT: VIRTUAL_KEY = VIRTUAL_KEY(0x27);
-                send_hotkey(&[VK_MENU], VK_RIGHT);
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let _ = std::process::Command::new("osascript")
-                    .args(["-e", "tell application \"System Events\" to keystroke \"]\" using command down"])
-                    .status();
-            }
-            #[cfg(all(not(windows), not(target_os = "macos")))]
-            {
-                let _ = std::process::Command::new("xdotool").args(["key", "alt+Right"]).status();
-            }
+            #[cfg(not(windows))]
+            let _ = target_hwnd;
+            const VK_MENU: VIRTUAL_KEY = VIRTUAL_KEY(0x12);
+            const VK_RIGHT: VIRTUAL_KEY = VIRTUAL_KEY(0x27);
+            send_hotkey(&[VK_MENU], VK_RIGHT);
             (
                 "Navigation avant dans l'historique du navigateur.".to_string(),
                 Some(UndoOperation::NavigateBack { target_hwnd }),
@@ -5595,22 +5533,11 @@ pub fn execute_undo_operation(op: UndoOperation) -> (String, Option<UndoOperatio
                     std::thread::sleep(Duration::from_millis(40));
                 }
             }
-            #[cfg(windows)]
-            {
-                const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
-                const VK_Z: VIRTUAL_KEY = VIRTUAL_KEY(0x5A);
-                send_hotkey(&[VK_CONTROL], VK_Z);
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let _ = std::process::Command::new("osascript")
-                    .args(["-e", "tell application \"System Events\" to keystroke \"z\" using command down"])
-                    .status();
-            }
-            #[cfg(all(not(windows), not(target_os = "macos")))]
-            {
-                let _ = std::process::Command::new("xdotool").args(["key", "ctrl+z"]).status();
-            }
+            #[cfg(not(windows))]
+            let _ = target_hwnd;
+            const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+            const VK_Z: VIRTUAL_KEY = VIRTUAL_KEY(0x5A);
+            send_hotkey(&[VK_CONTROL], VK_Z);
             (
                 "Texte annulé (Ctrl+Z).".to_string(),
                 Some(UndoOperation::RedoText { target_hwnd }),
@@ -5625,22 +5552,11 @@ pub fn execute_undo_operation(op: UndoOperation) -> (String, Option<UndoOperatio
                     std::thread::sleep(Duration::from_millis(40));
                 }
             }
-            #[cfg(windows)]
-            {
-                const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
-                const VK_Y: VIRTUAL_KEY = VIRTUAL_KEY(0x59);
-                send_hotkey(&[VK_CONTROL], VK_Y);
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let _ = std::process::Command::new("osascript")
-                    .args(["-e", "tell application \"System Events\" to keystroke \"z\" using {command down, shift down}"])
-                    .status();
-            }
-            #[cfg(all(not(windows), not(target_os = "macos")))]
-            {
-                let _ = std::process::Command::new("xdotool").args(["key", "ctrl+y"]).status();
-            }
+            #[cfg(not(windows))]
+            let _ = target_hwnd;
+            const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0x11);
+            const VK_Y: VIRTUAL_KEY = VIRTUAL_KEY(0x59);
+            send_hotkey(&[VK_CONTROL], VK_Y);
             (
                 "Texte rétabli (Ctrl+Y).".to_string(),
                 Some(UndoOperation::RevertText { target_hwnd }),
@@ -5650,6 +5566,15 @@ pub fn execute_undo_operation(op: UndoOperation) -> (String, Option<UndoOperatio
             let opp_dir = if direction == "down" { "up" } else { "down" };
             #[cfg(windows)]
             {
+                let _ = execute_system_actions(&[AgentAction::Scroll {
+                    direction: opp_dir.to_string(),
+                    amount: Some(amount),
+                    window: None,
+                }], 0);
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = target_hwnd;
                 let _ = execute_system_actions(&[AgentAction::Scroll {
                     direction: opp_dir.to_string(),
                     amount: Some(amount),
@@ -5743,7 +5668,3 @@ pub fn redo_last_system_action() -> Option<String> {
 }
 
 pub use crate::commands::execute_system_actions;
-#[cfg(windows)]
-fn name_words_count(s: &str) -> usize {
-    s.split_whitespace().count()
-}

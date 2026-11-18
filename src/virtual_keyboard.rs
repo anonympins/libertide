@@ -221,7 +221,7 @@ fn get_predictions(lang: &str, current_text: &str) -> Vec<String> {
     }
 
     let dict = get_dictionary(lang);
-    let mut matches: Vec<String> = dict
+    let matches: Vec<String> = dict
         .iter()
         .filter(|w| w.starts_with(&last_word) && **w != last_word.as_str())
         .take(6)
@@ -429,7 +429,7 @@ pub fn render_keyboard_view(
             let is_scanned_key = is_row_0_active && state.scan_stage == ScanningStage::Key && state.current_col == col_idx;
             let is_row_selected = is_row_0_active && state.scan_stage == ScanningStage::Row;
 
-            let mut btn = egui::Button::new(egui::RichText::new(pred).size(13.0).color(theme.accent_text).strong())
+            let btn = egui::Button::new(egui::RichText::new(pred).size(13.0).color(theme.accent_text).strong())
                 .fill(if is_scanned_key { theme.accent } else if is_row_selected { theme.tab_active_bg } else { theme.control_bg })
                 .stroke(egui::Stroke::new(if is_scanned_key { 2.5 } else { 1.0 }, theme.border))
                 .corner_radius(egui::CornerRadius::same(6));

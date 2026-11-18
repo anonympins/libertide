@@ -565,8 +565,10 @@ impl OverlayApp {
             let has_rect = unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut r).is_ok() };
             let cur_rect = if has_rect { Some([r.left, r.top, r.right, r.bottom]) } else { None };
 
-            if let Some(rect) = cur_rect {
-                draw_screen_orange_border(rect);
+            if self.switch_access_mode {
+                if let Some(rect) = cur_rect {
+                    draw_screen_orange_border(rect);
+                }
             }
 
             self.numbered_last_refresh = Instant::now();

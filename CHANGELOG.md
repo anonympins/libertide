@@ -3,6 +3,32 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.8.5] - 2026-11-18
+
+### 🐧🍎 Pure-Rust Cross-Platform Parity & Zero-Python Architecture (`automation.rs`, `ui.rs`, `ocr.rs`)
+- **Native Linux D-Bus & AT-SPI2 Integration (`zbus`)**:
+  - Completely eliminated external Python helper scripts and introspector dependencies for UI discovery and accessibility inspection on Linux.
+  - Integrated direct D-Bus communication via `zbus::blocking`:
+    - Automated discovery of the accessibility bus address (`org.a11y.Bus` -> `GetAddress`) with seamless fallback to `AT_SPI_BUS_ADDRESS`.
+    - Pure-Rust tree traversal querying `org.a11y.atspi.Accessible` (roles, names), `org.a11y.atspi.Component` (`GetExtents` screen coordinates), and `org.a11y.atspi.Text` (`GetText`), achieving sub-millisecond element harvesting.
+    - Native MPRIS D-Bus media session discovery and pause control (`org.mpris.MediaPlayer2.*`) for background audio isolation without shell commands.
+- **Native macOS CoreGraphics & Accessibility Parity (`AXUIElement`, `CGEvent`)**:
+  - Replaced external Python automation wrappers with direct Cocoa and CoreGraphics FFI bindings (`ApplicationServices`, `CoreGraphics`, `CoreFoundation`).
+  - Real-time focused element tracking and bounding box inspection via `AXUIElementCreateSystemWide`, `AXUIElementCopyAttributeValue`, and `AXValueGetValue` (`kAXValueCGPointType`, `kAXValueCGSizeType`).
+  - Zero-latency native input simulation for mouse events (`CGEventCreateMouseEvent`) and keyboard interactions (`CGEventCreateKeyboardEvent`) with full Unicode character string injection (`CGEventKeyboardSetUnicodeString`).
+  - In-memory screen capture via `CGWindowListCreateImage` and Apple Vision (`VNRecognizeTextRequest`) hardware-accelerated on Apple Silicon M1-M4 Neural Engine (ANE).
+
+### 🧠 Vulkan Memory Allocation Fix & CPU VLM Safety Defaults (`local_llm.rs`, `main.rs`)
+- **Vulkan Memory Allocation & Initial Loading Crash Guard**:
+  - Fixed startup race conditions and heap/VRAM allocation faults when loading local GGUF models on Vulkan-enabled graphics cards.
+  - Protected `LlamaModel::load_from_file` inside `std::panic::catch_unwind`: automatically falls back to multi-threaded CPU inference if Vulkan layer allocation fails or device VRAM is exhausted.
+  - Deferred initial local LLM preloading until after `eframe`/`egui` completes its first frame presentation, preventing thread contention on early message pump initialization.
+- **Vision-Language Models (VLM) on CPU by Default**:
+  - Configured `VLM_GPU_LAYERS` to default to `0` (CPU execution) for multimodal vision grounding models (`Qwen2-VL-2B`, `Qwen2.5-VL-7B`).
+  - Prevents VRAM collisions and out-of-memory crashes when running both local text LLMs and multimodal vision grounding simultaneously on consumer GPUs.
+
+---
+
 ## [0.8.4] - 2026-11-17
 
 ### 🖱️ Contextual Menu & Egui Widget ID Clash Fix (`overlay.rs`, `main.rs`)
