@@ -2660,17 +2660,9 @@ fn write_to_temp_txt_file(text: &str) -> String {
                 .spawn();
         }
 
-        for _ in 0..20 {
-            std::thread::sleep(Duration::from_millis(100));
-            let current_windows = list_user_windows();
-            for (hwnd, _) in &current_windows {
-                let raw = hwnd.0 as isize;
-                if !initial_hwnds.contains(&raw) {
-                    if let Ok(mut lock) = LAST_TXT_HWND.lock() {
-                        *lock = Some(raw);
-                    }
-                    break;
-                }
+        if let Some(hwnd) = wait_for_new_window(&initial_hwnds, Duration::from_millis(2000), 0) {
+            if let Ok(mut lock) = LAST_TXT_HWND.lock() {
+                *lock = Some(hwnd.0 as isize);
             }
         }
         "Texte écrit dans un nouveau fichier texte temporaire.".to_string()

@@ -1,6 +1,6 @@
 use std::path::Path;
-#[cfg(windows)]
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::collections::HashSet;
 #[cfg(windows)]
 use windows::core::w;
 #[cfg(windows)]
@@ -20,6 +20,123 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::pattern::{extract_target_propositions, matches_pattern};
 #[cfg(windows)]
 use crate::send_hotkey;
+
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn SetWinEventHook(
+        eventMin: u32,
+        eventMax: u32,
+        hmodWinEventProc: *mut std::ffi::c_void,
+        pfnWinEventProc: Option<unsafe extern "system" fn(
+            *mut std::ffi::c_void,
+            u32,
+            HWND,
+            i32,
+            i32,
+            u32,
+            u32,
+        )>,
+        idProcess: u32,
+        idThread: u32,
+        dwFlags: u32,
+    ) -> *mut std::ffi::c_void;
+    fn UnhookWinEvent(hWinEventHook: *mut std::ffi::c_void) -> windows::Win32::Foundation::BOOL;
+}
+
+#[cfg(windows)]
+static WINDOW_EVENT_NOTIFIER: (std::sync::Mutex<u64>, std::sync::Condvar) =
+    (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+#[cfg(windows)]
+static WIN_EVENT_HOOK_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(windows)]
+pub fn notify_window_event() {
+    let (lock, cvar) = &WINDOW_EVENT_NOTIFIER;
+    if let Ok(mut gen) = lock.lock() {
+        *gen = gen.wrapping_add(1);
+        cvar.notify_all();
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn win_event_proc(
+    _hook: *mut std::ffi::c_void,
+    _event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    _id_child: i32,
+    _event_thread: u32,
+    _event_time: u32,
+) {
+    const OBJID_WINDOW: i32 = 0;
+    if id_object == OBJID_WINDOW && !hwnd.0.is_null() {
+        notify_window_event();
+    }
+}
+
+#[cfg(windows)]
+pub fn ensure_window_event_hook() {
+    if WIN_EVENT_HOOK_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+
+    std::thread::Builder::new()
+        .name("win_event_hook_worker".to_string())
+        .spawn(move || {
+            const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
+            const EVENT_OBJECT_CREATE: u32 = 0x8000;
+            const EVENT_OBJECT_SHOW: u32 = 0x8002;
+            const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
+            const WINEVENT_SKIPOWNPROCESS: u32 = 0x0002;
+            let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
+
+            unsafe {
+                let hook_fg = SetWinEventHook(
+                    EVENT_SYSTEM_FOREGROUND,
+                    EVENT_SYSTEM_FOREGROUND,
+                    std::ptr::null_mut(),
+                    Some(win_event_proc),
+                    0,
+                    0,
+                    flags,
+                );
+
+                let hook_create = SetWinEventHook(
+                    EVENT_OBJECT_CREATE,
+                    EVENT_OBJECT_SHOW,
+                    std::ptr::null_mut(),
+                    Some(win_event_proc),
+                    0,
+                    0,
+                    flags,
+                );
+
+                let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
+                while windows::Win32::UI::WindowsAndMessaging::GetMessageW(
+                    &mut msg,
+                    HWND(std::ptr::null_mut()),
+                    0,
+                    0,
+                ).as_bool() {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
+                    windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
+                }
+
+                if !hook_fg.is_null() {
+                    let _ = UnhookWinEvent(hook_fg);
+                }
+                if !hook_create.is_null() {
+                    let _ = UnhookWinEvent(hook_create);
+                }
+            }
+        })
+        .expect("Échec du lancement du worker win_event_hook");
+}
+
+#[cfg(not(windows))]
+pub fn ensure_window_event_hook() {}
 
 #[derive(Default, Clone, Debug)]
 pub struct ZoneOverlayInfo {
@@ -2319,26 +2436,12 @@ pub fn launch_browser_new_window(url: &str) -> Option<HWND> {
     }
 
     if spawned {
-        for _ in 0..25 {
-            std::thread::sleep(Duration::from_millis(100));
-            let current_windows = list_user_windows();
-            for (hwnd, title) in &current_windows {
-                if !initial_hwnds.contains(&(hwnd.0 as isize)) {
-                    let t = title.to_lowercase();
-                    if is_browser_hwnd(*hwnd, title)
-                        || t.contains("chrome")
-                        || t.contains("edge")
-                        || t.contains("brave")
-                        || !t.is_empty()
-                    {
-                        unsafe {
-                            let _ = ShowWindow(*hwnd, SW_MAXIMIZE);
-                            let _ = SetForegroundWindow(*hwnd);
-                        }
-                        return Some(*hwnd);
-                    }
-                }
+        if let Some(hwnd) = wait_for_new_window(&initial_hwnds, Duration::from_millis(2500), 0) {
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+                let _ = SetForegroundWindow(hwnd);
             }
+            return Some(hwnd);
         }
     }
     None
@@ -2487,6 +2590,72 @@ pub fn launch_browser_new_window(url: &str) -> Option<String> {
         {
             std::thread::sleep(std::time::Duration::from_millis(300));
             return get_active_x11_window();
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+pub fn wait_for_new_window(
+    initial_hwnds: &HashSet<isize>,
+    timeout: Duration,
+    request_id: u64,
+) -> Option<HWND> {
+    ensure_window_event_hook();
+    let start = Instant::now();
+    let (lock, cvar) = &WINDOW_EVENT_NOTIFIER;
+
+    // Vérification initiale immédiate
+    let current_windows = list_user_windows();
+    for (hwnd, _) in &current_windows {
+        if !initial_hwnds.contains(&(hwnd.0 as isize)) {
+            return Some(*hwnd);
+        }
+    }
+
+    let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    while start.elapsed() < timeout {
+        if request_id != 0 && crate::automation::is_request_cancelled(request_id) {
+            return None;
+        }
+
+        let remaining = timeout.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+
+        let wait_dur = remaining.min(Duration::from_millis(80));
+        guard = cvar.wait_timeout(guard, wait_dur).unwrap_or_else(|e| e.into_inner()).0;
+
+        let current_windows = list_user_windows();
+        for (hwnd, _) in &current_windows {
+            if !initial_hwnds.contains(&(hwnd.0 as isize)) {
+                return Some(*hwnd);
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(not(windows))]
+pub fn wait_for_new_window(
+    initial_hwnds: &HashSet<isize>,
+    timeout: Duration,
+    request_id: u64,
+) -> Option<String> {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if request_id != 0 && crate::automation::is_request_cancelled(request_id) {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+        let current_windows = list_user_windows();
+        for (id, _) in &current_windows {
+            let hash = id.as_bytes().iter().fold(0isize, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as isize));
+            if !initial_hwnds.contains(&hash) {
+                return Some(id.clone());
+            }
         }
     }
     None

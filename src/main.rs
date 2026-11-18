@@ -1409,6 +1409,8 @@ fn main() -> eframe::Result<()> {
     let initial_twitch_channel = std::env::var("TWITCH_CHANNEL").unwrap_or_default();
 
     install_switch_keyboard_hook();
+    #[cfg(windows)]
+    crate::window_util::ensure_window_event_hook();
 
     spawn_periodic_screen_monitor(cmd_tx.clone());
     crate::scheduler::spawn_proactive_companion_loop(cmd_tx.clone());

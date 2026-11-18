@@ -115,22 +115,13 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 feedback.push(format!("Application '{}' lancée.", name));
             }
 
-            for _ in 0..25 {
-                if is_request_cancelled(request_id) {
+            if newly_spawned_hwnd.is_none() {
+                if let Some(hwnd) = wait_for_new_window(&initial_hwnds, Duration::from_millis(2500), request_id) {
+                    force_foreground_window(hwnd);
+                    restore_if_iconic(hwnd);
+                    newly_spawned_hwnd = Some(hwnd);
+                } else if is_request_cancelled(request_id) {
                     return "Lancement d'application interrompu par une nouvelle consigne.".to_string();
-                }
-                std::thread::sleep(Duration::from_millis(100));
-                let current_windows = list_user_windows();
-                for (hwnd, _title) in &current_windows {
-                    if !initial_hwnds.contains(&(hwnd.0 as isize)) {
-                        force_foreground_window(*hwnd);
-                        restore_if_iconic(*hwnd);
-                        newly_spawned_hwnd = Some(*hwnd);
-                        break;
-                    }
-                }
-                if newly_spawned_hwnd.is_some() {
-                    break;
                 }
             }
         }
@@ -768,18 +759,12 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 feedback.push(format!("Commande système '{}' ({status}).", command));
 
                 if ok {
-                    for _ in 0..15 {
-                        if is_request_cancelled(request_id) { break; }
-                        std::thread::sleep(Duration::from_millis(80));
-                        let current_windows = list_user_windows();
-                        if let Some((new_hwnd, _)) = current_windows.iter().find(|(h, _)| !initial_hwnds.contains(&(h.0 as isize))) {
-                            force_foreground_window(*new_hwnd);
-                            restore_if_iconic(*new_hwnd);
-                            active_user_hwnd = Some(*new_hwnd);
-                            preferred_target_hwnd = Some(*new_hwnd);
-                            user_windows = current_windows;
-                            break;
-                        }
+                    if let Some(new_hwnd) = wait_for_new_window(&initial_hwnds, Duration::from_millis(1500), request_id) {
+                        force_foreground_window(new_hwnd);
+                        restore_if_iconic(new_hwnd);
+                        active_user_hwnd = Some(new_hwnd);
+                        preferred_target_hwnd = Some(new_hwnd);
+                        user_windows = list_user_windows();
                     }
                 }
             }
@@ -1863,14 +1848,8 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     };
 
                     if launched {
-                        for _ in 0..20 {
-                            if is_request_cancelled(request_id) { break; }
-                            std::thread::sleep(Duration::from_millis(100));
-                            let after_windows = list_user_windows();
-                            if let Some((h, _)) = after_windows.iter().find(|(h, _)| !before_hwnds.contains(&(h.0 as isize))) {
-                                spawned_windows.push(*h);
-                                break;
-                            }
+                        if let Some(h) = wait_for_new_window(&before_hwnds, Duration::from_millis(2000), request_id) {
+                            spawned_windows.push(h);
                         }
                     }
                 }
@@ -1885,14 +1864,8 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
 
                     launch_browser_new_window(url_trimmed);
 
-                    for _ in 0..20 {
-                        if is_request_cancelled(request_id) { break; }
-                        std::thread::sleep(Duration::from_millis(100));
-                        let after_windows = list_user_windows();
-                        if let Some((h, _)) = after_windows.iter().find(|(h, _)| !before_hwnds.contains(&(h.0 as isize))) {
-                            spawned_windows.push(*h);
-                            break;
-                        }
+                    if let Some(h) = wait_for_new_window(&before_hwnds, Duration::from_millis(2000), request_id) {
+                        spawned_windows.push(h);
                     }
                 }
 
