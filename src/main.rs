@@ -3824,7 +3824,7 @@ impl eframe::App for OverlayApp {
             }
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
-                .show(ui, |_ui| {
+                .show(ui, |ui| {
                     #[cfg(not(windows))]
                     if self.switch_access_mode {
                         let state = crate::window_util::get_overlay_draw_state();
