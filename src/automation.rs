@@ -19,6 +19,8 @@ use crate::keyboard_hook::{
 };
 #[cfg(not(windows))]
 use crate::ocr::HWND;
+#[cfg(not(windows))]
+use crate::screen_summary::summarize_screen_state;
 use crate::types::{AgentAction, QuickSuggestionItem};
 pub use crate::types::{NavigationZone, NumberedElementTarget};
 use crate::window_util::*;
@@ -995,19 +997,19 @@ pub fn collect_numbered_targets_for_active_window_reconciled(
 
 #[cfg(target_os = "macos")]
 #[derive(serde::Deserialize, Debug, Clone)]
-struct MacosAxElementRaw {
-    name: String,
-    role: String,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
+pub struct MacosAxElementRaw {
+    pub name: String,
+    pub role: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
     #[serde(default)]
-    value: String,
+    pub value: String,
 }
 
 #[cfg(target_os = "macos")]
-fn query_macos_ax_elements() -> Vec<MacosAxElementRaw> {
+pub fn query_macos_ax_elements() -> Vec<MacosAxElementRaw> {
     const JXA_SCRIPT: &str = r#"(() => {
     try {
         const se = Application("System Events");
@@ -1129,19 +1131,19 @@ pub fn collect_numbered_targets_for_active_window() -> Vec<NumberedElementTarget
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 #[derive(serde::Deserialize, Debug, Clone)]
-struct AtspiElementRaw {
-    name: String,
-    role: String,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
+pub struct AtspiElementRaw {
+    pub name: String,
+    pub role: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
     #[serde(default)]
-    value: String,
+    pub value: String,
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
-fn query_atspi_elements() -> Vec<AtspiElementRaw> {
+pub fn query_atspi_elements() -> Vec<AtspiElementRaw> {
     // Résolution de l'adresse du bus d'accessibilité (org.a11y.Bus)
     let bus_addr = std::env::var("AT_SPI_BUS_ADDRESS").ok().filter(|s| !s.trim().is_empty()).or_else(|| {
         let session = zbus::blocking::Connection::session().ok()?;
