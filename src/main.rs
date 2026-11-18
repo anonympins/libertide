@@ -4,14 +4,18 @@
 extern crate rust_i18n;
 i18n!("locales", fallback = "en");
 
+mod action_history;
 mod autostart;
 mod audio;
 mod audio_player;
 mod automation;
+mod clipboard;
 mod floating_window;
 mod fs_util;
 mod html_util;
+mod keyboard_hook;
 mod pattern;
+mod screen_summary;
 mod scheduler;
 mod theme;
 mod tts;
@@ -32,6 +36,7 @@ mod agent_backend;
 mod instrument;
 mod eyetracking;
 mod virtual_keyboard;
+
 pub use eyetracking::*;
 pub use agent_backend::*;
 pub use locale::*;
@@ -45,6 +50,8 @@ use theme::{AppTheme, SettingsTab};
 use tts::{sanitize_for_tts, spawn_tts_worker};
 use twitch::spawn_twitch_worker;
 use window_util::*;
+use clipboard::*;
+use keyboard_hook::*;
 use eframe::egui;
 pub use overlay::*;
 use types::*;
@@ -285,6 +292,7 @@ impl OverlayApp {
         });
 
         let macros = load_macros();
+        load_keybindings();
         let long_press_ms = std::env::var("SWITCH_LONG_PRESS_MS")
             .ok()
             .or_else(|| read_env_var_from_file(".env", "SWITCH_LONG_PRESS_MS"))
@@ -631,7 +639,7 @@ impl OverlayApp {
         clear_all_screen_overlays();
         self.switch_access_mode = false;
         SWITCH_HOOK_ENABLED.store(false, Ordering::SeqCst);
-        automation::reset_switch_keys();
+        reset_switch_keys();
         IS_EMERGENCY_STOPPED.store(true, Ordering::SeqCst);
         TARGET_REASONING_PASSES.store(5, Ordering::SeqCst);
         let _ = CURRENT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
@@ -765,7 +773,7 @@ impl OverlayApp {
         mark_hover_nav_asked();
         self.switch_access_mode = force_state.unwrap_or(!self.switch_access_mode);
         SWITCH_HOOK_ENABLED.store(self.switch_access_mode, Ordering::SeqCst);
-        automation::reset_switch_keys();
+        reset_switch_keys();
 
         if self.switch_access_mode {
             self.dictation_mode = false;
@@ -2377,10 +2385,25 @@ impl eframe::App for OverlayApp {
             });
         }
 
-        let egui_f7 = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F7));
-        let egui_f8 = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F8));
-        let egui_f9 = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F9));
-        let egui_f4 = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F4));
+        let k_switch = KEY_BIND_SWITCH.load(Ordering::Relaxed);
+        let k_dict = KEY_BIND_DICTATION.load(Ordering::Relaxed);
+        let k_voice = KEY_BIND_VOICE.load(Ordering::Relaxed);
+        let k_clear = KEY_BIND_CLEAR.load(Ordering::Relaxed);
+        let check_egui_shortcut = |binding: u32| -> bool {
+            let base_vk = binding & VK_KEY_MASK;
+            let Some(k) = vk_to_egui_key(base_vk) else { return false };
+            let modifiers = egui::Modifiers {
+                ctrl: (binding & MOD_CTRL) != 0,
+                shift: (binding & MOD_SHIFT) != 0,
+                alt: (binding & MOD_ALT) != 0,
+                ..Default::default()
+            };
+            ctx.input_mut(|i| i.consume_key(modifiers, k))
+        };
+        let egui_f7 = check_egui_shortcut(k_switch);
+        let egui_f8 = check_egui_shortcut(k_dict);
+        let egui_f9 = check_egui_shortcut(k_voice);
+        let egui_f4 = check_egui_shortcut(k_clear);
 
         if hook_events.contains(&SwitchKeyEvent::GazeClick) {
             let is_eye_on = is_eye_tracking_enabled() && !self.eye_tracker.calibration.is_active;
@@ -3432,7 +3455,7 @@ impl eframe::App for OverlayApp {
                             } else if cur_target.role == "champ de saisie" || cur_target.role == "zone de texte" {
                                 let click_x = cur_target.click_x;
                                 let click_y = cur_target.click_y;
-                                crate::automation::IS_EXTERNAL_TEXT_INPUT_FOCUSED.store(true, Ordering::SeqCst);
+                                IS_EXTERNAL_TEXT_INPUT_FOCUSED.store(true, Ordering::SeqCst);
                                 let target_name = if !cur_target.name.is_empty() { cur_target.name.clone() } else { cur_target.role.clone() };
                                 let host_window_id = cur_target.window_id.or(self.switch_active_window_id);
 
@@ -5845,7 +5868,7 @@ impl eframe::App for OverlayApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        crate::automation::uninstall_switch_keyboard_hook();
+        uninstall_switch_keyboard_hook();
     }
 }
 
@@ -5995,7 +6018,7 @@ fn main() -> eframe::Result<()> {
 
     let initial_twitch_channel = std::env::var("TWITCH_CHANNEL").unwrap_or_default();
 
-    automation::install_switch_keyboard_hook();
+    install_switch_keyboard_hook();
 
     spawn_periodic_screen_monitor(cmd_tx.clone());
     crate::scheduler::spawn_proactive_companion_loop(cmd_tx.clone());

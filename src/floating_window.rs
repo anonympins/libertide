@@ -3,7 +3,7 @@ use eframe::egui;
 use eframe::egui::text::LayoutJob;
 use eframe::egui::TextFormat;
 use serde::{Deserialize, Serialize};
-use crate::automation::set_clipboard_text;
+use crate::clipboard::set_clipboard_text;
 use crate::{apply_dwell_to_response, DwellState};
 use crate::{play_earcon, Earcon};
 use crate::theme::ThemeColors;

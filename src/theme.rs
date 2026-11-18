@@ -10,6 +10,7 @@ pub enum SettingsTab {
     Language,
     Macros,
     Devices,
+    Keybindings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

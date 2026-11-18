@@ -51,8 +51,11 @@ use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetClassNameW, GetWin
 
 use crate::automation::{
     focus_browser_address_bar, force_foreground_window, format_url_for_navigation,
-    is_browser_chrome_target, restore_if_iconic, send_hotkey, send_paste, set_clipboard_text,
+    is_browser_chrome_target, restore_if_iconic, send_hotkey, send_paste,
     write_to_browser_or_txt,
+};
+use crate::clipboard::{
+    set_clipboard_text
 };
 use crate::pattern::{clean_words, extract_target_propositions, matches_pattern};
 use crate::window_util::*;

@@ -6,6 +6,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use rust_i18n::t;
 
 use crate::automation::*;
+use crate::screen_summary::*;
 use crate::html_util;
 use crate::local_llm;
 use crate::tts::sanitize_for_tts;

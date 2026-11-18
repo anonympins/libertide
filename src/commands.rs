@@ -19,6 +19,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::ui::click_element;
 use crate::ui::*;
+use crate::clipboard::*;
+use crate::screen_summary::*;
 use crate::automation::*;
 use crate::fs_util::*;
 use crate::types::{AgentAction};
