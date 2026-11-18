@@ -279,13 +279,10 @@ impl OverlayApp {
         let (targets_result_tx, targets_result_rx) = channel::<TargetsScanResult>();
         spawn_targets_worker(targets_request_rx, targets_result_tx);
 
-        #[cfg(windows)]
-        {
-            let ctx_clone = cc.egui_ctx.clone();
-            crate::automation::set_repaint_callback(move || {
-                ctx_clone.request_repaint();
-            });
-        }
+        let ctx_clone = cc.egui_ctx.clone();
+        crate::automation::set_repaint_callback(move || {
+            ctx_clone.request_repaint();
+        });
 
         let macros = load_macros();
         let long_press_ms = std::env::var("SWITCH_LONG_PRESS_MS")
