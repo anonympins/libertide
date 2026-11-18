@@ -258,7 +258,6 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     println!("[Actions] Aucun navigateur ouvert pour open_search_browser, lancement du navigateur.");
                     let spawned = launch_browser_new_window("https://www.google.com");
                     if let Some(h) = spawned {
-                        newly_spawned_hwnd = Some(h);
                         active_user_hwnd = Some(h);
                         preferred_target_hwnd = Some(h);
                         user_windows = list_user_windows();
@@ -468,7 +467,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         feedback.push(format!("Fenêtre cible [HWND {:?}] non réactive (sablier). Défilement ignoré.", hwnd.0));
                         continue;
                     }
-                    let win_title = user_windows
+                    let _win_title = user_windows
                         .iter()
                         .find(|(h, _)| *h == hwnd)
                         .map(|(_, t)| t.as_str())
@@ -856,7 +855,6 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                             println!("[Actions] Aucun navigateur ouvert trouvé pour la barre d'adresse, ouverture d'une nouvelle fenêtre pour : {}", text);
                             let spawned = launch_browser_new_window(text);
                             if let Some(h) = spawned {
-                                newly_spawned_hwnd = Some(h);
                                 active_user_hwnd = Some(h);
                                 preferred_target_hwnd = Some(h);
                                 user_windows = list_user_windows();
@@ -1179,7 +1177,6 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     println!("[Actions] Ouverture d'une nouvelle fenêtre de navigateur vers : {}", formatted_url);
                     let spawned = launch_browser_new_window(&formatted_url);
                     if let Some(h) = spawned {
-                        newly_spawned_hwnd = Some(h);
                         active_user_hwnd = Some(h);
                         preferred_target_hwnd = Some(h);
                         user_windows = list_user_windows();
@@ -1198,7 +1195,6 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                             feedback.push(format!("Navigateur [HWND {:?}] ne répond pas. Ouverture d'une nouvelle instance.", hwnd.0));
                             let spawned = launch_browser_new_window(&formatted_url);
                             if let Some(h) = spawned {
-                                newly_spawned_hwnd = Some(h);
                                 active_user_hwnd = Some(h);
                                 preferred_target_hwnd = Some(h);
                             }
@@ -1220,7 +1216,6 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         println!("[Actions] Aucun navigateur actif trouvé, ouverture vers : {}", formatted_url);
                         let spawned = launch_browser_new_window(&formatted_url);
                         if let Some(h) = spawned {
-                            newly_spawned_hwnd = Some(h);
                             active_user_hwnd = Some(h);
                             preferred_target_hwnd = Some(h);
                             user_windows = list_user_windows();
@@ -1249,7 +1244,6 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                             feedback.push(format!("Navigateur [HWND {:?}] ne répond pas. Ouverture d'une nouvelle instance.", hwnd.0));
                             let spawned = launch_browser_new_window(&formatted_url);
                             if let Some(h) = spawned {
-                                newly_spawned_hwnd = Some(h);
                                 active_user_hwnd = Some(h);
                                 preferred_target_hwnd = Some(h);
                             }
@@ -1269,7 +1263,6 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                         println!("[Actions] Aucun navigateur existant trouvé, ouverture vers : {}", formatted_url);
                         let spawned = launch_browser_new_window(&formatted_url);
                         if let Some(h) = spawned {
-                            newly_spawned_hwnd = Some(h);
                             active_user_hwnd = Some(h);
                             preferred_target_hwnd = Some(h);
                             user_windows = list_user_windows();

@@ -1055,7 +1055,6 @@ fn run_live_subtitles_loop(
         let whisper_instance = Arc::clone(&whisper_instance);
         let is_transcribing = Arc::clone(&is_transcribing);
         let current_sub_text = Arc::clone(&current_sub_text);
-        let event_tx = event_tx.clone();
         std::thread::Builder::new()
             .name("live_subtitles_inference".to_string())
             .spawn(move || {

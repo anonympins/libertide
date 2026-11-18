@@ -838,7 +838,7 @@ impl FloatingCard {
                                 FloatingContentType::Markdown { text } => {
                                     // Permet le clic droit pour copier l'ensemble du Markdown
                                     let full_rect = ui.available_rect_before_wrap();
-                                    let bg_resp = ui.interact(full_rect, ui.id().with("md_bg_context"), egui::Sense::click());
+                                    let bg_resp = ui.interact(full_rect, ui.scope_id().with("md_bg_context"), egui::Sense::click());
                                     bg_resp.context_menu(|ui| {
                                         if ui.button("📋 Tout copier (Ctrl+C / Ctrl+A)").clicked() {
                                             set_clipboard_text(text);
@@ -1208,7 +1208,7 @@ impl FloatingCard {
                         ];
 
                         for (rect, direction, cursor_icon) in resize_zones {
-                            let resp = ui.interact(rect, ui.id().with(format!("card_resize_{:?}_{card_id}", direction)), egui::Sense::drag());
+                            let resp = ui.interact(rect, ui.scope_id().with(format!("card_resize_{:?}_{card_id}", direction)), egui::Sense::drag());
                             if resp.hovered() {
                                 ui.ctx().set_cursor_icon(cursor_icon);
                             }

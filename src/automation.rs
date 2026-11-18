@@ -838,8 +838,10 @@ pub fn trigger_window_scan_async(hwnd: HWND) {
             }
 
             if !targets.is_empty() {
-                draw_screen_numbered_badges(&targets, 1.0, None);
-                trigger_repaint();
+                if SWITCH_HOOK_ENABLED.load(Ordering::Relaxed) {
+                    draw_screen_numbered_badges(&targets, 1.0, None);
+                    trigger_repaint();
+                }
             }
 
             // 2. Passe en arrière-plan : Qwen VLM pour les zones et canvas
@@ -872,8 +874,10 @@ pub fn trigger_window_scan_async(hwnd: HWND) {
                                     t.window_id = Some(hwnd_val);
                                     base_targets.push(t);
                                 }
-                                draw_screen_numbered_badges(&base_targets, 1.0, None);
-                                trigger_repaint();
+                                if SWITCH_HOOK_ENABLED.load(Ordering::Relaxed) {
+                                    draw_screen_numbered_badges(&base_targets, 1.0, None);
+                                    trigger_repaint();
+                                }
                             }
                         }
                     })
@@ -898,8 +902,10 @@ pub fn trigger_window_scan_async_target(_target: &str) {
                 return;
             }
             if !targets.is_empty() {
-                draw_screen_numbered_badges(&targets, 1.0, None);
-                trigger_repaint();
+                if SWITCH_HOOK_ENABLED.load(Ordering::Relaxed) {
+                    draw_screen_numbered_badges(&targets, 1.0, None);
+                    trigger_repaint();
+                }
             }
 
             // Passe en arrière-plan : Qwen VLM pour les icônes et canvas
@@ -921,8 +927,10 @@ pub fn trigger_window_scan_async_target(_target: &str) {
                                     t.value = crate::ocr::visual_zone_color(next_index).to_string();
                                     base_targets.push(t);
                                 }
-                                draw_screen_numbered_badges(&base_targets, 1.0, None);
-                                trigger_repaint();
+                                if SWITCH_HOOK_ENABLED.load(Ordering::Relaxed) {
+                                    draw_screen_numbered_badges(&base_targets, 1.0, None);
+                                    trigger_repaint();
+                                }
                             }
                         }
                     })

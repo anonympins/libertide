@@ -1174,8 +1174,10 @@ impl eframe::App for OverlayApp {
 
                 // Si le regard est fixé sur un contrôle interactif en mode survol
                 if let Some(target_idx) = snapped_idx {
-                    if let Some(target) = self.numbered_targets.iter().find(|t| t.index == target_idx) {
-                        draw_screen_control_border(target.rect, false);
+                    if self.switch_access_mode {
+                        if let Some(target) = self.numbered_targets.iter().find(|t| t.index == target_idx) {
+                            draw_screen_control_border(target.rect, false);
+                        }
                     }
                     if self.switch_access_mode && self.hover_last_announced_target != Some(target_idx) {
                         if let Some(target) = self.numbered_targets.iter().find(|t| t.index == target_idx).cloned() {
@@ -1184,7 +1186,7 @@ impl eframe::App for OverlayApp {
                             self.narrate_numbered_target(&target);
                         }
                     }
-                } else if !self.switch_access_mode {
+                } else if self.switch_access_mode {
                     set_overlay_focused_border(None);
                 }
             }
@@ -1785,7 +1787,7 @@ impl eframe::App for OverlayApp {
                             return;
                     }
 
-                    let (locale, _) = get_system_locale_language();
+                    let (_locale, _) = get_system_locale_language();
                     if is_switch_access_command(&prompt) {
                         mark_hover_nav_asked();
                         self.toggle_switch_access_mode(None);
@@ -2303,7 +2305,7 @@ impl eframe::App for OverlayApp {
                     update_open_floating_cards(&self.floating_cards);
                     ctx.request_repaint();
                 }
-                AgentEvent::NavigationZonesReady { window_id, window_title, summary, zones } => {
+                AgentEvent::NavigationZonesReady { window_id, window_title: _, summary, zones } => {
                     self.window_analysis_cache.insert(window_id, CachedWindowAnalysis {
                         summary: summary.clone(),
                         zones: zones.clone(),
@@ -2647,7 +2649,9 @@ impl eframe::App for OverlayApp {
                 if self.switch_step == SwitchAccessStep::Elements && self.switch_focus_index >= self.numbered_targets.len() {
                     self.switch_focus_index = 0;
                 }
-                self.sync_switch_access_overlays();
+                if self.switch_access_mode {
+                    self.sync_switch_access_overlays();
+                }
                 ctx.request_repaint();
                 }
             }
@@ -2745,7 +2749,7 @@ impl eframe::App for OverlayApp {
                             draw_screen_orange_border(rect);
                         }
 
-                        let win_num = self.switch_focus_index + 1;
+                        let _win_num = self.switch_focus_index + 1;
                         self.hover_last_announced_target = Some(target_hwnd.0 as usize);
                         self.transition_to_zones_for_window(target_hwnd.0 as isize, &display_title);
                         ctx.request_repaint();
@@ -3820,7 +3824,7 @@ impl eframe::App for OverlayApp {
             }
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
-                .show(ui, |ui| {
+                .show(ui, |_ui| {
                     #[cfg(not(windows))]
                     if self.switch_access_mode {
                         let state = crate::window_util::get_overlay_draw_state();
@@ -4117,7 +4121,7 @@ impl eframe::App for OverlayApp {
                                 .corner_radius(egui::CornerRadius::same(4)),
                             ).on_hover_text(t!("ui.btn_close"));
                             close_btn.widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), t!("ui.btn_close").to_string())
+                                egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), t!("ui.btn_close").to_string())
                             });
                             let close_btn_hit = make_widget_accessible_and_activated(ui, &close_btn, theme.accent);
                             if close_btn_hit {
@@ -4136,7 +4140,7 @@ impl eframe::App for OverlayApp {
                                 .corner_radius(egui::CornerRadius::same(4)),
                             ).on_hover_text(&max_label);
                             max_btn.widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), max_label.clone())
+                                egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), max_label.clone())
                             });
                             let max_btn_hit = make_widget_accessible_and_activated(ui, &max_btn, theme.accent);
                             if max_btn_hit {
@@ -4153,7 +4157,7 @@ impl eframe::App for OverlayApp {
                                 .corner_radius(egui::CornerRadius::same(4)),
                             ).on_hover_text(t!("ui.btn_minimize"));
                             min_btn.widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), t!("ui.btn_minimize").to_string())
+                                egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), t!("ui.btn_minimize").to_string())
                             });
                             let min_btn_hit = make_widget_accessible_and_activated(ui, &min_btn, theme.accent);
                             if min_btn_hit {
@@ -4183,7 +4187,7 @@ impl eframe::App for OverlayApp {
                             self.draw_avatar(ui, avatar_pos, 14.0, time);
 
                             let avatar_rect = egui::Rect::from_center_size(avatar_pos, egui::vec2(32.0, 32.0));
-                            let avatar_resp = ui.interact(avatar_rect, ui.id().with("avatar_interact"), egui::Sense::click());
+                            let avatar_resp = ui.interact(avatar_rect, ui.scope_id().with("avatar_interact"), egui::Sense::click());
                             let layer_id = ui.layer_id();
                             let avatar_label = if self.status == AgentStatus::Speaking {
                                 t!("ui.avatar_mute_tooltip").to_string()
@@ -4191,7 +4195,7 @@ impl eframe::App for OverlayApp {
                                 format!("Avatar Libertide ({:?})", self.status)
                             };
                             avatar_resp.widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), avatar_label.clone())
+                                egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), avatar_label.clone())
                             });
                             ui.memory_mut(|m| m.interested_in_focus(avatar_resp.id, layer_id));
                             if avatar_resp.has_focus() {
@@ -5182,7 +5186,7 @@ impl eframe::App for OverlayApp {
                                             let interact_resp = ui.interact(label_resp.rect, msg_id, egui::Sense::click());
                                             interact_resp.widget_info(|| {
                                                 egui::WidgetInfo::labeled(
-                                                    egui::WidgetType::Label,
+                                                    egui::Role::Label,
                                                     ui.is_enabled(),
                                                     format!("{}: {}", label_name, entry.text),
                                                 )
@@ -5575,7 +5579,7 @@ impl eframe::App for OverlayApp {
                                             let resp = ui.interact(resp.rect, t_id, egui::Sense::click());
                                             resp.widget_info(|| {
                                                 egui::WidgetInfo::labeled(
-                                                    egui::WidgetType::Label,
+                                                    egui::Role::Label,
                                                     ui.is_enabled(),
                                                     format!("{}: {}", msg.author, msg.text),
                                                 )
