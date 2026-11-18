@@ -682,7 +682,7 @@ unsafe extern "system" fn switch_mouse_hook_proc(
 
 #[cfg(windows)]
 pub fn install_switch_keyboard_hook() {
-    let mut guard = HOOK_WORKER.lock().unwrap();
+    let mut guard = HOOK_WORKER.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_some() {
         return;
     }
@@ -756,7 +756,7 @@ pub fn install_switch_keyboard_hook() {
 
 #[cfg(windows)]
 pub fn uninstall_switch_keyboard_hook() {
-    let mut guard = HOOK_WORKER.lock().unwrap();
+    let mut guard = HOOK_WORKER.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(state) = guard.take() {
         unsafe {
             let _ = UnhookWindowsHookEx(HHOOK(state.hook_handle as _));

@@ -248,7 +248,7 @@ pub fn render_keyboard_view(
     theme: &ThemeColors,
 ) -> Option<FloatingCardOutput> {
     let mut state = {
-        let mut guard = KEYBOARD_STATE.lock().unwrap();
+        let mut guard = KEYBOARD_STATE.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
             *guard = Some(VirtualKeyboardState::default());
         }
@@ -633,9 +633,8 @@ pub fn render_keyboard_view(
             });
     });
 
-    if let Ok(mut guard) = KEYBOARD_STATE.lock() {
-        *guard = Some(state);
-    }
+    let mut guard = KEYBOARD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(state);
 
     output_event
 }

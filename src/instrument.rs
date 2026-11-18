@@ -614,7 +614,7 @@ fn is_any_pad_key_down(i: &egui::InputState) -> bool {
 
 pub fn render_instrument_view(ui: &mut egui::Ui, dwell_state: &mut DwellState, theme: &ThemeColors) {
     let mut state = {
-        let mut guard = INSTRUMENT_STATE.lock().unwrap();
+        let mut guard = INSTRUMENT_STATE.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
             *guard = Some(InstrumentState::default());
         }
@@ -837,7 +837,6 @@ pub fn render_instrument_view(ui: &mut egui::Ui, dwell_state: &mut DwellState, t
         ui.add(egui::Slider::new(&mut state.pitch_bend, -12.0..=12.0).show_value(true));
     });
 
-    if let Ok(mut guard) = INSTRUMENT_STATE.lock() {
-        *guard = Some(state);
-    }
+    let mut guard = INSTRUMENT_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(state);
 }

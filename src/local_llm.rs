@@ -336,7 +336,8 @@ pub fn set_active_preset(preset_id: &str) {
         let _ = crate::fs_util::write_env_var_to_file(".env", "LLM_MODEL", p.filename);
     }
     // Réinitialise le moteur en mémoire pour recharger le nouveau modèle au prochain appel
-    if let Ok(mut lock) = LOCAL_ENGINE.lock() {
+    {
+        let mut lock = LOCAL_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         *lock = None;
     }
 }
@@ -381,7 +382,8 @@ pub fn set_active_vlm_preset(preset_id: &str) {
         let _ = crate::fs_util::write_env_var_to_file(".env", "VLM_MODEL", p.filename);
     }
     // Réinitialise le moteur VLM en mémoire pour recharger le nouveau modèle au prochain appel
-    if let Ok(mut lock) = VLM_ENGINE.lock() {
+    {
+        let mut lock = VLM_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         *lock = None;
     }
 }
@@ -390,11 +392,8 @@ static VLM_ENGINE: Mutex<Option<LocalLlamaEngine>> = Mutex::new(None);
 static VLM_LOADING: AtomicBool = AtomicBool::new(false);
 
 pub fn is_vlm_ready() -> bool {
-    if let Ok(guard) = VLM_ENGINE.lock() {
-        guard.is_some()
-    } else {
-        false
-    }
+    let guard = VLM_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+    guard.is_some()
 }
 
 /// Initialise et précharge le modèle Qwen-VL de manière totalement asynchrone en arrière-plan
@@ -429,9 +428,8 @@ pub fn init_vlm_async(event_tx: Sender<AgentEvent>) {
                             "👁️ Modèle de vision {} chargé en mémoire avec succès.",
                             preset.name
                         )));
-                        if let Ok(mut guard) = VLM_ENGINE.lock() {
-                            *guard = Some(engine);
-                        }
+                        let mut guard = VLM_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+                        *guard = Some(engine);
                     }
                     Err(e) => {
                         eprintln!("[Qwen-VL Async] Échec chargement modèle: {e}");
@@ -448,7 +446,7 @@ pub fn init_vlm_async(event_tx: Sender<AgentEvent>) {
 
 /// Exécute l'inférence locale de grounding sur le modèle Qwen-VL chargé en RAM
 pub fn query_vlm_grounding_local(prompt: &str) -> Option<String> {
-    let guard = VLM_ENGINE.lock().ok()?;
+    let guard = VLM_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     let engine = guard.as_ref()?;
     let preset = get_active_vlm_preset();
 
@@ -2540,10 +2538,10 @@ pub fn is_preset_downloaded(preset: &ModelPreset) -> bool {
 pub fn delete_preset_model(preset: &ModelPreset) -> Result<(), String> {
     // Décharger le modèle de la mémoire vive / VRAM pour libérer le descripteur de fichier
     if is_vlm_preset(preset) {
-        if let Ok(mut lock) = VLM_ENGINE.lock() {
-            *lock = None;
-        }
-    } else if let Ok(mut lock) = LOCAL_ENGINE.lock() {
+        let mut lock = VLM_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+        *lock = None;
+    } else {
+        let mut lock = LOCAL_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         *lock = None;
     }
 
@@ -2755,7 +2753,7 @@ static GLOBAL_BACKEND: Mutex<Option<Arc<LlamaBackend>>> = Mutex::new(None);
 
 /// Obtient ou initialise l'instance unique du backend Llama pour l'ensemble du processus
 pub fn get_or_init_backend() -> Result<Arc<LlamaBackend>, String> {
-    let mut lock = GLOBAL_BACKEND.lock().map_err(|e| e.to_string())?;
+    let mut lock = GLOBAL_BACKEND.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref backend) = *lock {
         return Ok(Arc::clone(backend));
     }
@@ -3161,7 +3159,7 @@ impl LocalLlamaEngine {
     }
 
     pub fn generate_local_text(prompt: &str, max_tokens: usize) -> Result<String, String> {
-        let lock = LOCAL_ENGINE.lock().map_err(|e| e.to_string())?;
+        let lock = LOCAL_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         let engine = lock.as_ref().ok_or_else(|| "Moteur local non initialisé".to_string())?;
         let preset = get_active_preset();
         let formatted = match preset.family {
@@ -3240,7 +3238,8 @@ pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<Command
         let fast = fast_classify_intent(clean, screen_hint);
         if !fast.is_empty() {
             fast
-        } else if let Ok(lock) = LOCAL_ENGINE.lock() {
+        } else {
+            let lock = LOCAL_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref engine) = *lock {
                 let tags = engine.classify_intent(clean, screen_hint);
                 if tags.is_empty() {
@@ -3274,15 +3273,13 @@ pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<Command
             } else {
                 vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch]
             }
-        } else {
-            vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch]
         }
     }
 }
 
 pub fn get_or_load_local_llama(event_tx: &Sender<AgentEvent>) -> Result<(), String> {
     {
-        let lock = LOCAL_ENGINE.lock().map_err(|e| e.to_string())?;
+        let lock = LOCAL_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         if lock.is_some() {
             return Ok(());
         }
@@ -3301,7 +3298,7 @@ pub fn get_or_load_local_llama(event_tx: &Sender<AgentEvent>) -> Result<(), Stri
     };
     let _ = event_tx.send(AgentEvent::SilentNarration(status_msg));
 
-    let mut lock = LOCAL_ENGINE.lock().map_err(|e| e.to_string())?;
+    let mut lock = LOCAL_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     if lock.is_none() {
         *lock = Some(engine);
     }
@@ -3317,10 +3314,9 @@ pub fn init_local_llm() {
     }
 
     {
-        if let Ok(lock) = LOCAL_ENGINE.lock() {
-            if lock.is_some() {
-                return;
-            }
+        let lock = LOCAL_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+        if lock.is_some() {
+            return;
         }
     }
 
@@ -3334,9 +3330,8 @@ pub fn init_local_llm() {
                     format!("💻 Modèle local {} prêt en mode CPU", preset.name)
                 };
                 println!("[Local LLM] {status_msg}");
-                if let Ok(mut lock) = LOCAL_ENGINE.lock() {
-                    *lock = Some(engine);
-                }
+                let mut lock = LOCAL_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+                *lock = Some(engine);
             }
             Err(e) => {
                 eprintln!("[Local LLM] Erreur lors du préchargement anticipé : {e}");
@@ -3355,14 +3350,15 @@ pub fn run_local_llama_completion(
 ) -> Result<String, String> {
     println!("[Local LLM] run_local_llama_completion ({} message(s), max_tokens={})", messages.len(), max_tokens);
     get_or_load_local_llama(event_tx)?;
-    let lock = LOCAL_ENGINE.lock().map_err(|e| e.to_string())?;
+    let lock = LOCAL_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     let engine = lock.as_ref().ok_or("Moteur Llama non initialisé")?;
 
     // Détecte si l'opération courante est une mise à jour de données JSON utilisateur (analyse de page)
     let is_json_update = messages.iter().rev().any(|m| m.role == "user" && is_json_payload(&m.content));
 
     // Réinitialiser systématiquement le cache de parole pour chaque nouvelle inférence
-    if let Ok(mut last) = LAST_SPOKEN_NARRATION.lock() {
+    {
+        let mut last = LAST_SPOKEN_NARRATION.lock().unwrap_or_else(|e| e.into_inner());
         last.clear();
     }
 
