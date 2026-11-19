@@ -51,8 +51,11 @@ use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetClassNameW, GetWin
 
 use crate::automation::{
     focus_browser_address_bar, force_foreground_window, format_url_for_navigation,
-    is_browser_chrome_target, restore_if_iconic, send_hotkey, send_paste, set_clipboard_text,
+    is_browser_chrome_target, restore_if_iconic, send_hotkey, send_paste,
     write_to_browser_or_txt,
+};
+use crate::clipboard::{
+    set_clipboard_text
 };
 use crate::pattern::{clean_words, extract_target_propositions, matches_pattern};
 use crate::window_util::*;
@@ -330,14 +333,45 @@ pub fn click_element(x: i32, y: i32, _element: Option<&()>, _invoke_pattern: Opt
     }
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
-        crate::window_util::set_global_cursor_pos(x, y);
-        std::thread::sleep(Duration::from_millis(15));
-        let press_ok = rdev::simulate(&rdev::EventType::ButtonPress(rdev::Button::Left)).is_ok();
-        std::thread::sleep(Duration::from_millis(30));
-        let release_ok = rdev::simulate(&rdev::EventType::ButtonRelease(rdev::Button::Left)).is_ok();
+        // 1. Essai direct via D-Bus AT-SPI DeviceEventController (100% natif Wayland / X11)
+        let atspi_ok = if let Some(conn) = crate::automation::get_atspi_connection() {
+            let _ = conn.call_method(
+                Some("org.a11y.atspi.Registry"),
+                "/org/a11y/atspi/registry/deviceeventcontroller",
+                Some("org.a11y.atspi.DeviceEventController"),
+                "GenerateMouseEvent",
+                &(x, y, "abs"),
+            );
+            std::thread::sleep(Duration::from_millis(15));
+            let click_res = conn.call_method(
+                Some("org.a11y.atspi.Registry"),
+                "/org/a11y/atspi/registry/deviceeventcontroller",
+                Some("org.a11y.atspi.DeviceEventController"),
+                "GenerateMouseEvent",
+                &(x, y, "b1c"),
+            );
+            click_res.is_ok()
+        } else {
+            false
+        };
 
-        if !press_ok || !release_ok {
+        if atspi_ok {
+            return;
+        }
+
+        // 2. Repli rdev
+        let click_ok = {
+            crate::window_util::set_global_cursor_pos(x, y);
+            std::thread::sleep(Duration::from_millis(15));
+            let p = rdev::simulate(&rdev::EventType::ButtonPress(rdev::Button::Left)).is_ok();
+            std::thread::sleep(Duration::from_millis(30));
+            let r = rdev::simulate(&rdev::EventType::ButtonRelease(rdev::Button::Left)).is_ok();
+            p && r
+        };
+
+        if !click_ok {
             if crate::automation::is_wayland_session() {
+                // Essai libei ou fallback shell si nécessaire
                 let moved = std::process::Command::new("ydotool")
                     .args(["mousemove", "--absolute", "-x", &x.to_string(), "-y", &y.to_string()])
                     .status()

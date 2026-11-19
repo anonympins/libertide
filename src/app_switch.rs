@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use crate::automation::*;
 use crate::overlay::*;
 use crate::types::*;
+use crate::keyboard_hook::*;
 use crate::ui;
 use crate::window_util::*;
 use crate::OverlayApp;
@@ -257,7 +258,7 @@ impl OverlayApp {
                 ui::click_element(target.click_x, target.click_y, None, None);
             }
             if target.role == "champ de saisie" || target.role == "zone de texte" {
-                crate::automation::IS_EXTERNAL_TEXT_INPUT_FOCUSED.store(true, Ordering::SeqCst);
+                IS_EXTERNAL_TEXT_INPUT_FOCUSED.store(true, Ordering::SeqCst);
                 self.dictation_mode = true;
                 IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
                 self.continuous_mode = true;

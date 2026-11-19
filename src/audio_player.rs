@@ -52,7 +52,7 @@ impl AudioPlayer {
                 cpal::SampleFormat::F32 => device.build_output_stream(
                     stream_config,
                     move |data: &mut [f32], _| {
-                        let mut buf = buf_cb.lock().unwrap();
+                        let mut buf = buf_cb.lock().unwrap_or_else(|e| e.into_inner());
                         let mut sum_sq = 0.0f32;
                         for sample in data.iter_mut() {
                             let s = buf.pop_front().unwrap_or(0.0);
@@ -71,7 +71,7 @@ impl AudioPlayer {
                 cpal::SampleFormat::I16 => device.build_output_stream(
                     stream_config,
                     move |data: &mut [i16], _| {
-                        let mut buf = buf_cb.lock().unwrap();
+                        let mut buf = buf_cb.lock().unwrap_or_else(|e| e.into_inner());
                         let mut sum_sq = 0.0f32;
                         for sample in data.iter_mut() {
                             let s = buf.pop_front().unwrap_or(0.0);
@@ -106,7 +106,15 @@ impl AudioPlayer {
                 return;
             }
 
-            while let Ok((gen, raw_samples, src_rate)) = rx.lock().unwrap().recv() {
+            loop {
+                let recv_res = {
+                    let rx_guard = rx.lock().unwrap_or_else(|e| e.into_inner());
+                    rx_guard.recv()
+                };
+                let (gen, raw_samples, src_rate) = match recv_res {
+                    Ok(item) => item,
+                    Err(_) => break,
+                };
                 if gen != generation_clone.load(Ordering::SeqCst) {
                     continue;
                 }
@@ -117,7 +125,7 @@ impl AudioPlayer {
                 if gen != generation_clone.load(Ordering::SeqCst) {
                     continue;
                 }
-                let mut buf = ring_buffer.lock().unwrap();
+                let mut buf = ring_buffer.lock().unwrap_or_else(|e| e.into_inner());
                 buf.extend(converted);
             }
         });
@@ -136,14 +144,16 @@ impl AudioPlayer {
 
     pub fn stop(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
-        if let Ok(mut buf) = self.ring_buffer.lock() {
-            buf.clear();
-        }
+        let mut buf = self.ring_buffer.lock().unwrap_or_else(|e| e.into_inner());
+        buf.clear();
         crate::set_tts_audio_level(0.0);
     }
 
     pub fn is_playing(&self) -> bool {
-        self.ring_buffer.lock().map(|b| !b.is_empty()).unwrap_or(false)
+        self.ring_buffer
+            .lock()
+            .map(|b| !b.is_empty())
+            .unwrap_or_else(|e| !e.into_inner().is_empty())
     }
 }
 

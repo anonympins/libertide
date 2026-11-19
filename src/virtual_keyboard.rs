@@ -2,6 +2,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use eframe::egui;
 use rust_i18n::t;
+use crate::clipboard::*;
 use crate::floating_window::FloatingCardOutput;
 use crate::overlay::{apply_dwell_to_response, DwellState, play_earcon, Earcon};
 use crate::theme::ThemeColors;
@@ -247,7 +248,7 @@ pub fn render_keyboard_view(
     theme: &ThemeColors,
 ) -> Option<FloatingCardOutput> {
     let mut state = {
-        let mut guard = KEYBOARD_STATE.lock().unwrap();
+        let mut guard = KEYBOARD_STATE.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
             *guard = Some(VirtualKeyboardState::default());
         }
@@ -584,7 +585,7 @@ pub fn render_keyboard_view(
                     4 => {
                         // Injection dans l'application externe au premier plan
                         if !state.text_buffer.trim().is_empty() {
-                            crate::automation::set_clipboard_text(&state.text_buffer);
+                            set_clipboard_text(&state.text_buffer);
                             crate::automation::restore_external_focus();
                             std::thread::sleep(Duration::from_millis(50));
                             crate::automation::send_paste();
@@ -632,9 +633,8 @@ pub fn render_keyboard_view(
             });
     });
 
-    if let Ok(mut guard) = KEYBOARD_STATE.lock() {
-        *guard = Some(state);
-    }
+    let mut guard = KEYBOARD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(state);
 
     output_event
 }

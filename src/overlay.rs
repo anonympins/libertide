@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::{get_system_locale_language, parse_llm_response_text, send_llm_chat_completion};
 use crate::automation::*;
+use crate::clipboard::*;
 use crate::fs_util::{read_env_var_from_file, write_env_var_to_file};
 use crate::theme::ThemeColors;
 use crate::types::*;

@@ -3,8 +3,11 @@ use rust_i18n::t;
 use std::time::{Duration, Instant};
 use eframe::egui;
 
-use crate::automation::{
-    get_clipboard_text, get_plain_clipboard_text, SWITCH_DEBOUNCE_MS,
+use crate::clipboard::{
+    get_clipboard_text, get_plain_clipboard_text
+};
+use crate::keyboard_hook::{
+    SWITCH_DEBOUNCE_MS,
     SWITCH_LONG_PRESS_MS,
 };
 use crate::fs_util::{read_env_var_from_file, save_macros, write_env_var_to_file};
@@ -542,6 +545,25 @@ impl OverlayApp {
                                 if devices_activated || is_devices_key {
                                     self.settings_tab = SettingsTab::Devices;
                                     self.refresh_devices();
+                                }
+
+                                let is_keybinds_active = self.settings_tab == SettingsTab::Keybindings;
+                                let tab_keybinds = ui.selectable_label(
+                                    is_keybinds_active,
+                                    egui::RichText::new("⌨ Raccourcis")
+                                        .size(12.0)
+                                        .color(if is_keybinds_active { theme.accent } else { theme.text_secondary })
+                                        .strong(),
+                                );
+                                let tab_keybinds_id = ui.make_persistent_id("dwell_tab_keybindings");
+                                let keybinds_activated = if !is_keybinds_active {
+                                    apply_dwell_to_response(ui, &mut self.dwell_state, tab_keybinds_id, &tab_keybinds)
+                                } else {
+                                    tab_keybinds.clicked()
+                                };
+                                let is_keybinds_key = make_widget_accessible_and_activated(ui, &tab_keybinds, theme.accent);
+                                if keybinds_activated || is_keybinds_key {
+                                    self.settings_tab = SettingsTab::Keybindings;
                                 }
                             });
                         });
@@ -1864,7 +1886,7 @@ impl OverlayApp {
                                                     let copy_btn_hit = make_widget_accessible_and_activated(ui, &copy_btn, theme.accent);
                                                     let copy_dwell = apply_dwell_to_response(ui, &mut self.dwell_state, copy_btn_id, &copy_btn);
                                                     if copy_btn_hit || copy_dwell {
-                                                        crate::automation::set_clipboard_text(&self.voice_guide_phrase);
+                                                        crate::clipboard::set_clipboard_text(&self.voice_guide_phrase);
                                                         play_earcon(Earcon::Success);
                                                     }
                                                 });
@@ -2516,6 +2538,202 @@ impl OverlayApp {
                                 ui.horizontal(|ui| {
                                     let close_dev_btn = ui.button(t!("ui.btn_close"));
                                     if make_widget_accessible_and_activated(ui, &close_dev_btn, theme.accent) {
+                                        self.show_api_key_modal = false;
+                                    }
+                                });
+                            }
+                            SettingsTab::Keybindings => {
+                                ui.label(egui::RichText::new("Configuration des raccourcis matériels et connexion du clavier virtuel.").size(11.5).color(theme.text_secondary));
+                                ui.add_space(6.0);
+
+                                // 1. Section Clavier Virtuel Adapté
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.accent))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("⌨ Clavier Virtuel Adapté").size(12.0).color(theme.accent).strong());
+                                            let is_kbd_open = self.is_keyboard_open();
+                                            let status_str = if is_kbd_open { "● Actif & Connecté" } else { "○ En veille" };
+                                            let status_color = if is_kbd_open { egui::Color32::from_rgb(0, 230, 118) } else { theme.text_secondary };
+                                            ui.label(egui::RichText::new(status_str).size(10.5).color(status_color));
+                                        });
+                                        ui.add_space(2.0);
+                                        ui.label(egui::RichText::new("Clavier d'accessibilité avec balayage automatique (Auto-Scan 1 contacteur), prédictions de mots par fréquence et synthèse vocale intégrée.").size(10.5).color(theme.text_secondary));
+                                        ui.add_space(4.0);
+
+                                        let is_kbd_open = self.is_keyboard_open();
+                                        let btn_label = if is_kbd_open { "🔌 Reconnecter / Réinitialiser le clavier" } else { "⌨ Ouvrir / Connecter le clavier virtuel" };
+                                        let connect_btn = ui.add(egui::Button::new(egui::RichText::new(btn_label).strong().color(theme.control_bg)).fill(theme.accent));
+                                        if make_widget_accessible_and_activated(ui, &connect_btn, theme.accent) {
+                                            if !is_kbd_open {
+                                                self.open_keyboard_card();
+                                            }
+                                            play_earcon(Earcon::Success);
+                                        }
+                                    });
+
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(6.0);
+
+                                // 2. Section Rebinding des touches
+                                ui.label(egui::RichText::new("Personnalisation des touches de contrôle (Rebinding)").size(12.0).color(egui::Color32::WHITE).strong());
+                                ui.add_space(2.0);
+                                ui.label(egui::RichText::new("Cliquez sur le bouton d'un raccourci puis appuyez sur n'importe quelle touche du clavier pour l'assigner.").size(10.5).color(theme.text_secondary));
+                                ui.add_space(4.0);
+
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        let bindings: [(&str, &std::sync::atomic::AtomicU32, &'static str); 4] = [
+                                            ("🎯 Mode Survol / Contacteur :", &crate::keyboard_hook::KEY_BIND_SWITCH, "KEY_BIND_SWITCH"),
+                                            ("🎙 Dictée Vocale :", &crate::keyboard_hook::KEY_BIND_DICTATION, "KEY_BIND_DICTATION"),
+                                            ("🗣 Profil Vocal (TTS) :", &crate::keyboard_hook::KEY_BIND_VOICE, "KEY_BIND_VOICE"),
+                                            ("🗑 Effacer Contexte :", &crate::keyboard_hook::KEY_BIND_CLEAR, "KEY_BIND_CLEAR"),
+                                        ];
+
+                                        let listening_var = crate::keyboard_hook::REBIND_LISTENING_TARGET.lock().ok().and_then(|g| *g);
+                                        if listening_var.is_some() {
+                                            ctx.request_repaint();
+                                        }
+
+                                        // Capture par écoute d'événement egui
+                                        let mut captured_vk: Option<u32> = None;
+                                        let mut cancel_capture = false;
+                                        if listening_var.is_some() {
+                                            ctx.input(|i| {
+                                                for ev in &i.events {
+                                                    match ev {
+                                                        egui::Event::Key { key, pressed: true, .. } => {
+                                                            if *key == egui::Key::Escape {
+                                                                cancel_capture = true;
+                                                            } else if let Some(vk) = crate::keyboard_hook::egui_key_to_vk(*key) {
+                                                                captured_vk = Some(vk);
+                                                            }
+                                                        }
+                                                        egui::Event::Text(ref text) => {
+                                                            if let Some(vk) = crate::keyboard_hook::azerty_char_to_vk(text) {
+                                                                captured_vk = Some(vk);
+                                                            }
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            });
+                                        }
+
+                                        if cancel_capture {
+                                            if let Ok(mut lock) = crate::keyboard_hook::REBIND_LISTENING_TARGET.lock() {
+                                                *lock = None;
+                                            }
+                                            play_earcon(Earcon::Navigation);
+                                        } else if let Some(vk) = captured_vk {
+                                            if let Ok(mut lock) = crate::keyboard_hook::REBIND_LISTENING_TARGET.lock() {
+                                                if let Some(target_var) = lock.take() {
+                                                    match target_var {
+                                                        "KEY_BIND_SWITCH" => crate::keyboard_hook::KEY_BIND_SWITCH.store(vk, Ordering::Relaxed),
+                                                        "KEY_BIND_DICTATION" => crate::keyboard_hook::KEY_BIND_DICTATION.store(vk, Ordering::Relaxed),
+                                                        "KEY_BIND_VOICE" => crate::keyboard_hook::KEY_BIND_VOICE.store(vk, Ordering::Relaxed),
+                                                        "KEY_BIND_CLEAR" => crate::keyboard_hook::KEY_BIND_CLEAR.store(vk, Ordering::Relaxed),
+                                                        _ => {}
+                                                    }
+                                                    let _ = write_env_var_to_file(".env", target_var, &vk.to_string());
+                                                    std::env::set_var(target_var, vk.to_string());
+                                                    play_earcon(Earcon::Success);
+                                                }
+                                            }
+                                        }
+
+                                        for (label, atomic_key, env_var) in bindings {
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new(label).size(11.0).color(theme.text_primary));
+                                                let cur_val = atomic_key.load(Ordering::Relaxed);
+                                                let is_listening_this = listening_var == Some(env_var);
+
+                                                if is_listening_this {
+                                                    let pulse = ((ui.input(|i| i.time) * 4.0).sin().abs() * 0.4 + 0.6) as f32;
+                                                    let listen_btn = ui.button(
+                                                        egui::RichText::new("🔴 Appuyez sur une touche... (Échap pour annuler)")
+                                                            .size(11.0)
+                                                            .strong()
+                                                            .color(egui::Color32::from_rgb((255.0 * pulse) as u8, 80, 80)),
+                                                    );
+                                                    if listen_btn.clicked() {
+                                                        if let Ok(mut lock) = crate::keyboard_hook::REBIND_LISTENING_TARGET.lock() {
+                                                            *lock = None;
+                                                        }
+                                                        play_earcon(Earcon::Navigation);
+                                                    }
+                                                } else {
+                                                    let key_name = crate::keyboard_hook::vk_to_label(cur_val);
+                                                    let btn_text = format!("⌨ {key_name}");
+                                                    let rebind_btn = ui.button(
+                                                        egui::RichText::new(btn_text)
+                                                            .size(11.0)
+                                                            .strong()
+                                                            .color(theme.accent),
+                                                    ).on_hover_text("Cliquez pour écouter et mapper n'importe quelle touche du clavier");
+
+                                                    if make_widget_accessible_and_activated(ui, &rebind_btn, theme.accent) {
+                                                        if let Ok(mut lock) = crate::keyboard_hook::REBIND_LISTENING_TARGET.lock() {
+                                                            *lock = Some(env_var);
+                                                        }
+                                                        play_earcon(Earcon::Navigation);
+                                                    }
+
+                                                    let mut selected_val = cur_val;
+                                                    let combo_id = format!("combo_rebind_{}", env_var);
+                                                    egui::ComboBox::from_id_salt(combo_id)
+                                                        .selected_text("▾")
+                                                        .width(40.0)
+                                                        .show_ui(ui, |ui| {
+                                                            for &(vk_code, k_label) in crate::keyboard_hook::AVAILABLE_REBIND_KEYS {
+                                                                if ui.selectable_value(&mut selected_val, vk_code, k_label).clicked() {
+                                                                    atomic_key.store(vk_code, Ordering::Relaxed);
+                                                                    let _ = write_env_var_to_file(".env", env_var, &vk_code.to_string());
+                                                                    std::env::set_var(env_var, vk_code.to_string());
+                                                                    play_earcon(Earcon::Success);
+                                                                }
+                                                            }
+                                                        });
+                                                }
+                                            });
+                                            ui.add_space(2.0);
+                                        }
+
+                                        ui.add_space(6.0);
+                                        ui.horizontal(|ui| {
+                                            let reset_keys_btn = ui.small_button("↺ Rétablir les touches par défaut");
+                                            if make_widget_accessible_and_activated(ui, &reset_keys_btn, theme.accent) {
+                                                crate::keyboard_hook::KEY_BIND_SWITCH.store(0x76, Ordering::Relaxed);
+                                                crate::keyboard_hook::KEY_BIND_DICTATION.store(0x77, Ordering::Relaxed);
+                                                crate::keyboard_hook::KEY_BIND_VOICE.store(0x78, Ordering::Relaxed);
+                                                crate::keyboard_hook::KEY_BIND_CLEAR.store(0x73, Ordering::Relaxed);
+                                                let _ = write_env_var_to_file(".env", "KEY_BIND_SWITCH", "118");
+                                                let _ = write_env_var_to_file(".env", "KEY_BIND_DICTATION", "119");
+                                                let _ = write_env_var_to_file(".env", "KEY_BIND_VOICE", "120");
+                                                let _ = write_env_var_to_file(".env", "KEY_BIND_CLEAR", "115");
+                                                if let Ok(mut lock) = crate::keyboard_hook::REBIND_LISTENING_TARGET.lock() {
+                                                    *lock = None;
+                                                }
+                                                play_earcon(Earcon::Success);
+                                            }
+                                        });
+                                    });
+
+                                ui.add_space(8.0);
+                                ui.label(egui::RichText::new("ℹ Astuce : la touche Échap permet à tout moment de quitter la dictée, le survol ou d'annuler une opération.").size(10.5).italics().color(theme.text_secondary));
+                                ui.add_space(6.0);
+
+                                ui.horizontal(|ui| {
+                                    let close_btn = ui.button(t!("ui.btn_close"));
+                                    if make_widget_accessible_and_activated(ui, &close_btn, theme.accent) {
                                         self.show_api_key_modal = false;
                                     }
                                 });

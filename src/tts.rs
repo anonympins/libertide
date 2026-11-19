@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crate::audio_player::AudioPlayer;
 use crate::fs_util::read_env_var_from_file;
 use crate::set_tts_audio_level;
-use crate::types::{AgentEvent, AgentStatus, TtsCommand, VoiceGender};
+pub(crate) use crate::types::{AgentEvent, AgentStatus, TtsCommand, VoiceGender};
 
 /// Nettoie le texte Markdown/HTML et convertit les symboles en texte parlé naturel
 pub fn sanitize_for_tts(text: &str) -> String {
@@ -1013,12 +1013,21 @@ impl NativeVoiceCloneBackend {
     }
 
     pub fn new() -> Option<Self> {
-        let player = AudioPlayer::new().ok()?;
         let gender = get_voice_clone_gender();
-        let model_dir = PathBuf::from("models").join("voice-clone").join(&gender);
+        Self::new_with_gender(&gender)
+    }
+
+    pub fn new_with_gender(gender: &str) -> Option<Self> {
+        let player = AudioPlayer::new().ok()?;
+        let clean_gender = if gender.eq_ignore_ascii_case("male") || gender.eq_ignore_ascii_case("homme") {
+            "male".to_string()
+        } else {
+            "female".to_string()
+        };
+        let model_dir = PathBuf::from("models").join("voice-clone").join(&clean_gender);
 
         // Téléchargement automatique si aucun modèle ONNX n'est présent
-        let _ = ensure_voice_clone_model_for_gender(&model_dir, &gender);
+        let _ = ensure_voice_clone_model_for_gender(&model_dir, &clean_gender);
 
         let reference_wav_path = std::env::var("VOICE_REFERENCE_WAV")
             .ok()
@@ -1042,23 +1051,34 @@ impl NativeVoiceCloneBackend {
         Some(Self {
             player,
             reference_wav_path,
-            gender,
+            gender: clean_gender,
             model_dir,
             #[cfg(feature = "sherpa")]
             tts_engine,
         })
     }
 
+    pub fn set_gender_str(&mut self, gender: &str) {
+        let clean = if gender.eq_ignore_ascii_case("male") || gender.eq_ignore_ascii_case("homme") {
+            "male".to_string()
+        } else {
+            "female".to_string()
+        };
+        if self.gender != clean {
+            self.gender = clean;
+            self.model_dir = PathBuf::from("models").join("voice-clone").join(&self.gender);
+            let _ = ensure_voice_clone_model_for_gender(&self.model_dir, &self.gender);
+            #[cfg(feature = "sherpa")]
+            {
+                self.tts_engine = Self::create_engine(&self.model_dir);
+            }
+        }
+    }
+
     pub fn synthesize(&mut self, text: &str) -> Result<(Vec<f32>, u32), String> {
         #[cfg(feature = "sherpa")]
         {
-            let cur_gender = get_voice_clone_gender();
-            if self.gender != cur_gender {
-                self.gender = cur_gender.clone();
-                self.model_dir = PathBuf::from("models").join("voice-clone").join(&self.gender);
-                let _ = ensure_voice_clone_model_for_gender(&self.model_dir, &self.gender);
-                self.tts_engine = Self::create_engine(&self.model_dir);
-            } else if self.tts_engine.is_none() {
+            if self.tts_engine.is_none() {
                 let _ = ensure_voice_clone_model_for_gender(&self.model_dir, &self.gender);
                 self.tts_engine = Self::create_engine(&self.model_dir);
             }
@@ -1077,17 +1097,16 @@ impl NativeVoiceCloneBackend {
                     .and_then(|s| s.trim().parse::<f32>().ok())
                     .unwrap_or(1.0);
 
-                println!("[TTS Clone] Synthèse Sherpa Vits pour : \"{}\"", text);
+                println!("[TTS Native] Synthèse Piper VITS ({}) pour : \"{}\"", self.gender, text);
                 let audio = engine
                     .create(text, sid, speed)
-                    .map_err(|e| format!("Erreur synthèse Sherpa Vits: {e}"))?;
-                println!("[TTS Clone] Synthèse terminée ({} échantillons).", audio.samples.len());
+                    .map_err(|e| format!("Erreur synthèse Sherpa Vits ({}) : {e}", self.gender))?;
                 return Ok((audio.samples, audio.sample_rate as u32));
             }
         }
 
         // Repli si le modèle ONNX n'est pas encore téléchargé dans models/voice-clone/
-        Err("Modèle de clonage vocal non installé dans models/voice-clone/.".to_string())
+        Err("Moteur de synthèse vocale Piper VITS non initialisé dans models/voice-clone/.".to_string())
     }
 
     pub fn stop(&self) {
@@ -1838,9 +1857,18 @@ impl SystemTtsBackend for UnixTtsBackend {
 impl SystemTtsBackend for CompositeTtsBackend {
     fn set_gender(&mut self, gender: VoiceGender) {
         self.current_gender = gender;
-        if gender == VoiceGender::Clone {
-            self.native_clone_backend = NativeVoiceCloneBackend::new();
+        let is_male = match gender {
+            VoiceGender::Henri | VoiceGender::Paul | VoiceGender::Jean => true,
+            VoiceGender::Denise | VoiceGender::Hortense | VoiceGender::Sylvie => false,
+            VoiceGender::Clone => get_voice_clone_gender() == "male",
+        };
+        let target_gender = if is_male { "male" } else { "female" };
+
+        if gender == VoiceGender::Clone && self.clone_backend.is_none() {
             self.clone_backend = HttpVoiceCloneBackend::new();
+        }
+        if let Some(ref mut nat) = self.native_clone_backend {
+            nat.set_gender_str(target_gender);
         }
         if let Some(ref mut sys) = self.system_backend {
             sys.set_gender(gender);
@@ -1867,39 +1895,56 @@ impl SystemTtsBackend for CompositeTtsBackend {
         pending_cmd: &mut Option<TtsCommand>,
         sentence_queue: &mut VecDeque<String>,
     ) -> bool {
-        let force_clone = std::env::var("TTS_BACKEND")
+        let backend_pref = std::env::var("TTS_BACKEND")
             .ok()
             .or_else(|| read_env_var_from_file(".env", "TTS_BACKEND"))
-            .map_or(false, |b| b.eq_ignore_ascii_case("clone") || b.eq_ignore_ascii_case("sherpa") || b.eq_ignore_ascii_case("http"));
+            .unwrap_or_default()
+            .to_lowercase();
 
-        if self.current_gender == VoiceGender::Clone || force_clone {
-            // Initialisation paresseuse si nécessaire
-            if self.clone_backend.is_none() {
-                self.clone_backend = HttpVoiceCloneBackend::new();
-            }
-            if self.native_clone_backend.is_none() {
-                self.native_clone_backend = NativeVoiceCloneBackend::new();
-            }
+        let force_system = backend_pref == "system" || backend_pref == "sapi" || backend_pref == "say" || backend_pref == "espeak";
+        let force_native = backend_pref == "clone" || backend_pref == "sherpa" || backend_pref == "piper" || backend_pref == "native" || backend_pref == "http";
 
+        #[cfg(not(windows))]
+        let prefer_native = !force_system;
+        #[cfg(windows)]
+        let prefer_native = force_native || self.current_gender == VoiceGender::Clone;
+
+        if (self.current_gender == VoiceGender::Clone || prefer_native) && !force_system {
             // 1. Essai en priorité absolue du moteur de clonage appliquant l'échantillon vocal
-            if let Some(ref mut clone) = self.clone_backend {
-                match clone.speak_sentence(sentence, rx, pending_cmd, sentence_queue) {
-                    Ok(interrupted) => return interrupted,
-                    Err(err) => {
-                        eprintln!("[TTS Clone] Serveur de clonage injoignable ({err}). Repli sur le moteur local.");
+            if self.current_gender == VoiceGender::Clone {
+                if self.clone_backend.is_none() {
+                    self.clone_backend = HttpVoiceCloneBackend::new();
+                }
+                if let Some(ref mut clone) = self.clone_backend {
+                    match clone.speak_sentence(sentence, rx, pending_cmd, sentence_queue) {
+                        Ok(interrupted) => return interrupted,
+                        Err(err) => {
+                            eprintln!("[TTS Clone] Serveur de clonage injoignable ({err}). Repli sur le moteur local.");
+                        }
                     }
                 }
             }
 
-            // 2. Repli sur le moteur local natif
+            // 2. Moteur local natif Sherpa-ONNX / Piper VITS (pur Rust)
+            let is_male = match self.current_gender {
+                VoiceGender::Henri | VoiceGender::Paul | VoiceGender::Jean => true,
+                VoiceGender::Denise | VoiceGender::Hortense | VoiceGender::Sylvie => false,
+                VoiceGender::Clone => get_voice_clone_gender() == "male",
+            };
+            let target_gender = if is_male { "male" } else { "female" };
+
+            if self.native_clone_backend.is_none() {
+                self.native_clone_backend = NativeVoiceCloneBackend::new_with_gender(target_gender);
+            }
             if let Some(ref mut nat) = self.native_clone_backend {
+                nat.set_gender_str(target_gender);
                 if let Ok(interrupted) = nat.speak_sentence(sentence, rx, pending_cmd, sentence_queue) {
-                    println!("[TTS] Voix synthétisée via le moteur local Sherpa VITS.");
                     return interrupted;
                 }
             }
         }
 
+        // 3. Repli système (SAPI sur Windows, say sur macOS, spd-say/espeak sur Linux)
         if let Some(ref mut sys) = self.system_backend {
             sys.speak_sentence(sentence, rx, pending_cmd, sentence_queue)
         } else {
@@ -1921,10 +1966,29 @@ pub fn spawn_tts_worker(event_tx: StdSender<AgentEvent>, initial_voice: VoiceGen
         let system_backend = UnixTtsBackend::new(current_gender);
 
         let is_clone_active = current_gender == VoiceGender::Clone
-            || std::env::var("TTS_BACKEND").map_or(false, |b| b.eq_ignore_ascii_case("clone") || b.eq_ignore_ascii_case("sherpa"));
+            || std::env::var("TTS_BACKEND").map_or(false, |b| {
+                let s = b.to_lowercase();
+                s == "clone" || s == "sherpa" || s == "piper" || s == "native"
+            });
+
+        #[cfg(not(windows))]
+        let init_native_backend = true;
+        #[cfg(windows)]
+        let init_native_backend = is_clone_active;
+
+        let is_male = match current_gender {
+            VoiceGender::Henri | VoiceGender::Paul | VoiceGender::Jean => true,
+            VoiceGender::Denise | VoiceGender::Hortense | VoiceGender::Sylvie => false,
+            VoiceGender::Clone => get_voice_clone_gender() == "male",
+        };
+        let initial_gender_str = if is_male { "male" } else { "female" };
 
         let clone_backend = if is_clone_active { HttpVoiceCloneBackend::new() } else { None };
-        let native_clone_backend = if is_clone_active { NativeVoiceCloneBackend::new() } else { None };
+        let native_clone_backend = if init_native_backend {
+            NativeVoiceCloneBackend::new_with_gender(initial_gender_str)
+        } else {
+            None
+        };
 
         let mut composite_backend = CompositeTtsBackend {
             current_gender,

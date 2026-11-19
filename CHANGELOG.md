@@ -3,6 +3,40 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.8.6] - 2026-11-19
+
+### 🎙️⚡ 500 ms Voice Responsiveness & Early Intent Detection (`audio.rs`)
+- **Ultra-Fast Voice Turnaround (`detect_action_intent_prefix`)**:
+  - Implemented early prefix and action-verb detection (*"open"*, *"search"*, *"close"*, *"click"*, *"write"*, *"mute"*, etc.) directly during Whisper speculative streaming inference.
+  - Reduced end-of-speech VAD silence timeout to **500 ms** as soon as an action verb is recognized (down from 1,200 ms previously), ensuring near-instantaneous execution with zero perceived latency.
+
+### 🗣️🐧 Default Piper VITS Neural TTS on Linux (`tts.rs`)
+- **Native Neural Synthesis by Default on Linux**:
+  - Configured local speech synthesis backends to prefer Sherpa-ONNX / Piper VITS (`prefer_native = !force_system`) over legacy system text-to-speech tools (`spd-say` / `espeak-ng`).
+  - Delivers natural, high-fidelity neural voices out of the box across Linux distributions without manual setup.
+
+### 🪟 Event-Driven Window Discovery via WinEventHook (`window_util.rs`, `automation.rs`)
+- **OS-Level Win32 Event Notifications (`SetWinEventHook`)**:
+  - Replaced busy-wait polling loops with a dedicated Win32 WinEventHook listener thread tracking `EVENT_SYSTEM_FOREGROUND`, `EVENT_OBJECT_CREATE`, and `EVENT_OBJECT_SHOW`.
+  - Instant synchronization via condition variable (`WINDOW_EVENT_NOTIFIER`): `wait_for_new_window` wakes up immediately when target windows appear without burning CPU cycles.
+
+### 🛡️ C CRT Assertion Dialog Suppression & Stability (`main.rs`, `local_llm.rs`)
+- **Suppression of Blocking CRT Dialog Popups (`disable_crt_assertion_dialogs`)**:
+  - Installed a custom silent `_set_invalid_parameter_handler` on Windows to suppress modal assertion crash dialogs from third-party C/C++ runtimes (notably `_osfile` handle checks and `fopen` calls in external audio/LLM engines).
+  - Reinforced crash boundaries around local model loading and COM interactions within `std::panic::catch_unwind`.
+
+### 🧩 Overlay UI Modularization & Decoupling (`app_ui.rs`, `main.rs`)
+- **Extracted `OverlayApp` Presentation Logic into `app_ui.rs`**:
+  - Substantially refactored and slimmed down `main.rs` by modularizing core interface methods (`process_gaze_tick`, `process_agent_events`, `process_input_events`, `render_header_bar`, `render_control_dock`, `render_chat_stream`, `render_hidden_state`, `render_calibration_screen`, `render_switch_overlays`, `process_floating_cards`).
+  - Improved maintainability, cleaner compilation units, and better testability.
+
+### 🐧🍎 D-Bus AT-SPI2 Parity & Cross-Platform Fixes (`ui.rs`, `automation.rs`)
+- **Cross-Platform Accessibility Input Consolidation**:
+  - Implemented native mouse click simulation under Linux via D-Bus AT-SPI2 `org.a11y.atspi.DeviceEventController` (`GenerateMouseEvent`), guaranteeing Wayland and X11 parity without mandatory shell tool dependencies.
+  - Resolved multi-platform compiler warnings and errors on macOS and Linux (type-safe `AsWindowTarget`, dummy `HWND` traits, and `VIRTUAL_KEY` handling).
+
+---
+N
 ## [0.8.5] - 2026-11-18
 
 ### 🐧🍎 Pure-Rust Cross-Platform Parity & Zero-Python Architecture (`automation.rs`, `ui.rs`, `ocr.rs`)
