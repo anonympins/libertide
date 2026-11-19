@@ -85,6 +85,56 @@ fn is_hallucination_or_noise(text: &str) -> bool {
     EXACT_NOISE_PHRASES.iter().any(|&p| clean_str == p)
 }
 
+/// Détecte la présence d'un verbe d'action au début de la phrase pour préchauffer le routeur d'intention
+pub fn detect_action_intent_prefix(text: &str) -> Option<&'static str> {
+    let lower = text.trim().to_lowercase();
+    const ACTION_PREFIXES: &[(&str, &str)] = &[
+        ("ouvre", "open_app"),
+        ("ouvrir", "open_app"),
+        ("lance", "launch_app"),
+        ("lancer", "launch_app"),
+        ("demarre", "launch_app"),
+        ("démarre", "launch_app"),
+        ("démarrer", "launch_app"),
+        ("cherche", "search_web"),
+        ("chercher", "search_web"),
+        ("trouve", "search_web"),
+        ("recherche", "search_web"),
+        ("rechercher", "search_web"),
+        ("google", "search_web"),
+        ("ferme", "close_window"),
+        ("fermer", "close_window"),
+        ("quitte", "close_window"),
+        ("quitter", "close_window"),
+        ("clique", "click"),
+        ("cliquer", "click"),
+        ("appuie", "press_key"),
+        ("ecris", "type_text"),
+        ("écris", "type_text"),
+        ("ecrire", "type_text"),
+        ("écrire", "type_text"),
+        ("tape", "type_text"),
+        ("taper", "type_text"),
+        ("mute", "mute_sound"),
+        ("coupe", "mute_sound"),
+        ("monte", "volume_up"),
+        ("baisse", "volume_down"),
+        ("open", "open_app"),
+        ("launch", "launch_app"),
+        ("search", "search_web"),
+        ("close", "close_window"),
+    ];
+    for &(prefix, tag) in ACTION_PREFIXES {
+        if lower.starts_with(prefix) {
+            let rest = &lower[prefix.len()..];
+            if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\'') || rest.starts_with(',') {
+                return Some(tag);
+            }
+        }
+    }
+    None
+}
+
 /// Filtre biquad Butterworth passe-bas pour éliminer l'aliasing avant décimation
 pub struct BiquadFilter {
     b0: f32,
@@ -773,13 +823,49 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
             .expect("Échec lancement worker live_subtitles");
     }
 
+    // Worker dédié au décodage incrémental spéculatif Whisper (Low-Latency STT)
+    let (spec_tx, spec_rx) = channel::<(u64, Vec<f32>)>();
+    let (spec_res_tx, spec_res_rx) = channel::<(u64, usize, Result<String, String>)>();
+    let is_spec_busy = Arc::new(AtomicBool::new(false));
+
+    {
+        let whisper_instance = Arc::clone(&whisper_instance);
+        let is_spec_busy = Arc::clone(&is_spec_busy);
+        std::thread::Builder::new()
+            .name("whisper_speculative_stt".to_string())
+            .spawn(move || {
+                while let Ok((mut session_id, mut samples)) = spec_rx.recv() {
+                    // Si plusieurs requêtes s'accumulent, ne retenir que la plus récente
+                    while let Ok((next_id, next_samples)) = spec_rx.try_recv() {
+                        session_id = next_id;
+                        samples = next_samples;
+                    }
+                    let samples_len = samples.len();
+                    let res = {
+                        let mut guard = whisper_instance.lock().unwrap();
+                        if let Some(ref mut whisper) = *guard {
+                            whisper.transcribe(&samples)
+                        } else {
+                            Err("Moteur Whisper non initialisé".to_string())
+                        }
+                    };
+                    is_spec_busy.store(false, Ordering::SeqCst);
+                    let _ = spec_res_tx.send((session_id, samples_len, res));
+                }
+            })
+            .expect("Échec lancement worker whisper_speculative_stt");
+    }
+
     // 2. Thread de capture audio : traite les commandes utilisateur
+    let mut session_counter: u64 = 0;
     std::thread::spawn(move || {
         while let Ok(cmd) = cmd_rx.recv() {
             if !matches!(cmd, AudioCommand::Start) {
                 continue;
             }
 
+            session_counter += 1;
+            let current_session = session_counter;
             // Résolution de la race condition : attente active si le modèle est encore en chargement
             if !is_model_ready.load(Ordering::SeqCst) {
                 let _ = event_tx.send(AgentEvent::SilentNarration(
@@ -861,6 +947,12 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
             const PRE_ROLL_SAMPLES: usize = 8000; // 500 ms à 16 kHz pour sécuriser l'attaque
             const MAX_RECORDING_DURATION: Duration = Duration::from_secs(40);
 
+            let mut last_speculative_instant = Instant::now();
+            let mut last_speculative_samples_dispatched = 0;
+            let mut latest_transcribed_text = String::new();
+            let mut latest_transcribed_samples_len = 0;
+            let mut action_intent_detected: Option<&'static str> = None;
+
             let is_listening = true;
             while is_listening {
                 if let Ok(AudioCommand::Stop) = cmd_rx.try_recv() {
@@ -916,26 +1008,97 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                     }
                 }
 
+                // Dépouillement des résultats de décodage spéculatif en cours
+                while let Ok((s_id, s_len, res)) = spec_res_rx.try_recv() {
+                    if s_id == current_session {
+                        if let Ok(text) = res {
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty()
+                                && trimmed.chars().any(|c| c.is_alphanumeric())
+                                && !is_hallucination_or_noise(trimmed)
+                            {
+                                latest_transcribed_text = trimmed.to_string();
+                                latest_transcribed_samples_len = s_len;
+                                let _ = event_tx.send(AgentEvent::TranscriptionPartial(latest_transcribed_text.clone()));
+
+                                // Préchauffage du routeur d'intention dès les premiers verbes d'action
+                                if action_intent_detected.is_none() {
+                                    if let Some(intent) = detect_action_intent_prefix(&latest_transcribed_text) {
+                                        action_intent_detected = Some(intent);
+                                        println!(
+                                            "[Whisper Stream] ⚡ Verbe d'action détecté ('{intent}') dans \"{latest_transcribed_text}\" -> préchauffage anticipé"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Déclenchement spéculatif par fenêtres glissantes pendant la parole active (~450 ms)
+                if speech_detected
+                    && audio_16k_buffer.len() >= 8000
+                    && audio_16k_buffer.len().saturating_sub(last_speculative_samples_dispatched) >= 4000
+                    && last_speculative_instant.elapsed() >= Duration::from_millis(450)
+                    && !is_spec_busy.load(Ordering::SeqCst)
+                {
+                    is_spec_busy.store(true, Ordering::SeqCst);
+                    last_speculative_instant = Instant::now();
+                    last_speculative_samples_dispatched = audio_16k_buffer.len();
+                    let _ = spec_tx.send((current_session, audio_16k_buffer.clone()));
+                }
+
                 if speech_detected {
                     let silence_elapsed = last_speech_time.elapsed();
                     let total_elapsed = start_recording_time.elapsed();
 
                     let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::Relaxed);
                     let silence_timeout = if is_dictation {
-                        Duration::from_millis(3200)
+                        Duration::from_millis(1300)
+                    } else if action_intent_detected.is_some() {
+                        // Pause raccourcie après un verbe d'action identifié pour une exécution ultra-rapide
+                        Duration::from_millis(500)
+                    } else if !latest_transcribed_text.is_empty() {
+                        // Du texte a déjà été capté et affiché en direct
+                        Duration::from_millis(700)
                     } else {
-                        Duration::from_millis(2400)
+                        Duration::from_millis(1200)
                     };
 
-                    if (silence_elapsed >= silence_timeout && audio_16k_buffer.len() >= 12000)
+                    if (silence_elapsed >= silence_timeout && audio_16k_buffer.len() >= 8000)
                         || total_elapsed >= MAX_RECORDING_DURATION
                     {
                         crate::set_mic_audio_level(0.0);
-                        let _ = event_tx.send(AgentEvent::TranscriptionPartial(
-                            "Transcription locale en cours...".into(),
-                        ));
 
-                        let transcribe_res = {
+                        // Attente brève (max 250ms) si le worker spéculatif est sur le point d'achever son inférence
+                        let wait_start = Instant::now();
+                        while is_spec_busy.load(Ordering::SeqCst) && wait_start.elapsed() < Duration::from_millis(250) {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+
+                        while let Ok((s_id, s_len, res)) = spec_res_rx.try_recv() {
+                            if s_id == current_session {
+                                if let Ok(text) = res {
+                                    let trimmed = text.trim();
+                                    if !trimmed.is_empty()
+                                        && trimmed.chars().any(|c| c.is_alphanumeric())
+                                        && !is_hallucination_or_noise(trimmed)
+                                    {
+                                        latest_transcribed_text = trimmed.to_string();
+                                        latest_transcribed_samples_len = s_len;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Si la transcription spéculative récente couvre l'audio parlé, réutilisation immédiate
+                        let unharvested_samples = audio_16k_buffer.len().saturating_sub(latest_transcribed_samples_len);
+                        let transcribe_res = if !latest_transcribed_text.is_empty() && unharvested_samples <= 16000 {
+                            Ok(latest_transcribed_text.clone())
+                        } else {
+                            let _ = event_tx.send(AgentEvent::TranscriptionPartial(
+                                "Finalisation...".into(),
+                            ));
                             let mut guard = whisper_instance.lock().unwrap();
                             if let Some(ref mut whisper) = *guard {
                                 whisper.transcribe(&audio_16k_buffer)
@@ -955,6 +1118,10 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                                 speech_detected = false;
                                 noise_floor = 0.004;
                                 audio_16k_buffer.clear();
+                                latest_transcribed_text.clear();
+                                latest_transcribed_samples_len = 0;
+                                last_speculative_samples_dispatched = 0;
+                                action_intent_detected = None;
                                 let _ = event_tx.send(AgentEvent::TranscriptionPartial(String::new()));
                             }
                             Err(err) => {
@@ -962,6 +1129,10 @@ pub fn spawn_audio_worker(event_tx: Sender<AgentEvent>, _api_key: String) -> Sen
                                 speech_detected = false;
                                 noise_floor = 0.004;
                                 audio_16k_buffer.clear();
+                                latest_transcribed_text.clear();
+                                latest_transcribed_samples_len = 0;
+                                last_speculative_samples_dispatched = 0;
+                                action_intent_detected = None;
                             }
                         }
                     }

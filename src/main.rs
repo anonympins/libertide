@@ -1092,11 +1092,24 @@ impl eframe::App for OverlayApp {
         // Traitement Eye-Tracking
         self.process_gaze_tick(&ctx, &work_area, ppp, is_typing);
 
-        let trimmed_input = self.input_text.trim();
-        if trimmed_input != self.last_suggestion_query {
-            self.last_suggestion_query = trimmed_input.to_string();
-            self.input_suggestions = if trimmed_input.len() >= 2 {
-                find_matching_applications(trimmed_input, 5)
+        let query_source = if !self.input_text.trim().is_empty() {
+            self.input_text.trim()
+        } else if self.is_recording && !self.live_transcript.trim().is_empty() {
+            // Préchauffage des suggestions applicatives dès la parole en direct ("ouvre spotify" -> "spotify")
+            let live = self.live_transcript.trim();
+            let words: Vec<&str> = live.split_whitespace().collect();
+            if words.len() >= 2 && (words[0].eq_ignore_ascii_case("ouvre") || words[0].eq_ignore_ascii_case("lance")) {
+                words[1]
+            } else {
+                words.last().copied().unwrap_or(live)
+            }
+        } else {
+            ""
+        };
+        if query_source != self.last_suggestion_query {
+            self.last_suggestion_query = query_source.to_string();
+            self.input_suggestions = if query_source.len() >= 2 {
+                find_matching_applications(query_source, 5)
             } else {
                 Vec::new()
             };
@@ -1292,23 +1305,25 @@ fn spawn_event_wake_watcher(
                      event,
                      AgentEvent::VoicePromptReady(_)
                          | AgentEvent::ReminderTriggered { .. }
+                         | AgentEvent::TranscriptionPartial(_)
                  );
 
                 if should_wake {
-                    #[cfg(windows)]
-                    unsafe {
-                        use windows::core::w;
-                        use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SetForegroundWindow, SW_RESTORE};
-                        let overlay = FindWindowW(None, w!("Libertide overlay"))
-                            .unwrap_or(windows::Win32::Foundation::HWND(std::ptr::null_mut()));
-                        if !overlay.0.is_null() {
-                            let _ = ShowWindow(overlay, SW_RESTORE);
-                            let _ = SetForegroundWindow(overlay);
+                    if !matches!(event, AgentEvent::TranscriptionPartial(_)) {
+                        #[cfg(windows)]
+                        unsafe {
+                            use windows::core::w;
+                            use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SetForegroundWindow, SW_RESTORE};
+                            let overlay = FindWindowW(None, w!("Libertide overlay"))
+                                .unwrap_or(windows::Win32::Foundation::HWND(std::ptr::null_mut()));
+                            if !overlay.0.is_null() {
+                                let _ = ShowWindow(overlay, SW_RESTORE);
+                                let _ = SetForegroundWindow(overlay);
+                            }
                         }
+                        egui_ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        egui_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
-
-                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     egui_ctx.request_repaint();
                 }
 
