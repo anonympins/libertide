@@ -11,6 +11,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_TARGET_DIR: "C:\\t"
+  CARGO_INCREMENTAL: "0"
+  RUSTFLAGS: "-C debuginfo=0"
   CMAKE_GENERATOR: "Ninja"
   CMAKE_POLICY_VERSION_MINIMUM: "3.30"
   CMAKE_TOOLCHAIN_FILE: "${{ github.workspace }}\\cmake\\windows-toolchain.cmake"
@@ -121,6 +123,14 @@ jobs:
           if (Test-Path dist/models) { Remove-Item -Recurse -Force dist/models }
           Get-ChildItem -Path dist -Include "*.onnx","*.bin","*.gguf","*.tflite","*.tar.bz2","*.tmp" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force
           Compress-Archive -Path dist/* -DestinationPath "libertide-windows-x64.zip"
+
+      - name: Prune target directory before caching
+        shell: pwsh
+        run: |
+          Write-Host "Nettoyage des fichiers temporaires et symboles lourds (.pdb, .obj)..."
+          Get-ChildItem -Path "C:\t" -Include "*.pdb", "*.obj" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force
+          Get-ChildItem -Path "C:\t" -Directory -Filter "incremental" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+          Write-Host "Nettoyage terminé."
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
