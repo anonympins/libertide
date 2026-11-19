@@ -360,7 +360,7 @@ pub fn click_element(x: i32, y: i32, _element: Option<&()>, _invoke_pattern: Opt
         }
 
         // 2. Repli rdev
-        let press_ok = {
+        let click_ok = {
             crate::window_util::set_global_cursor_pos(x, y);
             std::thread::sleep(Duration::from_millis(15));
             let p = rdev::simulate(&rdev::EventType::ButtonPress(rdev::Button::Left)).is_ok();
@@ -369,7 +369,7 @@ pub fn click_element(x: i32, y: i32, _element: Option<&()>, _invoke_pattern: Opt
             p && r
         };
 
-        if !press_ok || !release_ok {
+        if !click_ok {
             if crate::automation::is_wayland_session() {
                 // Essai libei ou fallback shell si nécessaire
                 let moved = std::process::Command::new("ydotool")
