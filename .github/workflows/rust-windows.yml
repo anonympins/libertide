@@ -35,24 +35,22 @@ jobs:
         shell: pwsh
         run: choco install ninja -y --no-progress
 
-      - name: Cache Vulkan SDK
-        id: cache-vulkan
-        uses: actions/cache@v4
+      - name: Install & Cache Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
         with:
-          path: C:\VulkanSDK
-          key: ${{ runner.os }}-vulkan-sdk-v1
-
-      - name: Install Vulkan SDK via Chocolatey
-        if: steps.cache-vulkan.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: choco install vulkan-sdk -y --no-progress
+          cache: true
+          stripdown: true
+          install_runtime: true
 
       - name: Configure Vulkan SDK environment
         shell: pwsh
         run: |
-          $sdkPath = (Get-ChildItem -Directory "C:\VulkanSDK" | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          $sdkPath = $env:VULKAN_SDK
+          if (-not $sdkPath) {
+            $sdkPath = (Get-ChildItem -Directory "C:\VulkanSDK" | Sort-Object Name -Descending | Select-Object -First 1).FullName
+            "VULKAN_SDK=$sdkPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          }
           Write-Host "Vulkan SDK installé sous: $sdkPath"
-          "VULKAN_SDK=$sdkPath" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VK_SDK_PATH=$sdkPath" | Out-File -FilePath $env:GITHUB_ENV -Append
           "$sdkPath\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
           if (Test-Path "$sdkPath\Lib") {
