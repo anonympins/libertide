@@ -18,6 +18,9 @@ env:
   CMAKE_TOOLCHAIN_FILE: "${{ github.workspace }}\\cmake\\windows-toolchain.cmake"
   CC: "cl"
   CXX: "cl"
+  _CL_: "/MP"
+  SCCACHE_DIR: "C:\\Users\\runneradmin\\AppData\\Local\\Mozilla\\sccache"
+  SCCACHE_CACHE_SIZE: "2G"
 
 jobs:
   build-windows:

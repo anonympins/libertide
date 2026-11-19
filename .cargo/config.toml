@@ -7,3 +7,6 @@ rustflags = ["-C", "target-cpu=apple-m1"]
 CMAKE_BUILD_PARALLEL_LEVEL = "4"
 VERBOSE = "1"
 CMAKE_GENERATOR = "Ninja"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
