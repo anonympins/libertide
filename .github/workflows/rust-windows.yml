@@ -31,10 +31,25 @@ jobs:
         with:
           arch: x64
 
+      - name: Install Ninja
+        shell: pwsh
+        run: choco install ninja -y --no-progress
+
+      - name: Cache Vulkan SDK
+        id: cache-vulkan
+        uses: actions/cache@v4
+        with:
+          path: C:\VulkanSDK
+          key: ${{ runner.os }}-vulkan-sdk-v1
+
       - name: Install Vulkan SDK via Chocolatey
+        if: steps.cache-vulkan.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: choco install vulkan-sdk -y --no-progress
+
+      - name: Configure Vulkan SDK environment
         shell: pwsh
         run: |
-          choco install vulkan-sdk ninja -y --no-progress
           $sdkPath = (Get-ChildItem -Directory "C:\VulkanSDK" | Sort-Object Name -Descending | Select-Object -First 1).FullName
           Write-Host "Vulkan SDK installé sous: $sdkPath"
           "VULKAN_SDK=$sdkPath" | Out-File -FilePath $env:GITHUB_ENV -Append
