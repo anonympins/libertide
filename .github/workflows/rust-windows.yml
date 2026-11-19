@@ -11,9 +11,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_TARGET_DIR: "C:\\t"
+  CARGO_INCREMENTAL: "0"
+  RUSTFLAGS: "-C debuginfo=0"
   CMAKE_GENERATOR: "Ninja"
   CMAKE_POLICY_VERSION_MINIMUM: "3.30"
   CMAKE_TOOLCHAIN_FILE: "${{ github.workspace }}\\cmake\\windows-toolchain.cmake"
+  CC: "cl"
+  CXX: "cl"
 
 jobs:
   build-windows:
@@ -35,31 +39,26 @@ jobs:
         shell: pwsh
         run: choco install ninja -y --no-progress
 
-      - name: Cache Vulkan SDK
-        id: cache-vulkan
-        uses: actions/cache@v4
+      - name: Install & Cache Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
         with:
-          path: C:\VulkanSDK
-          key: ${{ runner.os }}-vulkan-sdk-v1
-
-      - name: Install Vulkan SDK via Chocolatey
-        if: steps.cache-vulkan.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: choco install vulkan-sdk -y --no-progress
+          cache: true
+          stripdown: true
+          install_runtime: true
 
       - name: Configure Vulkan SDK environment
         shell: pwsh
         run: |
-          $sdkPath = (Get-ChildItem -Directory "C:\VulkanSDK" | Sort-Object Name -Descending | Select-Object -First 1).FullName
-          Write-Host "Vulkan SDK installé sous: $sdkPath"
-          "VULKAN_SDK=$sdkPath" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "VK_SDK_PATH=$sdkPath" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "$sdkPath\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          $sdkPath = if ($env:VULKAN_SDK) { $env:VULKAN_SDK } else { (Get-ChildItem -Directory "C:\VulkanSDK" | Sort-Object Name -Descending | Select-Object -First 1).FullName }
+          Write-Host "Vulkan SDK configuré sous: $sdkPath"
+          Add-Content -Path $env:GITHUB_ENV -Value "VK_SDK_PATH=$sdkPath" -Encoding utf8
+          Add-Content -Path $env:GITHUB_PATH -Value "$sdkPath\Bin" -Encoding utf8
           if (Test-Path "$sdkPath\Lib") {
-            "$sdkPath\Lib" | Out-File -FilePath $env:GITHUB_PATH -Append
-            "LIB=$env:LIB;$sdkPath\Lib" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Add-Content -Path $env:GITHUB_PATH -Value "$sdkPath\Lib" -Encoding utf8
+            $currentLib = if ($env:LIB) { "$env:LIB;$sdkPath\Lib" } else { "$sdkPath\Lib" }
+            Add-Content -Path $env:GITHUB_ENV -Value "LIB=$currentLib" -Encoding utf8
           }
-          "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\ProgramData\chocolatey\bin" -Encoding utf8
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -90,10 +89,14 @@ jobs:
             cargo build --release -p sherpa-rs-sys --target x86_64-pc-windows-msvc
             $sherpaLib = Get-ChildItem -Path "$env:LOCALAPPDATA\sherpa-rs" -Recurse -Directory -Filter "lib" -ErrorAction SilentlyContinue | Select-Object -First 1
           }
+          # Nettoyer les artefacts CMake de llama-cpp-sys-2 pouvant contenir des chemins obsolètes vers cl.exe
+          cargo clean -p llama-cpp-sys-2 --target x86_64-pc-windows-msvc 2>$null
+
           if ($sherpaLib) {
             Write-Host "Sherpa libraries found in: $($sherpaLib.FullName)"
-            "LIB=$env:LIB;$($sherpaLib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
-            "$($sherpaLib.FullName)" | Out-File -FilePath $env:GITHUB_PATH -Append
+            $currentLib = if ($env:LIB) { "$env:LIB;$($sherpaLib.FullName)" } else { "$($sherpaLib.FullName)" }
+            Add-Content -Path $env:GITHUB_ENV -Value "LIB=$currentLib" -Encoding utf8
+            Add-Content -Path $env:GITHUB_PATH -Value "$($sherpaLib.FullName)" -Encoding utf8
           } else {
             Write-Error "Unable to locate sherpa-rs native library directory!"
             exit 1
@@ -120,6 +123,14 @@ jobs:
           if (Test-Path dist/models) { Remove-Item -Recurse -Force dist/models }
           Get-ChildItem -Path dist -Include "*.onnx","*.bin","*.gguf","*.tflite","*.tar.bz2","*.tmp" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force
           Compress-Archive -Path dist/* -DestinationPath "libertide-windows-x64.zip"
+
+      - name: Prune target directory before caching
+        shell: pwsh
+        run: |
+          Write-Host "Nettoyage des fichiers temporaires et symboles lourds (.pdb, .obj)..."
+          Get-ChildItem -Path "C:\t" -Include "*.pdb", "*.obj" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force
+          Get-ChildItem -Path "C:\t" -Directory -Filter "incremental" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+          Write-Host "Nettoyage terminé."
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
