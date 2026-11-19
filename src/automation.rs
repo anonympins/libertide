@@ -1144,7 +1144,7 @@ pub struct AtspiElementRaw {
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
-pub fn query_atspi_elements() -> Vec<AtspiElementRaw> {
+pub fn get_atspi_connection() -> Option<zbus::blocking::Connection> {
     // Résolution de l'adresse du bus d'accessibilité (org.a11y.Bus)
     let bus_addr = std::env::var("AT_SPI_BUS_ADDRESS").ok().filter(|s| !s.trim().is_empty()).or_else(|| {
         let session = zbus::blocking::Connection::session().ok()?;
@@ -1156,15 +1156,16 @@ pub fn query_atspi_elements() -> Vec<AtspiElementRaw> {
             &(),
         ).and_then(|r| r.body().deserialize());
         reply.ok().filter(|s| !s.trim().is_empty())
-    });
+    })?;
 
-    let Some(addr) = bus_addr else {
-        return Vec::new();
-    };
-
-    let Ok(conn) = zbus::blocking::connection::Builder::address(addr.as_str())
+    zbus::blocking::connection::Builder::address(bus_addr.as_str())
         .and_then(|b| b.build())
-    else {
+        .ok()
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn query_atspi_elements() -> Vec<AtspiElementRaw> {
+    let Some(conn) = get_atspi_connection() else {
         return Vec::new();
     };
 

@@ -683,43 +683,80 @@ pub fn list_user_windows() -> Vec<(HWND, String)> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn list_user_windows() -> Vec<(String, String)> {
-    let script = r#"tell application "System Events"
-        set winList to {}
-        repeat with proc in (every process whose background only is false and visible is true)
-            set procName to name of proc
-            repeat with w in (every window of proc)
-                set wTitle to name of w
-                if wTitle is not "" then
-                    set end of winList to (procName & " - " & wTitle)
-                else
-                    set end of winList to procName
-                end if
-            end repeat
-        end repeat
-        set AppleScript's text item delimiters to linefeed
-        return winList as text
-    end tell"#;
-    let mut list = Vec::new();
-    if let Ok(output) = std::process::Command::new("osascript").args(["-e", script]).output() {
-        let text = String::from_utf8_lossy(&output.stdout);
-        for (i, line) in text.lines().enumerate() {
-            let t = line.trim();
-            if !t.is_empty() && !t.contains("Libertide") {
-                list.push((format!("mac_win_{i}"), t.to_string()));
-            }
-        }
+#[link(name = "ApplicationServices", kind = "framework")]
+#[link(name = "CoreGraphics", kind = "framework")]
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn AXUIElementCreateSystemWide() -> *mut std::ffi::c_void;
+    fn AXUIElementCopyAttributeValue(
+        element: *mut std::ffi::c_void,
+        attribute: *const std::ffi::c_void,
+        value: *mut *mut std::ffi::c_void,
+    ) -> i32;
+    fn AXValueGetValue(value: *mut std::ffi::c_void, the_type: u32, value_ptr: *mut std::ffi::c_void) -> bool;
+    fn CFStringCreateWithCString(alloc: *mut std::ffi::c_void, c_str: *const std::os::raw::c_char, encoding: u32) -> *mut std::ffi::c_void;
+    fn CFStringGetLength(the_string: *mut std::ffi::c_void) -> isize;
+    fn CFStringGetCString(the_string: *mut std::ffi::c_void, buffer: *mut std::os::raw::c_char, buffer_size: isize, encoding: u32) -> bool;
+    fn CFGetTypeID(cf: *mut std::ffi::c_void) -> usize;
+    fn CFStringGetTypeID() -> usize;
+    fn CFRelease(cf: *mut std::ffi::c_void);
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn cf_to_string(cf_str: *mut std::ffi::c_void) -> Option<String> {
+    if cf_str.is_null() || CFGetTypeID(cf_str) != CFStringGetTypeID() {
+        return None;
     }
-    list
+    let len = CFStringGetLength(cf_str);
+    let mut buf = vec![0u8; (len * 4 + 1) as usize];
+    if CFStringGetCString(cf_str, buf.as_mut_ptr() as _, buf.len() as isize, 0x08000100 /* UTF-8 */) {
+        let cstr = std::ffi::CStr::from_ptr(buf.as_ptr() as _);
+        Some(cstr.to_string_lossy().into_owned())
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn copy_ax_attr(elem: *mut std::ffi::c_void, attr: &str) -> Option<*mut std::ffi::c_void> {
+    let c = std::ffi::CString::new(attr).ok()?;
+    let cf_attr = CFStringCreateWithCString(std::ptr::null_mut(), c.as_ptr(), 0x08000100);
+    if cf_attr.is_null() {
+        return None;
+    }
+    let mut val: *mut std::ffi::c_void = std::ptr::null_mut();
+    let res = AXUIElementCopyAttributeValue(elem, cf_attr, &mut val);
+    CFRelease(cf_attr);
+    if res == 0 && !val.is_null() {
+        Some(val)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn list_user_windows() -> Vec<(String, String)> {
+    crate::automation::collect_switch_candidate_windows()
+        .into_iter()
+        .map(|c| (c.id.to_string(), c.title))
+        .collect()
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn list_user_windows() -> Vec<(String, String)> {
-    // Utilisation de wmctrl pour lister les fenêtres X11 gérées par le Window Manager EWMH
+    // 1. Détection native AT-SPI via D-Bus sans shell fork
+    let candidates = crate::automation::collect_switch_candidate_windows();
+    if !candidates.is_empty() {
+        return candidates
+            .into_iter()
+            .map(|c| (c.id.to_string(), c.title))
+            .collect();
+    }
+
+    // 2. Repli wmctrl si AT-SPI indisponible
     let output = std::process::Command::new("wmctrl")
         .args(["-l"])
         .output();
-
     let mut list = Vec::new();
     if let Ok(out) = output {
         let text = String::from_utf8_lossy(&out.stdout);
@@ -771,64 +808,90 @@ pub fn get_active_window_rect() -> Option<[i32; 4]> {
 
 #[cfg(target_os = "macos")]
 pub fn get_active_window_rect() -> Option<[i32; 4]> {
-    let script = r#"tell application "System Events"
-        set p to first process whose frontmost is true
-        tell p
-            if (count of windows) > 0 then
-                set w to front window
-                set {x, y} to position of w
-                set {w_w, w_h} to size of w
-                return (x as text) & "," & (y as text) & "," & (w_w as text) & "," & (w_h as text)
-            end if
-        end tell
-    end tell"#;
-    let output = std::process::Command::new("osascript").args(["-e", script]).output().ok()?;
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let parts: Vec<&str> = text.split(',').map(|s| s.trim()).collect();
-    if parts.len() == 4 {
-        let x = parts[0].parse::<i32>().ok()?;
-        let y = parts[1].parse::<i32>().ok()?;
-        let w = parts[2].parse::<i32>().ok()?;
-        let h = parts[3].parse::<i32>().ok()?;
-        return Some([x, y, x + w, y + h]);
+    unsafe {
+        let system_wide = AXUIElementCreateSystemWide();
+        if system_wide.is_null() {
+            return None;
+        }
+        let app = copy_ax_attr(system_wide, "AXFocusedApplication")?;
+        CFRelease(system_wide);
+
+        let win = copy_ax_attr(app, "AXFocusedWindow")?;
+        CFRelease(app);
+
+        let mut pt = [0.0f64; 2];
+        let mut sz = [0.0f64; 2];
+        let mut has_pt = false;
+        let mut has_sz = false;
+
+        if let Some(pos_val) = copy_ax_attr(win, "AXPosition") {
+            if AXValueGetValue(pos_val, 1 /* kAXValueCGPointType */, pt.as_mut_ptr() as _) {
+                has_pt = true;
+            }
+            CFRelease(pos_val);
+        }
+        if let Some(sz_val) = copy_ax_attr(win, "AXSize") {
+            if AXValueGetValue(sz_val, 2 /* kAXValueCGSizeType */, sz.as_mut_ptr() as _) {
+                has_sz = true;
+            }
+            CFRelease(sz_val);
+        }
+        CFRelease(win);
+
+        if has_pt && has_sz {
+            let x = pt[0].round() as i32;
+            let y = pt[1].round() as i32;
+            let w = sz[0].round() as i32;
+            let h = sz[1].round() as i32;
+            return Some([x, y, x + w, y + h]);
+        }
+        None
     }
-    None
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn get_active_window_rect() -> Option<[i32; 4]> {
-    let active_id = get_active_x11_window()?;
-    let parse_id = |s: &str| -> Option<u64> {
-        let s = s.trim();
-        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-            u64::from_str_radix(hex, 16).ok()
-        } else {
-            s.parse::<u64>().ok()
-        }
-    };
-    let active_num = parse_id(&active_id);
+    // 1. Tenter la détection via l'ID X11 actif + wmctrl
+    if let Some(active_id) = get_active_x11_window() {
+        let parse_id = |s: &str| -> Option<u64> {
+            let s = s.trim();
+            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                s.parse::<u64>().ok()
+            }
+        };
+        let active_num = parse_id(&active_id);
 
-    let output = std::process::Command::new("wmctrl")
-        .args(["-l", "-G"])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 6 {
-            let win_id = parts[0];
-            let is_match = win_id.eq_ignore_ascii_case(&active_id)
-                || (active_num.is_some() && parse_id(win_id) == active_num);
-            if is_match {
-                let x = parts[2].parse::<i32>().ok()?;
-                let y = parts[3].parse::<i32>().ok()?;
-                let w = parts[4].parse::<i32>().ok()?;
-                let h = parts[5].parse::<i32>().ok()?;
-                return Some([x, y, x + w, y + h]);
+        if let Ok(output) = std::process::Command::new("wmctrl")
+            .args(["-l", "-G"])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 6 {
+                    let win_id = parts[0];
+                    let is_match = win_id.eq_ignore_ascii_case(&active_id)
+                        || (active_num.is_some() && parse_id(win_id) == active_num);
+                    if is_match {
+                        if let (Ok(x), Ok(y), Ok(w), Ok(h)) = (
+                            parts[2].parse::<i32>(),
+                            parts[3].parse::<i32>(),
+                            parts[4].parse::<i32>(),
+                            parts[5].parse::<i32>(),
+                        ) {
+                            return Some([x, y, x + w, y + h]);
+                        }
+                    }
+                }
             }
         }
     }
-    None
+
+    // 2. Repli AT-SPI
+    let windows = crate::automation::collect_switch_candidate_windows();
+    windows.first().map(|w| w.rect)
 }
 
 #[cfg(not(windows))]
@@ -860,22 +923,45 @@ pub fn get_x11_window_properties(win_id: &str) -> (String, String) {
 
 #[cfg(target_os = "macos")]
 pub fn get_active_macos_window() -> Option<String> {
-    let script = r#"tell application "System Events"
-        set p to first process whose frontmost is true
-        set pName to name of p
-        try
-            set wTitle to name of front window of p
-            return pName & " - " & wTitle
-        on error
-            return pName
-        end try
-    end tell"#;
-    let output = std::process::Command::new("osascript").args(["-e", script]).output().ok()?;
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
+    unsafe {
+        let system_wide = AXUIElementCreateSystemWide();
+        if system_wide.is_null() {
+            return None;
+        }
+        let app = copy_ax_attr(system_wide, "AXFocusedApplication")?;
+        CFRelease(system_wide);
+
+        let owner = copy_ax_attr(app, "AXTitle")
+            .and_then(|t| {
+                let s = cf_to_string(t);
+                CFRelease(t);
+                s
+            })
+            .unwrap_or_default();
+
+        let win_title = copy_ax_attr(app, "AXFocusedWindow")
+            .and_then(|w| {
+                let t = copy_ax_attr(w, "AXTitle").and_then(|val| {
+                    let s = cf_to_string(val);
+                    CFRelease(val);
+                    s
+                });
+                CFRelease(w);
+                t
+            })
+            .unwrap_or_default();
+
+        CFRelease(app);
+
+        if !owner.is_empty() && !win_title.is_empty() {
+            Some(format!("{owner} - {win_title}"))
+        } else if !owner.is_empty() {
+            Some(owner)
+        } else if !win_title.is_empty() {
+            Some(win_title)
+        } else {
+            None
+        }
     }
 }
 
@@ -1179,6 +1265,19 @@ pub fn set_global_cursor_pos(x: i32, y: i32) {
 pub fn set_global_cursor_pos(x: i32, y: i32) {
     if !crate::automation::is_wayland_session() {
         if x11_cursor::set_cursor_pos(x, y) {
+            return;
+        }
+    }
+    // Injection directe via D-Bus AT-SPI DeviceEventController (compatible Wayland et X11)
+    if let Some(conn) = crate::automation::get_atspi_connection() {
+        let res = conn.call_method(
+            Some("org.a11y.atspi.Registry"),
+            "/org/a11y/atspi/registry/deviceeventcontroller",
+            Some("org.a11y.atspi.DeviceEventController"),
+            "GenerateMouseEvent",
+            &(x, y, "abs"),
+        );
+        if res.is_ok() {
             return;
         }
     }
