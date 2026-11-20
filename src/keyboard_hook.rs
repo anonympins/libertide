@@ -10,9 +10,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::automation::{trigger_repaint, IS_DICTATION_ACTIVE, IS_USER_TYPING, LIBERTIDE_EXTRA_INFO};
+use crate::automation::{trigger_repaint, IS_DICTATION_ACTIVE, IS_USER_TYPING};
+#[cfg(windows)]
+use crate::automation::LIBERTIDE_EXTRA_INFO;
 use crate::fs_util::{read_env_var_from_file, write_env_var_to_file};
 use crate::types::SwitchKeyEvent;
+#[cfg(windows)]
 use crate::window_util::clear_screen_numbered_badges;
 
 #[cfg(windows)]
@@ -29,6 +32,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 #[cfg(not(windows))]
+#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct VIRTUAL_KEY(pub u16);
 
@@ -2123,7 +2127,7 @@ pub fn rdev_key_to_vk(key: rdev::Key) -> Option<u32> {
         rdev::Key::Kp9 => Some(0x69),
         rdev::Key::KpMultiply => Some(0x6A),
         rdev::Key::KpMinus => Some(0x6D),
-        rdev::Key::KpDecimal => Some(0x6E),
+        rdev::Key::KpDelete => Some(0x6E),
         rdev::Key::KpDivide => Some(0x6F),
         rdev::Key::KpReturn => Some(0x0D),
         rdev::Key::KeyA => Some(0x41),
@@ -2225,27 +2229,17 @@ pub fn install_switch_keyboard_hook() {
 
                         if let Some(code) = vk {
                             if let Ok(mut lock) = REBIND_LISTENING_TARGET.lock() {
-                                if let Some(target_var) = *lock {
+                                if let Some(target_var) = lock.take() {
                                     if is_modifier_vk(code) {
+                                        *lock = Some(target_var);
                                         return;
                                     }
                                     if code == 0x1B && active_mods == 0 {
-                                        *lock = None;
                                         trigger_repaint();
                                         return;
                                     }
                                     let full_binding = (code & VK_KEY_MASK) | (active_mods & MOD_MASK);
-                                    match target_var {
-                                        "KEY_BIND_SWITCH" => KEY_BIND_SWITCH.store(full_binding, Ordering::SeqCst),
-                                        "KEY_BIND_DICTATION" => KEY_BIND_DICTATION.store(full_binding, Ordering::SeqCst),
-                                        "KEY_BIND_VOICE" => KEY_BIND_VOICE.store(full_binding, Ordering::SeqCst),
-                                        "KEY_BIND_CLEAR" => KEY_BIND_CLEAR.store(full_binding, Ordering::SeqCst),
-                                        _ => {}
-                                    }
-                                    let binding_str = full_binding.to_string();
-                                    let _ = write_env_var_to_file(".env", target_var, &binding_str);
-                                    std::env::set_var(target_var, binding_str);
-                                    *lock = None;
+                                    apply_rebound_key(&target_var, full_binding);
                                     trigger_repaint();
                                     return;
                                 }
