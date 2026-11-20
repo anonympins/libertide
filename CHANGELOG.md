@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   - Integrated direct local automation control targeting Home Assistant (`HASS_URL`, `HASS_TOKEN`) via RFC 6455 WebSockets with transparent fallback to the local REST service API.
   - Dedicated control over everyday physical independence appliances: lighting (`light`), electric shutters and blinds (`cover`), climate/thermostat (`climate`), motorized medical beds (`switch`), fans, and smart plugs.
   - Comprehensive multilingual semantic normalization of home automation domains and services across all 9 supported languages (French, English, German, Spanish, Italian, Portuguese, Russian, Japanese, Chinese).
+- **KNX Group Address Alias Resolution & `.env` Default Macros (`home_automation.rs`, `fs_util.rs`)**:
+  - Added transparent KNX alias resolution (`resolve_knx_alias`) mapping human-friendly names (e.g. `lumiere_salon`, `volet_chambre`, `lit_tete`) to technical ETS group addresses (`1/2/3`, `1/200`) via `KNX_ALIASES` JSON or individual `KNX_ADDR_*` / `KNX_ALIAS_*` variables in `.env`.
+  - Native direct UDP KNXnet/IP routing indication and Home Assistant `knx.send` integration allowing users to control appliances without pronouncing technical group addresses.
+  - Configurable default voice macros via `DEFAULT_MACROS` (or `MACROS`) in `.env`, automatically merged with `macros.json` on startup.
 
 ### 🎧 3D Binaural Spatial Audio & Acoustic Localization (`audio_player.rs`, `overlay.rs`, `app_switch.rs`)
 - **Screen-Positioned Spatial Earcons (`play_earcon_spatial`, `spatialize_mono_to_stereo`)**:
