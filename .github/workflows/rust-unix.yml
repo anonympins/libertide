@@ -80,56 +80,43 @@ jobs:
 
       - name: Configure library search paths for Sherpa & ONNX Runtime
         run: |
-          # 1. Créer impérativement les dossiers de destination pour que std::fs::copy ne panique pas
+          # 1. Créer impérativement les dossiers de destination pour que Cargo et std::fs::copy ne paniquent pas
           mkdir -p target/release/deps target/debug/deps
 
-          # 2. Localiser la bibliothèque sherpa-rs si présente en cache
-          SHERPA_LIB_DIR=$(find "$HOME/.cache/sherpa-rs" -type d -name "lib" 2>/dev/null | head -n 1)
-          if [ -z "$SHERPA_LIB_DIR" ] || [ ! -f "$SHERPA_LIB_DIR/libsherpa-onnx-c-api.so" ]; then
-            echo "Sherpa libraries missing from runner. Rebuilding sherpa-rs-sys..."
-            # Exécuter cargo check d'abord pour créer la structure target/
+          # 2. Déclencher le téléchargement des bibliothèques sherpa-onnx si absentes du cache
+          if [ ! -d "$HOME/.cache/sherpa-rs" ] || [ -z "$(find "$HOME/.cache/sherpa-rs" -name "libsherpa-onnx-c-api.so" 2>/dev/null)" ]; then
+            echo "Sherpa libraries missing from runner. Downloading via cargo check..."
             cargo check --release --package sherpa-rs-sys || true
-            mkdir -p target/release/deps
-            
-            # Corriger les liens symboliques dans le cache sherpa si déjà téléchargé
-            SHERPA_CACHE_DIR=$(find "$HOME/.cache/sherpa-rs" -type d -name "lib" 2>/dev/null | head -n 1)
-            if [ -n "$SHERPA_CACHE_DIR" ]; then
-              cd "$SHERPA_CACHE_DIR" && ln -sf libonnxruntime.so.* libonnxruntime.so 2>/dev/null || true
-              cd "$GITHUB_WORKSPACE"
-            fi
-            cargo build --release -p sherpa-rs-sys || {
-              mkdir -p target/release/deps target/debug/deps
-              SHERPA_CACHE_DIR=$(find "$HOME/.cache/sherpa-rs" -type d -name "lib" 2>/dev/null | head -n 1)
-              if [ -n "$SHERPA_CACHE_DIR" ]; then
-                cd "$SHERPA_CACHE_DIR" && ln -sf libonnxruntime.so.* libonnxruntime.so 2>/dev/null || true
-              fi
-              cargo build --release -p sherpa-rs-sys
-            }
-            cargo build --release -p sherpa-rs-sys
-            SHERPA_LIB_DIR=$(find "$HOME/.cache/sherpa-rs" -type d -name "lib" 2>/dev/null | head -n 1)
           fi
 
+          # 3. Créer une copie réelle de libonnxruntime.so dans TOUS les répertoires lib sous le cache
+          find "$HOME/.cache/sherpa-rs" -type f -name "libonnxruntime.so.*" 2>/dev/null | while read -r ort; do
+            dir=$(dirname "$ort")
+            rm -f "$dir/libonnxruntime.so"
+            cp -f "$ort" "$dir/libonnxruntime.so"
+          done
+
+          SHERPA_LIB_DIR=$(find "$HOME/.cache/sherpa-rs" -type d -name "lib" 2>/dev/null | head -n 1)
           if [ -z "$SHERPA_LIB_DIR" ]; then
             echo "::error::Unable to locate sherpa-rs native library directory!"
             exit 1
           fi
-
           echo "Sherpa libraries found in: $SHERPA_LIB_DIR"
 
-          # Ensure unversioned soname symlink exists for onnxruntime
-          ORT_TARGET=$(find "$SHERPA_LIB_DIR" -maxdepth 1 -name "libonnxruntime.so*" ! -name "libonnxruntime.so" | head -n 1)
-          if [ -n "$ORT_TARGET" ] && [ ! -f "$SHERPA_LIB_DIR/libonnxruntime.so" ]; then
-            ln -sf "$(basename "$ORT_TARGET")" "$SHERPA_LIB_DIR/libonnxruntime.so"
-          fi
+          # 4. Installer les bibliothèques partagées dans /usr/local/lib et rafraîchir ldconfig
+          find "$HOME/.cache/sherpa-rs" -name "*.so*" -type f -exec sudo cp -f {} /usr/local/lib/ \; 2>/dev/null || true
+          find "$HOME/.cache/sherpa-rs" -name "libonnxruntime.so" -exec sudo cp -f {} /usr/local/lib/ \; 2>/dev/null || true
+          sudo ldconfig
 
-          # Ensure libraries are also present in target/release/deps
+          # 5. S'assurer que les bibliothèques sont présentes dans target/release/deps
           cp -d "$SHERPA_LIB_DIR"/*.so* target/release/deps/ 2>/dev/null || true
+          cp -d "$SHERPA_LIB_DIR"/*.so* target/debug/deps/ 2>/dev/null || true
 
           # Clean any stale/corrupted build artifacts for llama-cpp-sys-2 from previous cached runs
           cargo clean -p llama-cpp-sys-2 || true
 
-          echo "LIBRARY_PATH=$SHERPA_LIB_DIR:${LIBRARY_PATH:-}" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=$SHERPA_LIB_DIR:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=/usr/local/lib:$SHERPA_LIB_DIR:${LIBRARY_PATH:-}" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/usr/local/lib:$SHERPA_LIB_DIR:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
 
       - name: Run tests (release profile)
         run: cargo test --release --features vulkan
