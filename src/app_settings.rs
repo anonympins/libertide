@@ -2602,6 +2602,73 @@ impl OverlayApp {
                                 ui.separator();
                                 ui.add_space(6.0);
 
+                                // 2. Section Passerelle Contacteur Déporté (BLE / Wi-Fi / Smartphone / ESP32)
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 230, 118)))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        let companion_url = crate::keyboard_hook::get_local_companion_url();
+                                        let is_running = crate::keyboard_hook::is_companion_server_running();
+                                        let clients = crate::keyboard_hook::COMPANION_CLIENTS_COUNT.load(Ordering::Relaxed);
+
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("📱 Contacteur Déporté sans fil (Wi-Fi / Smartphone / ESP32)").size(12.0).color(egui::Color32::from_rgb(0, 230, 118)).strong());
+                                            let status_str = if is_running && clients > 0 {
+                                                format!("● Connecté ({} client{})", clients, if clients > 1 { "s" } else { "" })
+                                            } else if is_running {
+                                                "● Prêt & En écoute".to_string()
+                                            } else {
+                                                "○ Inactif".to_string()
+                                            };
+                                            let status_col = if is_running { egui::Color32::from_rgb(0, 230, 118) } else { theme.text_secondary };
+                                            ui.label(egui::RichText::new(status_str).size(10.5).color(status_col));
+                                        });
+                                        ui.add_space(2.0);
+                                        ui.label(egui::RichText::new("Transforme n'importe quel smartphone, tablette ou microcontrôleur ESP32 à bas coût en contacteur unique sans fil avec retour haptique.").size(10.5).color(theme.text_secondary));
+                                        ui.add_space(4.0);
+
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("Lien WebApp Mobile :").size(11.0).color(Color32::WHITE).strong());
+                                            ui.label(egui::RichText::new(&companion_url).size(11.5).color(theme.accent).underline());
+
+                                            let copy_btn = ui.small_button("📋 Copier").on_hover_text("Copier l'URL pour l'ouvrir sur votre smartphone ou tablette");
+                                            if make_widget_accessible_and_activated(ui, &copy_btn, theme.accent) {
+                                                crate::clipboard::set_clipboard_text(&companion_url);
+                                                play_earcon(Earcon::Success);
+                                            }
+                                            let open_btn = ui.small_button("↗ Ouvrir").on_hover_text("Tester le contacteur dans votre navigateur");
+                                            if make_widget_accessible_and_activated(ui, &open_btn, theme.accent) {
+                                                crate::automation::open_browser_smart(&companion_url);
+                                            }
+                                        });
+
+                                        ui.add_space(4.0);
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(format!("Port UDP pour ESP32 / Pédales matérielles : {}", crate::keyboard_hook::COMPANION_UDP_PORT)).size(10.5).color(theme.text_secondary));
+                                            let test_switch_btn = ui.small_button("🎯 Tester Clic Contacteur");
+                                            if make_widget_accessible_and_activated(ui, &test_switch_btn, theme.accent) {
+                                                crate::keyboard_hook::inject_switch_event(crate::types::SwitchKeyEvent::Select);
+                                                play_earcon(Earcon::Success);
+                                            }
+                                        });
+
+                                        if let Ok(last_ev) = crate::keyboard_hook::LAST_COMPANION_EVENT.lock() {
+                                            if let Some((ref name, ref time)) = *last_ev {
+                                                let elapsed = time.elapsed().as_secs();
+                                                if elapsed < 15 {
+                                                    ui.add_space(2.0);
+                                                    ui.label(egui::RichText::new(format!("⚡ Dernier signal reçu : {} (il y a {}s)", name, elapsed)).size(10.5).color(egui::Color32::from_rgb(255, 214, 0)));
+                                                }
+                                            }
+                                        }
+                                    });
+
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(6.0);
+
                                 // 2. Section Rebinding des touches
                                 ui.label(egui::RichText::new("Personnalisation des touches de contrôle (Rebinding)").size(12.0).color(egui::Color32::WHITE).strong());
                                 ui.add_space(2.0);
