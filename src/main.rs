@@ -193,6 +193,7 @@ pub struct OverlayApp {
     // Domotique locale (Home Assistant / Matter)
     hass_url_input: String,
     hass_token_input: String,
+    knx_gateway_input: String,
     hass_status_feedback: Option<String>,
 
     // Options d'accessibilité et presets cumulatifs
@@ -319,6 +320,7 @@ impl OverlayApp {
 
         let hass_url_input = crate::home_automation::get_home_assistant_url();
         let hass_token_input = crate::home_automation::get_home_assistant_token();
+        let knx_gateway_input = crate::home_automation::get_knx_gateway_ip();
 
         let active_disability_presets: std::collections::BTreeSet<DisabilityPreset> = std::env::var("DISABILITY_PRESETS")
             .ok()
@@ -499,6 +501,7 @@ impl OverlayApp {
             macro_error: None,
             hass_url_input,
             hass_token_input,
+            knx_gateway_input,
             hass_status_feedback: None,
 
             active_disability_presets,

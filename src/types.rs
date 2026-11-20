@@ -902,6 +902,10 @@ pub enum AgentAction {
         #[serde(default)]
         entity_id: Option<String>,
         #[serde(default)]
+        protocol: Option<String>,
+        #[serde(default)]
+        address: Option<String>,
+        #[serde(default)]
         data: Option<serde_json::Value>,
     },
 }
@@ -1019,8 +1023,8 @@ impl QuickSuggestionItem {
                 }
                 AgentAction::OpenTwitchChat { channel, .. } => Some(format!("Ouvrir le chat #{channel}")),
                 AgentAction::SwitchTab { tab } => Some(format!("Basculer vers l'onglet {tab}")),
-                AgentAction::HomeControl { domain, service, entity_id, .. } => {
-                    let ent = entity_id.as_deref().unwrap_or(domain.as_str());
+                AgentAction::HomeControl { domain, service, entity_id, address, .. } => {
+                    let ent = entity_id.as_deref().or(address.as_deref()).unwrap_or(domain.as_str());
                     Some(format!("Domotique : {service} ({ent})"))
                 }
                 _ => None,

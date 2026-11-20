@@ -2461,11 +2461,13 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
             AgentAction::SwitchTab { tab } => {
                 feedback.push(format!("Bascule d'onglet vers {tab}."));
             }
-            AgentAction::HomeControl { domain, service, entity_id, data } => {
-                let result = crate::home_automation::call_home_assistant_service(
+            AgentAction::HomeControl { domain, service, entity_id, protocol, address, data } => {
+                let result = crate::home_automation::call_home_control_multi(
+                    protocol.as_deref(),
                     domain,
                     service,
                     entity_id.as_deref(),
+                    address.as_deref(),
                     data.as_ref(),
                 );
                 feedback.push(result);
@@ -2991,11 +2993,13 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
             AgentAction::SwitchTab { tab } => {
                 feedback.push(format!("Bascule vers l'onglet {tab}."));
             }
-            AgentAction::HomeControl { domain, service, entity_id, data } => {
-                let result = crate::home_automation::call_home_assistant_service(
+            AgentAction::HomeControl { domain, service, entity_id, protocol, address, data } => {
+                let result = crate::home_automation::call_home_control_multi(
+                    protocol.as_deref(),
                     domain,
                     service,
                     entity_id.as_deref(),
+                    address.as_deref(),
                     data.as_ref(),
                 );
                 feedback.push(result);

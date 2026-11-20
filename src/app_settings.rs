@@ -586,6 +586,7 @@ impl OverlayApp {
                                     self.settings_tab = SettingsTab::HomeAutomation;
                                     self.hass_url_input = crate::home_automation::get_home_assistant_url();
                                     self.hass_token_input = crate::home_automation::get_home_assistant_token();
+                                    self.knx_gateway_input = crate::home_automation::get_knx_gateway_ip();
                                     self.hass_status_feedback = None;
                                 }
                             });
@@ -2829,9 +2830,9 @@ impl OverlayApp {
                                 });
                             }
                             SettingsTab::HomeAutomation => {
-                                ui.label(egui::RichText::new("Contrôle domotique local direct (Home Assistant, Matter, Zigbee, Z-Wave).").size(11.5).color(theme.text_secondary));
+                                ui.label(egui::RichText::new("Contrôle domotique local direct (Home Assistant, KNX-IP, BACnet/IP, Matter, Zigbee).").size(11.5).color(theme.text_secondary));
                                 ui.add_space(2.0);
-                                ui.label(egui::RichText::new("Permet aux personnes à mobilité réduite de piloter directement l'environnement physique (éclairage, volets, lit médicalisé, thermostat) sans cloud externe.").size(10.5).color(theme.text_secondary));
+                                ui.label(egui::RichText::new("Permet aux personnes à mobilité réduite de piloter directement l'environnement physique (éclairage, volets, lit médicalisé, climatisation GTB) sans cloud externe.").size(10.5).color(theme.text_secondary));
                                 ui.add_space(6.0);
 
                                 egui::Frame::new()
@@ -2882,6 +2883,21 @@ impl OverlayApp {
                                             }
                                         });
 
+                                        ui.add_space(6.0);
+                                        ui.label(egui::RichText::new("🔌 Passerelle KNXnet/IP directe (Multicast ou IP routeur)").size(11.0).color(Color32::WHITE).strong());
+                                        ui.add_space(2.0);
+                                        render_accessible_input(
+                                            ui,
+                                            egui::Id::NULL.with("knx_gateway_input_field"),
+                                            &mut self.knx_gateway_input,
+                                            "224.0.23.12:3671",
+                                            false,
+                                            Some(ui.available_width().max(240.0)),
+                                            None,
+                                            false,
+                                            theme,
+                                        ).on_hover_text("Adresse de routage KNXnet/IP UDP (par défaut 224.0.23.12:3671 en multicast local ou IP unicast du routeur/passerelle)");
+
                                         if let Some(ref feedback) = self.hass_status_feedback {
                                             ui.add_space(4.0);
                                             let is_err = feedback.to_lowercase().contains("erreur") || feedback.to_lowercase().contains("échec") || feedback.to_lowercase().contains("non configuré");
@@ -2912,6 +2928,8 @@ impl OverlayApp {
                                             if make_widget_accessible_and_activated(ui, &save_btn, theme.accent) {
                                                 let url = self.hass_url_input.trim();
                                                 let token = self.hass_token_input.trim();
+                                                let knx_ip = self.knx_gateway_input.trim();
+                                                let _ = crate::home_automation::set_knx_gateway_ip(knx_ip);
                                                 match crate::home_automation::set_home_assistant_config(url, token) {
                                                     Ok(()) => {
                                                         self.hass_status_feedback = Some("✓ Configuration enregistrée dans .env".to_string());
@@ -2939,6 +2957,7 @@ impl OverlayApp {
                                     .show(ui, |ui| {
                                         ui.label(egui::RichText::new("• « Allume la lumière du salon » / « Éteins la chambre »").size(10.5).color(theme.text_secondary));
                                         ui.label(egui::RichText::new("• « Ouvre les volets » / « Ferme les stores »").size(10.5).color(theme.text_secondary));
+                                                ui.label(egui::RichText::new("• « Allume la lumière KNX » (alias ou adresse de groupe configurée dans .env)").size(10.5).color(theme.text_secondary));
                                         ui.label(egui::RichText::new("• « Règle le chauffage à 21 degrés »").size(10.5).color(theme.text_secondary));
                                         ui.label(egui::RichText::new("• « Incline / relève le lit médicalisé »").size(10.5).color(theme.text_secondary));
                                     });

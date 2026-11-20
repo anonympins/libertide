@@ -53,7 +53,7 @@ pub fn find_macros_file() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("macros.json"))
 }
 
-/// Charge la liste des macros enregistrées ('raccourci' => 'texte complet')
+/// Charge la liste des macros enregistrées ('raccourci' => 'texte complet') en fusionnant .env et macros.json
 pub fn load_macros() -> Vec<(String, String)> {
     let path = find_macros_file();
     if let Ok(content) = std::fs::read_to_string(&path) {
@@ -64,6 +64,21 @@ pub fn load_macros() -> Vec<(String, String)> {
             return map.into_iter().collect();
         }
     }
+
+    // Lecture de macros par défaut configurées dans le fichier .env (DEFAULT_MACROS ou MACROS)
+    if let Ok(env_macros) = std::env::var("DEFAULT_MACROS")
+        .or_else(|_| read_env_var_from_file(".env", "DEFAULT_MACROS").ok_or(()))
+        .or_else(|_| std::env::var("MACROS"))
+        .or_else(|_| read_env_var_from_file(".env", "MACROS").ok_or(()))
+    {
+        if let Ok(list) = serde_json::from_str::<Vec<(String, String)>>(&env_macros) {
+            return list;
+        }
+        if let Ok(map) = serde_json::from_str::<std::collections::BTreeMap<String, String>>(&env_macros) {
+            return map.into_iter().collect();
+        }
+    }
+
     vec![
         ("actu".to_string(), "Donne les actualités et titres majeurs du jour sous forme de synthèse concise.".to_string()),
         ("colis".to_string(), "Vérifie le statut de ma commande ou le suivi de livraison à l'écran.".to_string()),

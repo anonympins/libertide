@@ -774,6 +774,7 @@ pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<Comma
     // Détection domotique multilingue (FR, EN, DE, ES, IT, PT, RU, JA, ZH)
     const HOME_AUTO_KEYWORDS: &[&str] = &[
         "lumière", "lumiere", "volet", "chauffage", "climatisation", "ventilateur", "lit médicalisé", "lit medicalise", "domotique", "home assistant", "matter",
+        "knx", "bacnet", "gtb", "gtc", "eib", "adresse de groupe", "télégramme", "consigne gtb",
         "light", "lights", "lamp", "shutter", "shutters", "blind", "blinds", "thermostat", "heater", "smart home", "turn on", "turn off",
         "licht", "rollladen", "rolladen", "heizung", "klimaanlage",
         "luz", "luces", "persiana", "persianas", "calefaccion", "calefacción",
@@ -1846,15 +1847,20 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
             }
             CommandTag::HomeAutomation => {
                 prompt.push_str(r#"
-Règles DOMOTIQUE LOCALE & HOME ASSISTANT / MATTER (TAG HOME_AUTOMATION) :
-- Permet de contrôler directement l'environnement physique sans passer par un cloud externe (lumières, volets, lit médicalisé, chauffage, prises).
+Règles DOMOTIQUE LOCALE, HOME ASSISTANT, KNX & BACNET (TAG HOME_AUTOMATION) :
+- Permet de contrôler directement l'environnement physique sans passer par un cloud externe (lumières, volets, lit médicalisé, chauffage, prises, climatisation, bus de terrain KNX et GTB/GTC BACnet).
 - Action "home_control" avec :
-  * "domain": "light" | "cover" | "climate" | "switch" | "button" | "fan"
-  * "service": "turn_on" | "turn_off" | "toggle" | "open_cover" | "close_cover" | "stop_cover" | "set_temperature"
-  * "entity_id": identifiant Home Assistant optionnel (ex: "light.salon", "cover.chambre", "climate.chambre", "switch.lit_medicalise_tete")
-  * "data": paramètres optionnels (ex: {"temperature": 21.0} ou {"brightness_pct": 80})
+  * "domain": "light" | "cover" | "climate" | "switch" | "button" | "fan" | "knx" | "bacnet"
+  * "service": "turn_on" | "turn_off" | "toggle" | "open_cover" | "close_cover" | "stop_cover" | "set_temperature" | "send" | "write_property"
+  * "entity_id": identifiant Home Assistant optionnel (ex: "light.salon_knx", "cover.chambre", "climate.chambre", "switch.lit_medicalise_tete")
+  * "protocol": optionnel ("hass", "knx", "bacnet")
+  * "address": adresse de groupe KNX ("1/2/3" ou alias "lumiere_salon") ou identifiant BACnet ("analog-value:1") si pilotage direct
+  * "data": paramètres optionnels (ex: {"temperature": 21.0}, {"brightness_pct": 80}, ou pour KNX: {"address": "1/2/3", "payload": 1})
 - Exemples :
   * Allumer la lumière : {"action": "home_control", "domain": "light", "service": "turn_on", "entity_id": "light.salon"}
+  * Allumer via alias KNX : {"action": "home_control", "domain": "knx", "service": "send", "address": "lumiere_salon", "data": {"payload": 1}}
+  * Allumer via bus KNX direct : {"action": "home_control", "domain": "knx", "service": "send", "address": "1/2/3", "data": {"payload": 1}}
+  * Régler consigne BACnet (GTB) : {"action": "home_control", "domain": "climate", "service": "set_temperature", "entity_id": "climate.chambre_bacnet", "data": {"temperature": 21.5}}
   * Éteindre la lumière : {"action": "home_control", "domain": "light", "service": "turn_off", "entity_id": "light.salon"}
   * Ouvrir les volets : {"action": "home_control", "domain": "cover", "service": "open_cover", "entity_id": "cover.chambre"}
   * Fermer les volets : {"action": "home_control", "domain": "cover", "service": "close_cover", "entity_id": "cover.chambre"}
@@ -2029,6 +2035,7 @@ Règles DOMOTIQUE LOCALE & HOME ASSISTANT / MATTER (TAG HOME_AUTOMATION) :
                 prompt.push_str("- {\"action\": \"home_control\", \"domain\": \"light\", \"service\": \"turn_on\", \"entity_id\": \"light.salon\"}\n");
                 prompt.push_str("- {\"action\": \"home_control\", \"domain\": \"cover\", \"service\": \"open_cover\", \"entity_id\": \"cover.chambre\"}\n");
                 prompt.push_str("- {\"action\": \"home_control\", \"domain\": \"climate\", \"service\": \"set_temperature\", \"entity_id\": \"climate.chambre\", \"data\": {\"temperature\": 21.0}}\n");
+                prompt.push_str("- {\"action\": \"home_control\", \"domain\": \"knx\", \"service\": \"send\", \"address\": \"1/2/3\", \"data\": {\"payload\": 1}}\n");
             }
         }
     }

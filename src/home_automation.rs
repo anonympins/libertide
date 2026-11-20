@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, UdpSocket};
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use rust_i18n::t;
@@ -45,6 +45,132 @@ pub fn set_home_assistant_config(url: &str, token: &str) -> std::io::Result<()> 
     write_env_var_to_file(".env", "HASS_URL", clean_url)?;
     std::env::set_var("HASS_TOKEN", clean_token);
     write_env_var_to_file(".env", "HASS_TOKEN", clean_token)?;
+    Ok(())
+}
+
+/// Récupère l'adresse de la passerelle ou routeur KNX/IP (ex: 224.0.23.12:3671 ou 192.168.1.120:3671)
+pub fn get_knx_gateway_ip() -> String {
+    std::env::var("KNX_GATEWAY_IP")
+        .ok()
+        .or_else(|| read_env_var_from_file(".env", "KNX_GATEWAY_IP"))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "224.0.23.12:3671".to_string())
+}
+
+/// Enregistre l'adresse de la passerelle KNX/IP dans `.env`
+pub fn set_knx_gateway_ip(gateway: &str) -> std::io::Result<()> {
+    let clean = gateway.trim();
+    std::env::set_var("KNX_GATEWAY_IP", clean);
+    write_env_var_to_file(".env", "KNX_GATEWAY_IP", clean)?;
+    Ok(())
+}
+
+/// Parse une adresse de groupe KNX ("1/2/3" en 3 niveaux ou "1/200" en 2 niveaux) en entier 16-bit
+pub fn parse_knx_group_address(addr_str: &str) -> Option<u16> {
+    let clean = addr_str.trim();
+    if clean.contains('/') {
+        let parts: Vec<&str> = clean.split('/').collect();
+        if parts.len() == 3 {
+            let main = parts[0].trim().parse::<u16>().ok()?;
+            let middle = parts[1].trim().parse::<u16>().ok()?;
+            let sub = parts[2].trim().parse::<u16>().ok()?;
+            if main <= 31 && middle <= 7 && sub <= 255 {
+                return Some(((main & 0x1F) << 11) | ((middle & 0x07) << 8) | (sub & 0xFF));
+            }
+        } else if parts.len() == 2 {
+            let main = parts[0].trim().parse::<u16>().ok()?;
+            let sub = parts[1].trim().parse::<u16>().ok()?;
+            if main <= 31 && sub <= 2047 {
+                return Some(((main & 0x1F) << 11) | (sub & 0x07FF));
+            }
+        }
+    } else if let Ok(val) = clean.parse::<u16>() {
+        return Some(val);
+    }
+    None
+}
+
+/// Résout un alias KNX (ex: "lumiere_salon", "lit_medicalise") vers une adresse de groupe réelle ("1/2/3")
+/// en consultant les configurations déclarées dans le `.env` (`KNX_ALIASES` ou `KNX_ADDR_*`).
+pub fn resolve_knx_alias(alias_or_addr: &str) -> String {
+    let clean = alias_or_addr.trim();
+    // Si c'est déjà une adresse de groupe valide ("1/2/3"), la conserver telle quelle
+    if parse_knx_group_address(clean).is_some() {
+        return clean.to_string();
+    }
+
+    let norm_key = clean.to_lowercase().replace([' ', '-'], "_");
+
+    // 1. Recherche dans le dictionnaire JSON KNX_ALIASES du .env
+    if let Ok(aliases_json) = std::env::var("KNX_ALIASES").or_else(|_| read_env_var_from_file(".env", "KNX_ALIASES").ok_or(())) {
+        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(&aliases_json) {
+            for (k, v) in map {
+                if k.to_lowercase().replace([' ', '-'], "_") == norm_key {
+                    return v;
+                }
+            }
+        }
+    }
+
+    // 2. Recherche par variable dédiée KNX_ADDR_* ou KNX_ALIAS_* (ex: KNX_ADDR_LUMIERE_SALON="1/2/3")
+    let env_key = format!("KNX_ADDR_{}", norm_key.to_uppercase());
+    if let Ok(val) = std::env::var(&env_key).or_else(|_| read_env_var_from_file(".env", &env_key).ok_or(())) {
+        let v = val.trim().to_string();
+        if !v.is_empty() { return v; }
+    }
+    let env_alias_key = format!("KNX_ALIAS_{}", norm_key.to_uppercase());
+    if let Ok(val) = std::env::var(&env_alias_key).or_else(|_| read_env_var_from_file(".env", &env_alias_key).ok_or(())) {
+        let v = val.trim().to_string();
+        if !v.is_empty() { return v; }
+    }
+
+    clean.to_string()
+}
+
+/// Construit un datagramme KNXnet/IP ROUTING_INDICATION (17 octets, cEMI L_Data.ind, DPT 1.001)
+pub fn build_knx_routing_indication(group_addr: u16, value: u8) -> [u8; 17] {
+    let dest_hi = (group_addr >> 8) as u8;
+    let dest_lo = (group_addr & 0xFF) as u8;
+    let apci_data = 0x80 | (value & 0x3F);
+
+    [
+        0x06,       // Header length
+        0x10,       // Version 1.0
+        0x05, 0x30, // Service Type: ROUTING_INDICATION (0x0530)
+        0x00, 0x11, // Total length (17 octets)
+        0x29,       // Message Code: L_Data.ind
+        0x00,       // Additional Info Length
+        0xBC,       // Control 1: standard frame, normal priority
+        0xE0,       // Control 2: group address target, hop count = 6
+        0x00, 0x00, // Source address: 0.0.0
+        dest_hi, dest_lo, // Destination group address
+        0x01,       // Data length (1 octet)
+        0x00,       // TPCI (unsequenced)
+        apci_data,  // APCI A_GroupValue_Write
+    ]
+}
+
+/// Envoi direct d'un télégramme KNXnet/IP UDP sur le réseau local (Multicast standard ou IP dédiée)
+pub fn send_knx_direct_udp(group_addr: &str, value: u8) -> Result<(), String> {
+    let addr_u16 = parse_knx_group_address(group_addr)
+        .ok_or_else(|| format!("Format d'adresse de groupe KNX invalide (attendu: 1/2/3 ou 1/200) : '{group_addr}'"))?;
+
+    let telegram = build_knx_routing_indication(addr_u16, value);
+    let target_dest = get_knx_gateway_ip();
+    let target_addr = if target_dest.contains(':') {
+        target_dest
+    } else {
+        format!("{target_dest}:3671")
+    };
+
+    let socket = UdpSocket::bind("0.0.0.0:0")
+        .map_err(|e| format!("Erreur socket UDP KNX: {e}"))?;
+    socket.set_multicast_loop_v4(true).ok();
+    socket.set_multicast_ttl_v4(4).ok();
+
+    socket.send_to(&telegram, &target_addr)
+        .map_err(|e| format!("Erreur envoi datagramme KNX vers {target_addr}: {e}"))?;
     Ok(())
 }
 
@@ -372,6 +498,10 @@ pub fn normalize_ha_service(service: &str) -> &str {
         // Bascule (toggle)
         "toggle" | "basculer" | "bascule" | "umschalten" | "alternar" | "commuta" | "переключить" | "切替" | "切换" => "toggle",
 
+        // Envoi KNX / Écriture de propriété BACnet
+        "send" | "knx_send" | "envoyer" | "write" | "ecrire" | "écrire" => "send",
+        "write_property" | "write_prop" => "write_property",
+
         _ => service,
     }
 }
@@ -429,6 +559,10 @@ pub fn normalize_ha_domain(domain: &str) -> &str {
         // Boutons
         "button" | "bouton" | "knopf" | "botón" | "pulsante" | "botão" | "кнопка" | "ボタン" | "按钮" => "button",
 
+        // Protocoles industriels
+        "knx" | "eib" | "bus_knx" => "knx",
+        "bacnet" | "gtb" | "gtc" | "bacnet_ip" => "bacnet",
+
         _ => domain,
     }
 }
@@ -464,6 +598,84 @@ pub fn call_home_assistant_service(
                 }
             }
         }
+    }
+}
+
+/// Point d'entrée multi-protocoles avec prise en charge directe de KNX et BACnet
+pub fn call_home_control_multi(
+    protocol: Option<&str>,
+    domain: &str,
+    service: &str,
+    entity_id: Option<&str>,
+    address: Option<&str>,
+    data: Option<&serde_json::Value>,
+) -> String {
+    let proto_clean = protocol.unwrap_or("").trim().to_lowercase();
+    let is_knx = proto_clean == "knx" || domain.eq_ignore_ascii_case("knx");
+    let is_bacnet = proto_clean == "bacnet" || domain.eq_ignore_ascii_case("bacnet");
+
+    // 1. Branche KNX directe ou via Home Assistant knx.send
+    if is_knx {
+        let raw_addr = address.or_else(|| {
+            data.and_then(|d| d.get("address")).and_then(|a| a.as_str())
+        }).or(entity_id);
+
+        let resolved_addr_str = raw_addr.map(resolve_knx_alias);
+        if let Some(grp_addr) = resolved_addr_str.as_deref() {
+            let val_u8: u8 = data
+                .and_then(|d| d.get("payload").or_else(|| d.get("value")))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u8)
+                .unwrap_or_else(|| {
+                    let s_norm = normalize_ha_service(service);
+                    if s_norm == "turn_off" || s_norm == "close_cover" { 0 } else { 1 }
+                });
+
+            // Tenter d'abord l'intégration officielle Home Assistant knx.send si connectée
+            let token = get_home_assistant_token();
+            if !token.is_empty() {
+                let mut knx_data = serde_json::json!({
+                    "address": grp_addr,
+                    "payload": val_u8
+                });
+                if let Some(extra) = data {
+                    if let Some(obj) = extra.as_object() {
+                        for (k, v) in obj {
+                            knx_data[k] = v.clone();
+                        }
+                    }
+                }
+                let res_hass = call_home_assistant_service("knx", "send", None, Some(&knx_data));
+                if !res_hass.to_lowercase().contains("erreur") && !res_hass.to_lowercase().contains("impossible") {
+                    return format!("✓ Télégramme KNX transmis à l'adresse {} (valeur: {}) via Home Assistant.", grp_addr, val_u8);
+                }
+            }
+
+            // Repli / transmission directe UDP vers le routeur KNXnet/IP
+            match send_knx_direct_udp(grp_addr, val_u8) {
+                Ok(()) => format!("✓ Ordre KNX émis en direct sur le bus (groupe: {}, valeur: {}).", grp_addr, val_u8),
+                Err(err) => format!("✕ Échec de transmission KNX : {err}"),
+            }
+        } else if let Some(ent) = entity_id {
+            call_home_assistant_service("light", service, Some(ent), data)
+        } else {
+            "Précisez une adresse de groupe KNX (ex: 1/2/3) ou une entité Home Assistant.".to_string()
+        }
+    } else if is_bacnet {
+        // 2. Branche BACnet/IP
+        let ent_desc = entity_id.unwrap_or("équipement BACnet/IP");
+        let s_norm = normalize_ha_service(service);
+        let res = call_home_assistant_service(domain, s_norm, entity_id, data);
+        if !res.to_lowercase().contains("erreur") && !res.to_lowercase().contains("impossible") {
+            format!("✓ Ordre BACnet/IP transmis avec succès à {ent_desc}.")
+        } else {
+            res
+        }
+    } else {
+        // 3. Domotique générale (Home Assistant / Matter / Zigbee)
+        let norm_d = normalize_ha_domain(domain);
+        let norm_s = normalize_ha_service(service);
+        call_home_assistant_service(norm_d, norm_s, entity_id, data)
     }
 }
 
