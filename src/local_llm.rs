@@ -1424,27 +1424,6 @@ Règles ANALYSE DE PAGE WEB (TAG WEBPAGE_ANALYSIS) :
 "#);
                 }
             }
-                prompt.push_str(r#"
-Règles NAVIGATION WEB & RECHERCHE :
-- EXTRACTION DE L'INTENTION RÉELLE de l'utilisateur
-- POINT DE DÉPART OBLIGATOIRE SUR GOOGLE SEARCH : Pour toute recherche d'information, météo (ex: météo Paris, prévisions), actualité ou service, le point de départ DOIT TOUJOURS ÊTRE une recherche Google via "navigate_to_url" ("https://www.google.com/search?q=mots+cles+du+sujet+reel"). INTERDICTION FORMELLE d'aller directement sur une URL présumée ou codée en dur (INTERDIT d'ouvrir directement meteofrance.com ou un site arbitraire : passe obligatoirement par Google Search d'abord).
-- RECHERCHE IMMÉDIATE SANS CONSEIL : Si l'utilisateur demande une recherche (météo, film, vidéo, information), INTERDICTION de répondre par du texte passif. Émets IMMÉDIATEMENT {"action": "navigate_to_url", "url": "https://www.google.com/search?q=...", "target": "new_tab"} avec "next_passes": 5.
-- INTERDICTION de fermer la fenêtre active (pas de "close_app" ni clic croix) pour chercher sur le web.
-- Accepte systématiquement les bannières cookies Google ("Tout accepter").
-- Clique directement sur le résultat textuel du sujet demandé parmi la liste des sites proposés par Google, JAMAIS sur les filtres/onglets génériques ("Actualités", "Vidéos", "Images", "Outils").
-- Pour revenir en arrière : "navigate_back".
-"#);
-            }
-            CommandTag::WebpageAnalysis => {
-                prompt.push_str(r#"
-Règles ANALYSE DE PAGE WEB (TAG WEBPAGE_ANALYSIS) :
-- L'utilisateur demande d'analyser, synthétiser, expliquer ou extraire le contenu d'une page web ou d'un site affiché à l'écran.
-- Tu DOIS exploiter en priorité les sections [État actuel de l'écran] et particulièrement [Page web - Corps textuel et résultats rendus] pour fournir une synthèse riche, structurée et précise.
-- Si le contenu est long ou structuré, projette une fenêtre volante Markdown via "show_floating_card" (card_type: "markdown", id: "analyse_page", title: "Analyse de la page", data: {"text": "..."}).
-- RÈGLE D'ARRÊT STRICT : Dès que l'analyse est rédigée dans "narration" ou projetée dans "show_floating_card", la tâche est TERMINÉE. Renvoie IMPÉRATIVEMENT "next_passes": 0 et "actions": [] (ou uniquement le "show_floating_card"). INTERDICTION FORMELLE de relancer une passe ("next_passes": 0 obligatoire) : une analyse ne doit JAMAIS redéclencher de réflexion.
-- N'utilise "scroll" avec "next_passes": 1 QUE si l'information recherchée est manifestement tronquée et absente de l'écran actuel.
-"#);
-            }
             CommandTag::NavigateInWebpage => {
                 prompt.push_str(r#"
 Règles NAVIGATION DANS LA PAGE WEB (TAG NAVIGATE_IN_WEBPAGE) :
