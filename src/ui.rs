@@ -436,8 +436,6 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
             return results;
         };
 
-        let walker = uia.ControlViewWalker().ok();
-
         let cache_req = uia.CreateCacheRequest().ok();
         if let Some(ref req) = cache_req {
             let _ = req.AddProperty(UIA_ControlTypePropertyId);
@@ -990,7 +988,7 @@ pub fn list_interactive_elements(hwnd: HWND) -> Vec<UiaElementInfo> {
                     let has_action_pattern = pattern.is_some() || has_toggle || has_sel_item || has_expand || has_legacy;
                     let area = (width as i64) * (height as i64);
                     let index = results.len() + 1;
-                    let parent_rect = walker.as_ref().and_then(|w| get_parent_container_rect(w, &item, &rect));
+                    let parent_rect = None;
 
                     results.push(UiaElementInfo {
                         index,
@@ -1102,6 +1100,10 @@ pub fn has_focused_textarea(_hwnd: HWND) -> bool {
         let Ok(uia): Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else {
             return false;
         };
+        if let Ok(uia2) = uia.cast::<IUIAutomation2>() {
+            let _ = uia2.SetTransactionTimeout(200);
+            let _ = uia2.SetConnectionTimeout(200);
+        }
         let Ok(focused) = uia.GetFocusedElement() else {
             return false;
         };
@@ -1142,6 +1144,10 @@ pub fn has_focused_text_input(_hwnd: HWND) -> bool {
         let Ok(uia): Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else {
             return false;
         };
+        if let Ok(uia2) = uia.cast::<IUIAutomation2>() {
+            let _ = uia2.SetTransactionTimeout(200);
+            let _ = uia2.SetConnectionTimeout(200);
+        }
         let Ok(focused) = uia.GetFocusedElement() else {
             return false;
         };

@@ -2586,7 +2586,6 @@ pub fn focus_and_isolate_window(target: HWND) {
         let _ = ShowWindow(target, SW_MAXIMIZE);
     }
     crate::automation::force_foreground_window(target);
-    crate::automation::trigger_window_scan_async(target);
 }
 
 #[cfg(not(windows))]

@@ -540,6 +540,22 @@ impl OverlayApp {
             || self.switch_access_mode
     }
 
+    pub fn should_show_hover_mode_button(&self) -> bool {
+        self.switch_access_mode
+            || self.active_disability_presets.contains(&DisabilityPreset::Visual)
+            || self.active_disability_presets.contains(&DisabilityPreset::MotorSwitch)
+            || self.active_disability_presets.contains(&DisabilityPreset::Tremor)
+    }
+
+    pub fn should_show_eye_tracking_button(&self) -> bool {
+        (crate::eyetracking::is_eyetracking_model_installed()
+            || crate::eyetracking::get_eye_tracker_source() != crate::eyetracking::EyeTrackerSource::WebcamNeural
+            || crate::eyetracking::is_eye_tracking_enabled())
+            && (self.has_motor_disability()
+                || self.active_disability_presets.contains(&DisabilityPreset::Cognitive)
+                || crate::eyetracking::is_eye_tracking_enabled())
+    }
+
     pub fn open_instrument_card(&mut self) {
         let title = t!("instrument.title").to_string();
         let card = FloatingCard::new("instrument_toy", title, FloatingContentType::Instrument);
@@ -570,6 +586,11 @@ impl OverlayApp {
 
     pub fn is_keyboard_open(&self) -> bool {
         self.floating_cards.iter().any(|c| c.id == "virtual_keyboard" && c.open)
+    }
+
+    pub fn is_subtitles_open(&self) -> bool {
+        crate::audio::is_live_subtitles_active()
+            && self.floating_cards.iter().any(|c| matches!(c.content, FloatingContentType::Subtitles { .. }) && c.open)
     }
 
     fn draw_avatar(&self, ui: &mut egui::Ui, center: egui::Pos2, base_radius: f32, time: f64) {

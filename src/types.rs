@@ -46,7 +46,7 @@ impl DisabilityPreset {
         match s.trim().to_lowercase().as_str() {
             "visual" | "visuel" => Some(Self::Visual),
             "motorswitch" | "switch" | "moteur" => Some(Self::MotorSwitch),
-            "tremor" | "tremblement" => Some(Self::Tremor),
+            "tremor" | "tremblement" | "parkinson" => Some(Self::Tremor),
             "cognitive" | "cognitif" => Some(Self::Cognitive),
             _ => None,
         }

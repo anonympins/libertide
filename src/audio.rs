@@ -1714,10 +1714,12 @@ fn run_live_subtitles_loop(
             if last_spectrum_send.elapsed() >= Duration::from_millis(50) {
                 last_spectrum_send = Instant::now();
                 let text = current_sub_text.lock().map(|g| g.clone()).unwrap_or_default();
-                let _ = event_tx.send(AgentEvent::LiveSubtitleUpdate {
-                    text,
-                    spectrum: current_spectrum,
-                });
+                if LIVE_SUBTITLES_RUNNING.load(Ordering::SeqCst) {
+                    let _ = event_tx.send(AgentEvent::LiveSubtitleUpdate {
+                        text,
+                        spectrum: current_spectrum,
+                    });
+                }
             }
 
             let mut new_16k = Vec::new();
@@ -1794,10 +1796,6 @@ fn run_live_subtitles_loop(
         if let Ok(mut lock) = current_sub_text.lock() {
             lock.clear();
         }
-        let _ = event_tx.send(AgentEvent::LiveSubtitleUpdate {
-            text: String::new(),
-            spectrum: [0.0; 16],
-        });
         println!("[Live Subtitles] Flux de capture loopback arrêté.");
     }
 }

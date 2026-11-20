@@ -613,8 +613,13 @@ impl FloatingCard {
         ctx.show_viewport_immediate(viewport_id, builder, |vp_ctx, _class| {
             vp_ctx.request_repaint();
             vp_ctx.set_zoom_factor(ctx.zoom_factor());
+            let is_subtitles = matches!(self.content, FloatingContentType::Subtitles { .. });
             if vp_ctx.input(|i| i.viewport().close_requested()) {
                 self.open = false;
+                if is_subtitles {
+                    stop_live_subtitles();
+                    crate::audio::stop_live_subtitles();
+                }
             }
 
             let is_maximized = vp_ctx.input(|i| i.viewport().maximized.unwrap_or(false));
@@ -731,6 +736,10 @@ impl FloatingCard {
                             let close_id = ui.make_persistent_id(format!("dwell_close_card_{}", self.id));
                             if apply_dwell_to_response(ui, dwell_state, close_id, &close_btn) {
                                 self.open = false;
+                                if is_subtitles {
+                                    stop_live_subtitles();
+                                    crate::audio::stop_live_subtitles();
+                                }
                             }
 
                             let max_icon = if is_maximized { "⧉" } else { "□" };

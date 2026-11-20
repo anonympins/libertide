@@ -1,5 +1,7 @@
 use crate::automation::NumberedElementTarget;
 #[cfg(windows)]
+use windows::core::Interface;
+#[cfg(windows)]
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
 use std::time::Duration;
 
@@ -1215,7 +1217,7 @@ pub fn detect_visual_boxes_from_pixels(
 
     // Trier les cibles par ordre visuel de lecture (haut-vers-bas, gauche-vers-droite)
     candidate_boxes.sort_by_key(|b| (b[1] / 16) * 10000 + b[0]);
-    candidate_boxes.truncate(80);
+    candidate_boxes.truncate(40);
 
     candidate_boxes
 }
@@ -1635,7 +1637,14 @@ pub fn enrich_targets_with_ocr(
     #[cfg(windows)]
     let uia_instance = unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()
+        let uia = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok();
+        if let Some(ref u) = uia {
+            if let Ok(uia2) = u.cast::<windows::Win32::UI::Accessibility::IUIAutomation2>() {
+                let _ = uia2.SetTransactionTimeout(200);
+                let _ = uia2.SetConnectionTimeout(200);
+            }
+        }
+        uia
     };
 
     // Injection dans la liste des cibles d'interaction

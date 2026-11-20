@@ -286,8 +286,6 @@ impl OverlayApp {
             let _ = self.tts_sender.send(TtsCommand::Stop);
             let _ = self.tts_sender.send(TtsCommand::Speak(target_desc));
 
-            // Laisser le temps à l'application cible de réagir au clic (navigation, menu, etc.)
-            std::thread::sleep(Duration::from_millis(250));
             self.switch_focus_index = 0;
 
             // Régénération automatique des numéros/badges après le clic pour enchaîner
@@ -358,25 +356,11 @@ impl OverlayApp {
             self.switch_zones = cached.zones;
             self.display_zones_overlay(&cached.summary);
         } else {
-            #[cfg(windows)]
-            let raw_targets = collect_numbered_targets_for_window(target_hwnd);
-            #[cfg(not(windows))]
-            let raw_targets = collect_numbered_targets_for_window(win_title);
-
-            let (summary, fallback_zones) = build_fallback_navigation_zones(win_title, &raw_targets);
-            self.window_analysis_cache.insert(window_id, CachedWindowAnalysis {
-                summary: summary.clone(),
-                zones: fallback_zones.clone(),
-            });
+            let (summary, fallback_zones) = build_fallback_navigation_zones(win_title, &[]);
             self.switch_zones = fallback_zones;
             self.display_zones_overlay(&summary);
 
-            let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
-                window_id,
-                window_title: win_title.to_string(),
-                targets: raw_targets,
-                context_meta: None,
-            });
+            self.refresh_numbered_targets_for_window(window_id);
         }
     }
 
@@ -462,30 +446,8 @@ impl OverlayApp {
         let (summary, zones) = if let Some(cached) = self.window_analysis_cache.get(&window_id).cloned() {
             (cached.summary, cached.zones)
         } else {
-            #[cfg(windows)]
-            let raw_targets = collect_numbered_targets_for_window(windows::Win32::Foundation::HWND(window_id as _));
-            #[cfg(not(windows))]
-            let raw_targets = collect_numbered_targets_for_window(win_title);
-
-            let (sum, fb_zones) = build_fallback_navigation_zones(win_title, &raw_targets);
-            self.window_analysis_cache.insert(window_id, CachedWindowAnalysis {
-                summary: sum.clone(),
-                zones: fb_zones.clone(),
-            });
-
-            if !raw_targets.is_empty() {
-                #[cfg(windows)]
-                let context_meta = extract_window_context_meta(windows::Win32::Foundation::HWND(window_id as _), win_title);
-                #[cfg(not(windows))]
-                let context_meta = None;
-
-                let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
-                    window_id,
-                    window_title: win_title.to_string(),
-                    targets: raw_targets,
-                    context_meta,
-                });
-            }
+            let (sum, fb_zones) = build_fallback_navigation_zones(win_title, &[]);
+            self.refresh_numbered_targets_for_window(window_id);
             (sum, fb_zones)
         };
 
