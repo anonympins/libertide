@@ -1,8 +1,10 @@
 use eframe::egui;
+use std::sync::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::audio_player::AudioPlayer;
 use crate::{get_system_locale_language, parse_llm_response_text, send_llm_chat_completion};
 use crate::automation::*;
 use crate::clipboard::*;
@@ -26,9 +28,18 @@ pub enum Earcon {
 }
 
 pub static EARCONS_ENABLED: AtomicBool = AtomicBool::new(true);
+static SPATIAL_EARCON_PLAYER: Mutex<Option<AudioPlayer>> = Mutex::new(None);
 
 pub fn is_earcons_enabled() -> bool {
     EARCONS_ENABLED.load(Ordering::Relaxed)
+}
+
+fn get_or_init_earcon_player() -> Option<AudioPlayer> {
+    let mut guard = SPATIAL_EARCON_PLAYER.lock().ok()?;
+    if guard.is_none() {
+        *guard = AudioPlayer::new().ok();
+    }
+    guard.clone()
 }
 
 pub fn set_earcons_enabled(enabled: bool) {
@@ -36,10 +47,88 @@ pub fn set_earcons_enabled(enabled: bool) {
     let _ = write_env_var_to_file(".env", "EARCONS_ENABLED", if enabled { "true" } else { "false" });
 }
 
+/// Génère la forme d'onde mono synthétique d'un Earcon sans aucune dépendance externe
+fn generate_earcon_waveform(earcon: Earcon, sample_rate: u32) -> Vec<f32> {
+    let sr = sample_rate as f32;
+    let mut samples = Vec::new();
+
+    let append_tone = |buf: &mut Vec<f32>, freq: f32, duration_ms: u64, peak: f32| {
+        let n_samples = ((duration_ms as f32 / 1000.0) * sr).round() as usize;
+        let tau = 2.0 * std::f32::consts::PI;
+        for i in 0..n_samples {
+            let t = i as f32 / sr;
+            let env = (1.0 - (i as f32 / n_samples as f32)).powf(1.6); // Attaque rapide & relâchement naturel
+            let s = (t * freq * tau).sin() * env * peak;
+            buf.push(s);
+        }
+    };
+
+    match earcon {
+        Earcon::MicOpen => {
+            append_tone(&mut samples, 580.0, 45, 0.45);
+            append_tone(&mut samples, 880.0, 65, 0.55);
+        }
+        Earcon::MicClose => {
+            append_tone(&mut samples, 840.0, 45, 0.48);
+            append_tone(&mut samples, 520.0, 60, 0.40);
+        }
+        Earcon::Success => {
+            append_tone(&mut samples, 987.77, 40, 0.40); // B5
+            append_tone(&mut samples, 1318.51, 80, 0.50); // E6
+        }
+        Earcon::Emergency => {
+            for _ in 0..3 {
+                append_tone(&mut samples, 1200.0, 50, 0.65);
+                append_tone(&mut samples, 800.0, 50, 0.55);
+            }
+        }
+        Earcon::Error => {
+            append_tone(&mut samples, 420.0, 70, 0.55);
+            append_tone(&mut samples, 290.0, 110, 0.50);
+        }
+        Earcon::Navigation => {
+            // Clic subtil de sélection avec transitoire percussif
+            append_tone(&mut samples, 1760.0, 22, 0.35);
+        }
+        Earcon::Warning => {
+            append_tone(&mut samples, 880.0, 50, 0.45);
+            let silence = (0.025 * sr) as usize;
+            samples.extend(std::iter::repeat(0.0f32).take(silence));
+            append_tone(&mut samples, 880.0, 50, 0.45);
+        }
+    }
+
+    samples
+}
+
+/// Joue un retour sonore spatialisé en 3D selon la position physique exacte (X, Y) à l'écran
+pub fn play_earcon_spatial(earcon: Earcon, click_x: i32, click_y: i32) {
+    if !is_earcons_enabled() {
+        return;
+    }
+
+    if let Some(player) = get_or_init_earcon_player() {
+        let sample_rate = 44100;
+        let wave = generate_earcon_waveform(earcon, sample_rate);
+        player.play_spatial_samples(wave, sample_rate, click_x, click_y);
+    } else {
+        play_earcon(earcon);
+    }
+}
+
 pub fn play_earcon(earcon: Earcon) {
     if !is_earcons_enabled() {
         return;
     }
+
+    // Rendu binaural centré par défaut via AudioPlayer haute fidélité
+    if let Some(player) = get_or_init_earcon_player() {
+        let sample_rate = 44100;
+        let wave = generate_earcon_waveform(earcon, sample_rate);
+        player.play_samples(wave, sample_rate);
+        return;
+    }
+
     #[cfg(windows)]
     std::thread::spawn(move || unsafe {
         extern "system" {

@@ -7,6 +7,7 @@ use crate::types::*;
 use crate::keyboard_hook::*;
 use crate::ui;
 use crate::window_util::*;
+use crate::overlay::play_earcon_spatial;
 use crate::OverlayApp;
 
 impl OverlayApp {
@@ -36,6 +37,9 @@ impl OverlayApp {
         }
         self.hover_last_cursor_pos = Some((target.click_x, target.click_y));
         self.hover_cursor_still_since = Instant::now();
+
+        // Retour audio 3D binaural spatialisé sur la position exacte du contrôle
+        play_earcon_spatial(Earcon::Navigation, target.click_x, target.click_y);
 
         let role_label = match target.role.as_str() {
             "bouton" | "button" => t!("roles.button").to_string(),
@@ -266,7 +270,7 @@ impl OverlayApp {
                     *guard = Some(target.rect);
                 }
             }
-            play_earcon(Earcon::Success);
+            play_earcon_spatial(Earcon::Success, target.click_x, target.click_y);
             let target_desc = if !target.name.is_empty() {
                 t!("commands.click_target_named", index = idx, name = target.name).to_string()
             } else {
