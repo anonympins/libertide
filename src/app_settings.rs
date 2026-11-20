@@ -3173,6 +3173,29 @@ impl OverlayApp {
                                                 }
                                             }
                                         });
+
+                                        ui.add_space(8.0);
+                                        ui.separator();
+                                        ui.add_space(4.0);
+                                        ui.label(egui::RichText::new("🏥 Scénarios médicaux combinés (1 geste) :").size(11.0).color(Color32::WHITE).strong());
+                                        ui.add_space(3.0);
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                                            let sleep_btn = ui.button("🌙 Tester Mode Sommeil")
+                                                .on_hover_text("Incline le lit à plat, ferme les volets, éteint les lumières, coupe le son et verrouille l'écran");
+                                            if make_widget_accessible_and_activated(ui, &sleep_btn, theme.accent) {
+                                                let res = crate::home_automation::execute_medical_scene("sleep");
+                                                self.hass_status_feedback = Some(res);
+                                                play_earcon(Earcon::Success);
+                                            }
+                                            let meal_btn = ui.button("🥣 Tester Mode Repas / Travail")
+                                                .on_hover_text("Relève la tête de lit, allume l'éclairage de travail, ouvre les volets et centre la fenêtre active");
+                                            if make_widget_accessible_and_activated(ui, &meal_btn, theme.accent) {
+                                                let res = crate::home_automation::execute_medical_scene("meal_work");
+                                                self.hass_status_feedback = Some(res);
+                                                play_earcon(Earcon::Success);
+                                            }
+                                        });
                                     });
 
                                 ui.add_space(8.0);

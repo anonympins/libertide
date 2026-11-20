@@ -789,6 +789,21 @@ pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<Comma
         "灯", "窗帘", "空调", "智能家居",
     ];
 
+    if lower.contains("mode sommeil")
+        || lower.contains("mode nuit")
+        || lower.contains("bonne nuit")
+        || lower.contains("je vais dormir")
+        || lower.contains("mode repas")
+        || lower.contains("mode travail")
+        || lower.contains("heure de manger")
+        || lower.contains("redresse le lit")
+        || lower.contains("redresser le lit")
+        || lower.contains("lit à plat")
+        || lower.contains("lit a plat")
+    {
+        return vec![CommandTag::HomeAutomation, CommandTag::CareAndComfort];
+    }
+
     if HOME_AUTO_KEYWORDS.iter().any(|&kw| lower.contains(kw))
         || (lower.contains("allume ") && (lower.contains("chambre") || lower.contains("salon") || lower.contains("bureau")))
         || (lower.contains("éteins ") && (lower.contains("chambre") || lower.contains("salon") || lower.contains("bureau")))
@@ -1883,6 +1898,10 @@ Règles DOMOTIQUE LOCALE, HOME ASSISTANT, KNX & BACNET (TAG HOME_AUTOMATION) :
   * "protocol": optionnel ("hass", "knx", "bacnet")
   * "address": adresse de groupe KNX ("1/2/3" ou alias "lumiere_salon") ou identifiant BACnet ("analog-value:1") si pilotage direct
   * "data": paramètres optionnels (ex: {"temperature": 21.0}, {"brightness_pct": 80}, ou pour KNX: {"address": "1/2/3", "payload": 1})
+- Action "home_scene" avec "scene": "sleep" | "meal_work" | "relax" pour déclencher les scénarios combinés d'un seul geste :
+  * Mode Sommeil ("sleep") : met le lit à plat, ferme les volets, éteint les lumières, coupe le son et verrouille l'écran.
+  * Mode Repas / Travail ("meal_work") : redresse la tête de lit, allume l'éclairage de travail et centre la fenêtre d'écriture.
+  * Mode Détente ("relax") : position de repos inclinée et éclairage tamisé à 30%.
 - Exemples :
   * Allumer la lumière : {"action": "home_control", "domain": "light", "service": "turn_on", "entity_id": "light.salon"}
   * Allumer via alias KNX : {"action": "home_control", "domain": "knx", "service": "send", "address": "lumiere_salon", "data": {"payload": 1}}
@@ -2063,6 +2082,7 @@ Règles DOMOTIQUE LOCALE, HOME ASSISTANT, KNX & BACNET (TAG HOME_AUTOMATION) :
                 prompt.push_str("- {\"action\": \"home_control\", \"domain\": \"cover\", \"service\": \"open_cover\", \"entity_id\": \"cover.chambre\"}\n");
                 prompt.push_str("- {\"action\": \"home_control\", \"domain\": \"climate\", \"service\": \"set_temperature\", \"entity_id\": \"climate.chambre\", \"data\": {\"temperature\": 21.0}}\n");
                 prompt.push_str("- {\"action\": \"home_control\", \"domain\": \"knx\", \"service\": \"send\", \"address\": \"1/2/3\", \"data\": {\"payload\": 1}}\n");
+                prompt.push_str("- {\"action\": \"home_scene\", \"scene\": \"sleep\"|\"meal_work\"|\"relax\"}\n");
             }
         }
     }

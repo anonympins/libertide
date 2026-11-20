@@ -909,6 +909,10 @@ pub enum AgentAction {
         #[serde(default)]
         data: Option<serde_json::Value>,
     },
+    #[serde(alias = "scene", alias = "medical_scene", alias = "scenario_domotique", alias = "home_scene")]
+    HomeScene {
+        scene: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1027,6 +1031,18 @@ impl QuickSuggestionItem {
                 AgentAction::HomeControl { domain, service, entity_id, address, .. } => {
                     let ent = entity_id.as_deref().or(address.as_deref()).unwrap_or(domain.as_str());
                     Some(format!("Domotique : {service} ({ent})"))
+                }
+                AgentAction::HomeScene { scene } => {
+                    let sc = scene.to_lowercase();
+                    if sc.contains("sleep") || sc.contains("sommeil") || sc.contains("nuit") {
+                        Some("🌙 Mode Sommeil (Lit à plat, volets, lumières, verrouillage)".to_string())
+                    } else if sc.contains("repas") || sc.contains("travail") || sc.contains("meal") || sc.contains("work") {
+                        Some("🥣 Mode Repas / Travail (Tête relevée, lumière, fenêtre centrée)".to_string())
+                    } else if sc.contains("relax") || sc.contains("detente") || sc.contains("détente") {
+                        Some("🛋️ Mode Détente (Relaxation, lumière tamisée)".to_string())
+                    } else {
+                        Some(format!("Scénario domotique : {scene}"))
+                    }
                 }
                 _ => None,
             },

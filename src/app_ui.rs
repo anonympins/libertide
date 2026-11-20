@@ -849,6 +849,47 @@ impl OverlayApp {
             return;
         }
 
+        if norm_prompt == "mode sommeil" || norm_prompt == "mode nuit" || norm_prompt == "bonne nuit" || norm_prompt == "active le mode sommeil" {
+            let res = crate::home_automation::execute_medical_scene("sleep");
+            play_earcon(Earcon::Success);
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::User,
+                text: prompt,
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Mode repas / travail".to_string())],
+                screen_size_kb: None,
+            });
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: res.clone(),
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Mode repas / travail".to_string())],
+                screen_size_kb: None,
+            });
+            let _ = self.tts_sender.send(TtsCommand::Speak(res));
+            return;
+        }
+        if norm_prompt == "mode repas" || norm_prompt == "mode travail" || norm_prompt == "active le mode repas" || norm_prompt == "active le mode travail" {
+            let res = crate::home_automation::execute_medical_scene("meal_work");
+            play_earcon(Earcon::Success);
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::User,
+                text: prompt,
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Mode sommeil".to_string())],
+                screen_size_kb: None,
+            });
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: res.clone(),
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Mode sommeil".to_string())],
+                screen_size_kb: None,
+            });
+            let _ = self.tts_sender.send(TtsCommand::Speak(res));
+            return;
+        }
+
         if norm_prompt.contains("grossis") || norm_prompt.contains("zoom plus") || norm_prompt.contains("agrandis") || norm_prompt.contains("zoom in")
             || norm_prompt.contains("police plus grande") || norm_prompt.contains("texte plus grand") || norm_prompt.contains("agrandir la police") || norm_prompt.contains("agrandir le texte") {
             self.set_zoom_factor(self.zoom_factor + 0.15);
@@ -2710,6 +2751,49 @@ impl OverlayApp {
             return;
         } else if is_stop_subtitles_command(&norm_prompt) {
             self.stop_live_subtitles();
+            return;
+        }
+
+        if norm_prompt == "mode sommeil" || norm_prompt == "mode nuit" || norm_prompt == "bonne nuit" || norm_prompt == "active le mode sommeil" {
+            let res = crate::home_automation::execute_medical_scene("sleep");
+            play_earcon(Earcon::Success);
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::User,
+                text: prompt,
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Mode repas / travail".to_string())],
+                screen_size_kb: None,
+            });
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: res.clone(),
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Mode repas / travail".to_string())],
+                screen_size_kb: None,
+            });
+            let _ = self.tts_sender.send(TtsCommand::Speak(res));
+            self.status = AgentStatus::Idle;
+            return;
+        }
+        if norm_prompt == "mode repas" || norm_prompt == "mode travail" || norm_prompt == "active le mode repas" || norm_prompt == "active le mode travail" {
+            let res = crate::home_automation::execute_medical_scene("meal_work");
+            play_earcon(Earcon::Success);
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::User,
+                text: prompt,
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Mode sommeil".to_string())],
+                screen_size_kb: None,
+            });
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: res.clone(),
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Mode sommeil".to_string())],
+                screen_size_kb: None,
+            });
+            let _ = self.tts_sender.send(TtsCommand::Speak(res));
+            self.status = AgentStatus::Idle;
             return;
         }
 

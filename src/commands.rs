@@ -2472,6 +2472,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 );
                 feedback.push(result);
             }
+            AgentAction::HomeScene { scene } => {
+                let result = crate::home_automation::execute_medical_scene(scene);
+                feedback.push(result);
+            }
         }
     }
 
@@ -3002,6 +3006,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     address.as_deref(),
                     data.as_ref(),
                 );
+                feedback.push(result);
+            }
+            AgentAction::HomeScene { scene } => {
+                let result = crate::home_automation::execute_medical_scene(scene);
                 feedback.push(result);
             }
             _ => {}
