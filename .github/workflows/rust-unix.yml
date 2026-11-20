@@ -80,11 +80,31 @@ jobs:
 
       - name: Configure library search paths for Sherpa & ONNX Runtime
         run: |
-          # If the cache restored target/ without ~/.cache/sherpa-rs, force sherpa-rs-sys to re-run build.rs
+          # 1. Créer impérativement les dossiers de destination pour que std::fs::copy ne panique pas
+          mkdir -p target/release/deps target/debug/deps
+
+          # 2. Localiser la bibliothèque sherpa-rs si présente en cache
           SHERPA_LIB_DIR=$(find "$HOME/.cache/sherpa-rs" -type d -name "lib" 2>/dev/null | head -n 1)
           if [ -z "$SHERPA_LIB_DIR" ] || [ ! -f "$SHERPA_LIB_DIR/libsherpa-onnx-c-api.so" ]; then
             echo "Sherpa libraries missing from runner. Rebuilding sherpa-rs-sys..."
-            cargo clean -p sherpa-rs-sys -p sherpa-rs
+            # Exécuter cargo check d'abord pour créer la structure target/
+            cargo check --release --package sherpa-rs-sys || true
+            mkdir -p target/release/deps
+            
+            # Corriger les liens symboliques dans le cache sherpa si déjà téléchargé
+            SHERPA_CACHE_DIR=$(find "$HOME/.cache/sherpa-rs" -type d -name "lib" 2>/dev/null | head -n 1)
+            if [ -n "$SHERPA_CACHE_DIR" ]; then
+              cd "$SHERPA_CACHE_DIR" && ln -sf libonnxruntime.so.* libonnxruntime.so 2>/dev/null || true
+              cd "$GITHUB_WORKSPACE"
+            fi
+            cargo build --release -p sherpa-rs-sys || {
+              mkdir -p target/release/deps target/debug/deps
+              SHERPA_CACHE_DIR=$(find "$HOME/.cache/sherpa-rs" -type d -name "lib" 2>/dev/null | head -n 1)
+              if [ -n "$SHERPA_CACHE_DIR" ]; then
+                cd "$SHERPA_CACHE_DIR" && ln -sf libonnxruntime.so.* libonnxruntime.so 2>/dev/null || true
+              fi
+              cargo build --release -p sherpa-rs-sys
+            }
             cargo build --release -p sherpa-rs-sys
             SHERPA_LIB_DIR=$(find "$HOME/.cache/sherpa-rs" -type d -name "lib" 2>/dev/null | head -n 1)
           fi
@@ -97,12 +117,13 @@ jobs:
           echo "Sherpa libraries found in: $SHERPA_LIB_DIR"
 
           # Ensure unversioned soname symlink exists for onnxruntime
-          if [ ! -f "$SHERPA_LIB_DIR/libonnxruntime.so" ]; then
-            ORT_TARGET=$(find "$SHERPA_LIB_DIR" -maxdepth 1 -name "libonnxruntime.so*" | head -n 1)
-            if [ -n "$ORT_TARGET" ]; then
-              ln -sf "$(basename "$ORT_TARGET")" "$SHERPA_LIB_DIR/libonnxruntime.so"
-            fi
+          ORT_TARGET=$(find "$SHERPA_LIB_DIR" -maxdepth 1 -name "libonnxruntime.so*" ! -name "libonnxruntime.so" | head -n 1)
+          if [ -n "$ORT_TARGET" ] && [ ! -f "$SHERPA_LIB_DIR/libonnxruntime.so" ]; then
+            ln -sf "$(basename "$ORT_TARGET")" "$SHERPA_LIB_DIR/libonnxruntime.so"
           fi
+
+          # Ensure libraries are also present in target/release/deps
+          cp -d "$SHERPA_LIB_DIR"/*.so* target/release/deps/ 2>/dev/null || true
 
           # Clean any stale/corrupted build artifacts for llama-cpp-sys-2 from previous cached runs
           cargo clean -p llama-cpp-sys-2 || true

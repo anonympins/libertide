@@ -82,6 +82,14 @@ jobs:
       - name: Configure library search paths for Sherpa & ONNX Runtime
         shell: pwsh
         run: |
+          # Pré-créer les répertoires deps pour éviter que build.rs de sherpa-rs-sys ne panique lors du std::fs::copy
+          New-Item -ItemType Directory -Force -Path @(
+            "C:\t\x86_64-pc-windows-msvc\release\deps",
+            "C:\t\x86_64-pc-windows-msvc\debug\deps",
+            "C:\t\release\deps",
+            "C:\t\debug\deps"
+          ) | Out-Null
+
           $sherpaLib = Get-ChildItem -Path "$env:LOCALAPPDATA\sherpa-rs" -Recurse -Directory -Filter "lib" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $sherpaLib -or -not (Test-Path "$($sherpaLib.FullName)\cargs.lib")) {
             Write-Host "Sherpa libraries missing from runner. Rebuilding sherpa-rs-sys..."
