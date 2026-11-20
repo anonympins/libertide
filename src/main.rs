@@ -58,6 +58,7 @@ use keyboard_hook::*;
 use eframe::egui;
 pub use overlay::*;
 use types::*;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{channel, Receiver, Sender as StdSender};
@@ -206,7 +207,7 @@ pub struct OverlayApp {
     detected_microphones: Vec<String>,
     selected_microphone: String,
     detected_pointing_devices: Vec<crate::devices::PointingDevice>,
-    pending_twitch_speech: Option<String>,
+    pending_twitch_speech: VecDeque<String>,
 }
 
 impl OverlayApp {
@@ -512,7 +513,7 @@ impl OverlayApp {
             detected_microphones,
             selected_microphone,
             detected_pointing_devices,
-            pending_twitch_speech: None,
+            pending_twitch_speech: VecDeque::new(),
         };
         app.sync_modal_inputs_for_provider(llm_config.provider);
         update_open_floating_cards(&app.floating_cards);
@@ -644,7 +645,7 @@ impl OverlayApp {
     }
 
     pub fn stop_speaking(&mut self) {
-        self.pending_twitch_speech = None;
+        self.pending_twitch_speech.clear();
         self.is_streaming_narration = false;
         let _ = self.tts_sender.send(TtsCommand::Stop);
         set_tts_audio_level(0.0);
@@ -662,6 +663,7 @@ impl OverlayApp {
         self.continuous_mode = false;
         self.dictation_mode = false;
         self.is_streaming_narration = false;
+        self.pending_twitch_speech.clear();
         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
         cancel_all_scheduled_tasks();
         floating_window::stop_live_subtitles();
@@ -1080,11 +1082,6 @@ impl eframe::App for OverlayApp {
             }
         } else {
             self.smoothed_audio_level += (0.0 - self.smoothed_audio_level) * 0.25;
-        }
-        if self.status == AgentStatus::Speaking && target_level <= 0.001 && self.smoothed_audio_level <= 0.01 {
-            if !self.is_streaming_narration {
-                self.status = AgentStatus::Idle;
-            }
         }
 
         let theme = self.theme.colors();

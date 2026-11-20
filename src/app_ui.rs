@@ -159,24 +159,29 @@ impl OverlayApp {
                 AgentEvent::StatusChanged(new_status) => {
                     if self.status != AgentStatus::EmergencyStopped || new_status == AgentStatus::EmergencyStopped {
                         let prev_status = self.status;
-                        self.status = new_status;
+                        let has_pending_twitch = self.active_tab == ActiveTab::Chat && !self.pending_twitch_speech.is_empty();
+                        if !has_pending_twitch {
+                            self.status = new_status;
+                        }
                         if new_status == AgentStatus::Listening {
                             self.is_recording = true;
                         } else if new_status == AgentStatus::Idle {
                             self.is_recording = false;
-                            if !self.mic_manually_disabled
-                                && (self.dictation_mode
-                                || (prev_status == AgentStatus::Thinking && self.continuous_mode)
-                                || (prev_status == AgentStatus::Speaking && self.continuous_mode))
-                                && !crate::audio::is_live_subtitles_active()
-                                && self.whisper_ready
-                                && !self.show_api_key_modal
-                                && !self.voice_is_recording_sample
-                                && self.status != AgentStatus::EmergencyStopped
-                                && (!self.is_hidden || self.switch_access_mode)
-                                && !AGENT_BUSY.load(Ordering::SeqCst)
-                            {
-                                self.start_recording(ctx, false);
+                            if !has_pending_twitch {
+                                if !self.mic_manually_disabled
+                                    && (self.dictation_mode
+                                    || (prev_status == AgentStatus::Thinking && self.continuous_mode)
+                                    || (prev_status == AgentStatus::Speaking && self.continuous_mode))
+                                    && !crate::audio::is_live_subtitles_active()
+                                    && self.whisper_ready
+                                    && !self.show_api_key_modal
+                                    && !self.voice_is_recording_sample
+                                    && self.status != AgentStatus::EmergencyStopped
+                                    && (!self.is_hidden || self.switch_access_mode)
+                                    && !AGENT_BUSY.load(Ordering::SeqCst)
+                                {
+                                    self.start_recording(ctx, false);
+                                }
                             }
                         }
                     }
@@ -348,7 +353,7 @@ impl OverlayApp {
                 }
                 AgentEvent::TtsFinished => {
                     if self.active_tab == ActiveTab::Chat {
-                        if let Some(recent_speech) = self.pending_twitch_speech.take() {
+                        if let Some(recent_speech) = self.pending_twitch_speech.pop_front() {
                             self.status = AgentStatus::Speaking;
                             let _ = self.tts_sender.send(TtsCommand::Speak(recent_speech));
                             continue;
@@ -391,10 +396,13 @@ impl OverlayApp {
                     self.auto_scroll_to_bottom = true;
                     if self.active_tab == ActiveTab::Chat {
                         let speech = format!("{} : {}", twitch_msg.author, twitch_msg.text);
-                        if self.status == AgentStatus::Speaking {
-                            self.pending_twitch_speech = Some(speech);
+                        if self.status == AgentStatus::Speaking || !self.pending_twitch_speech.is_empty() {
+                            const MAX_PENDING_TWITCH: usize = 30;
+                            if self.pending_twitch_speech.len() >= MAX_PENDING_TWITCH {
+                                self.pending_twitch_speech.pop_front();
+                            }
+                            self.pending_twitch_speech.push_back(speech);
                         } else {
-                            self.pending_twitch_speech = None;
                             self.status = AgentStatus::Speaking;
                             let _ = self.tts_sender.send(TtsCommand::Speak(speech));
                         }
@@ -422,7 +430,7 @@ impl OverlayApp {
                     }
                 }
                 AgentEvent::SwitchTab(tab) => {
-                    self.pending_twitch_speech = None;
+                    self.pending_twitch_speech.clear();
                     self.stop_speaking();
                     self.active_tab = tab;
                 }

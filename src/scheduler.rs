@@ -600,7 +600,7 @@ pub fn spawn_proactive_companion_loop(tx: UnboundedSender<AgentCommand>) {
                 let proactive_prompt = match category_index {
                     0 => {
                         // Soin & Confort physique (CareAndComfort)
-                        "[COMPAGNON PROACTIF - THÈME: CareAndComfort] : Fais une brève intervention bienveillante (1 à 2 phrases) pour suggérer gentiment à l'utilisateur de s'hydrater (boire un verre d'eau), relâcher ses épaules ou cligner des yeux. Propose 2 suggestions d'action simples dans quick_suggestions."
+                        "[COMPAGNON PROACTIF - THÈME: CareAndComfort] : Fais une brève intervention bienveillante (1 à 2 phrases) pour suggérer gentiment à l'utilisateur de s'hydrater (boire un verre d'eau), relâcher ses épaules ou cligner des yeux. Varie ton style, évite tout cliché ou formule répétée. Propose 2 suggestions d'action simples dans quick_suggestions."
                     }
                     1 => {
                         // Question curieuse & Savoir (KnowledgeAndQuestions)
@@ -608,7 +608,7 @@ pub fn spawn_proactive_companion_loop(tx: UnboundedSender<AgentCommand>) {
                     }
                     2 => {
                         // Écoute émotionnelle & Humeur (EmotionalSupportAndEmpathy)
-                        "[COMPAGNON PROACTIF - THÈME: EmotionalSupportAndEmpathy] : Prends doucement des nouvelles de l'utilisateur avec chaleur et empathie. Demande-lui comment se passe sa journée ou s'il aimerait papoter ou écouter quelque chose."
+                        "[COMPAGNON PROACTIF - THÈME: EmotionalSupportAndEmpathy] : Prends doucement des nouvelles de l'utilisateur avec chaleur, originalité et empathie. Proscris les banalités de surveillance d'écran : demande-lui comment va son moral ou propose un échange convivial."
                     }
                     3 => {
                         // Pause musicale & Calme sensoriel (RadioAndMusicStream)
@@ -616,7 +616,7 @@ pub fn spawn_proactive_companion_loop(tx: UnboundedSender<AgentCommand>) {
                     }
                     _ => {
                         // Pensée philosophique & Complicité éthique (ChattyAndEthicalCompanion)
-                        "[COMPAGNON PROACTIF - THÈME: ChattyAndEthicalCompanion] : Partage une pensée inspirante, optimiste ou un trait d'humour léger sur la vie quotidienne ou sur ton rôle d'assistant bienveillant, juste pour papoter agréablement."
+                        "[COMPAGNON PROACTIF - THÈME: ChattyAndEthicalCompanion] : Partage une réflexion inspirante, originale, philosophique ou un trait d'humour piquant. RÈGLE D'ORIGINALITÉ STRICTE : Ne décris jamais les fenêtres ouvertes ni l'heure qu'il est, et ne dis pas 'je reste en veille bienveillante'. Sois authentique et surprenant !"
                     }
                 };
 
