@@ -895,6 +895,15 @@ pub enum AgentAction {
     SwitchTab {
         tab: String,
     },
+    #[serde(alias = "home_assistant", alias = "domotique", alias = "ha_control", alias = "smart_home")]
+    HomeControl {
+        domain: String,
+        service: String,
+        #[serde(default)]
+        entity_id: Option<String>,
+        #[serde(default)]
+        data: Option<serde_json::Value>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1010,6 +1019,10 @@ impl QuickSuggestionItem {
                 }
                 AgentAction::OpenTwitchChat { channel, .. } => Some(format!("Ouvrir le chat #{channel}")),
                 AgentAction::SwitchTab { tab } => Some(format!("Basculer vers l'onglet {tab}")),
+                AgentAction::HomeControl { domain, service, entity_id, .. } => {
+                    let ent = entity_id.as_deref().unwrap_or(domain.as_str());
+                    Some(format!("Domotique : {service} ({ent})"))
+                }
                 _ => None,
             },
         }

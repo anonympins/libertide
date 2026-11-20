@@ -465,5 +465,13 @@
     "cognitive_clarity": "einfach erklären,einfacher,schritt für schritt",
     "greetings": "hallo,guten morgen,guten abend,danke,dankeschön,tschuess,tschüss",
     "identity": "wer bist du,wer hat dich gemacht,was kannst du"
+  },
+  "home_automation": {
+    "token_missing": "Home Assistant-Token (HASS_TOKEN) nicht in .env konfiguriert",
+    "all_entities": "alle Entitäten",
+    "action_sent_ws": "Hausautomationsaktion über WebSocket gesendet: %{domain}.%{service} (%{entity})",
+    "action_sent_rest": "Hausautomationsaktion über REST ausgeführt: %{domain}.%{service} (%{entity})",
+    "control_failed": "Home Assistant-Steuerungsfehler: %{error}",
+    "test_ok": "Home Assistant betriebsbereit (%{url})"
   }
 }

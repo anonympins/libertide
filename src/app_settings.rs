@@ -2,6 +2,7 @@ use std::sync::atomic::Ordering;
 use rust_i18n::t;
 use std::time::{Duration, Instant};
 use eframe::egui;
+use eframe::egui::Color32;
 
 use crate::clipboard::{
     get_clipboard_text, get_plain_clipboard_text
@@ -564,6 +565,28 @@ impl OverlayApp {
                                 let is_keybinds_key = make_widget_accessible_and_activated(ui, &tab_keybinds, theme.accent);
                                 if keybinds_activated || is_keybinds_key {
                                     self.settings_tab = SettingsTab::Keybindings;
+                                }
+
+                                let is_home_active = self.settings_tab == SettingsTab::HomeAutomation;
+                                let tab_home = ui.selectable_label(
+                                    is_home_active,
+                                    egui::RichText::new("🏠 Domotique")
+                                        .size(12.0)
+                                        .color(if is_home_active { theme.accent } else { theme.text_secondary })
+                                        .strong(),
+                                );
+                                let tab_home_id = ui.make_persistent_id("dwell_tab_home_automation");
+                                let home_activated = if !is_home_active {
+                                    apply_dwell_to_response(ui, &mut self.dwell_state, tab_home_id, &tab_home)
+                                } else {
+                                    tab_home.clicked()
+                                };
+                                let is_home_key = make_widget_accessible_and_activated(ui, &tab_home, theme.accent);
+                                if home_activated || is_home_key {
+                                    self.settings_tab = SettingsTab::HomeAutomation;
+                                    self.hass_url_input = crate::home_automation::get_home_assistant_url();
+                                    self.hass_token_input = crate::home_automation::get_home_assistant_token();
+                                    self.hass_status_feedback = None;
                                 }
                             });
                         });
@@ -2737,6 +2760,126 @@ impl OverlayApp {
                                         self.show_api_key_modal = false;
                                     }
                                 });
+                            }
+                            SettingsTab::HomeAutomation => {
+                                ui.label(egui::RichText::new("Contrôle domotique local direct (Home Assistant, Matter, Zigbee, Z-Wave).").size(11.5).color(theme.text_secondary));
+                                ui.add_space(2.0);
+                                ui.label(egui::RichText::new("Permet aux personnes à mobilité réduite de piloter directement l'environnement physique (éclairage, volets, lit médicalisé, thermostat) sans cloud externe.").size(10.5).color(theme.text_secondary));
+                                ui.add_space(6.0);
+
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.label(egui::RichText::new("🌐 Serveur Home Assistant / Passerelle locale").size(11.0).color(Color32::WHITE).strong());
+                                        ui.add_space(2.0);
+
+                                        render_accessible_input(
+                                            ui,
+                                            egui::Id::NULL.with("hass_url_input_field"),
+                                            &mut self.hass_url_input,
+                                            "http://homeassistant.local:8123",
+                                            false,
+                                            Some(ui.available_width().max(240.0)),
+                                            None,
+                                            false,
+                                            theme,
+                                        ).on_hover_text("URL locale de votre instance Home Assistant (ex: http://homeassistant.local:8123 ou http://192.168.1.50:8123)");
+
+                                        ui.add_space(6.0);
+                                        ui.label(egui::RichText::new("🔑 Jeton d'accès longue durée (Long-Lived Access Token)").size(11.0).color(Color32::WHITE).strong());
+                                        ui.add_space(2.0);
+
+                                        ui.horizontal(|ui| {
+                                            let token_id = egui::Id::NULL.with("hass_token_input_field");
+                                            render_accessible_input(
+                                                ui,
+                                                token_id,
+                                                &mut self.hass_token_input,
+                                                "eyJhbGciOiJIUzI1NiIsIn...",
+                                                false,
+                                                Some((ui.available_width() - 40.0).max(180.0)),
+                                                None,
+                                                !self.show_api_key_plain,
+                                                theme,
+                                            ).on_hover_text("Généré dans Home Assistant > Profil utilisateur > Jetons d'accès longue durée");
+
+                                            let paste_btn = ui.button("📋").on_hover_text("Coller le jeton depuis le presse-papiers");
+                                            if make_widget_accessible_and_activated(ui, &paste_btn, theme.accent) {
+                                                if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
+                                                    self.hass_token_input = clip.trim().to_string();
+                                                    play_earcon(Earcon::Success);
+                                                }
+                                            }
+                                        });
+
+                                        if let Some(ref feedback) = self.hass_status_feedback {
+                                            ui.add_space(4.0);
+                                            let is_err = feedback.to_lowercase().contains("erreur") || feedback.to_lowercase().contains("échec") || feedback.to_lowercase().contains("non configuré");
+                                            let color = if is_err { Color32::from_rgb(255, 110, 110) } else { Color32::from_rgb(0, 230, 118) };
+                                            ui.label(egui::RichText::new(feedback).size(10.5).color(color));
+                                        }
+
+                                        ui.add_space(8.0);
+                                        ui.horizontal(|ui| {
+                                            let test_btn = ui.button("🔌 Tester la connexion");
+                                            if make_widget_accessible_and_activated(ui, &test_btn, theme.accent) {
+                                                let url = self.hass_url_input.trim();
+                                                let token = self.hass_token_input.trim();
+                                                let _ = crate::home_automation::set_home_assistant_config(url, token);
+                                                match crate::home_automation::test_home_assistant_connection() {
+                                                    Ok(msg) => {
+                                                        self.hass_status_feedback = Some(format!("✓ {msg}"));
+                                                        play_earcon(Earcon::Success);
+                                                    }
+                                                    Err(err) => {
+                                                        self.hass_status_feedback = Some(format!("✕ Connexion impossible : {err}"));
+                                                        play_earcon(Earcon::Error);
+                                                    }
+                                                }
+                                            }
+
+                                            let save_btn = ui.button(egui::RichText::new("💾 Enregistrer et Appliquer").strong().color(theme.accent));
+                                            if make_widget_accessible_and_activated(ui, &save_btn, theme.accent) {
+                                                let url = self.hass_url_input.trim();
+                                                let token = self.hass_token_input.trim();
+                                                match crate::home_automation::set_home_assistant_config(url, token) {
+                                                    Ok(()) => {
+                                                        self.hass_status_feedback = Some("✓ Configuration enregistrée dans .env".to_string());
+                                                        play_earcon(Earcon::Success);
+                                                    }
+                                                    Err(e) => {
+                                                        self.hass_status_feedback = Some(format!("✕ Erreur sauvegarde : {e}"));
+                                                        play_earcon(Earcon::Error);
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    });
+
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Exemples d'ordres vocaux & oculaires reconnus :").size(11.0).strong().color(Color32::WHITE));
+                                ui.add_space(2.0);
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                    .corner_radius(egui::CornerRadius::same(6))
+                                    .inner_margin(egui::Margin::symmetric(8, 6))
+                                    .show(ui, |ui| {
+                                        ui.label(egui::RichText::new("• « Allume la lumière du salon » / « Éteins la chambre »").size(10.5).color(theme.text_secondary));
+                                        ui.label(egui::RichText::new("• « Ouvre les volets » / « Ferme les stores »").size(10.5).color(theme.text_secondary));
+                                        ui.label(egui::RichText::new("• « Règle le chauffage à 21 degrés »").size(10.5).color(theme.text_secondary));
+                                        ui.label(egui::RichText::new("• « Incline / relève le lit médicalisé »").size(10.5).color(theme.text_secondary));
+                                    });
+
+                                ui.add_space(6.0);
+                                if ui.button(t!("ui.btn_close")).clicked() {
+                                    self.show_api_key_modal = false;
+                                }
                             }
                         }
                     });

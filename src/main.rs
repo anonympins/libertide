@@ -37,11 +37,13 @@ mod instrument;
 mod eyetracking;
 mod virtual_keyboard;
 mod app_ui;
+mod home_automation;
 
 pub use eyetracking::*;
 pub use agent_backend::*;
 pub use locale::*;
 pub use action_history::*;
+pub use home_automation::*;
 
 use audio::spawn_audio_worker;
 use floating_window::{update_open_floating_cards, FloatingCard, FloatingContentType};
@@ -188,6 +190,11 @@ pub struct OverlayApp {
     macro_text_input: String,
     macro_error: Option<String>,
 
+    // Domotique locale (Home Assistant / Matter)
+    hass_url_input: String,
+    hass_token_input: String,
+    hass_status_feedback: Option<String>,
+
     // Options d'accessibilité et presets cumulatifs
     active_disability_presets: std::collections::BTreeSet<DisabilityPreset>,
     auto_read_agent_messages: bool,
@@ -309,6 +316,9 @@ impl OverlayApp {
         let detected_microphones = crate::devices::list_microphones();
         let selected_microphone = crate::devices::get_active_microphone();
         let detected_pointing_devices = crate::devices::list_pointing_devices();
+
+        let hass_url_input = crate::home_automation::get_home_assistant_url();
+        let hass_token_input = crate::home_automation::get_home_assistant_token();
 
         let active_disability_presets: std::collections::BTreeSet<DisabilityPreset> = std::env::var("DISABILITY_PRESETS")
             .ok()
@@ -487,6 +497,9 @@ impl OverlayApp {
             macro_shortcut_input: String::new(),
             macro_text_input: String::new(),
             macro_error: None,
+            hass_url_input,
+            hass_token_input,
+            hass_status_feedback: None,
 
             active_disability_presets,
             auto_read_agent_messages,

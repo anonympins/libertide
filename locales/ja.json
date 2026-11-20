@@ -462,5 +462,13 @@
     "cognitive_clarity": "分かりやすく,簡単に,一歩ずつ",
     "greetings": "こんにちは,おはよう,こんばんは,ありがとう,さようなら,おやすみ",
     "identity": "あなた誰,何ができるの,名前は"
+  },
+  "home_automation": {
+    "token_missing": "Home Assistant トークン (HASS_TOKEN) が .env に設定されていません",
+    "all_entities": "すべての機器",
+    "action_sent_ws": "スマートホーム操作を WebSocket 経由で送信しました: %{domain}.%{service} (%{entity})",
+    "action_sent_rest": "スマートホーム操作を REST 経由で実行しました: %{domain}.%{service} (%{entity})",
+    "control_failed": "Home Assistant 操作エラー: %{error}",
+    "test_ok": "Home Assistant 接続成功 (%{url})"
   }
 }

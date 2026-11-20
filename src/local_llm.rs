@@ -611,6 +611,7 @@ pub enum CommandTag {
     AgentIdentityAndCapabilities,
     EmotionalSupportAndEmpathy,
     ChattyAndEthicalCompanion,
+    HomeAutomation,
 }
 
 impl CommandTag {
@@ -657,6 +658,7 @@ impl CommandTag {
         Self::AgentIdentityAndCapabilities,
         Self::EmotionalSupportAndEmpathy,
         Self::ChattyAndEthicalCompanion,
+        Self::HomeAutomation,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -703,6 +705,7 @@ impl CommandTag {
             Self::AgentIdentityAndCapabilities => "AGENT_IDENTITY_AND_CAPABILITIES",
             Self::EmotionalSupportAndEmpathy => "EMOTIONAL_SUPPORT_AND_EMPATHY",
             Self::ChattyAndEthicalCompanion => "CHATTY_AND_ETHICAL_COMPANION",
+            Self::HomeAutomation => "HOME_AUTOMATION",
         }
     }
 
@@ -749,7 +752,8 @@ impl CommandTag {
             Self::CorrectionOrDisagreement => "Signalement d'erreur ou désaccord de l'utilisateur ('non pas ça', 'tu t'es trompé', 'annule'). Arrêt immédiat de la manœuvre en cours et compensation.",
             Self::AgentIdentityAndCapabilities => "Questions portant sur qui est Libertide, ses fonctionnalités, sa conception et son fonctionnement pour l'accessibilité.",
             Self::EmotionalSupportAndEmpathy => "Soutien moral et écoute active : réconfort face à la fatigue, l'isolement, le découragement ou gratitude de l'utilisateur.",
-            Self::ChattyAndEthicalCompanion => "Compagnon pour des conversations éthiques"
+            Self::ChattyAndEthicalCompanion => "Compagnon pour des conversations éthiques",
+            Self::HomeAutomation => "Contrôle domotique local direct (Home Assistant, Matter, Zigbee/Z-Wave) : allumer ou éteindre lumières, ouvrir ou fermer volets et stores, régler le chauffage/climatisation, incliner le lit médicalisé, prises et ventilateurs. Action : home_control.",
         }
     }
 }
@@ -766,6 +770,26 @@ pub fn all_command_tags_prompt_list() -> String {
 /// Filtrage rapide des cas évidents (bruit pur, signal de micro, impulsions système)
 pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<CommandTag> {
     let lower = query.to_lowercase();
+
+    // Détection domotique multilingue (FR, EN, DE, ES, IT, PT, RU, JA, ZH)
+    const HOME_AUTO_KEYWORDS: &[&str] = &[
+        "lumière", "lumiere", "volet", "chauffage", "climatisation", "ventilateur", "lit médicalisé", "lit medicalise", "domotique", "home assistant", "matter",
+        "light", "lights", "lamp", "shutter", "shutters", "blind", "blinds", "thermostat", "heater", "smart home", "turn on", "turn off",
+        "licht", "rollladen", "rolladen", "heizung", "klimaanlage",
+        "luz", "luces", "persiana", "persianas", "calefaccion", "calefacción",
+        "luce", "luci", "tapparella", "tapparelle", "riscaldamento",
+        "ar condicionado", "aquecimento",
+        "свет", "жалюзи", "отопление", "умный дом",
+        "照明", "電気", "エアコン", "シャッター",
+        "灯", "窗帘", "空调", "智能家居",
+    ];
+
+    if HOME_AUTO_KEYWORDS.iter().any(|&kw| lower.contains(kw))
+        || (lower.contains("allume ") && (lower.contains("chambre") || lower.contains("salon") || lower.contains("bureau")))
+        || (lower.contains("éteins ") && (lower.contains("chambre") || lower.contains("salon") || lower.contains("bureau")))
+    {
+        return vec![CommandTag::HomeAutomation, CommandTag::CareAndComfort];
+    }
 
     if lower.contains("twitch")
         || lower.contains("streamer")
@@ -1820,6 +1844,24 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
 - Ne te focalise surtout pas sur le grand nombre d'éléments analysés à l'écran : apporte convivialité et clarté sans te noyer dans les détails techniques.
 "#);
             }
+            CommandTag::HomeAutomation => {
+                prompt.push_str(r#"
+Règles DOMOTIQUE LOCALE & HOME ASSISTANT / MATTER (TAG HOME_AUTOMATION) :
+- Permet de contrôler directement l'environnement physique sans passer par un cloud externe (lumières, volets, lit médicalisé, chauffage, prises).
+- Action "home_control" avec :
+  * "domain": "light" | "cover" | "climate" | "switch" | "button" | "fan"
+  * "service": "turn_on" | "turn_off" | "toggle" | "open_cover" | "close_cover" | "stop_cover" | "set_temperature"
+  * "entity_id": identifiant Home Assistant optionnel (ex: "light.salon", "cover.chambre", "climate.chambre", "switch.lit_medicalise_tete")
+  * "data": paramètres optionnels (ex: {"temperature": 21.0} ou {"brightness_pct": 80})
+- Exemples :
+  * Allumer la lumière : {"action": "home_control", "domain": "light", "service": "turn_on", "entity_id": "light.salon"}
+  * Éteindre la lumière : {"action": "home_control", "domain": "light", "service": "turn_off", "entity_id": "light.salon"}
+  * Ouvrir les volets : {"action": "home_control", "domain": "cover", "service": "open_cover", "entity_id": "cover.chambre"}
+  * Fermer les volets : {"action": "home_control", "domain": "cover", "service": "close_cover", "entity_id": "cover.chambre"}
+  * Régler le chauffage : {"action": "home_control", "domain": "climate", "service": "set_temperature", "entity_id": "climate.chambre", "data": {"temperature": 20.0}}
+  * Relever le lit médicalisé : {"action": "home_control", "domain": "switch", "service": "turn_on", "entity_id": "switch.lit_medicalise_tete"}
+"#);
+            }
         }
     }
 
@@ -1983,6 +2025,11 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
             CommandTag::AgentIdentityAndCapabilities => {}
             CommandTag::EmotionalSupportAndEmpathy => {}
             CommandTag::ChattyAndEthicalCompanion => {}
+            CommandTag::HomeAutomation => {
+                prompt.push_str("- {\"action\": \"home_control\", \"domain\": \"light\", \"service\": \"turn_on\", \"entity_id\": \"light.salon\"}\n");
+                prompt.push_str("- {\"action\": \"home_control\", \"domain\": \"cover\", \"service\": \"open_cover\", \"entity_id\": \"cover.chambre\"}\n");
+                prompt.push_str("- {\"action\": \"home_control\", \"domain\": \"climate\", \"service\": \"set_temperature\", \"entity_id\": \"climate.chambre\", \"data\": {\"temperature\": 21.0}}\n");
+            }
         }
     }
 
