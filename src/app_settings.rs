@@ -27,11 +27,17 @@ use crate::OverlayApp;
 
 impl OverlayApp {
     pub fn set_voice_clone_gender(&mut self, gender: &str) {
+        if self.voice_guide_generating {
+            return;
+        }
         let clean = if gender.trim().eq_ignore_ascii_case("male") || gender.trim().eq_ignore_ascii_case("homme") {
             "male"
         } else {
             "female"
         };
+        if self.voice_clone_gender == clean {
+            return;
+        }
         self.voice_clone_gender = clean.to_string();
         std::env::set_var("VOICE_CLONE_GENDER", clean);
         let _ = write_env_var_to_file(".env", "VOICE_CLONE_GENDER", clean);
@@ -243,8 +249,6 @@ impl OverlayApp {
             .map(|p| p.key())
             .collect::<Vec<_>>()
             .join(",");
-        let _ = write_env_var_to_file(".env", "DISABILITY_PRESETS", &keys_str);
-        std::env::set_var("DISABILITY_PRESETS", &keys_str);
 
         // Si aucun profil ou un seul profil est actif (bascule d'un preset à l'autre),
         // on réinitialise l'ensemble des réglages par défaut avant d'appliquer le profil.
@@ -315,12 +319,22 @@ impl OverlayApp {
             SWITCH_LONG_PRESS_MS.store(1200, Ordering::Relaxed);
             self.switch_auto_scroll = true;
         }
-        let _ = write_env_var_to_file(".env", "DWELL_TIME_MS", &self.dwell_state.dwell_duration.as_millis().to_string());
-        let _ = write_env_var_to_file(".env", "DWELL_ACTIVATION_DELAY_MS", &self.dwell_state.activation_delay.as_millis().to_string());
-        let _ = write_env_var_to_file(".env", "SWITCH_DEBOUNCE_MS", &SWITCH_DEBOUNCE_MS.load(Ordering::Relaxed).to_string());
-        let _ = write_env_var_to_file(".env", "SWITCH_LONG_PRESS_MS", &SWITCH_LONG_PRESS_MS.load(Ordering::Relaxed).to_string());
-        let _ = write_env_var_to_file(".env", "AUTO_READ_MESSAGES", if self.auto_read_agent_messages { "true" } else { "false" });
-        let _ = write_env_var_to_file(".env", "AUTO_READ_SUGGESTIONS", if self.auto_read_suggestions { "true" } else { "false" });
+
+        // Sauvegarde groupée en arrière-plan pour éviter de bloquer l'UI par de multiples accès disque
+        let dwell_ms = self.dwell_state.dwell_duration.as_millis().to_string();
+        let act_delay_ms = self.dwell_state.activation_delay.as_millis().to_string();
+        let debounce_ms = SWITCH_DEBOUNCE_MS.load(Ordering::Relaxed).to_string();
+        let long_press_ms = SWITCH_LONG_PRESS_MS.load(Ordering::Relaxed).to_string();
+        let auto_msgs = if self.auto_read_agent_messages { "true" } else { "false" };
+        let auto_sugs = if self.auto_read_suggestions { "true" } else { "false" };
+
+        let _ = write_env_var_to_file(".env", "DISABILITY_PRESETS", &keys_str);
+        let _ = write_env_var_to_file(".env", "DWELL_TIME_MS", &dwell_ms);
+        let _ = write_env_var_to_file(".env", "DWELL_ACTIVATION_DELAY_MS", &act_delay_ms);
+        let _ = write_env_var_to_file(".env", "SWITCH_DEBOUNCE_MS", &debounce_ms);
+        let _ = write_env_var_to_file(".env", "SWITCH_LONG_PRESS_MS", &long_press_ms);
+        let _ = write_env_var_to_file(".env", "AUTO_READ_MESSAGES", auto_msgs);
+        let _ = write_env_var_to_file(".env", "AUTO_READ_SUGGESTIONS", auto_sugs);
     }
 
     pub fn current_agent_model_display_name(&self) -> String {
@@ -2940,17 +2954,24 @@ impl OverlayApp {
                                             ui.data_mut(|d| d.insert_temp(egui::Id::NULL.with("new_remap_to_vk"), final_dest));
 
                                             let add_btn = ui.button(egui::RichText::new("➕ Ajouter").strong().color(theme.accent));
-                                            if make_widget_accessible_and_activated(ui, &add_btn, theme.accent) {
-                                                if let Ok(mut remaps) = crate::keyboard_hook::CUSTOM_KEY_REMAPS.lock() {
-                                                    remaps.retain(|r| r.from_key != source_vk);
-                                                    remaps.push(CustomKeyRemap {
-                                                        from_key: source_vk,
-                                                        to_key: final_dest,
-                                                        enabled: true,
-                                                    });
-                                                    let _ = save_custom_key_remaps(&remaps);
-                                                    play_earcon(Earcon::Success);
+                                            if add_btn.clicked() || make_widget_accessible_and_activated(ui, &add_btn, theme.accent) {
+                                                let mut remaps = match crate::keyboard_hook::CUSTOM_KEY_REMAPS.lock() {
+                                                    Ok(guard) => guard,
+                                                    Err(poisoned) => poisoned.into_inner(),
+                                                };
+                                                remaps.retain(|r| r.from_key != source_vk);
+                                                remaps.push(CustomKeyRemap {
+                                                    from_key: source_vk,
+                                                    to_key: final_dest,
+                                                    enabled: true,
+                                                });
+                                                let from_name = crate::keyboard_hook::vk_to_label(source_vk);
+                                                let to_name = crate::keyboard_hook::vk_to_label(final_dest);
+                                                match save_custom_key_remaps(&remaps) {
+                                                    Ok(()) => println!("[KeyRemaps] Remappage ajouté : {from_name} ➔ {to_name}"),
+                                                    Err(e) => eprintln!("[KeyRemaps] Erreur sauvegarde remappage : {e}"),
                                                 }
+                                                play_earcon(Earcon::Success);
                                             }
                                         });
 
@@ -2959,58 +2980,71 @@ impl OverlayApp {
                                         ui.add_space(4.0);
 
                                         // Liste des règles actives
-                                        if let Ok(mut remaps) = crate::keyboard_hook::CUSTOM_KEY_REMAPS.lock() {
-                                            if remaps.is_empty() {
-                                                ui.label(egui::RichText::new("Aucune redirection de touche personnalisée active.").size(10.5).italics().color(theme.text_secondary));
-                                            } else {
-                                                let mut remap_to_remove = None;
-                                                let mut remap_changed = false;
+                                        let mut remaps = match crate::keyboard_hook::CUSTOM_KEY_REMAPS.lock() {
+                                            Ok(guard) => guard,
+                                            Err(poisoned) => poisoned.into_inner(),
+                                        };
+                                        if remaps.is_empty() {
+                                            ui.label(egui::RichText::new("Aucune redirection de touche personnalisée active.").size(10.5).italics().color(theme.text_secondary));
+                                        } else {
+                                            let mut remap_to_remove = None;
+                                            let mut remap_changed = false;
 
-                                                for (idx, remap) in remaps.iter_mut().enumerate() {
-                                                    ui.horizontal_wrapped(|ui| {
-                                                        ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
-                                                        let mut is_on = remap.enabled;
-                                                        if ui.checkbox(&mut is_on, "").changed() {
-                                                            remap.enabled = is_on;
-                                                            remap_changed = true;
+                                            for (idx, remap) in remaps.iter_mut().enumerate() {
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
+                                                    let mut is_on = remap.enabled;
+                                                    if ui.checkbox(&mut is_on, "").changed() {
+                                                        remap.enabled = is_on;
+                                                        remap_changed = true;
+                                                    }
+
+                                                    let from_label = crate::keyboard_hook::vk_to_label(remap.from_key);
+                                                    let to_label = crate::keyboard_hook::vk_to_label(remap.to_key);
+
+                                                    let text_color = if remap.enabled { theme.accent } else { theme.text_secondary };
+                                                    ui.label(egui::RichText::new(format!("⌨ {from_label}")).size(11.0).strong().color(text_color));
+                                                    ui.label(egui::RichText::new("➔").size(10.5).color(theme.text_secondary));
+                                                    ui.label(egui::RichText::new(format!("🎯 {to_label}")).size(11.0).strong().color(Color32::WHITE));
+
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        let del_btn = ui.small_button("🗑").on_hover_text("Supprimer cette redirection");
+                                                        if del_btn.clicked() || make_widget_accessible_and_activated(ui, &del_btn, theme.accent) {
+                                                            remap_to_remove = Some(idx);
                                                         }
-
-                                                        let from_label = crate::keyboard_hook::vk_to_label(remap.from_key);
-                                                        let to_label = crate::keyboard_hook::vk_to_label(remap.to_key);
-
-                                                        let text_color = if remap.enabled { theme.accent } else { theme.text_secondary };
-                                                        ui.label(egui::RichText::new(format!("⌨ {from_label}")).size(11.0).strong().color(text_color));
-                                                        ui.label(egui::RichText::new("➔").size(10.5).color(theme.text_secondary));
-                                                        ui.label(egui::RichText::new(format!("🎯 {to_label}")).size(11.0).strong().color(Color32::WHITE));
-
-                                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                            let del_btn = ui.small_button("🗑").on_hover_text("Supprimer cette redirection");
-                                                            if make_widget_accessible_and_activated(ui, &del_btn, theme.accent) {
-                                                                remap_to_remove = Some(idx);
-                                                            }
-                                                        });
                                                     });
-                                                    ui.add_space(2.0);
-                                                }
-
-                                                if let Some(del_idx) = remap_to_remove {
-                                                    remaps.remove(del_idx);
-                                                    let _ = save_custom_key_remaps(&remaps);
-                                                    play_earcon(Earcon::Success);
-                                                } else if remap_changed {
-                                                    let _ = save_custom_key_remaps(&remaps);
-                                                    play_earcon(Earcon::Success);
-                                                }
+                                                });
+                                                ui.add_space(2.0);
                                             }
 
-                                            if !remaps.is_empty() {
-                                                ui.add_space(4.0);
-                                                let clear_all_btn = ui.small_button("🗑 Effacer toutes les redirections");
-                                                if make_widget_accessible_and_activated(ui, &clear_all_btn, theme.accent) {
-                                                    remaps.clear();
-                                                    let _ = save_custom_key_remaps(&remaps);
-                                                    play_earcon(Earcon::Success);
+                                            if let Some(del_idx) = remap_to_remove {
+                                                let removed = remaps.remove(del_idx);
+                                                let from_name = crate::keyboard_hook::vk_to_label(removed.from_key);
+                                                let to_name = crate::keyboard_hook::vk_to_label(removed.to_key);
+                                                match save_custom_key_remaps(&remaps) {
+                                                    Ok(()) => println!("[KeyRemaps] Remappage supprimé : {from_name} ➔ {to_name}"),
+                                                    Err(e) => eprintln!("[KeyRemaps] Erreur sauvegarde suppression : {e}"),
                                                 }
+                                                play_earcon(Earcon::Success);
+                                            } else if remap_changed {
+                                                match save_custom_key_remaps(&remaps) {
+                                                    Ok(()) => println!("[KeyRemaps] Statut du remappage mis à jour"),
+                                                    Err(e) => eprintln!("[KeyRemaps] Erreur sauvegarde statut : {e}"),
+                                                }
+                                                play_earcon(Earcon::Success);
+                                            }
+                                        }
+
+                                        if !remaps.is_empty() {
+                                            ui.add_space(4.0);
+                                            let clear_all_btn = ui.small_button("🗑 Effacer toutes les redirections");
+                                            if clear_all_btn.clicked() || make_widget_accessible_and_activated(ui, &clear_all_btn, theme.accent) {
+                                                remaps.clear();
+                                                match save_custom_key_remaps(&remaps) {
+                                                    Ok(()) => println!("[KeyRemaps] Toutes les redirections ont été effacées"),
+                                                    Err(e) => eprintln!("[KeyRemaps] Erreur sauvegarde effacement total : {e}"),
+                                                }
+                                                play_earcon(Earcon::Success);
                                             }
                                         }
                                     });

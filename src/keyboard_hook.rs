@@ -149,20 +149,24 @@ pub fn matches_remap(from_key: u32, vk: u32, active_mods: u32) -> bool {
 pub fn apply_rebound_key(target_var: &str, full_binding: u32) {
     if let Some(idx_str) = target_var.strip_prefix("CUSTOM_FROM_") {
         if let Ok(idx) = idx_str.parse::<usize>() {
-            if let Ok(mut lock) = CUSTOM_KEY_REMAPS.lock() {
-                if idx < lock.len() {
-                    lock[idx].from_key = full_binding;
-                    let _ = save_custom_key_remaps(&lock);
-                }
+            let mut lock = match CUSTOM_KEY_REMAPS.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if idx < lock.len() {
+                lock[idx].from_key = full_binding;
+                let _ = save_custom_key_remaps(&lock);
             }
         }
     } else if let Some(idx_str) = target_var.strip_prefix("CUSTOM_TO_") {
         if let Ok(idx) = idx_str.parse::<usize>() {
-            if let Ok(mut lock) = CUSTOM_KEY_REMAPS.lock() {
-                if idx < lock.len() {
-                    lock[idx].to_key = full_binding;
-                    let _ = save_custom_key_remaps(&lock);
-                }
+            let mut lock = match CUSTOM_KEY_REMAPS.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if idx < lock.len() {
+                lock[idx].to_key = full_binding;
+                let _ = save_custom_key_remaps(&lock);
             }
         }
     } else {
@@ -1217,9 +1221,11 @@ pub fn load_keybindings() {
     KEY_BIND_STOP_SPEECH.store(load_vk("KEY_BIND_STOP_SPEECH", 0x13), Ordering::SeqCst);
     KEY_BIND_EMERGENCY.store(load_vk("KEY_BIND_EMERGENCY", 0x1B), Ordering::SeqCst);
 
-    if let Ok(mut lock) = CUSTOM_KEY_REMAPS.lock() {
-        *lock = load_custom_key_remaps();
-    }
+    let mut lock = match CUSTOM_KEY_REMAPS.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *lock = load_custom_key_remaps();
 }
 
 #[cfg(windows)]
@@ -1253,14 +1259,40 @@ pub fn vk_to_char_layout(vk: u32, shift: bool) -> Option<char> {
             Some(if shift { (b'A' + offset) as char } else { (b'a' + offset) as char })
         }
         0x30..=0x39 => Some((b'0' + (base_vk - 0x30) as u8) as char),
+        // Pavé numérique (Numpad 0..=9 et opérateurs)
+        0x60..=0x69 => Some((b'0' + (base_vk - 0x60) as u8) as char),
+        0x6A => Some('*'),
+        0x6B => Some('+'),
+        0x6D => Some('-'),
+        0x6E => Some('.'),
+        0x6F => Some('/'),
         0x20 => Some(' '),
+        0x0D => Some('\n'),
+        0x09 => Some('\t'),
+        // Symboles et ponctuation usuels (AZERTY / standard)
+        0xDE => Some('²'),
+        0xBD => Some(if shift { '_' } else { '-' }),
+        0xBB => Some(if shift { '+' } else { '=' }),
+        0xBC => Some(if shift { '?' } else { ',' }),
+        0xBE => Some(if shift { '.' } else { ';' }),
+        0xBF => Some(if shift { '/' } else { ':' }),
+        0xBA => Some(if shift { '£' } else { '$' }),
+        0xC0 => Some(if shift { '%' } else { 'ù' }),
+        0xDC => Some(if shift { 'µ' } else { '*' }),
+        0xDD => Some(if shift { '¨' } else { '^' }),
+        0xDF => Some(if shift { '§' } else { '!' }),
+        0xDB => Some(if shift { '°' } else { ')' }),
         _ => None,
     }
 }
 
 /// Réécrit directement les événements egui (`Event::Key` et `Event::Text`) selon `key_remaps.json`
 pub fn apply_egui_key_remaps(ctx: &egui::Context) {
-    let remaps = if let Ok(mut lock) = CUSTOM_KEY_REMAPS.lock() {
+    let remaps = {
+        let mut lock = match CUSTOM_KEY_REMAPS.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         if lock.is_empty() {
             *lock = load_custom_key_remaps();
         }
@@ -1268,16 +1300,16 @@ pub fn apply_egui_key_remaps(ctx: &egui::Context) {
             return;
         }
         lock.clone()
-    } else {
-        return;
     };
 
     let shift = ctx.input(|i| i.modifiers.shift);
 
     ctx.input_mut(|i| {
+        let mut injected_text_events = Vec::new();
+
         for ev in &mut i.events {
             match ev {
-                egui::Event::Key { key, physical_key, .. } => {
+                egui::Event::Key { key, physical_key, pressed, .. } => {
                     let vk_opt = egui_key_to_vk(*key)
                         .or_else(|| physical_key.and_then(egui_key_to_vk));
                     if let Some(vk) = vk_opt {
@@ -1287,6 +1319,14 @@ pub fn apply_egui_key_remaps(ctx: &egui::Context) {
                                 *key = new_key;
                                 if let Some(pk) = physical_key {
                                     *pk = new_key;
+                                }
+                            }
+                            // Si la touche source est non imprimable (F1..=F12, etc.) et ne produit pas d'Event::Text,
+                            // alors que la touche de destination est un caractère textuel (Espace, lettre, chiffre...),
+                            // on injecte l'Event::Text manquant pour alimenter les TextEdit d'egui.
+                            if *pressed && vk_to_char_layout(vk, shift).is_none() {
+                                if let Some(c) = vk_to_char_layout(target_base_vk, shift) {
+                                    injected_text_events.push(egui::Event::Text(c.to_string()));
                                 }
                             }
                         }
@@ -1308,6 +1348,10 @@ pub fn apply_egui_key_remaps(ctx: &egui::Context) {
                 }
                 _ => {}
             }
+        }
+
+        if !injected_text_events.is_empty() {
+            i.events.extend(injected_text_events);
         }
     });
 }
@@ -1562,13 +1606,15 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
             };
 
             if is_down {
-                let custom_remap = if let Ok(mut remaps) = CUSTOM_KEY_REMAPS.lock() {
+                let custom_remap = {
+                    let mut remaps = match CUSTOM_KEY_REMAPS.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
                     if remaps.is_empty() {
                         *remaps = load_custom_key_remaps();
                     }
                     remaps.iter().find(|r| r.enabled && matches_remap(r.from_key, vk, active_mods)).copied()
-                } else {
-                    None
                 };
 
                 if let Some(remap) = custom_remap {
@@ -1590,14 +1636,14 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                 };
 
                 let target_to_key = to_key_opt.or_else(|| {
-                    if let Ok(mut remaps) = CUSTOM_KEY_REMAPS.lock() {
-                        if remaps.is_empty() {
-                            *remaps = load_custom_key_remaps();
-                        }
-                        remaps.iter().find(|r| r.enabled && matches_remap(r.from_key, vk, active_mods)).map(|r| r.to_key)
-                    } else {
-                        None
+                    let mut remaps = match CUSTOM_KEY_REMAPS.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    if remaps.is_empty() {
+                        *remaps = load_custom_key_remaps();
                     }
+                    remaps.iter().find(|r| r.enabled && matches_remap(r.from_key, vk, active_mods)).map(|r| r.to_key)
                 });
 
                 if let Some(to_key) = target_to_key {
