@@ -3,7 +3,7 @@ use rust_i18n::t;
 use std::time::{Duration, Instant};
 use eframe::egui;
 use eframe::egui::Color32;
-
+use egui::TextBuffer;
 use crate::clipboard::{
     get_clipboard_text, get_plain_clipboard_text
 };
@@ -570,7 +570,7 @@ impl OverlayApp {
                                 let is_keybinds_active = self.settings_tab == SettingsTab::Keybindings;
                                 let tab_keybinds = ui.selectable_label(
                                     is_keybinds_active,
-                                    egui::RichText::new("⌨ Raccourcis")
+                                    egui::RichText::new(t!("ui.settings_tab_keybindings"))
                                         .size(12.0)
                                         .color(if is_keybinds_active { theme.accent } else { theme.text_secondary })
                                         .strong(),
@@ -589,7 +589,7 @@ impl OverlayApp {
                                 let is_home_active = self.settings_tab == SettingsTab::HomeAutomation;
                                 let tab_home = ui.selectable_label(
                                     is_home_active,
-                                    egui::RichText::new("🏠 Domotique")
+                                    egui::RichText::new(t!("ui.settings_tab_home"))
                                         .size(12.0)
                                         .color(if is_home_active { theme.accent } else { theme.text_secondary })
                                         .strong(),
@@ -1162,13 +1162,13 @@ impl OverlayApp {
                                             for &profile in VoiceProfile::ALL {
                                                 let is_selected = self.voice_gender == profile;
                                                 let (icon, label) = match profile {
-                                                    VoiceProfile::Denise => ("👩", "Denise"),
-                                                    VoiceProfile::Henri => ("👨", "Henri"),
-                                                    VoiceProfile::Hortense => ("🎙️", "Hortense"),
-                                                    VoiceProfile::Paul => ("🎩", "Paul"),
-                                                    VoiceProfile::Sylvie => ("🍁", "Sylvie"),
-                                                    VoiceProfile::Jean => ("⚡", "Jean"),
-                                                    VoiceProfile::Clone => ("🧬", "Clonée"),
+                                                    VoiceProfile::Denise => ("👩", t!("voice.profile_denise").to_string()),
+                                                    VoiceProfile::Henri => ("👨", t!("voice.profile_henri").to_string()),
+                                                    VoiceProfile::Hortense => ("🎙️", t!("voice.profile_hortense").to_string()),
+                                                    VoiceProfile::Paul => ("🎩", t!("voice.profile_paul").to_string()),
+                                                    VoiceProfile::Sylvie => ("🍁", t!("voice.profile_sylvie").to_string()),
+                                                    VoiceProfile::Jean => ("⚡", t!("voice.profile_jean").to_string()),
+                                                    VoiceProfile::Clone => ("🧬", "Clonée".to_string()),
                                                 };
                                                 let btn_text = format!("{icon} {label}");
                                                 let resp = ui.selectable_label(is_selected, btn_text);
@@ -1644,10 +1644,10 @@ impl OverlayApp {
                                                 let (icon, label) = match profile {
                                                     VoiceProfile::Denise => ("👩", t!("voice.profile_denise").to_string()),
                                                     VoiceProfile::Henri => ("👨", t!("voice.profile_henri").to_string()),
-                                                    VoiceProfile::Hortense => ("🎙️", "Hortense".to_string()),
-                                                    VoiceProfile::Paul => ("🎩", "Paul".to_string()),
-                                                    VoiceProfile::Sylvie => ("🍁", "Sylvie (CA)".to_string()),
-                                                    VoiceProfile::Jean => ("⚡", "Jean".to_string()),
+                                                    VoiceProfile::Hortense => ("🎙️", t!("voice.profile_hortense").to_string()),
+                                                    VoiceProfile::Paul => ("🎩", t!("voice.profile_paul").to_string()),
+                                                    VoiceProfile::Sylvie => ("🍁", t!("voice.profile_sylvie").to_string()),
+                                                    VoiceProfile::Jean => ("⚡", t!("voice.profile_jean").to_string()),
                                                     VoiceProfile::Clone => {
                                                         let g = if self.voice_clone_gender == "male" { t!("voice.gender_male") } else { t!("voice.gender_female") };
                                                         ("🧬", t!("voice.profile_clone", gender = g).to_string())

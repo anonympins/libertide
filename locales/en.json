@@ -33,8 +33,8 @@
     "scheduled_tasks_cancelled": "All scheduled tasks have been cancelled.",
     "scheduled_tasks_cancelled_count": "All scheduled tasks have been cancelled (%{count} cancelled).",
     "subtitles_enabled": "Live subtitles activated (%{source}).",
-    "subtitles_disabled": "Live subtitles disabled."
-    ,"window_name_announced": "Window %{name}."
+    "subtitles_disabled": "Live subtitles disabled.",
+    "window_name_announced": "Window %{name}."
   },
   "roles": {
     "button": "button",
@@ -48,7 +48,8 @@
     "checkbox": "checkbox",
     "combobox": "drop-down list",
     "slider": "slider",
-    "media": "media player"
+    "media": "media player",
+    "vlm": "visual element (AI)"
   },
   "commands": {
     "disable_dictation": "Disable dictation",
@@ -210,6 +211,8 @@
     "settings_tab_language": "🌐 Language",
     "settings_tab_devices": "🎙️ Devices",
     "settings_tab_macros": "⚡ Macros",
+    "settings_tab_keybindings": "⌨ Shortcuts",
+    "settings_tab_home": "🏠 Smart Home",
     "api_key_label": "API Key (%{env}):",
     "provider_enabled_checkbox": "Provider enabled",
     "btn_set_primary_provider": "★ Set as primary active",
@@ -299,6 +302,10 @@
     "active_narrator": "Active narrator voice",
     "profile_denise": "Denise (Female)",
     "profile_henri": "Henri (Male)",
+    "profile_hortense": "Hortense (Studio)",
+    "profile_paul": "Paul (Calm)",
+    "profile_sylvie": "Sylvie (Canadian)",
+    "profile_jean": "Jean (Dynamic)",
     "profile_clone": "Cloned Voice (%{gender})",
     "test_title": "Test voice",
     "test_hint": "Audio test sentence...",

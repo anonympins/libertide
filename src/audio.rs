@@ -385,7 +385,7 @@ impl WhisperEngine {
         Ok(result.trim().to_string())
     }
 
-    pub fn transcribe_multilingual(&mut self, samples_16k: &[f32]) -> Result<String, String> {
+    pub fn transcribe_multilingual(&mut self, samples_16k: &[f32], translate: bool) -> Result<String, String> {
         if samples_16k.is_empty() {
             return Ok(String::new());
         }
@@ -405,7 +405,7 @@ impl WhisperEngine {
         params.set_n_threads(num_threads);
         // "auto" active la détection automatique de n'importe quelle langue parlée
         params.set_language(Some("auto"));
-        params.set_translate(false);
+        params.set_translate(translate);
         params.set_no_context(true);
         params.set_single_segment(true);
         params.set_no_timestamps(true);
@@ -425,6 +425,302 @@ impl WhisperEngine {
             }
         }
         Ok(result.trim().to_string())
+    }
+}
+
+// ============================================================================
+// 2b. Diarisation des Locuteurs (ECAPA-TDNN ONNX & Moteur Spectral Natif F0)
+// ============================================================================
+
+pub static LIVE_SUBTITLES_TRANSLATE: AtomicBool = AtomicBool::new(false);
+pub static LIVE_SUBTITLES_DIARIZATION: AtomicBool = AtomicBool::new(false);
+
+pub fn is_live_subtitles_translate() -> bool {
+    LIVE_SUBTITLES_TRANSLATE.load(Ordering::SeqCst)
+}
+
+pub fn set_live_subtitles_translate(translate: bool) {
+    LIVE_SUBTITLES_TRANSLATE.store(translate, Ordering::SeqCst);
+}
+
+pub fn is_live_subtitles_diarization() -> bool {
+    LIVE_SUBTITLES_DIARIZATION.load(Ordering::SeqCst)
+}
+
+pub fn set_live_subtitles_diarization(diarization: bool) {
+    LIVE_SUBTITLES_DIARIZATION.store(diarization, Ordering::SeqCst);
+}
+
+#[derive(Clone, Debug)]
+pub struct SpeakerProfile {
+    pub id: usize, // 1..=4 ([Locuteur 1]..[Locuteur 4])
+    pub centroid: Vec<f32>,
+    pub sample_count: usize,
+    pub last_seen: Instant,
+}
+
+pub struct SpeakerDiarizer {
+    pub profiles: Vec<SpeakerProfile>,
+    pub threshold: f32,
+    onnx_session: Option<ort::session::Session>,
+}
+
+impl SpeakerDiarizer {
+    pub fn new() -> Self {
+        let onnx_session = Self::try_init_onnx_model();
+        Self {
+            profiles: Vec::new(),
+            threshold: 0.74,
+            onnx_session,
+        }
+    }
+
+    fn try_init_onnx_model() -> Option<ort::session::Session> {
+        let candidate_paths = [
+            PathBuf::from("models").join("diarization").join("ecapa_tdnn.onnx"),
+            PathBuf::from("models").join("diarization").join("model.onnx"),
+            PathBuf::from("models").join("ecapa_tdnn.onnx"),
+        ];
+
+        for p in &candidate_paths {
+            if p.is_file() {
+                let env = ort::init().with_name("SpeakerDiarization").build().ok()?;
+                let session = ort::session::Session::builder(&env)
+                    .ok()?
+                    .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
+                    .ok()?
+                    .commit_from_file(p)
+                    .ok()?;
+                println!("[Diarization] Modèle neuronal ONNX d'embeddings chargé : {}", p.display());
+                return Some(session);
+            }
+        }
+        None
+    }
+
+    /// Extrait la fréquence fondamentale F0 et la force de voisement via autocorrélation normalisée (NACF)
+    fn extract_f0_pitch(samples: &[f32]) -> (f32, f32) {
+        if samples.len() < 512 {
+            return (0.0, 0.0);
+        }
+        // Fréquences vocales humaines : 70 Hz à 400 Hz (lags de 40 à 228 échantillons à 16 kHz)
+        const MIN_LAG: usize = 40;
+        const MAX_LAG: usize = 228;
+        let window_len = 512.min(samples.len() - MAX_LAG);
+
+        let mut energy0 = 0.0f32;
+        for i in 0..window_len {
+            energy0 += samples[i] * samples[i];
+        }
+        if energy0 < 1e-4 {
+            return (0.0, 0.0);
+        }
+
+        let mut best_lag = MIN_LAG;
+        let mut max_corr = 0.0f32;
+
+        for lag in MIN_LAG..=MAX_LAG {
+            let mut cross_corr = 0.0f32;
+            let mut energy_lag = 0.0f32;
+            for i in 0..window_len {
+                let s0 = samples[i];
+                let s1 = samples[i + lag];
+                cross_corr += s0 * s1;
+                energy_lag += s1 * s1;
+            }
+            let norm = (energy0 * energy_lag).sqrt() + 1e-6;
+            let r = cross_corr / norm;
+            if r > max_corr {
+                max_corr = r;
+                best_lag = lag;
+            }
+        }
+
+        let f0 = if max_corr > 0.35 {
+            16000.0 / best_lag as f32
+        } else {
+            0.0
+        };
+        (f0, max_corr.clamp(0.0, 1.0))
+    }
+
+    /// Banc de 30 filtres spectraux logarithmiques (100 Hz à 7500 Hz)
+    fn compute_spectral_filterbank(samples: &[f32]) -> [f32; 30] {
+        let mut bank = [0.0f32; 30];
+        if samples.len() < 512 {
+            return bank;
+        }
+
+        // Fréquences centrales réparties logarithmiquement
+        let f_min = 100.0f32;
+        let f_max = 7500.0f32;
+        let ratio = (f_max / f_min).powf(1.0 / 29.0);
+        let mut center_freqs = [0.0f32; 30];
+        for i in 0..30 {
+            center_freqs[i] = f_min * ratio.powi(i as i32);
+        }
+
+        let frame_size = 512;
+        let num_frames = (samples.len() / 256).saturating_sub(1).max(1);
+
+        for f in 0..num_frames {
+            let offset = f * 256;
+            if offset + frame_size > samples.len() {
+                break;
+            }
+            let frame = &samples[offset..offset + frame_size];
+
+            for (band_idx, &fc) in center_freqs.iter().enumerate() {
+                let omega = 2.0 * std::f32::consts::PI * fc / 16000.0;
+                let mut sum_re = 0.0f32;
+                let mut sum_im = 0.0f32;
+                for (n, &s) in frame.iter().enumerate() {
+                    // Fenêtrage de Hamming
+                    let w = 0.54 - 0.46 * (2.0 * std::f32::consts::PI * n as f32 / (frame_size - 1) as f32).cos();
+                    let win_s = s * w;
+                    let angle = omega * n as f32;
+                    sum_re += win_s * angle.cos();
+                    sum_im += win_s * angle.sin();
+                }
+                let pwr = sum_re * sum_re + sum_im * sum_im;
+                bank[band_idx] += pwr;
+            }
+        }
+
+        for b in bank.iter_mut() {
+            *b = (*b / num_frames as f32).max(1e-6).ln();
+        }
+        bank
+    }
+
+    /// Extrait le vecteur d'embedding unifié (32 dimensions normalisées)
+    pub fn extract_embedding(&mut self, samples: &[f32]) -> Vec<f32> {
+        // 1. Inférence ONNX si disponible
+        if let Some(ref mut session) = self.onnx_session {
+            let shape = [1usize, samples.len()];
+            if let Ok(tensor_val) = ort::value::Tensor::from_array((shape, samples.to_vec())) {
+                if let Ok(outputs) = session.run(ort::inputs![tensor_val]) {
+                    if outputs.len() > 0 {
+                        if let Ok((_, emb_slice)) = outputs[0].try_extract_tensor::<f32>() {
+                            let mut emb = emb_slice.to_vec();
+                            let norm = emb.iter().map(|v| v * v).sum::<f32>().sqrt();
+                            if norm > 1e-6 {
+                                for v in emb.iter_mut() {
+                                    *v /= norm;
+                                }
+                                return emb;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Moteur spectral natif sans dépendance externe (30 banques + F0 + voisement = 32 dimensions)
+        let bank = Self::compute_spectral_filterbank(samples);
+        let (f0, voicing) = Self::extract_f0_pitch(samples);
+
+        let mut emb = Vec::with_capacity(32);
+        let mean = bank.iter().sum::<f32>() / 30.0;
+        let variance = bank.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / 30.0;
+        let std_dev = variance.sqrt().max(1e-4);
+
+        for &b in &bank {
+            emb.push((b - mean) / std_dev);
+        }
+
+        let norm_f0 = if f0 > 0.0 {
+            ((f0 - 160.0) / 120.0).clamp(-2.0, 2.0)
+        } else {
+            0.0
+        };
+        emb.push(norm_f0);
+        emb.push((voicing - 0.5) * 2.0);
+
+        // Normalisation unitaire Euclidienne L2
+        let l2 = emb.iter().map(|v| v * v).sum::<f32>().sqrt();
+        if l2 > 1e-6 {
+            for v in emb.iter_mut() {
+                *v /= l2;
+            }
+        }
+        emb
+    }
+
+    /// Similarité cosinus entre deux vecteurs déjà normalisés L2
+    #[inline]
+    fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+        let len = a.len().min(b.len());
+        let mut dot = 0.0f32;
+        for i in 0..len {
+            dot += a[i] * b[i];
+        }
+        dot.clamp(-1.0, 1.0)
+    }
+
+    /// Identifie le locuteur courant (1..=4) par clustering cosinus incrémental en ligne
+    pub fn identify_speaker(&mut self, samples: &[f32]) -> usize {
+        let now = Instant::now();
+        // Purge automatique des locuteurs inactifs depuis plus de 90 secondes
+        self.profiles.retain(|p| now.duration_since(p.last_seen) < Duration::from_secs(90));
+
+        let emb = self.extract_embedding(samples);
+        if emb.is_empty() {
+            return 1;
+        }
+
+        let mut best_id = None;
+        let mut best_sim = -1.0f32;
+        let mut best_idx = 0;
+
+        for (idx, p) in self.profiles.iter().enumerate() {
+            let sim = Self::cosine_similarity(&emb, &p.centroid);
+            if sim > best_sim {
+                best_sim = sim;
+                best_idx = idx;
+                best_id = Some(p.id);
+            }
+        }
+
+        if best_sim >= self.threshold {
+            if let Some(p) = self.profiles.get_mut(best_idx) {
+                p.last_seen = now;
+                p.sample_count += 1;
+                // Mise à jour adaptative du centroïde
+                let alpha = 0.85f32;
+                for (c, &e) in p.centroid.iter_mut().zip(emb.iter()) {
+                    *c = *c * alpha + e * (1.0 - alpha);
+                }
+                let norm = p.centroid.iter().map(|v| v * v).sum::<f32>().sqrt();
+                if norm > 1e-6 {
+                    for c in p.centroid.iter_mut() {
+                        *c /= norm;
+                    }
+                }
+                return p.id;
+            }
+        }
+
+        // Création d'un nouveau profil locuteur (jusqu'à 4 simultanément)
+        if self.profiles.len() < 4 {
+            let used_ids: Vec<usize> = self.profiles.iter().map(|p| p.id).collect();
+            let next_id = (1..=4).find(|id| !used_ids.contains(id)).unwrap_or(1);
+            self.profiles.push(SpeakerProfile {
+                id: next_id,
+                centroid: emb,
+                sample_count: 1,
+                last_seen: now,
+            });
+            next_id
+        } else {
+            // Réutilisation du profil le plus ancien
+            self.profiles.sort_by_key(|p| p.last_seen);
+            let target = &mut self.profiles[0];
+            target.centroid = emb;
+            target.sample_count = 1;
+            target.last_seen = now;
+            target.id
+        }
     }
 }
 
@@ -1217,10 +1513,11 @@ fn run_live_subtitles_loop(
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    let (transcribe_tx, transcribe_rx) = channel::<Vec<f32>>();
+    let (transcribe_tx, transcribe_rx) = channel::<(Vec<f32>, bool, bool)>();
     let is_transcribing = Arc::new(AtomicBool::new(false));
     let current_sub_text = Arc::new(Mutex::new(String::new()));
 
+    let mut diarizer = SpeakerDiarizer::new();
     // Worker dédié à l'inférence Whisper pour ne jamais bloquer la capture ni l'égaliseur
     {
         let whisper_instance = Arc::clone(&whisper_instance);
@@ -1228,22 +1525,33 @@ fn run_live_subtitles_loop(
         let current_sub_text = Arc::clone(&current_sub_text);
         std::thread::Builder::new()
             .name("live_subtitles_inference".to_string())
-            .spawn(move || {
-                while let Ok(samples) = transcribe_rx.recv() {
+            .spawn(move || loop {
+                let (samples, translate, diarize) = match transcribe_rx.recv() {
+                    Ok(payload) => payload,
+                    Err(_) => break,
+                };
+                {
                     let transcribe_res = {
                         let mut guard = whisper_instance.lock().unwrap();
                         if let Some(ref mut whisper) = *guard {
-                            whisper.transcribe_multilingual(&samples)
+                            whisper.transcribe_multilingual(&samples, translate)
                         } else {
                             Err("Moteur Whisper non disponible.".to_string())
                         }
                     };
                     if let Ok(text) = transcribe_res {
-                        let trimmed = text.trim();
+                        let mut trimmed = text.trim().to_string();
                         if !trimmed.is_empty()
                             && trimmed.chars().any(|c| c.is_alphanumeric())
-                            && !is_hallucination_or_noise(trimmed)
+                            && !is_hallucination_or_noise(&trimmed)
                         {
+                            if diarize {
+                                let speaker_id = diarizer.identify_speaker(&samples);
+                                trimmed = format!("[Locuteur {speaker_id}] {trimmed}");
+                            }
+                            if translate && !trimmed.contains("🌐") {
+                                trimmed = format!("{trimmed} 🌐");
+                            }
                             if let Ok(mut lock) = current_sub_text.lock() {
                                 *lock = trimmed.to_string();
                             }
@@ -1469,7 +1777,9 @@ fn run_live_subtitles_loop(
                     }
 
                     is_transcribing.store(true, Ordering::SeqCst);
-                    let _ = transcribe_tx.send(transcribe_buf);
+                    let translate = is_live_subtitles_translate();
+                    let diarize = is_live_subtitles_diarization();
+                    let _ = transcribe_tx.send((transcribe_buf, translate, diarize));
                 } else if audio_16k_buffer.len() > 16000 * 5 {
                     // Écrêter les données les plus anciennes SANS écraser speech_start
                     let overflow = audio_16k_buffer.len() - (16000 * 4);

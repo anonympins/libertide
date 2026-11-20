@@ -54,7 +54,7 @@ impl OverlayApp {
             "liste déroulante" | "select" | "combobox" => t!("roles.combobox").to_string(),
             "curseur" | "slider" => t!("roles.slider").to_string(),
             "lecteur multimédia" | "media" => t!("roles.media").to_string(),
-            s if s.contains("qwen") || s.contains("vlm") => "icône ou élément visuel détecté".to_string(),
+            s if s.contains("qwen") || s.contains("vlm") => t!("roles.vlm").to_string(),
             other => other.to_string(),
         };
 

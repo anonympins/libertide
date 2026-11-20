@@ -33,8 +33,8 @@
     "scheduled_tasks_cancelled": "Alle verzögerten Befehle wurden abgebrochen.",
     "scheduled_tasks_cancelled_count": "Alle verzögerten Befehle wurden abgebrochen (%{count} abgebrochen).",
     "subtitles_enabled": "Live-Untertitel aktiviert (%{source}).",
-    "subtitles_disabled": "Live-Untertitel deaktiviert."
-    ,"window_name_announced": "Fenster %{name}."
+    "subtitles_disabled": "Live-Untertitel deaktiviert.",
+    "window_name_announced": "Fenster %{name}."
   },
   "roles": {
     "button": "Schaltfläche",
@@ -48,7 +48,8 @@
     "checkbox": "Kontrollkästchen",
     "combobox": "Dropdown-Liste",
     "slider": "Schieberegler",
-    "media": "Mediaplayer"
+    "media": "Mediaplayer",
+    "vlm": "visuelles Element (KI)"
   },
   "commands": {
     "disable_dictation": "Diktat deaktivieren",
@@ -210,6 +211,8 @@
     "settings_tab_language": "🌐 Sprache",
     "settings_tab_devices": "🎙️ Geräte",
     "settings_tab_macros": "⚡ Makros",
+    "settings_tab_keybindings": "⌨ Tastaturkürzel",
+    "settings_tab_home": "🏠 Hausautomation",
     "api_key_label": "API-Schlüssel (%{env}):",
     "provider_enabled_checkbox": "Anbieter aktiviert",
     "btn_set_primary_provider": "★ Als primär aktiv festlegen",
@@ -299,6 +302,10 @@
     "active_narrator": "Aktive Sprecherstimme",
     "profile_denise": "Denise (Weiblich)",
     "profile_henri": "Henri (Männlich)",
+    "profile_hortense": "Hortense (Studio)",
+    "profile_paul": "Paul (Ruhig)",
+    "profile_sylvie": "Sylvie (Kanadisch)",
+    "profile_jean": "Jean (Dynamisch)",
     "profile_clone": "Geklonte Stimme (%{gender})",
     "test_title": "Stimme testen",
     "test_hint": "Audio-Testsatz...",
@@ -368,8 +375,8 @@
     "bpm": "BPM:",
     "wah_filter": "Wah / Filter:",
     "pitch": "Pitch:"
-  }
-  ,"keyboard": {
+  },
+  "keyboard": {
     "title": "⌨️ Barrierefreie virtuelle Tastatur",
     "card_summary": "Barrierefreie virtuelle Tastatur mit Scanning und Blicksteuerung",
     "open_btn_tooltip": "Öffnet die barrierefreie virtuelle Tastatur mit Scanning und Blicksteuerung.",

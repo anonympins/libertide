@@ -1080,6 +1080,26 @@ impl FloatingCard {
                                             ui.label(egui::RichText::new("EN DIRECT").size(11.0).color(dot_color).strong());
 
                                             let live_target = crate::audio::LIVE_SUBTITLES_TARGET.lock().ok().and_then(|g| g.clone());
+                                            let mut is_diar = crate::audio::is_live_subtitles_diarization();
+                                            let mut is_trans = crate::audio::is_live_subtitles_translate();
+
+                                            ui.add_space(6.0);
+                                            let diar_btn = ui.selectable_label(
+                                                is_diar,
+                                                egui::RichText::new("👥 Locuteurs").size(10.5),
+                                            ).on_hover_text("Diarisation : séparer et colorer les différents interlocuteurs");
+                                            if diar_btn.clicked() {
+                                                crate::audio::set_live_subtitles_diarization(!is_diar);
+                                            }
+
+                                            let trans_btn = ui.selectable_label(
+                                                is_trans,
+                                                egui::RichText::new("🌐 Traduction").size(10.5),
+                                            ).on_hover_text("Traduire instantanément la parole étrangère");
+                                            if trans_btn.clicked() {
+                                                crate::audio::set_live_subtitles_translate(!is_trans);
+                                            }
+
                                             if target_window.is_none() && live_target.is_some() {
                                                 *target_window = live_target.clone();
                                             }
@@ -1170,22 +1190,46 @@ impl FloatingCard {
                                                     .stick_to_bottom(true)
                                                     .auto_shrink([false, false])
                                                     .show(ui, |ui| {
+                                                        let format_sub_line = |text: &str| -> (egui::Color32, String) {
+                                                            if text.starts_with("[Locuteur 1]") {
+                                                                (egui::Color32::from_rgb(0, 229, 255), text.to_string())
+                                                            } else if text.starts_with("[Locuteur 2]") {
+                                                                (egui::Color32::from_rgb(255, 102, 204), text.to_string())
+                                                            } else if text.starts_with("[Locuteur 3]") {
+                                                                (egui::Color32::from_rgb(255, 214, 0), text.to_string())
+                                                            } else if text.starts_with("[Locuteur 4]") {
+                                                                (egui::Color32::from_rgb(0, 230, 118), text.to_string())
+                                                            } else if text.contains("🌐") {
+                                                                (egui::Color32::from_rgb(180, 220, 255), text.to_string())
+                                                            } else {
+                                                                (egui::Color32::from_rgb(160, 175, 195), text.to_string())
+                                                            }
+                                                        };
+
                                                         // Lignes passées
                                                         for past in all_history.iter().rev().take(6).rev() {
+                                                            let (color, content) = format_sub_line(past);
+                                                            let past_color = egui::Color32::from_rgba_unmultiplied(
+                                                                color.r(),
+                                                                color.g(),
+                                                                color.b(),
+                                                                160,
+                                                            );
                                                             ui.label(
-                                                                egui::RichText::new(past)
+                                                                egui::RichText::new(content)
                                                                     .size(13.5)
-                                                                    .color(egui::Color32::from_rgb(140, 155, 175)),
+                                                                    .color(past_color),
                                                             );
                                                             ui.add_space(2.0);
                                                         }
 
                                                         // Ligne active courante
                                                         if !active_text.is_empty() {
+                                                            let (color, content) = format_sub_line(&active_text);
                                                             ui.label(
-                                                                egui::RichText::new(&active_text)
+                                                                egui::RichText::new(content)
                                                                     .size(18.5)
-                                                                    .color(egui::Color32::from_rgb(255, 240, 140))
+                                                                    .color(if color == egui::Color32::from_rgb(160, 175, 195) { egui::Color32::from_rgb(255, 240, 140) } else { color })
                                                                     .strong(),
                                                             );
                                                         } else if all_history.is_empty() {
