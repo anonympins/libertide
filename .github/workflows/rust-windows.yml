@@ -15,7 +15,6 @@ env:
   RUSTFLAGS: "-C debuginfo=0"
   CMAKE_GENERATOR: "Ninja"
   CMAKE_POLICY_VERSION_MINIMUM: "3.30"
-  CMAKE_TOOLCHAIN_FILE: "${{ github.workspace }}\\cmake\\windows-toolchain.cmake"
   CC: "cl"
   CXX: "cl"
 
@@ -82,6 +81,20 @@ jobs:
       - name: Configure library search paths for Sherpa & ONNX Runtime
         shell: pwsh
         run: |
+          # Purger les caches CMake obsolètes restaurés depuis GitHub Cache (chemins MSVC cl.exe modifiés par GitHub)
+          Get-ChildItem -Path "C:\t" -Directory -Filter "*llama-cpp-sys-2*" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+          Get-ChildItem -Path "C:\t" -Filter "CMakeCache.txt" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force
+          Get-ChildItem -Path "C:\t" -Filter "build.ninja" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force
+          cargo clean -p llama-cpp-sys-2 --release --target x86_64-pc-windows-msvc 2>$null
+          cargo clean -p llama-cpp-sys-2 --target x86_64-pc-windows-msvc 2>$null
+          # Pré-créer les répertoires deps pour éviter que build.rs de sherpa-rs-sys ne panique lors du std::fs::copy
+          New-Item -ItemType Directory -Force -Path @(
+            "C:\t\x86_64-pc-windows-msvc\release\deps",
+            "C:\t\x86_64-pc-windows-msvc\debug\deps",
+            "C:\t\release\deps",
+            "C:\t\debug\deps"
+          ) | Out-Null
+
           $sherpaLib = Get-ChildItem -Path "$env:LOCALAPPDATA\sherpa-rs" -Recurse -Directory -Filter "lib" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $sherpaLib -or -not (Test-Path "$($sherpaLib.FullName)\cargs.lib")) {
             Write-Host "Sherpa libraries missing from runner. Rebuilding sherpa-rs-sys..."
@@ -89,8 +102,6 @@ jobs:
             cargo build --release -p sherpa-rs-sys --target x86_64-pc-windows-msvc
             $sherpaLib = Get-ChildItem -Path "$env:LOCALAPPDATA\sherpa-rs" -Recurse -Directory -Filter "lib" -ErrorAction SilentlyContinue | Select-Object -First 1
           }
-          # Nettoyer les artefacts CMake de llama-cpp-sys-2 pouvant contenir des chemins obsolètes vers cl.exe
-          cargo clean -p llama-cpp-sys-2 --target x86_64-pc-windows-msvc 2>$null
 
           if ($sherpaLib) {
             Write-Host "Sherpa libraries found in: $($sherpaLib.FullName)"
@@ -127,8 +138,11 @@ jobs:
       - name: Prune target directory before caching
         shell: pwsh
         run: |
-          Write-Host "Nettoyage des fichiers temporaires et symboles lourds (.pdb, .obj)..."
+          Write-Host "Nettoyage des fichiers temporaires, symboles lourds et caches CMake..."
           Get-ChildItem -Path "C:\t" -Include "*.pdb", "*.obj" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force
+          Get-ChildItem -Path "C:\t" -Filter "CMakeCache.txt" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force
+          Get-ChildItem -Path "C:\t" -Filter "build.ninja" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force
+          Get-ChildItem -Path "C:\t" -Directory -Filter "CMakeFiles" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
           Get-ChildItem -Path "C:\t" -Directory -Filter "incremental" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
           Write-Host "Nettoyage terminé."
 
