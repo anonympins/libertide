@@ -312,6 +312,10 @@ pub fn is_vlm_preset(preset: &ModelPreset) -> bool {
     VLM_PRESETS.iter().any(|p| p.id == preset.id)
 }
 
+pub fn is_small_model(preset: &ModelPreset) -> bool {
+    preset.id == "qwen-1.5b" || preset.id == "llama-1b"
+}
+
 pub fn get_active_preset() -> &'static ModelPreset {
     let preset_var = std::env::var("LOCAL_LLAMA_PRESET")
         .ok()
@@ -324,6 +328,33 @@ pub fn get_active_preset() -> &'static ModelPreset {
     }
     // Par défaut : Qwen 2.5 1.5B
     &TEXT_PRESETS[0]
+}
+
+pub fn tags_require_screen(tags: &[CommandTag]) -> bool {
+    tags.iter().any(|t| {
+        matches!(
+            t,
+            CommandTag::WebNavigateOrSearch
+                | CommandTag::WebpageAnalysis
+                | CommandTag::NavigateInWebpage
+                | CommandTag::ClickElementOrButton
+                | CommandTag::TextInputOrDictation
+                | CommandTag::AppManagement
+                | CommandTag::FocusWindow
+                | CommandTag::WindowManagementOrImmersion
+                | CommandTag::ScreenReadingOrSummary
+                | CommandTag::MotorAndSwitchAccess
+                | CommandTag::VisualAccessibility
+                | CommandTag::BrowserTabNavigation
+                | CommandTag::EcommerceAndShopping
+                | CommandTag::CodeAndDevelopment
+                | CommandTag::FileManagementAndExplorer
+                | CommandTag::VideoAndEntertainment
+                | CommandTag::LockedInAndEyeTracking
+                | CommandTag::TremorAndSpasticityFilter
+                | CommandTag::TravelAndFlightBooking
+        )
+    })
 }
 
 pub fn set_active_preset(preset_id: &str) {
@@ -479,12 +510,13 @@ impl ModelTier {
     }
 
     pub fn default_options(&self) -> LocalLlmOptions {
-        // Traitement identique entre local et remote
+        let preset = get_active_preset();
+        let is_small = is_small_model(preset);
         LocalLlmOptions {
-            minimal_mode: false,
-            active_window_only: false,
+            minimal_mode: is_small,
+            active_window_only: is_small,
             include_feedback: true,
-            include_history: true,
+            include_history: !is_small,
         }
     }
 }
@@ -523,7 +555,14 @@ impl Default for LocalLlmOptions {
 }
 
 pub fn get_local_llm_options() -> LocalLlmOptions {
-    LocalLlmOptions::default()
+    let preset = get_active_preset();
+    let is_small = is_small_model(preset);
+    LocalLlmOptions {
+        minimal_mode: is_small,
+        active_window_only: is_small,
+        include_feedback: true,
+        include_history: !is_small,
+    }
 }
 
 pub fn set_local_llm_options(_opts: LocalLlmOptions) {}
@@ -1087,6 +1126,8 @@ pub fn parse_tags_from_response(raw: &str) -> Vec<CommandTag> {
 /// pour qu'aucune capacité d'accessibilité ou d'exploration ne soit amputée.
 pub fn build_routed_system_prompt(tags: &[CommandTag], lang_name: &str) -> String {
     let mut effective_tags: Vec<CommandTag> = tags.to_vec();
+    let preset = get_active_preset();
+    let is_small = is_small_model(preset);
 
     // Règle transversale permanente : le compagnon bavard, joyeux, lucide et éthique est systématiquement actif
     if !effective_tags.contains(&CommandTag::ChattyAndEthicalCompanion) {
@@ -1166,7 +1207,7 @@ pub fn build_routed_system_prompt(tags: &[CommandTag], lang_name: &str) -> Strin
         if !effective_tags.contains(&CommandTag::ScreenReadingOrSummary) {
             effective_tags.push(CommandTag::ScreenReadingOrSummary);
         }
-        if !effective_tags.contains(&CommandTag::FloatingCardOrForm) {
+        if !is_small && !effective_tags.contains(&CommandTag::FloatingCardOrForm) {
             effective_tags.push(CommandTag::FloatingCardOrForm);
         }
     }
@@ -1271,6 +1312,13 @@ RÈGLE STRICTE SUR LA NARRATION (NON-RÉCITATION DES COMPOSANTS ET CONTRÔLES) :
 - Ne décris JAMAIS la structure de l'interface (ne dis jamais 'je vois un bouton...', 'la fenêtre comporte...', etc.).
 - Ta "narration" DOIT SE FOCALISER EXCLUSIVEMENT sur le contenu en lien direct avec la demande ou la suggestion de l'utilisateur. Les contrôles d'écran ne te servent qu'à renseigner l'action mécanique à exécuter dans "actions", ils ne doivent JAMAIS apparaître dans la réponse parlée.
 
+RÈGLE CRITIQUE D'ANTI-SATURATION & CONCENTRATION SUR LA DEMANDE :
+- L'écran peut contenir des dizaines ou centaines d'éléments. NE TE LAISSE PAS SATURER : IGNORE 90% des éléments secondaires !
+- NE CHERCHE JAMAIS à tout lire, énumérer ou analyser. Va droit au but en te focalisant à 100% sur l'intention de l'utilisateur.
+- Identifie UNIQUEMENT le bouton, lien ou champ spécifique qui permet de réaliser la tâche demandée.
+- Si la demande est une question générale, un salut ou ne requiert aucune interaction, NE TOUCHE À RIEN à l'écran et réponds directement avec "actions": [] et "next_passes": 0.
+- Si la demande est une analyse ou un résumé de l'écran ou d'une fenêtre : exprime directement ton analyse dans "narration" sans générer de carte volante ("show_floating_card") vide.
+
 - Tu dois également être bavard, joyeux, lucide et ethique !
 N'hesite pas a parler de toi à l'utilisateur, juste pour papoter.
 
@@ -1284,6 +1332,11 @@ Format JSON obligatoire :
   ],
   "quick_suggestions": ["...", "..."]
 }}
+
+RÈGLE ABSOLUE SUR L'ENVELOPPE JSON :
+- Ta réponse DOIT TOUJOURS COMMENCER PAR L'ACCOLADE '{{' ET SE TERMINER PAR L'ACCOLADE '}}'.
+- INTERDICTION FORMELLE d'écrire sans les accolades englobantes {{ ... }} et sans le champ 'narration'.
+- L'objet JSON doit contenir au minimum : "narration", "next_passes", "actions", "quick_suggestions".
 
 STRUCTURE STRICTE DU TABLEAU "actions" :
 - "actions" est TOUJOURS une liste d'OBJETS JSON. Chaque action DOIT être un objet ayant impérativement la clé "action".
@@ -1315,13 +1368,13 @@ RÉTRO-ANALYSE COGNITIVE & ARRÊT STRICT SUR OBJECTIF (SELF-CHECK DE COMPLÉTION
   -> Place TOUJOURS {{"action": "focus_window", "title": "Nom/titre de la fenêtre"}} EN PREMIÈRE ACTION dans le tableau "actions", avant toute autre action subséquente.
   -> Si la demande comporte des actions subséquentes dans cette fenêtre (saisie, clic, défilement, etc.), NE T'ARRÊTE PAS après le focus : enchaîne avec l'action demandée ou poursuis avec "next_passes" > 0 jusqu'à l'accomplissement total de la tâche.
 - SI LA CIBLE EST ATTEINTE (page de films/vidéos affichée, vidéo en lecture, formulaire validé, texte saisi, information demandée lisible à l'écran) :
-  -> ARRÊT STRICT ET IMMÉDIAT : renvoie impérativement "actions": [] et "next_passes": 0.
+  -> ARRÊT STRICT ET IMMÉDIAT : renvoie impérativement l'objet JSON complet avec "actions": [] et "next_passes": 0.
   -> INTERDICTION FORMELLE DE SUR-AGIR : Ne clique JAMAIS au hasard, ne défile pas indéfiniment et ne clique pas sur des recommandations secondaires, publicités ou menus inutiles une fois sur la destination demandée.
 - SI UNE ANALYSE OU RÉPONSE EST FOURNIE (synthèse de page, explication, lecture d'écran, fiche volante) :
-  -> ARRÊT STRICT ET IMMÉDIAT : renvoie impérativement "next_passes": 0 et "actions": [] (ou uniquement "show_floating_card").
+  -> ARRÊT STRICT ET IMMÉDIAT : renvoie impérativement l'objet JSON complet avec "next_passes": 0 et "actions": [] (ou uniquement "show_floating_card").
   -> UNE ANALYSE NE DOIT JAMAIS REDÉCLENCHER DE RÉFLEXION NI DE PASSE SUPPLÉMENTAIRE.
 - SI LA CIBLE N'EST PAS ENCORE ATTEINTE (page intermédiaire, moteur de recherche en attente de clic, cookies ou popups bloquantes) :
-  -> Fournis l'unique action concrète suivante dans "actions" avec "next_passes" > 0.
+  -> Fournis l'unique action concrète suivante dans "actions" avec "next_passes" > 0 à l'intérieur de l'objet JSON.
 
 Règles de syntaxe JSON strictes :
 - N'échappe JAMAIS les apostrophes simples : écris "d'accueil", "l'écran", "c'est" et SURTOUT PAS "d\'accueil" ou "l\'écran".
@@ -1334,12 +1387,43 @@ Règles de syntaxe JSON strictes :
     );
     prompt.push_str(&header);
 
-    prompt.push_str("Ne te focalise surtout pas sur le grand nombre d'elements analysés, mais sur la suite : ");
+    prompt.push_str("\nCONSIGNE D'ACTION : Ne te focalise surtout pas sur le grand nombre d'éléments analysés à l'écran, isole uniquement l'élément pertinent pour la demande :\n");
 
     // 2. Injection des règles sémantiques ciblées par module
     for tag in &effective_tags {
         match tag {
             CommandTag::WebNavigateOrSearch => {
+                prompt.push_str(r#"
+Règles NAVIGATION WEB & RECHERCHE :
+- EXTRACTION DE L'INTENTION RÉELLE de l'utilisateur
+- POINT DE DÉPART OBLIGATOIRE SUR GOOGLE SEARCH : Pour toute recherche d'information, météo (ex: météo Paris, prévisions), actualité ou service, le point de départ DOIT TOUJOURS ÊTRE une recherche Google via "navigate_to_url" ("https://www.google.com/search?q=mots+cles+du+sujet+reel"). INTERDICTION FORMELLE d'aller directement sur une URL présumée ou codée en dur (INTERDIT d'ouvrir directement meteofrance.com ou un site arbitraire : passe obligatoirement par Google Search d'abord).
+- RECHERCHE IMMÉDIATE SANS CONSEIL : Si l'utilisateur demande une recherche (météo, film, vidéo, information), INTERDICTION de répondre par du texte passif. Émets IMMÉDIATEMENT {"action": "navigate_to_url", "url": "https://www.google.com/search?q=...", "target": "new_tab"} avec "next_passes": 5.
+- INTERDICTION de fermer la fenêtre active (pas de "close_app" ni clic croix) pour chercher sur le web.
+- Accepte systématiquement les bannières cookies Google ("Tout accepter").
+- Clique directement sur le résultat textuel du sujet demandé parmi la liste des sites proposés par Google, JAMAIS sur les filtres/onglets génériques ("Actualités", "Vidéos", "Images", "Outils").
+- Pour revenir en arrière : "navigate_back".
+"#);
+            }
+            CommandTag::WebpageAnalysis => {
+                if is_small {
+                    prompt.push_str(r#"
+Règles ANALYSE DE PAGE WEB (TAG WEBPAGE_ANALYSIS) :
+- L'utilisateur demande d'analyser, synthétiser ou expliquer la page ou le site affiché à l'écran.
+- Rédige l'intégralité de ton analyse directement dans "narration" (2 à 4 phrases claires et concises).
+- INTERDICTION FORMELLE d'ouvrir une fenêtre volante ("show_floating_card") : délivre l'analyse uniquement dans "narration" avec "actions": [] et "next_passes": 0.
+- RÈGLE D'ARRÊT STRICT : Dès que l'analyse est rédigée dans "narration", renvoie STRICTEMENT "actions": [] et "next_passes": 0.
+"#);
+                } else {
+                    prompt.push_str(r#"
+Règles ANALYSE DE PAGE WEB (TAG WEBPAGE_ANALYSIS) :
+- L'utilisateur demande d'analyser, synthétiser, expliquer ou extraire le contenu d'une page web ou d'un site affiché à l'écran.
+- Tu DOIS exploiter en priorité les sections [État actuel de l'écran] et particulièrement [Page web - Corps textuel et résultats rendus] pour fournir une synthèse riche, structurée et précise.
+- Si le contenu est long ou structuré, projette une fenêtre volante Markdown via "show_floating_card" (card_type: "markdown", id: "analyse_page", title: "Analyse de la page", data: {"text": "..."}).
+- RÈGLE D'ARRÊT STRICT : Dès que l'analyse est rédigée dans "narration" ou projetée dans "show_floating_card", la tâche est TERMINÉE. Renvoie IMPÉRATIVEMENT "next_passes": 0 et "actions": [] (ou uniquement le "show_floating_card"). INTERDICTION FORMELLE de relancer une passe ("next_passes": 0 obligatoire) : une analyse ne doit JAMAIS redéclencher de réflexion.
+- N'utilise "scroll" avec "next_passes": 1 QUE si l'information recherchée est manifestement tronquée et absente de l'écran actuel.
+"#);
+                }
+            }
                 prompt.push_str(r#"
 Règles NAVIGATION WEB & RECHERCHE :
 - EXTRACTION DE L'INTENTION RÉELLE de l'utilisateur
@@ -1452,6 +1536,14 @@ Règles FENÊTRES & IMMERSION :
 "#);
             }
             CommandTag::ScreenReadingOrSummary => {
+                if is_small {
+                    prompt.push_str(r#"
+Règles LECTURE & RÉSUMÉ D'ÉCRAN :
+- Résume clairement ce que fait la fenêtre en cours ou le contenu de l'écran directement dans le champ "narration".
+- INTERDICTION FORMELLE d'ouvrir une fenêtre volante ("show_floating_card") : formule ton résumé directement dans "narration" avec "actions": [] et "next_passes": 0.
+- RÈGLE D'ARRÊT STRICT : Dès que le résumé est donné dans "narration", l'objectif est atteint : termine impérativement avec "actions": [], "next_passes": 0.
+"#);
+                } else {
                 prompt.push_str(r#"
 Règles LECTURE & RÉSUMÉ D'ÉCRAN :
 - Restitution riche et descriptive : décris l'organisation de l'écran, les sections visibles et le contenu textuel essentiel pour offrir une autonomie totale aux personnes malvoyantes.
@@ -1460,6 +1552,7 @@ Règles LECTURE & RÉSUMÉ D'ÉCRAN :
 - RÈGLE D'ARRÊT STRICT : Dès que la lecture ou le résumé est transmis dans "narration" ou projeté via "show_floating_card", l'objectif est atteint : termine impérativement avec "actions": [], "next_passes": 0.
 - Défilement : "scroll" ("direction": "down"|"up"|"top"|"bottom", amount: 1).
 "#);
+                }
             }
             CommandTag::ScheduleTask => {
                 prompt.push_str(r#"
@@ -1762,7 +1855,9 @@ Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
                 prompt.push_str("- {\"action\": \"navigate_forward\"}\n");
             }
             CommandTag::WebpageAnalysis => {
-                prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"analyse_page\", \"title\": \"Analyse\", \"card_type\": \"markdown\", \"data\": {\"text\": \"...\"}}\n");
+                if !is_small {
+                    prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"analyse_page\", \"title\": \"Analyse\", \"card_type\": \"markdown\", \"data\": {\"text\": \"...\"}}\n");
+                }
                 prompt.push_str("- {\"action\": \"scroll\", \"direction\": \"down\"|\"up\", \"amount\": 1}\n");
             }
             CommandTag::NavigateInWebpage => {
@@ -2291,6 +2386,92 @@ fn repair_narration_field(json_str: &str) -> String {
     result
 }
 
+/// Met entre guillemets les clés standard si le modèle les a sorties brutes sans guillemets
+fn quote_unquoted_keys(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 32);
+    for line in s.lines() {
+        let trimmed_line = line.trim();
+        let mut line_to_add = line.to_string();
+        for key in &[
+            "narration", "next_passes", "actions", "quick_suggestions",
+            "action", "button_name", "target_name", "window",
+            "command", "title", "url", "delay_seconds", "prompt", "label",
+        ] {
+            let unquoted_colon = format!("{}:", key);
+            let unquoted_space = format!("{} :", key);
+            let quoted = format!("\"{}\":", key);
+            if (trimmed_line.starts_with(&unquoted_colon) || trimmed_line.starts_with(&unquoted_space))
+                && !trimmed_line.starts_with(&quoted)
+            {
+                if let Some(pos) = line_to_add.find(key) {
+                    if let Some(colon_offset) = line_to_add[pos + key.len()..].find(':') {
+                        let after_colon = &line_to_add[pos + key.len() + colon_offset + 1..];
+                        let indent = &line_to_add[..pos];
+                        line_to_add = format!("{}{}{}", indent, quoted, after_colon);
+                    }
+                }
+            }
+        }
+        result.push_str(&line_to_add);
+        result.push('\n');
+    }
+    result
+}
+
+/// Insère les virgules manquantes entre les lignes du JSON généré
+fn fix_missing_commas(s: &str) -> String {
+    let mut lines: Vec<String> = s.lines().map(|l| l.to_string()).collect();
+    let num_lines = lines.len();
+    for i in 0..num_lines.saturating_sub(1) {
+        let trimmed_curr = lines[i].trim().to_string();
+        let trimmed_next = lines[i + 1].trim().to_string();
+        if trimmed_curr.is_empty() || trimmed_next.is_empty() {
+            continue;
+        }
+        let ends_val = trimmed_curr.ends_with('"')
+            || trimmed_curr.ends_with(']')
+            || trimmed_curr.ends_with('}')
+            || trimmed_curr.ends_with(|c: char| c.is_ascii_digit())
+            || trimmed_curr.ends_with("true")
+            || trimmed_curr.ends_with("false");
+        let next_is_field = trimmed_next.starts_with('"');
+
+        if ends_val && next_is_field && !trimmed_curr.ends_with(',') && !trimmed_curr.ends_with('{') {
+            lines[i].push(',');
+        }
+    }
+    lines.join("\n")
+}
+
+fn extract_actions_fallback(s: &str) -> serde_json::Value {
+    if let Some(pos) = s.find("\"actions\"").or_else(|| s.find("actions")) {
+        let after = &s[pos..];
+        if let Some(open) = after.find('[') {
+            if let Some(close) = after[open..].find(']') {
+                let inner = &after[open..=open + close];
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(inner) {
+                    return val;
+                }
+            }
+        }
+    }
+    serde_json::json!([])
+}
+
+fn extract_next_passes_fallback(s: &str) -> i64 {
+    if let Some(pos) = s.find("\"next_passes\"").or_else(|| s.find("next_passes")) {
+        let after = &s[pos..];
+        if let Some(colon) = after.find(':') {
+            let after_colon = after[colon + 1..].trim();
+            let digits: String = after_colon.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = digits.parse::<i64>() {
+                return n.min(5);
+            }
+        }
+    }
+    0
+}
+
 /// Nettoie et fiabilise le JSON généré par le LLM local avant désérialisation
 fn sanitize_json_output(raw: &str) -> String {
     let trimmed = raw.trim();
@@ -2333,62 +2514,139 @@ fn sanitize_json_output(raw: &str) -> String {
         cleaned.push(c);
     }
 
-    let mut repaired = repair_actions_field(&cleaned);
+    // 1. Quoter les clés orphelines (ex: actions: [] -> "actions": [])
+    let with_quoted_keys = quote_unquoted_keys(&cleaned);
+
+    // 2. Réparer les virgules manquantes entre lignes
+    let with_commas = fix_missing_commas(&with_quoted_keys);
+
+    // 3. Encapsuler dans { ... } si le modèle a omis les accolades
+    let trimmed_prep = with_commas.trim();
+    let mut framed = if !trimmed_prep.starts_with('{') {
+        format!("{{\n{}\n}}", trimmed_prep)
+    } else if !trimmed_prep.ends_with('}') {
+        format!("{}}}", trimmed_prep)
+    } else {
+        trimmed_prep.to_string()
+    };
+
+    let mut repaired = repair_actions_field(&framed);
     if serde_json::from_str::<serde_json::Value>(&repaired).is_err() {
-        let narr_fixed = repair_narration_field(&cleaned);
+        let narr_fixed = repair_narration_field(&framed);
         repaired = repair_actions_field(&narr_fixed);
     }
 
-    // Garde-fou programmatique : si "actions" est vide ([] ou absent), forcer "next_passes": 0
+    // 4. Analyse et injection des valeurs obligatoires dans l'objet JSON
     if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&repaired) {
         if let Some(obj) = val.as_object_mut() {
-            let actions_arr = obj.get("actions").and_then(|a| a.as_array());
-            let actions_empty = actions_arr.map_or(true, |arr| arr.is_empty());
+            // S'assurer que les 4 clés canoniques existent
+            obj.entry("narration".to_string()).or_insert_with(|| serde_json::json!(""));
+            obj.entry("actions".to_string()).or_insert_with(|| serde_json::json!([]));
+            obj.entry("next_passes".to_string()).or_insert_with(|| serde_json::json!(0));
+            obj.entry("quick_suggestions".to_string()).or_insert_with(|| serde_json::json!([]));
 
-            let has_motor_action = actions_arr.map_or(false, |arr| {
-                arr.iter().any(|act| {
-                    act.get("action").and_then(|v| v.as_str()).map_or(false, |a| {
-                        matches!(
-                            a,
-                            "click_element"
-                                | "click_button"
-                                | "click_numbered_target"
-                                | "navigate_to_url"
-                                | "open_browser"
-                                | "open_app"
-                                | "close_app"
-                                | "write_text"
-                                | "replace_field_text"
-                                | "focus_window"
-                                | "open_search_browser"
-                                | "run_command"
-                                | "schedule_prompt"
-                        )
-                    })
-                })
-            });
+            // Filtrage des floating cards vides ou sans contenu textuel exploitable
+            if let Some(actions_arr) = obj.get_mut("actions").and_then(|a| a.as_array_mut()) {
+                let is_small = is_small_model(get_active_preset());
+                actions_arr.retain(|act| {
+                    if let Some(action_name) = act.get("action").and_then(|v| v.as_str()) {
+                        if action_name == "show_floating_card" {
+                            let card_type = act.get("card_type").and_then(|c| c.as_str()).unwrap_or("markdown");
+                            if card_type == "markdown" {
+                                let text = act.get("data")
+                                    .and_then(|d| d.get("text"))
+                                    .and_then(|t| t.as_str())
+                                    .map(str::trim)
+                                    .unwrap_or("");
+                                let min_len = if is_small { 30 } else { 10 };
+                                if text.len() < min_len || text == "..." {
+                                    return false;
+                                }
+                            } else if let Some(data) = act.get("data") {
+                                if let Some(map) = data.as_object() {
+                                    if map.is_empty() && card_type != "instrument" {
+                                        return false;
+                                    }
+                                } else {
+                                    return false;
+                                }
+                            } else {
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                });
+            }
 
-            let only_passive_actions = actions_arr.map_or(false, |arr| {
-                !arr.is_empty()
-                    && arr.iter().all(|act| {
+            let narr_text = obj.get("narration").and_then(|n| n.as_str()).unwrap_or("");
+            let narr_lower = narr_text.to_lowercase();
+            let is_clarification_or_apology = narr_text.is_empty()
+                || narr_lower.contains("pas compris")
+                || narr_lower.contains("pas bien compris")
+                || narr_lower.contains("pas saisi")
+                || narr_lower.contains("pas bien saisi")
+                || narr_lower.contains("préciser")
+                || narr_lower.contains("preciser")
+                || narr_lower.contains("précisez")
+                || narr_lower.contains("precise")
+                || narr_lower.contains("clarifier")
+                || narr_lower.contains("clarifiez")
+                || narr_lower.contains("répéter")
+                || narr_lower.contains("repeter")
+                || narr_lower.contains("que voulez-vous")
+                || narr_lower.contains("que souhaitez-vous")
+                || narr_lower.contains("désolé")
+                || narr_lower.contains("desole")
+                || narr_lower.contains("pardon");
+
+            if is_clarification_or_apology {
+                obj.insert("actions".to_string(), serde_json::json!([]));
+                obj.insert("next_passes".to_string(), serde_json::json!(0));
+            } else {
+                let actions_arr = obj.get("actions").and_then(|a| a.as_array());
+                let actions_empty = actions_arr.map_or(true, |arr| arr.is_empty());
+
+                let has_motor_action = actions_arr.map_or(false, |arr| {
+                    arr.iter().any(|act| {
                         act.get("action").and_then(|v| v.as_str()).map_or(false, |a| {
-                            matches!(a, "show_floating_card" | "close_floating_card" | "live_subtitles")
+                            matches!(
+                                a,
+                                "click_element"
+                                    | "click_button"
+                                    | "click_numbered_target"
+                                    | "navigate_to_url"
+                                    | "open_browser"
+                                    | "open_app"
+                                    | "close_app"
+                                    | "write_text"
+                                    | "replace_field_text"
+                                    | "focus_window"
+                                    | "open_search_browser"
+                                    | "run_command"
+                                    | "schedule_prompt"
+                            )
                         })
                     })
-            });
+                });
 
-            let is_long_analysis = obj.get("narration")
-                .and_then(|n| n.as_str())
-                .map_or(false, |text| text.trim().len() >= 100);
+                let only_passive_actions = actions_arr.map_or(false, |arr| {
+                    !arr.is_empty()
+                        && arr.iter().all(|act| {
+                            act.get("action").and_then(|v| v.as_str()).map_or(false, |a| {
+                                matches!(a, "show_floating_card" | "close_floating_card" | "live_subtitles")
+                            })
+                        })
+                });
 
-            if actions_empty || only_passive_actions || (is_long_analysis && !has_motor_action) {
-                obj.insert("next_passes".to_string(), serde_json::json!(0));
-                if !obj.contains_key("actions") {
-                    obj.insert("actions".to_string(), serde_json::json!([]));
-                }
-            } else if let Some(np) = obj.get("next_passes").and_then(|p| p.as_i64()) {
-                if np > 5 {
-                    obj.insert("next_passes".to_string(), serde_json::json!(5));
+                let is_long_analysis = narr_text.trim().len() >= 100;
+
+                if actions_empty || only_passive_actions || (is_long_analysis && !has_motor_action) {
+                    obj.insert("next_passes".to_string(), serde_json::json!(0));
+                } else if let Some(np) = obj.get("next_passes").and_then(|p| p.as_i64()) {
+                    if np > 5 {
+                        obj.insert("next_passes".to_string(), serde_json::json!(5));
+                    }
                 }
             }
             if let Ok(serialized) = serde_json::to_string(obj) {
@@ -2396,25 +2654,21 @@ fn sanitize_json_output(raw: &str) -> String {
             }
         }
     } else {
-        // Fallback textuel de sécurité si serde_json n'arrive pas à parser l'objet complet
-        let actions_empty = repaired.contains("\"actions\": []")
-            || repaired.contains("\"actions\":[]")
-            || repaired.contains("\"actions\": [ ]")
-            || !repaired.contains("\"actions\"");
-        if actions_empty {
-            if let Some(pos) = repaired.find("\"next_passes\"") {
-                if let Some(colon) = repaired[pos..].find(':') {
-                    let start = pos + colon + 1;
-                    let num_end = repaired[start..].find(|c: char| !c.is_ascii_digit() && !c.is_whitespace()).unwrap_or(0);
-                    if num_end > 0 {
-                        repaired.replace_range(start..start + num_end, " 0");
-                    }
-                }
-            }
+        // Fallback ultime : reconstitution garantie d'un objet JSON canonique
+        let mut obj = serde_json::Map::new();
+        obj.insert("narration".to_string(), serde_json::Value::String(String::new()));
+        let actions = extract_actions_fallback(&cleaned);
+        obj.insert("actions".to_string(), actions);
+        let next_passes = extract_next_passes_fallback(&cleaned);
+        obj.insert("next_passes".to_string(), serde_json::json!(next_passes));
+        obj.insert("quick_suggestions".to_string(), serde_json::json!([]));
+
+        if let Ok(serialized) = serde_json::to_string(&obj) {
+            return serialized;
         }
     }
 
-    repaired
+    "{\"narration\":\"\",\"actions\":[],\"next_passes\":0,\"quick_suggestions\":[]}".to_string()
 }
 
 /// Tronque une chaîne UTF-8 sans couper au milieu d'un point de code multi-octets
@@ -2427,6 +2681,35 @@ fn safe_truncate_str(s: &str, max_bytes: usize) -> &str {
         boundary -= 1;
     }
     &s[..boundary]
+}
+
+/// Allège drastiquement le contexte d'écran pour les petits modèles (1B / 1.5B) afin d'éviter la saturation cognitive.
+pub fn lighten_screen_context_for_small_model(content: &str) -> String {
+    let mut result = Vec::new();
+    let mut interactive_count = 0;
+    const MAX_INTERACTIVE_ITEMS: usize = 25;
+    let mut truncated_interactive = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let is_interactive_item = trimmed.starts_with("- #")
+            || trimmed.starts_with('#')
+            || trimmed.starts_with("[#")
+            || (trimmed.starts_with('-') && (trimmed.contains("[bouton]") || trimmed.contains("[lien]") || trimmed.contains("[button]") || trimmed.contains("[link]")));
+
+        if is_interactive_item {
+            interactive_count += 1;
+            if interactive_count <= MAX_INTERACTIVE_ITEMS {
+                result.push(line);
+            } else if !truncated_interactive {
+                result.push("  ... (autres contrôles secondaires omis pour préserver l'attention du modèle)");
+                truncated_interactive = true;
+            }
+        } else {
+            result.push(line);
+        }
+    }
+    result.join("\n")
 }
 
 /// Détecte si le message correspond à des données techniques JSON (ex: analyse de page/DOM)
@@ -2494,6 +2777,13 @@ pub fn extract_clean_user_message(content: &str) -> &str {
         };
         if !res.is_empty() {
             return res;
+        }
+    }
+
+    if let Some(pos) = trimmed.find("[État actuel de l'écran]") {
+        let before = trimmed[..pos].trim();
+        if !before.is_empty() {
+            return before;
         }
     }
 
@@ -3178,7 +3468,7 @@ impl LocalLlamaEngine {
     pub fn classify_intent(&self, user_query: &str, screen_hint: Option<&str>) -> Vec<CommandTag> {
         let clean = user_query.trim();
         if clean.is_empty() {
-            return vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch];
+            return vec![CommandTag::ClarificationRequired];
         }
 
         let mut fast_tags = fast_classify_intent(clean, screen_hint);
@@ -3190,7 +3480,8 @@ impl LocalLlamaEngine {
         let preset = get_active_preset();
         let tags_list = all_command_tags_prompt_list();
         let screen_info = if let Some(hint) = screen_hint.filter(|h| !h.trim().is_empty()) {
-            let truncated = safe_truncate_str(hint.trim(), 500);
+            let max_hint_len = if is_small_model(preset) { 250 } else { 500 };
+            let truncated = safe_truncate_str(hint.trim(), max_hint_len);
             format!("\n[Contexte d'écran actuel / Fenêtre active] :\n{}\n", truncated)
         } else {
             String::new()
@@ -3233,7 +3524,7 @@ impl LocalLlamaEngine {
 pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<CommandTag> {
     let clean = query.trim();
     if clean.is_empty() {
-        vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch]
+        vec![CommandTag::ClarificationRequired]
     } else {
         let fast = fast_classify_intent(clean, screen_hint);
         if !fast.is_empty() {
@@ -3243,7 +3534,7 @@ pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<Command
             if let Some(ref engine) = *lock {
                 let tags = engine.classify_intent(clean, screen_hint);
                 if tags.is_empty() {
-                    vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch]
+                    vec![CommandTag::ClarificationRequired]
                 } else {
                     tags
                 }
@@ -3271,7 +3562,7 @@ pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<Command
             } else if clean.ends_with('?') {
                 vec![CommandTag::KnowledgeAndQuestions]
             } else {
-                vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch]
+                vec![CommandTag::ClarificationRequired]
             }
         }
     }
@@ -3367,6 +3658,7 @@ pub fn run_local_llama_completion(
     }
 
     let preset = get_active_preset();
+    let is_small = is_small_model(preset);
 
     // Identifier le message utilisateur le plus récent (incluant éléments interactifs et consignes)
     let last_user_msg = messages
@@ -3375,9 +3667,6 @@ pub fn run_local_llama_completion(
         .find(|m| m.role == "user")
         .map(|m| m.content.trim())
         .unwrap_or("");
-
-    // Conserver le message utilisateur complet avec [État actuel de l'écran] pour la consigne courante
-    let clean_query = last_user_msg;
 
     // Remonte l'historique utilisateur pour trouver la consigne réelle non-vide
     let clean_goal = messages
@@ -3388,20 +3677,24 @@ pub fn run_local_llama_completion(
         .find(|msg| !msg.is_empty())
         .unwrap_or(last_user_msg);
 
+    let preliminary_fast = fast_classify_intent(clean_goal, Some(last_user_msg));
+
     // Résolution d'intention sans réentrance de verrou
     let tags = {
-        let fast = fast_classify_intent(clean_goal, Some(clean_query));
-        if !fast.is_empty() {
-            fast
+        if !preliminary_fast.is_empty() {
+            preliminary_fast
         } else {
-            let classified = engine.classify_intent(clean_goal, Some(clean_query));
+            let classified = engine.classify_intent(clean_goal, Some(last_user_msg));
             if classified.is_empty() {
-                vec![CommandTag::GeneralChitChat, CommandTag::WebNavigateOrSearch]
+                vec![CommandTag::ClarificationRequired]
             } else {
                 classified
             }
         }
     };
+
+    let needs_screen = tags_require_screen(&tags);
+    let clean_query = if needs_screen { last_user_msg } else { clean_goal };
 
     // Routage de commande sémantique : sélection et injection modulaire des règles
     let is_specialized_task = system_prompt.contains("Tu es un synthétiseur")
@@ -3420,8 +3713,8 @@ pub fn run_local_llama_completion(
     // Prise en compte intégrale de l'historique de conversation (identique au remote)
     let candidate_messages: Vec<&ChatMessage> = messages.iter().collect();
 
-    // Fenêtre de contexte standard
-    let max_history_msgs = 6;
+    // Fenêtre de contexte standard (allégée pour les petits modèles)
+    let max_history_msgs = if is_small { 3 } else { 6 };
     let start_idx = candidate_messages.len().saturating_sub(max_history_msgs);
     let mut recent_messages: Vec<ChatMessage> = candidate_messages[start_idx..].iter().map(|&m| m.clone()).collect();
 
@@ -3448,8 +3741,8 @@ pub fn run_local_llama_completion(
         .rposition(|m| m.role == "user");
 
     let mut formatted_prompt = String::new();
-    let user_token_budget = 6000;
-    let query_token_budget = 6000;
+    let user_token_budget = if is_small { 2500 } else { 6000 };
+    let query_token_budget = if is_small { 2500 } else { 6000 };
 
     match preset.family {
         ModelFamily::Llama3 => {
@@ -3459,7 +3752,12 @@ pub fn run_local_llama_completion(
 
             if recent_messages.is_empty() {
                 formatted_prompt.push_str("<|start_header_id|>user<|end_header_id|>\n\n");
-                let safe_query = safe_truncate_str(clean_query, query_token_budget);
+                let query_str = if is_small && needs_screen {
+                    lighten_screen_context_for_small_model(clean_query)
+                } else {
+                    clean_query.to_string()
+                };
+                let safe_query = safe_truncate_str(&query_str, query_token_budget);
                 formatted_prompt.push_str(safe_query);
                 formatted_prompt.push_str("<|eot_id|>");
             } else {
@@ -3471,18 +3769,28 @@ pub fn run_local_llama_completion(
                         formatted_prompt.push_str("<|eot_id|>");
                     } else {
                         formatted_prompt.push_str("<|start_header_id|>user<|end_header_id|>\n\n");
-                        let user_text = if Some(idx) == last_user_in_recent {
+                        let raw_user_text = if Some(idx) == last_user_in_recent && needs_screen {
                             msg.content.trim()
                         } else {
                             extract_clean_user_message(&msg.content)
                         };
-                        let safe_user = safe_truncate_str(user_text, user_token_budget);
+                        let user_text = if is_small && needs_screen {
+                            lighten_screen_context_for_small_model(raw_user_text)
+                        } else {
+                            raw_user_text.to_string()
+                        };
+                        let safe_user = safe_truncate_str(&user_text, user_token_budget);
                         formatted_prompt.push_str(safe_user);
                         formatted_prompt.push_str("<|eot_id|>");
                     }
                 }
                 if recent_messages.last().map(|m| m.role.as_str()) != Some("user") {
-                    let safe_query = safe_truncate_str(clean_query, query_token_budget);
+                    let query_str = if is_small && needs_screen {
+                        lighten_screen_context_for_small_model(clean_query)
+                    } else {
+                        clean_query.to_string()
+                    };
+                    let safe_query = safe_truncate_str(&query_str, query_token_budget);
                     if !safe_query.is_empty() {
                         formatted_prompt.push_str("<|start_header_id|>user<|end_header_id|>\n\n");
                         formatted_prompt.push_str(safe_query);
@@ -3500,7 +3808,12 @@ pub fn run_local_llama_completion(
 
             if recent_messages.is_empty() {
                 formatted_prompt.push_str("<|im_start|>user\n");
-                let safe_query = safe_truncate_str(clean_query, query_token_budget);
+                let query_str = if is_small && needs_screen {
+                    lighten_screen_context_for_small_model(clean_query)
+                } else {
+                    clean_query.to_string()
+                };
+                let safe_query = safe_truncate_str(&query_str, query_token_budget);
                 formatted_prompt.push_str(safe_query);
                 formatted_prompt.push_str("<|im_end|>\n");
             } else {
@@ -3512,18 +3825,28 @@ pub fn run_local_llama_completion(
                         formatted_prompt.push_str("<|im_end|>\n");
                     } else {
                         formatted_prompt.push_str("<|im_start|>user\n");
-                        let user_text = if Some(idx) == last_user_in_recent {
+                        let raw_user_text = if Some(idx) == last_user_in_recent && needs_screen {
                             msg.content.trim()
                         } else {
                             extract_clean_user_message(&msg.content)
                         };
-                        let safe_user = safe_truncate_str(user_text, user_token_budget);
+                        let user_text = if is_small && needs_screen {
+                            lighten_screen_context_for_small_model(raw_user_text)
+                        } else {
+                            raw_user_text.to_string()
+                        };
+                        let safe_user = safe_truncate_str(&user_text, user_token_budget);
                         formatted_prompt.push_str(safe_user);
                         formatted_prompt.push_str("<|im_end|>\n");
                     }
                 }
                 if recent_messages.last().map(|m| m.role.as_str()) != Some("user") {
-                    let safe_query = safe_truncate_str(clean_query, query_token_budget);
+                    let query_str = if is_small && needs_screen {
+                        lighten_screen_context_for_small_model(clean_query)
+                    } else {
+                        clean_query.to_string()
+                    };
+                    let safe_query = safe_truncate_str(&query_str, query_token_budget);
                     if !safe_query.is_empty() {
                         formatted_prompt.push_str("<|im_start|>user\n");
                         formatted_prompt.push_str(safe_query);
