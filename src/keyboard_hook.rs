@@ -1,3 +1,9 @@
+// ============================================================================
+// Libertide - Module Keyboard Hook & Passerelle Contacteur (Partie 1/2)
+// ============================================================================
+
+use eframe::egui;
+use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::Mutex;
@@ -26,14 +32,25 @@ use windows::Win32::UI::WindowsAndMessaging::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct VIRTUAL_KEY(pub u16);
 
+// --- Suivi d'état des modificateurs clavier (Windows) ---
 #[cfg(windows)]
-static TRACKED_CTRL: AtomicBool = AtomicBool::new(false);
+pub static TRACKED_CTRL: AtomicBool = AtomicBool::new(false);
 #[cfg(windows)]
-static TRACKED_SHIFT: AtomicBool = AtomicBool::new(false);
+pub static TRACKED_SHIFT: AtomicBool = AtomicBool::new(false);
 #[cfg(windows)]
-static TRACKED_ALT: AtomicBool = AtomicBool::new(false);
+pub static TRACKED_ALT: AtomicBool = AtomicBool::new(false);
 #[cfg(windows)]
-static TRACKED_WIN: AtomicBool = AtomicBool::new(false);
+pub static TRACKED_WIN: AtomicBool = AtomicBool::new(false);
+
+// --- Suivi d'état des modificateurs clavier (Linux / macOS) ---
+#[cfg(not(windows))]
+pub static RDEV_TRACKED_CTRL: AtomicBool = AtomicBool::new(false);
+#[cfg(not(windows))]
+pub static RDEV_TRACKED_SHIFT: AtomicBool = AtomicBool::new(false);
+#[cfg(not(windows))]
+pub static RDEV_TRACKED_ALT: AtomicBool = AtomicBool::new(false);
+#[cfg(not(windows))]
+pub static RDEV_TRACKED_META: AtomicBool = AtomicBool::new(false);
 
 pub static SWITCH_HOOK_ENABLED: AtomicBool = AtomicBool::new(false);
 pub static IS_EXTERNAL_TEXT_INPUT_FOCUSED: AtomicBool = AtomicBool::new(false);
@@ -42,17 +59,174 @@ pub static NUMBER_KEY_QUEUE: Mutex<Vec<char>> = Mutex::new(Vec::new());
 pub static SWITCH_LONG_PRESS_MS: AtomicU64 = AtomicU64::new(1100);
 pub static SWITCH_DEBOUNCE_MS: AtomicU64 = AtomicU64::new(180);
 
+// Masque de touche de base et drapeaux de bits pour les touches modificatrices
 pub const VK_KEY_MASK: u32 = 0x0000FFFF;
 pub const MOD_ALT: u32 = 0x00010000;
 pub const MOD_CTRL: u32 = 0x00020000;
 pub const MOD_SHIFT: u32 = 0x00040000;
 pub const MOD_WIN: u32 = 0x00080000;
+pub const MOD_MASK: u32 = MOD_CTRL | MOD_ALT | MOD_SHIFT | MOD_WIN;
 
 pub static KEY_BIND_SWITCH: AtomicU32 = AtomicU32::new(0x76);    // F7 (Par défaut : Contacteur / Survol)
 pub static KEY_BIND_DICTATION: AtomicU32 = AtomicU32::new(0x77); // F8 (Par défaut : Dictée vocale)
 pub static KEY_BIND_VOICE: AtomicU32 = AtomicU32::new(0x78);     // F9 (Par défaut : Synthèse vocale TTS)
-pub static KEY_BIND_CLEAR: AtomicU32 = AtomicU32::new(0x73);     // F4 (Par défaut : Vider / Effacer)
-pub static REBIND_LISTENING_TARGET: Mutex<Option<&'static str>> = Mutex::new(None);
+pub static KEY_BIND_CLEAR: AtomicU32 = AtomicU32::new(0x73);     // F4 (Par défaut : Vider le contexte)
+pub static KEY_BIND_SELECT: AtomicU32 = AtomicU32::new(0x20);    // Espace (Par défaut : Sélection Contacteur)
+pub static KEY_BIND_NEXT: AtomicU32 = AtomicU32::new(0x27);      // Flèche Droite (Par défaut : Suivant)
+pub static KEY_BIND_PREV: AtomicU32 = AtomicU32::new(0x25);      // Flèche Gauche (Par défaut : Précédent)
+pub static KEY_BIND_BACK: AtomicU32 = AtomicU32::new(0x08);      // Retour Arrière (Par défaut : Retour)
+pub static KEY_BIND_GAZE_CLICK: AtomicU32 = AtomicU32::new(0x0D);// Entrée (Par défaut : Clic regard)
+pub static KEY_BIND_STOP_SPEECH: AtomicU32 = AtomicU32::new(0x13); // Pause/Break (Par défaut : Arrêter la voix TTS)
+pub static KEY_BIND_EMERGENCY: AtomicU32 = AtomicU32::new(0x1B); // Échap (Par défaut : Arrêt d'urgence)
+pub static REBIND_LISTENING_TARGET: Mutex<Option<String>> = Mutex::new(None);
+
+/// Règle de remappage d'une touche physique quelconque vers une touche ou combinaison simulée
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomKeyRemap {
+    pub from_key: u32,
+    pub to_key: u32,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+pub static CUSTOM_KEY_REMAPS: Mutex<Vec<CustomKeyRemap>> = Mutex::new(Vec::new());
+
+pub fn load_custom_key_remaps() -> Vec<CustomKeyRemap> {
+    let path = crate::fs_util::find_key_remaps_file();
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(list) = serde_json::from_str::<Vec<CustomKeyRemap>>(&content) {
+            println!("[KeyRemaps] {} remappage(s) chargé(s) depuis {}", list.len(), path.display());
+            return list;
+        }
+    }
+    Vec::new()
+}
+
+pub fn save_custom_key_remaps(remaps: &[CustomKeyRemap]) -> std::io::Result<()> {
+    let path = crate::fs_util::find_key_remaps_file();
+    let json = serde_json::to_string_pretty(remaps).unwrap_or_default();
+    std::fs::write(path, json)
+}
+
+/// Détermine si un code virtuel correspond à une touche de modification isolée
+pub fn is_modifier_vk(vk: u32) -> bool {
+    matches!(
+        vk,
+        0x10 | 0xA0 | 0xA1 // Shift
+        | 0x11 | 0xA2 | 0xA3 // Ctrl
+        | 0x12 | 0xA4 | 0xA5 // Alt
+        | 0x5B | 0x5C // Win / Super
+    )
+}
+
+/// Vérifie rigoureusement si un code virtuel et un masque de modificateurs actifs correspondent à un binding configuré
+pub fn matches_binding(binding: u32, vk: u32, active_mods: u32) -> bool {
+    let target_vk = binding & VK_KEY_MASK;
+    let target_mods = binding & MOD_MASK;
+    let current_mods = active_mods & MOD_MASK;
+    (vk & VK_KEY_MASK) == target_vk && current_mods == target_mods
+}
+
+/// Vérifie si une règle de remappage correspond à la touche physique
+pub fn matches_remap(from_key: u32, vk: u32, active_mods: u32) -> bool {
+    let target_vk = from_key & VK_KEY_MASK;
+    let target_mods = from_key & MOD_MASK;
+    if (vk & VK_KEY_MASK) != target_vk {
+        return false;
+    }
+    if target_mods == 0 {
+        true
+    } else {
+        (active_mods & MOD_MASK) == target_mods
+    }
+}
+
+/// Applique la touche capturée dans la variable atomique ou la liste des remappages personnalisés
+pub fn apply_rebound_key(target_var: &str, full_binding: u32) {
+    if let Some(idx_str) = target_var.strip_prefix("CUSTOM_FROM_") {
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            if let Ok(mut lock) = CUSTOM_KEY_REMAPS.lock() {
+                if idx < lock.len() {
+                    lock[idx].from_key = full_binding;
+                    let _ = save_custom_key_remaps(&lock);
+                }
+            }
+        }
+    } else if let Some(idx_str) = target_var.strip_prefix("CUSTOM_TO_") {
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            if let Ok(mut lock) = CUSTOM_KEY_REMAPS.lock() {
+                if idx < lock.len() {
+                    lock[idx].to_key = full_binding;
+                    let _ = save_custom_key_remaps(&lock);
+                }
+            }
+        }
+    } else {
+        match target_var {
+            "KEY_BIND_SWITCH" => KEY_BIND_SWITCH.store(full_binding, Ordering::SeqCst),
+            "KEY_BIND_DICTATION" => KEY_BIND_DICTATION.store(full_binding, Ordering::SeqCst),
+            "KEY_BIND_VOICE" => KEY_BIND_VOICE.store(full_binding, Ordering::SeqCst),
+            "KEY_BIND_CLEAR" => KEY_BIND_CLEAR.store(full_binding, Ordering::SeqCst),
+            "KEY_BIND_SELECT" => KEY_BIND_SELECT.store(full_binding, Ordering::SeqCst),
+            "KEY_BIND_NEXT" => KEY_BIND_NEXT.store(full_binding, Ordering::SeqCst),
+            "KEY_BIND_PREV" => KEY_BIND_PREV.store(full_binding, Ordering::SeqCst),
+            "KEY_BIND_BACK" => KEY_BIND_BACK.store(full_binding, Ordering::SeqCst),
+            "KEY_BIND_GAZE_CLICK" => KEY_BIND_GAZE_CLICK.store(full_binding, Ordering::SeqCst),
+            "KEY_BIND_STOP_SPEECH" => KEY_BIND_STOP_SPEECH.store(full_binding, Ordering::SeqCst),
+            "KEY_BIND_EMERGENCY" => KEY_BIND_EMERGENCY.store(full_binding, Ordering::SeqCst),
+            _ => {}
+        }
+        let binding_str = full_binding.to_string();
+        let _ = write_env_var_to_file(".env", target_var, &binding_str);
+        std::env::set_var(target_var, binding_str);
+    }
+}
+
+/// Retourne le masque binaire des modificateurs actuellement enfoncés au niveau du système
+pub fn get_currently_pressed_modifiers() -> u32 {
+    let mut mods = 0u32;
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+        if TRACKED_CTRL.load(Ordering::Relaxed) || (GetAsyncKeyState(0x11) as u16 & 0x8000) != 0 {
+            mods |= MOD_CTRL;
+        }
+        if TRACKED_ALT.load(Ordering::Relaxed) || (GetAsyncKeyState(0x12) as u16 & 0x8000) != 0 {
+            mods |= MOD_ALT;
+        }
+        if TRACKED_SHIFT.load(Ordering::Relaxed) || (GetAsyncKeyState(0x10) as u16 & 0x8000) != 0 {
+            mods |= MOD_SHIFT;
+        }
+        if TRACKED_WIN.load(Ordering::Relaxed)
+            || (GetAsyncKeyState(0x5B) as u16 & 0x8000) != 0
+            || (GetAsyncKeyState(0x5C) as u16 & 0x8000) != 0
+        {
+            mods |= MOD_WIN;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if RDEV_TRACKED_CTRL.load(Ordering::Relaxed) { mods |= MOD_CTRL; }
+        if RDEV_TRACKED_ALT.load(Ordering::Relaxed) { mods |= MOD_ALT; }
+        if RDEV_TRACKED_SHIFT.load(Ordering::Relaxed) { mods |= MOD_SHIFT; }
+        if RDEV_TRACKED_META.load(Ordering::Relaxed) { mods |= MOD_WIN; }
+    }
+    mods
+}
+
+/// Convertit les drapeaux de modificateurs actifs en liste de libellés lisibles
+pub fn modifiers_to_labels(mods: u32) -> Vec<&'static str> {
+    let mut list = Vec::new();
+    if (mods & MOD_CTRL) != 0 { list.push("Ctrl"); }
+    if (mods & MOD_ALT) != 0 { list.push("Alt"); }
+    if (mods & MOD_SHIFT) != 0 { list.push("Shift"); }
+    if (mods & MOD_WIN) != 0 { list.push("Win"); }
+    list
+}
 
 // ============================================================================
 // Passerelle Contacteur Déporté sans fil (Wi-Fi / Smartphone / ESP32)
@@ -733,6 +907,32 @@ pub const AVAILABLE_REBIND_KEYS: &[(u32, &str)] = &[
     (0x79, "F10"),
     (0x7A, "F11"),
     (0x7B, "F12"),
+    (0x41, "A"),
+    (0x42, "B"),
+    (0x43, "C"),
+    (0x44, "D"),
+    (0x45, "E"),
+    (0x46, "F"),
+    (0x47, "G"),
+    (0x48, "H"),
+    (0x49, "I"),
+    (0x4A, "J"),
+    (0x4B, "K"),
+    (0x4C, "L"),
+    (0x4D, "M"),
+    (0x4E, "N"),
+    (0x4F, "O"),
+    (0x50, "P"),
+    (0x51, "Q"),
+    (0x52, "R"),
+    (0x53, "S"),
+    (0x54, "T"),
+    (0x55, "U"),
+    (0x56, "V"),
+    (0x57, "W"),
+    (0x58, "X"),
+    (0x59, "Y"),
+    (0x5A, "Z"),
     (0x31, "1 (&)"),
     (0x32, "2 (é / ~)"),
     (0x33, "3 (\" / #)"),
@@ -802,11 +1002,22 @@ pub const AVAILABLE_REBIND_KEYS: &[(u32, &str)] = &[
     (0xB1, "Média Précédent"),
 ];
 
-pub fn vk_to_label(vk: u32) -> String {
+pub fn vk_to_label(binding: u32) -> String {
+    let vk = binding & VK_KEY_MASK;
+    let mut parts = Vec::new();
+    if (binding & MOD_CTRL) != 0 { parts.push("Ctrl"); }
+    if (binding & MOD_ALT) != 0 { parts.push("Alt"); }
+    if (binding & MOD_SHIFT) != 0 { parts.push("Shift"); }
+    if (binding & MOD_WIN) != 0 { parts.push("Win"); }
+
+    let base_label = get_base_vk_label(vk);
+    parts.push(&base_label);
+    parts.join(" + ")
+}
+
+pub fn get_base_vk_label(vk: u32) -> String {
     for &(code, label) in AVAILABLE_REBIND_KEYS {
-        if code == vk {
-            return label.to_string();
-        }
+        if code == vk { return label.to_string(); }
     }
     match vk {
         0x70..=0x87 => format!("F{}", vk - 0x70 + 1),
@@ -925,6 +1136,7 @@ pub fn egui_key_to_vk(key: eframe::egui::Key) -> Option<u32> {
         Key::Colon | Key::Semicolon => Some(0xBA),
         Key::OpenBracket => Some(0xDD),
         Key::CloseBracket => Some(0xBA),
+        Key::Quote => Some(0xDE),
         _ => None,
     }
 }
@@ -950,6 +1162,37 @@ pub fn vk_to_egui_key(vk: u32) -> Option<eframe::egui::Key> {
         0x24 => Some(Key::Home),
         0x2D => Some(Key::Insert),
         0x2E => Some(Key::Delete),
+        0x41 => Some(Key::A), 0x42 => Some(Key::B), 0x43 => Some(Key::C),
+        0x44 => Some(Key::D), 0x45 => Some(Key::E), 0x46 => Some(Key::F),
+        0x47 => Some(Key::G), 0x48 => Some(Key::H), 0x49 => Some(Key::I),
+        0x4A => Some(Key::J), 0x4B => Some(Key::K), 0x4C => Some(Key::L),
+        0x4D => Some(Key::M), 0x4E => Some(Key::N), 0x4F => Some(Key::O),
+        0x50 => Some(Key::P), 0x51 => Some(Key::Q), 0x52 => Some(Key::R),
+        0x53 => Some(Key::S), 0x54 => Some(Key::T), 0x55 => Some(Key::U),
+        0x56 => Some(Key::V), 0x57 => Some(Key::W), 0x58 => Some(Key::X),
+        0x59 => Some(Key::Y), 0x5A => Some(Key::Z),
+        0x30 => Some(Key::Num0), 0x31 => Some(Key::Num1), 0x32 => Some(Key::Num2),
+        0x33 => Some(Key::Num3), 0x34 => Some(Key::Num4), 0x35 => Some(Key::Num5),
+        0x36 => Some(Key::Num6), 0x37 => Some(Key::Num7), 0x38 => Some(Key::Num8),
+        0x39 => Some(Key::Num9),
+        0x1B => Some(Key::Escape),
+        0x20 => Some(Key::Space),
+        0x0D => Some(Key::Enter),
+        0x09 => Some(Key::Tab),
+        0x08 => Some(Key::Backspace),
+        0x25 => Some(Key::ArrowLeft),
+        0x26 => Some(Key::ArrowUp),
+        0x27 => Some(Key::ArrowRight),
+        0x28 => Some(Key::ArrowDown),
+        0xBD => Some(Key::Minus),
+        0xBB => Some(Key::Plus),
+        0xBC => Some(Key::Comma),
+        0xBE => Some(Key::Period),
+        0xBF => Some(Key::Slash),
+        0xDC => Some(Key::Backslash),
+        0xBA => Some(Key::Colon),
+        0xDD => Some(Key::OpenBracket),
+        0xDE => Some(Key::Quote),
         _ => None,
     }
 }
@@ -966,11 +1209,124 @@ pub fn load_keybindings() {
     KEY_BIND_DICTATION.store(load_vk("KEY_BIND_DICTATION", 0x77), Ordering::SeqCst);
     KEY_BIND_VOICE.store(load_vk("KEY_BIND_VOICE", 0x78), Ordering::SeqCst);
     KEY_BIND_CLEAR.store(load_vk("KEY_BIND_CLEAR", 0x73), Ordering::SeqCst);
+    KEY_BIND_SELECT.store(load_vk("KEY_BIND_SELECT", 0x20), Ordering::SeqCst);
+    KEY_BIND_NEXT.store(load_vk("KEY_BIND_NEXT", 0x27), Ordering::SeqCst);
+    KEY_BIND_PREV.store(load_vk("KEY_BIND_PREV", 0x25), Ordering::SeqCst);
+    KEY_BIND_BACK.store(load_vk("KEY_BIND_BACK", 0x08), Ordering::SeqCst);
+    KEY_BIND_GAZE_CLICK.store(load_vk("KEY_BIND_GAZE_CLICK", 0x0D), Ordering::SeqCst);
+    KEY_BIND_STOP_SPEECH.store(load_vk("KEY_BIND_STOP_SPEECH", 0x13), Ordering::SeqCst);
+    KEY_BIND_EMERGENCY.store(load_vk("KEY_BIND_EMERGENCY", 0x1B), Ordering::SeqCst);
+
+    if let Ok(mut lock) = CUSTOM_KEY_REMAPS.lock() {
+        *lock = load_custom_key_remaps();
+    }
 }
 
 #[cfg(windows)]
-static HOOK_KEYS_DOWN: Mutex<[bool; 256]> = Mutex::new([false; 256]);
+extern "system" {
+    fn VkKeyScanW(ch: u16) -> i16;
+}
+
+/// Résout le code virtuel (VK) associé à un caractère selon le layout clavier actif
+pub fn char_to_vk(c: char) -> Option<u32> {
+    #[cfg(windows)]
+    unsafe {
+        let mut buf = [0u16; 2];
+        let enc = c.encode_utf16(&mut buf);
+        if enc.len() == 1 {
+            let res = VkKeyScanW(enc[0]);
+            if res != -1 {
+                let vk = (res as u32) & 0xFF;
+                return Some(vk);
+            }
+        }
+    }
+    azerty_char_to_vk(&c.to_string())
+}
+
+/// Résout le caractère généré par un code virtuel selon l'état de la touche Majuscule
+pub fn vk_to_char_layout(vk: u32, shift: bool) -> Option<char> {
+    let base_vk = vk & VK_KEY_MASK;
+    match base_vk {
+        0x41..=0x5A => {
+            let offset = (base_vk - 0x41) as u8;
+            Some(if shift { (b'A' + offset) as char } else { (b'a' + offset) as char })
+        }
+        0x30..=0x39 => Some((b'0' + (base_vk - 0x30) as u8) as char),
+        0x20 => Some(' '),
+        _ => None,
+    }
+}
+
+/// Réécrit directement les événements egui (`Event::Key` et `Event::Text`) selon `key_remaps.json`
+pub fn apply_egui_key_remaps(ctx: &egui::Context) {
+    let remaps = if let Ok(mut lock) = CUSTOM_KEY_REMAPS.lock() {
+        if lock.is_empty() {
+            *lock = load_custom_key_remaps();
+        }
+        if lock.is_empty() {
+            return;
+        }
+        lock.clone()
+    } else {
+        return;
+    };
+
+    let shift = ctx.input(|i| i.modifiers.shift);
+
+    ctx.input_mut(|i| {
+        for ev in &mut i.events {
+            match ev {
+                egui::Event::Key { key, physical_key, .. } => {
+                    let vk_opt = egui_key_to_vk(*key)
+                        .or_else(|| physical_key.and_then(egui_key_to_vk));
+                    if let Some(vk) = vk_opt {
+                        if let Some(r) = remaps.iter().find(|r| r.enabled && (r.from_key & VK_KEY_MASK) == (vk & VK_KEY_MASK)) {
+                            let target_base_vk = r.to_key & VK_KEY_MASK;
+                            if let Some(new_key) = vk_to_egui_key(target_base_vk) {
+                                *key = new_key;
+                                if let Some(pk) = physical_key {
+                                    *pk = new_key;
+                                }
+                            }
+                        }
+                    }
+                }
+                egui::Event::Text(text) => {
+                    let matched_remap = text.chars().next().and_then(|c| {
+                        char_to_vk(c).and_then(|vk| {
+                            remaps.iter().find(|r| r.enabled && (r.from_key & VK_KEY_MASK) == (vk & VK_KEY_MASK)).copied()
+                        })
+                    });
+
+                    if let Some(r) = matched_remap {
+                        let target_base_vk = r.to_key & VK_KEY_MASK;
+                        if let Some(c) = vk_to_char_layout(target_base_vk, shift) {
+                            *text = c.to_string();
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HookCaptureKind {
+    None,
+    GlobalAction,
+    GazeClick,
+    Digit,
+    SwitchNav(SwitchKeyEvent),
+}
+
+#[cfg(windows)]
+static HOOK_KEYS_DOWN: Mutex<[HookCaptureKind; 256]> = Mutex::new([HookCaptureKind::None; 256]);
 static HOOK_KEYS_DOWN_TIME: Mutex<[Option<Instant>; 256]> = Mutex::new([None; 256]);
+#[cfg(windows)]
+static REMAPPED_KEYS_DOWN: Mutex<[Option<u32>; 256]> = Mutex::new([None; 256]);
 
 pub fn reset_switch_keys() {
     if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
@@ -981,7 +1337,11 @@ pub fn reset_switch_keys() {
     }
     #[cfg(windows)]
     if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
-        *keys = [false; 256];
+        *keys = [HookCaptureKind::None; 256];
+    }
+    #[cfg(windows)]
+    if let Ok(mut rkd) = REMAPPED_KEYS_DOWN.lock() {
+        *rkd = [None; 256];
     }
     if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
         *times = [None; 256];
@@ -997,6 +1357,76 @@ struct HookWorkerState {
 
 #[cfg(windows)]
 static HOOK_WORKER: Mutex<Option<HookWorkerState>> = Mutex::new(None);
+
+#[cfg(windows)]
+pub fn inject_remapped_key(to_binding: u32, is_down: bool) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+        KEYEVENTF_KEYUP, KEYEVENTF_EXTENDEDKEY,
+    };
+    extern "system" {
+        fn MapVirtualKeyW(uCode: u32, uMapType: u32) -> u32;
+    }
+
+    let target_vk = (to_binding & VK_KEY_MASK) as u16;
+    let target_mods = to_binding & MOD_MASK;
+    let scan = unsafe { MapVirtualKeyW(target_vk as u32, 0) as u16 };
+
+    let is_extended_vk = |vk_code: u16| -> bool {
+        matches!(
+            vk_code,
+            0x21..=0x28 // VK_PRIOR, VK_NEXT, VK_END, VK_HOME, VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN
+            | 0x2D | 0x2E // VK_INSERT, VK_DELETE
+            | 0x5B..=0x5D // VK_LWIN, VK_RWIN, VK_APPS
+            | 0x6F        // VK_DIVIDE
+            | 0x90        // VK_NUMLOCK
+            | 0xAD..=0xB3 // Touches média et volume
+        )
+    };
+
+    let make_key = |vk: u16, sc: u16, up: bool| -> INPUT {
+        let mut flags = KEYBD_EVENT_FLAGS(0);
+        if up {
+            flags |= KEYEVENTF_KEYUP;
+        }
+        if is_extended_vk(vk) {
+            flags |= KEYEVENTF_EXTENDEDKEY;
+        }
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk),
+                    wScan: sc,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: LIBERTIDE_EXTRA_INFO,
+                },
+            },
+        }
+    };
+
+    let mut inputs = Vec::new();
+    if is_down {
+        if (target_mods & MOD_CTRL) != 0 { inputs.push(make_key(0x11, unsafe { MapVirtualKeyW(0x11, 0) as u16 }, false)); }
+        if (target_mods & MOD_ALT) != 0 { inputs.push(make_key(0x12, unsafe { MapVirtualKeyW(0x12, 0) as u16 }, false)); }
+        if (target_mods & MOD_SHIFT) != 0 { inputs.push(make_key(0x10, unsafe { MapVirtualKeyW(0x10, 0) as u16 }, false)); }
+        if (target_mods & MOD_WIN) != 0 { inputs.push(make_key(0x5B, unsafe { MapVirtualKeyW(0x5B, 0) as u16 }, false)); }
+        inputs.push(make_key(target_vk, scan, false));
+    } else {
+        inputs.push(make_key(target_vk, scan, true));
+        if (target_mods & MOD_WIN) != 0 { inputs.push(make_key(0x5B, unsafe { MapVirtualKeyW(0x5B, 0) as u16 }, true)); }
+        if (target_mods & MOD_SHIFT) != 0 { inputs.push(make_key(0x10, unsafe { MapVirtualKeyW(0x10, 0) as u16 }, true)); }
+        if (target_mods & MOD_ALT) != 0 { inputs.push(make_key(0x12, unsafe { MapVirtualKeyW(0x12, 0) as u16 }, true)); }
+        if (target_mods & MOD_CTRL) != 0 { inputs.push(make_key(0x11, unsafe { MapVirtualKeyW(0x11, 0) as u16 }, true)); }
+    }
+
+    if !inputs.is_empty() {
+        unsafe {
+            SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        }
+    }
+}
 
 #[cfg(windows)]
 unsafe extern "system" fn switch_keyboard_hook_proc(
@@ -1038,7 +1468,12 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         let is_injected = (kbd.flags.0 & 0x10) != 0;
         let is_powertoys = kbd.dwExtraInfo == 0x1 || kbd.dwExtraInfo == 0x2;
 
-        let is_alt = (kbd.flags.0 & 0x20) != 0;
+        let vk_idx = (vk as usize) & 0xFF;
+        let is_alt = (kbd.flags.0 & 0x20) != 0
+            || TRACKED_ALT.load(Ordering::Relaxed)
+            || (!is_powertoys
+                && !is_injected
+                && (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x12) as u16 & 0x8000) != 0);
         let is_ctrl = if is_powertoys {
             false
         } else if is_injected {
@@ -1055,6 +1490,21 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
             TRACKED_SHIFT.load(Ordering::Relaxed)
                 || (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x10) as u16 & 0x8000) != 0
         };
+        let is_win = if is_powertoys {
+            false
+        } else if is_injected {
+            TRACKED_WIN.load(Ordering::Relaxed)
+        } else {
+            TRACKED_WIN.load(Ordering::Relaxed)
+                || (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x5B) as u16 & 0x8000) != 0
+                || (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x5C) as u16 & 0x8000) != 0
+        };
+
+        let mut active_mods = 0u32;
+        if is_ctrl { active_mods |= MOD_CTRL; }
+        if is_alt { active_mods |= MOD_ALT; }
+        if is_shift { active_mods |= MOD_SHIFT; }
+        if is_win { active_mods |= MOD_WIN; }
 
         let is_switch_hook_on = SWITCH_HOOK_ENABLED.load(Ordering::Relaxed);
         let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::Relaxed);
@@ -1063,56 +1513,133 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         let key_dictation = KEY_BIND_DICTATION.load(Ordering::Relaxed);
         let key_voice = KEY_BIND_VOICE.load(Ordering::Relaxed);
         let key_clear = KEY_BIND_CLEAR.load(Ordering::Relaxed);
+        let key_stop_speech = KEY_BIND_STOP_SPEECH.load(Ordering::Relaxed);
+        let key_emergency = KEY_BIND_EMERGENCY.load(Ordering::Relaxed);
 
         if is_down {
             if let Ok(mut lock) = REBIND_LISTENING_TARGET.lock() {
-                if let Some(target_var) = *lock {
-                    if vk == 0x1B {
-                        *lock = None;
+                if let Some(target_var) = lock.take() {
+                    // Ignorer les appuis isolés sur les touches modificatrices pour attendre la touche finale
+                    if is_modifier_vk(vk) {
+                        *lock = Some(target_var);
+                        return CallNextHookEx(None, code, wparam, lparam);
+                    }
+
+                    // Annulation sécurisée par Échap uniquement si AUCUN modificateur n'est pressé
+                    if vk == 0x1B && active_mods == 0 {
                         trigger_repaint();
                         return windows::Win32::Foundation::LRESULT(1);
                     }
-                    match target_var {
-                        "KEY_BIND_SWITCH" => KEY_BIND_SWITCH.store(vk, Ordering::SeqCst),
-                        "KEY_BIND_DICTATION" => KEY_BIND_DICTATION.store(vk, Ordering::SeqCst),
-                        "KEY_BIND_VOICE" => KEY_BIND_VOICE.store(vk, Ordering::SeqCst),
-                        "KEY_BIND_CLEAR" => KEY_BIND_CLEAR.store(vk, Ordering::SeqCst),
-                        _ => {}
-                    }
-                    let _ = write_env_var_to_file(".env", target_var, &vk.to_string());
-                    std::env::set_var(target_var, vk.to_string());
-                    *lock = None;
+
+                    let full_binding = (vk & VK_KEY_MASK) | (active_mods & MOD_MASK);
+                    apply_rebound_key(&target_var, full_binding);
                     trigger_repaint();
                     return windows::Win32::Foundation::LRESULT(1);
                 }
             }
         }
 
-        let global_action_event = if (!is_ctrl && !is_alt) || is_powertoys {
-            if vk == key_switch {
-                Some(SwitchKeyEvent::ToggleSwitch)
-            } else if vk == key_dictation || vk == 0x13 {
-                Some(SwitchKeyEvent::ToggleDictation)
-            } else if vk == key_voice {
-                Some(SwitchKeyEvent::ToggleVoice)
-            } else if vk == key_clear {
-                Some(SwitchKeyEvent::Clear)
-            } else if vk == 0x1B && (is_dictation || is_switch_hook_on) {
-                Some(SwitchKeyEvent::Escape)
+        let fg_hwnd = GetForegroundWindow();
+        let current_pid = std::process::id();
+        let mut fg_pid = 0u32;
+        windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(fg_hwnd, Some(&mut fg_pid));
+        let is_libertide_fg = fg_pid == current_pid;
+
+        // Exécution du remappage personnalisé de n'importe quelle touche (actif partout, y compris dans les inputs)
+        let is_rebinding = if let Ok(lock) = REBIND_LISTENING_TARGET.lock() {
+            lock.is_some()
+        } else {
+            false
+        };
+
+        // Pour Libertide, on ne bloque pas les messages clavier avec SendInput :
+        // apply_egui_key_remaps() transforme directement les événements dans le pipeline d'egui.
+        if !is_injected && !is_rebinding && !is_libertide_fg {
+            let was_remapped = if let Ok(down_keys) = REMAPPED_KEYS_DOWN.lock() {
+                down_keys[vk_idx]
             } else {
                 None
+            };
+
+            if is_down {
+                let custom_remap = if let Ok(mut remaps) = CUSTOM_KEY_REMAPS.lock() {
+                    if remaps.is_empty() {
+                        *remaps = load_custom_key_remaps();
+                    }
+                    remaps.iter().find(|r| r.enabled && matches_remap(r.from_key, vk, active_mods)).copied()
+                } else {
+                    None
+                };
+
+                if let Some(remap) = custom_remap {
+                    if let Ok(mut down_keys) = REMAPPED_KEYS_DOWN.lock() {
+                        down_keys[vk_idx] = Some(remap.to_key);
+                    }
+                    inject_remapped_key(remap.to_key, true);
+                    return windows::Win32::Foundation::LRESULT(1);
+                } else if let Some(to_key) = was_remapped {
+                    // Répétition de touche lors d'un appui maintenu (auto-repeat)
+                    inject_remapped_key(to_key, true);
+                    return windows::Win32::Foundation::LRESULT(1);
+                }
+            } else if is_up {
+                let to_key_opt = if let Ok(mut down_keys) = REMAPPED_KEYS_DOWN.lock() {
+                    down_keys[vk_idx].take()
+                } else {
+                    None
+                };
+
+                let target_to_key = to_key_opt.or_else(|| {
+                    if let Ok(mut remaps) = CUSTOM_KEY_REMAPS.lock() {
+                        if remaps.is_empty() {
+                            *remaps = load_custom_key_remaps();
+                        }
+                        remaps.iter().find(|r| r.enabled && matches_remap(r.from_key, vk, active_mods)).map(|r| r.to_key)
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(to_key) = target_to_key {
+                    inject_remapped_key(to_key, false);
+                    return windows::Win32::Foundation::LRESULT(1);
+                }
             }
+        }
+
+        let overlay_hwnd = FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()));
+        let fg_hwnd = GetForegroundWindow();
+        let is_libertide_fg = !overlay_hwnd.0.is_null() && fg_hwnd == overlay_hwnd;
+        let is_user_typing = IS_USER_TYPING.load(Ordering::Relaxed) && is_libertide_fg;
+
+        let captured_kind = if let Ok(keys) = HOOK_KEYS_DOWN.lock() {
+            keys[vk_idx]
+        } else {
+            HookCaptureKind::None
+        };
+        let was_captured_down = captured_kind != HookCaptureKind::None;
+
+        let global_action_event = if matches_binding(key_switch, vk, active_mods) {
+            Some(SwitchKeyEvent::ToggleSwitch)
+        } else if matches_binding(key_dictation, vk, active_mods) {
+            Some(SwitchKeyEvent::ToggleDictation)
+        } else if matches_binding(key_voice, vk, active_mods) {
+            Some(SwitchKeyEvent::ToggleVoice)
+        } else if matches_binding(key_clear, vk, active_mods) {
+            Some(SwitchKeyEvent::Clear)
+        } else if matches_binding(key_stop_speech, vk, active_mods) || (key_stop_speech == 0x13 && vk == 0x13 && active_mods == 0) {
+            Some(SwitchKeyEvent::StopSpeech)
+        } else if matches_binding(key_emergency, vk, active_mods) || (vk == 0x1B && active_mods == 0 && (is_dictation || is_switch_hook_on)) {
+            Some(SwitchKeyEvent::Escape)
         } else {
             None
         };
 
         if let Some(event) = global_action_event {
-            let vk_idx = (vk as usize) & 0xFF;
             let now = Instant::now();
             if is_down {
                 let mut already_down = false;
                 if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
-                    already_down = keys[vk_idx];
                     if already_down {
                         if let Ok(times) = HOOK_KEYS_DOWN_TIME.lock() {
                             if let Some(t) = times[vk_idx] {
@@ -1124,7 +1651,8 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                             }
                         }
                     }
-                    keys[vk_idx] = true;
+                    already_down = keys[vk_idx] != HookCaptureKind::None;
+                    keys[vk_idx] = HookCaptureKind::GlobalAction;
                 }
                 if !already_down {
                     if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
@@ -1137,7 +1665,7 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                 }
             } else if is_up {
                 if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
-                    keys[vk_idx] = false;
+                    keys[vk_idx] = HookCaptureKind::None;
                 }
                 if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
                     times[vk_idx] = None;
@@ -1146,28 +1674,34 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
             if is_down || is_up {
                 return windows::Win32::Foundation::LRESULT(1);
             }
+        } else if is_up && was_captured_down && captured_kind == HookCaptureKind::GlobalAction {
+            if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
+                keys[vk_idx] = HookCaptureKind::None;
+            }
+            if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+                times[vk_idx] = None;
+            }
+            return windows::Win32::Foundation::LRESULT(1);
         }
 
-        let overlay_hwnd = FindWindowW(None, w!("Libertide overlay")).unwrap_or(HWND(std::ptr::null_mut()));
-        let fg_hwnd = GetForegroundWindow();
-        let is_libertide_fg = !overlay_hwnd.0.is_null() && fg_hwnd == overlay_hwnd;
-        let is_user_typing = IS_USER_TYPING.load(Ordering::Relaxed) && is_libertide_fg;
+        if is_user_typing {
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
 
         let is_eye_active = crate::eyetracking::is_eye_tracking_enabled()
             && !crate::eyetracking::is_calibration_active();
+        let key_gaze = KEY_BIND_GAZE_CLICK.load(Ordering::Relaxed);
+        let matches_gaze = matches_binding(key_gaze, vk, active_mods)
+            || (key_gaze == 0x0D && vk == 0x0D && active_mods == 0);
 
-        if is_eye_active && !is_dictation && vk == 0x0D && ((!is_ctrl && !is_alt) || is_powertoys) {
-            if is_user_typing {
-                return CallNextHookEx(None, code, wparam, lparam);
-            }
+        if is_eye_active && !is_dictation && matches_gaze {
             crate::eyetracking::ENTER_PRESSED.store(is_down, Ordering::Relaxed);
-            let vk_idx = (vk as usize) & 0xFF;
             let now = Instant::now();
             if is_down {
                 let mut already_down = false;
                 if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
-                    already_down = keys[vk_idx];
-                    if already_down {
+                    if keys[vk_idx] != HookCaptureKind::None {
+                        already_down = true;
                         if let Ok(times) = HOOK_KEYS_DOWN_TIME.lock() {
                             if let Some(t) = times[vk_idx] {
                                 if now.duration_since(t) > Duration::from_millis(500) {
@@ -1178,7 +1712,7 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                             }
                         }
                     }
-                    keys[vk_idx] = true;
+                    keys[vk_idx] = HookCaptureKind::GazeClick;
                 }
                 if !already_down {
                     if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
@@ -1195,7 +1729,7 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                 }
             } else if is_up {
                 if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
-                    keys[vk_idx] = false;
+                    keys[vk_idx] = HookCaptureKind::None;
                 }
                 if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
                     times[vk_idx] = None;
@@ -1203,9 +1737,15 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
             }
             return windows::Win32::Foundation::LRESULT(1);
         }
-
-        if is_user_typing {
-            return CallNextHookEx(None, code, wparam, lparam);
+        if is_up && was_captured_down && captured_kind == HookCaptureKind::GazeClick {
+            crate::eyetracking::ENTER_PRESSED.store(false, Ordering::Relaxed);
+            if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
+                keys[vk_idx] = HookCaptureKind::None;
+            }
+            if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+                times[vk_idx] = None;
+            }
+            return windows::Win32::Foundation::LRESULT(1);
         }
 
         if !is_switch_hook_on {
@@ -1216,14 +1756,13 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
             let _ = ShowWindow(overlay_hwnd, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE);
         }
 
-        if is_switch_hook_on && ((!is_ctrl && !is_alt) || is_powertoys) {
+        if is_switch_hook_on && active_mods == 0 {
             let digit_char = match vk {
                 0x60..=0x69 => Some((b'0' + (vk as u8 - 0x60)) as char),
                 0x30..=0x39 => Some((b'0' + (vk as u8 - 0x30)) as char),
                 _ => None,
             };
             if let Some(digit) = digit_char {
-                let vk_idx = (vk as usize) & 0xFF;
                 let now = Instant::now();
                 if is_down {
                     let mut allow_digit = true;
@@ -1238,7 +1777,7 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                         }
                     }
                     if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
-                        keys[vk_idx] = true;
+                        keys[vk_idx] = HookCaptureKind::Digit;
                     }
                     if allow_digit {
                         if let Ok(mut nq) = NUMBER_KEY_QUEUE.lock() {
@@ -1248,7 +1787,7 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                     }
                 } else if is_up {
                     if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
-                        keys[vk_idx] = false;
+                        keys[vk_idx] = HookCaptureKind::None;
                     }
                     if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
                         times[vk_idx] = None;
@@ -1258,24 +1797,46 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                     return windows::Win32::Foundation::LRESULT(1);
                 }
             }
+        } else if is_up && was_captured_down && captured_kind == HookCaptureKind::Digit {
+            if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
+                keys[vk_idx] = HookCaptureKind::None;
+            }
+            if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+                times[vk_idx] = None;
+            }
+            return windows::Win32::Foundation::LRESULT(1);
         }
 
-        let switch_event = match vk {
-            0x09 => Some(if is_shift { SwitchKeyEvent::Prev } else { SwitchKeyEvent::Next }),
-            0x25 | 0x26 | 0x21 => Some(SwitchKeyEvent::Prev),
-            0x27 | 0x28 | 0x22 => Some(SwitchKeyEvent::Next),
-            0x0D | 0x20 => Some(SwitchKeyEvent::Select),
-            0x08 => Some(SwitchKeyEvent::Back),
-            _ => None,
+        let key_select = KEY_BIND_SELECT.load(Ordering::Relaxed);
+        let key_next = KEY_BIND_NEXT.load(Ordering::Relaxed);
+        let key_prev = KEY_BIND_PREV.load(Ordering::Relaxed);
+        let key_back = KEY_BIND_BACK.load(Ordering::Relaxed);
+
+        let switch_event = if matches_binding(key_select, vk, active_mods)
+            || (key_select == 0x20 && active_mods == 0 && (vk == 0x0D || vk == 0x20))
+        {
+            Some(SwitchKeyEvent::Select)
+        } else if matches_binding(key_next, vk, active_mods)
+            || (key_next == 0x27 && (active_mods == 0 && (vk == 0x27 || vk == 0x28 || vk == 0x22 || vk == 0x09)))
+        {
+            Some(SwitchKeyEvent::Next)
+        } else if matches_binding(key_prev, vk, active_mods)
+            || (key_prev == 0x25 && ((active_mods == 0 && (vk == 0x25 || vk == 0x26 || vk == 0x21)) || (active_mods == MOD_SHIFT && vk == 0x09)))
+        {
+            Some(SwitchKeyEvent::Prev)
+        } else if matches_binding(key_back, vk, active_mods)
+            || (key_back == 0x08 && active_mods == 0 && vk == 0x08)
+        {
+            Some(SwitchKeyEvent::Back)
+        } else {
+            None
         };
 
         if let Some(event) = switch_event {
-            let vk_idx = (vk as usize) & 0xFF;
             let now = Instant::now();
             if is_down {
                 let mut already_down = false;
                 if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
-                    already_down = keys[vk_idx];
                     if already_down {
                         if let Ok(times) = HOOK_KEYS_DOWN_TIME.lock() {
                             if let Some(t) = times[vk_idx] {
@@ -1287,7 +1848,8 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                             }
                         }
                     }
-                    keys[vk_idx] = true;
+                    already_down = keys[vk_idx] != HookCaptureKind::None;
+                    keys[vk_idx] = HookCaptureKind::SwitchNav(event);
                 }
                 if !already_down {
                     if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
@@ -1307,7 +1869,7 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                     None
                 };
                 if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
-                    keys[vk_idx] = false;
+                    keys[vk_idx] = HookCaptureKind::None;
                 }
                 if event == SwitchKeyEvent::Select {
                     let long_press_threshold = Duration::from_millis(SWITCH_LONG_PRESS_MS.load(Ordering::Relaxed));
@@ -1323,6 +1885,30 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
                 }
             }
             if is_down || is_up {
+                return windows::Win32::Foundation::LRESULT(1);
+            }
+        } else if is_up && was_captured_down {
+            if let HookCaptureKind::SwitchNav(event) = captured_kind {
+                let press_duration = if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
+                    times[vk_idx].take().map(|t| t.elapsed())
+                } else {
+                    None
+                };
+                if let Ok(mut keys) = HOOK_KEYS_DOWN.lock() {
+                    keys[vk_idx] = HookCaptureKind::None;
+                }
+                if event == SwitchKeyEvent::Select {
+                    let long_press_threshold = Duration::from_millis(SWITCH_LONG_PRESS_MS.load(Ordering::Relaxed));
+                    let is_long_press = press_duration.map_or(false, |d| d >= long_press_threshold);
+                    if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                        if is_long_press {
+                            q.push(SwitchKeyEvent::Back);
+                        } else {
+                            q.push(SwitchKeyEvent::Select);
+                        }
+                    }
+                    trigger_repaint();
+                }
                 return windows::Win32::Foundation::LRESULT(1);
             }
         }
@@ -1350,6 +1936,7 @@ unsafe extern "system" fn switch_mouse_hook_proc(
 
 #[cfg(windows)]
 pub fn install_switch_keyboard_hook() {
+    load_keybindings();
     start_companion_switch_server();
 
     let mut guard = HOOK_WORKER.lock().unwrap_or_else(|e| e.into_inner());
@@ -1452,43 +2039,104 @@ static SPACE_DOWN_TIME: Mutex<Option<Instant>> = Mutex::new(None);
 #[cfg(not(windows))]
 static RETURN_DOWN_TIME: Mutex<Option<Instant>> = Mutex::new(None);
 
+/// Convertit une touche rdev en code virtuel standard
 #[cfg(not(windows))]
-fn vk_to_rdev_key(vk: u32) -> Option<rdev::Key> {
-    match vk {
-        0x70 => Some(rdev::Key::F1),
-        0x71 => Some(rdev::Key::F2),
-        0x72 => Some(rdev::Key::F3),
-        0x73 => Some(rdev::Key::F4),
-        0x74 => Some(rdev::Key::F5),
-        0x75 => Some(rdev::Key::F6),
-        0x76 => Some(rdev::Key::F7),
-        0x77 => Some(rdev::Key::F8),
-        0x78 => Some(rdev::Key::F9),
-        0x79 => Some(rdev::Key::F10),
-        0x7A => Some(rdev::Key::F11),
-        0x7B => Some(rdev::Key::F12),
-        0x13 => Some(rdev::Key::Pause),
-        0x21 => Some(rdev::Key::PageUp),
-        0x22 => Some(rdev::Key::PageDown),
-        0x23 => Some(rdev::Key::End),
-        0x24 => Some(rdev::Key::Home),
-        0x2D => Some(rdev::Key::Insert),
-        0x2E => Some(rdev::Key::Delete),
-        0x1B => Some(rdev::Key::Escape),
-        0x20 => Some(rdev::Key::Space),
-        0x0D => Some(rdev::Key::Return),
-        0x09 => Some(rdev::Key::Tab),
-        0x08 => Some(rdev::Key::Backspace),
-        0x25 => Some(rdev::Key::LeftArrow),
-        0x26 => Some(rdev::Key::UpArrow),
-        0x27 => Some(rdev::Key::RightArrow),
-        0x28 => Some(rdev::Key::DownArrow),
+pub fn rdev_key_to_vk(key: rdev::Key) -> Option<u32> {
+    match key {
+        rdev::Key::F1 => Some(0x70),
+        rdev::Key::F2 => Some(0x71),
+        rdev::Key::F3 => Some(0x72),
+        rdev::Key::F4 => Some(0x73),
+        rdev::Key::F5 => Some(0x74),
+        rdev::Key::F6 => Some(0x75),
+        rdev::Key::F7 => Some(0x76),
+        rdev::Key::F8 => Some(0x77),
+        rdev::Key::F9 => Some(0x78),
+        rdev::Key::F10 => Some(0x79),
+        rdev::Key::F11 => Some(0x7A),
+        rdev::Key::F12 => Some(0x7B),
+        rdev::Key::Num0 => Some(0x30),
+        rdev::Key::Num1 => Some(0x31),
+        rdev::Key::Num2 => Some(0x32),
+        rdev::Key::Num3 => Some(0x33),
+        rdev::Key::Num4 => Some(0x34),
+        rdev::Key::Num5 => Some(0x35),
+        rdev::Key::Num6 => Some(0x36),
+        rdev::Key::Num7 => Some(0x37),
+        rdev::Key::Num8 => Some(0x38),
+        rdev::Key::Num9 => Some(0x39),
+        rdev::Key::Kp0 => Some(0x60),
+        rdev::Key::Kp1 => Some(0x61),
+        rdev::Key::Kp2 => Some(0x62),
+        rdev::Key::Kp3 => Some(0x63),
+        rdev::Key::Kp4 => Some(0x64),
+        rdev::Key::Kp5 => Some(0x65),
+        rdev::Key::Kp6 => Some(0x66),
+        rdev::Key::Kp7 => Some(0x67),
+        rdev::Key::Kp8 => Some(0x68),
+        rdev::Key::Kp9 => Some(0x69),
+        rdev::Key::KpMultiply => Some(0x6A),
+        rdev::Key::KpMinus => Some(0x6D),
+        rdev::Key::KpDecimal => Some(0x6E),
+        rdev::Key::KpDivide => Some(0x6F),
+        rdev::Key::KpReturn => Some(0x0D),
+        rdev::Key::KeyA => Some(0x41),
+        rdev::Key::KeyB => Some(0x42),
+        rdev::Key::KeyC => Some(0x43),
+        rdev::Key::KeyD => Some(0x44),
+        rdev::Key::KeyE => Some(0x45),
+        rdev::Key::KeyF => Some(0x46),
+        rdev::Key::KeyG => Some(0x47),
+        rdev::Key::KeyH => Some(0x48),
+        rdev::Key::KeyI => Some(0x49),
+        rdev::Key::KeyJ => Some(0x4A),
+        rdev::Key::KeyK => Some(0x4B),
+        rdev::Key::KeyL => Some(0x4C),
+        rdev::Key::KeyM => Some(0x4D),
+        rdev::Key::KeyN => Some(0x4E),
+        rdev::Key::KeyO => Some(0x4F),
+        rdev::Key::KeyP => Some(0x50),
+        rdev::Key::KeyQ => Some(0x51),
+        rdev::Key::KeyR => Some(0x52),
+        rdev::Key::KeyS => Some(0x53),
+        rdev::Key::KeyT => Some(0x54),
+        rdev::Key::KeyU => Some(0x55),
+        rdev::Key::KeyV => Some(0x56),
+        rdev::Key::KeyW => Some(0x57),
+        rdev::Key::KeyX => Some(0x58),
+        rdev::Key::KeyY => Some(0x59),
+        rdev::Key::KeyZ => Some(0x5A),
+        rdev::Key::Escape => Some(0x1B),
+        rdev::Key::Space => Some(0x20),
+        rdev::Key::Return => Some(0x0D),
+        rdev::Key::Tab => Some(0x09),
+        rdev::Key::Backspace => Some(0x08),
+        rdev::Key::Pause => Some(0x13),
+        rdev::Key::PageUp => Some(0x21),
+        rdev::Key::PageDown => Some(0x22),
+        rdev::Key::End => Some(0x23),
+        rdev::Key::Home => Some(0x24),
+        rdev::Key::LeftArrow => Some(0x25),
+        rdev::Key::UpArrow => Some(0x26),
+        rdev::Key::RightArrow => Some(0x27),
+        rdev::Key::DownArrow => Some(0x28),
+        rdev::Key::Insert => Some(0x2D),
+        rdev::Key::Delete => Some(0x2E),
+        rdev::Key::CapsLock => Some(0x14),
+        rdev::Key::NumLock => Some(0x90),
+        rdev::Key::ScrollLock => Some(0x91),
+        rdev::Key::PrintScreen => Some(0x2C),
+        rdev::Key::ControlLeft | rdev::Key::ControlRight => Some(0x11),
+        rdev::Key::ShiftLeft | rdev::Key::ShiftRight => Some(0x10),
+        rdev::Key::Alt | rdev::Key::AltGr => Some(0x12),
+        rdev::Key::MetaLeft | rdev::Key::MetaRight => Some(0x5B),
         _ => None,
     }
 }
 
 #[cfg(not(windows))]
 pub fn install_switch_keyboard_hook() {
+    load_keybindings();
     start_companion_switch_server();
 
     if HOOK_THREAD_ACTIVE.swap(true, Ordering::SeqCst) {
@@ -1503,13 +2151,61 @@ pub fn install_switch_keyboard_hook() {
                 let is_dictation = IS_DICTATION_ACTIVE.load(Ordering::Relaxed);
                 let is_typing = IS_USER_TYPING.load(Ordering::Relaxed);
 
-                let key_switch = vk_to_rdev_key(KEY_BIND_SWITCH.load(Ordering::Relaxed)).unwrap_or(rdev::Key::F7);
-                let key_dictation = vk_to_rdev_key(KEY_BIND_DICTATION.load(Ordering::Relaxed)).unwrap_or(rdev::Key::F8);
-                let key_voice = vk_to_rdev_key(KEY_BIND_VOICE.load(Ordering::Relaxed)).unwrap_or(rdev::Key::F9);
-                let key_clear = vk_to_rdev_key(KEY_BIND_CLEAR.load(Ordering::Relaxed)).unwrap_or(rdev::Key::F4);
+                let key_switch = KEY_BIND_SWITCH.load(Ordering::Relaxed);
+                let key_dictation = KEY_BIND_DICTATION.load(Ordering::Relaxed);
+                let key_voice = KEY_BIND_VOICE.load(Ordering::Relaxed);
+                let key_clear = KEY_BIND_CLEAR.load(Ordering::Relaxed);
 
                 match event.event_type {
                     rdev::EventType::KeyPress(key) => {
+                        match key {
+                            rdev::Key::ControlLeft | rdev::Key::ControlRight => {
+                                RDEV_TRACKED_CTRL.store(true, Ordering::Relaxed);
+                            }
+                            rdev::Key::ShiftLeft | rdev::Key::ShiftRight => {
+                                RDEV_TRACKED_SHIFT.store(true, Ordering::Relaxed);
+                            }
+                            rdev::Key::Alt | rdev::Key::AltGr => {
+                                RDEV_TRACKED_ALT.store(true, Ordering::Relaxed);
+                            }
+                            rdev::Key::MetaLeft | rdev::Key::MetaRight => {
+                                RDEV_TRACKED_META.store(true, Ordering::Relaxed);
+                            }
+                            _ => {}
+                        }
+
+                        let active_mods = get_currently_pressed_modifiers();
+                        let vk = rdev_key_to_vk(key);
+
+                        if let Some(code) = vk {
+                            if let Ok(mut lock) = REBIND_LISTENING_TARGET.lock() {
+                                if let Some(target_var) = *lock {
+                                    if is_modifier_vk(code) {
+                                        return;
+                                    }
+                                    if code == 0x1B && active_mods == 0 {
+                                        *lock = None;
+                                        trigger_repaint();
+                                        return;
+                                    }
+                                    let full_binding = (code & VK_KEY_MASK) | (active_mods & MOD_MASK);
+                                    match target_var {
+                                        "KEY_BIND_SWITCH" => KEY_BIND_SWITCH.store(full_binding, Ordering::SeqCst),
+                                        "KEY_BIND_DICTATION" => KEY_BIND_DICTATION.store(full_binding, Ordering::SeqCst),
+                                        "KEY_BIND_VOICE" => KEY_BIND_VOICE.store(full_binding, Ordering::SeqCst),
+                                        "KEY_BIND_CLEAR" => KEY_BIND_CLEAR.store(full_binding, Ordering::SeqCst),
+                                        _ => {}
+                                    }
+                                    let binding_str = full_binding.to_string();
+                                    let _ = write_env_var_to_file(".env", target_var, &binding_str);
+                                    std::env::set_var(target_var, binding_str);
+                                    *lock = None;
+                                    trigger_repaint();
+                                    return;
+                                }
+                            }
+                        }
+
                         if matches!(key, rdev::Key::Escape) {
                             crate::eyetracking::ESCAPE_PRESSED.store(true, Ordering::Relaxed);
                         }
@@ -1517,31 +2213,33 @@ pub fn install_switch_keyboard_hook() {
                             crate::eyetracking::ENTER_PRESSED.store(true, Ordering::Relaxed);
                         }
 
-                        let global_evt = if key == key_switch {
-                            Some(SwitchKeyEvent::ToggleSwitch)
-                        } else if key == key_dictation || matches!(key, rdev::Key::Pause) {
-                            Some(SwitchKeyEvent::ToggleDictation)
-                        } else if key == key_voice {
-                            Some(SwitchKeyEvent::ToggleVoice)
-                        } else if key == key_clear {
-                            Some(SwitchKeyEvent::Clear)
-                        } else if matches!(key, rdev::Key::Escape) && (is_dictation || is_switch_on) {
-                            Some(SwitchKeyEvent::Escape)
-                        } else {
-                            None
-                        };
-                        if let Some(evt) = global_evt {
-                            if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
-                                q.push(evt);
+                        if let Some(code) = vk {
+                            let global_evt = if matches_binding(key_switch, code, active_mods) {
+                                Some(SwitchKeyEvent::ToggleSwitch)
+                            } else if matches_binding(key_dictation, code, active_mods) || (code == 0x13 && active_mods == 0) {
+                                Some(SwitchKeyEvent::ToggleDictation)
+                            } else if matches_binding(key_voice, code, active_mods) {
+                                Some(SwitchKeyEvent::ToggleVoice)
+                            } else if matches_binding(key_clear, code, active_mods) {
+                                Some(SwitchKeyEvent::Clear)
+                            } else if code == 0x1B && active_mods == 0 && (is_dictation || is_switch_on) {
+                                Some(SwitchKeyEvent::Escape)
+                            } else {
+                                None
+                            };
+                            if let Some(evt) = global_evt {
+                                if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                    q.push(evt);
+                                }
+                                trigger_repaint();
+                                return;
                             }
-                            trigger_repaint();
-                            return;
                         }
 
                         let is_eye_active = crate::eyetracking::is_eye_tracking_enabled()
                             && !crate::eyetracking::is_calibration_active();
 
-                        if is_eye_active && !is_dictation && !is_typing && matches!(key, rdev::Key::Return) {
+                        if is_eye_active && !is_dictation && !is_typing && matches!(key, rdev::Key::Return) && active_mods == 0 {
                             crate::eyetracking::request_gaze_click();
                             if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
                                 q.push(SwitchKeyEvent::GazeClick);
@@ -1554,60 +2252,87 @@ pub fn install_switch_keyboard_hook() {
                             return;
                         }
 
-                        let digit = match key {
-                            rdev::Key::Num0 | rdev::Key::Kp0 => Some('0'),
-                            rdev::Key::Num1 | rdev::Key::Kp1 => Some('1'),
-                            rdev::Key::Num2 | rdev::Key::Kp2 => Some('2'),
-                            rdev::Key::Num3 | rdev::Key::Kp3 => Some('3'),
-                            rdev::Key::Num4 | rdev::Key::Kp4 => Some('4'),
-                            rdev::Key::Num5 | rdev::Key::Kp5 => Some('5'),
-                            rdev::Key::Num6 | rdev::Key::Kp6 => Some('6'),
-                            rdev::Key::Num7 | rdev::Key::Kp7 => Some('7'),
-                            rdev::Key::Num8 | rdev::Key::Kp8 => Some('8'),
-                            rdev::Key::Num9 | rdev::Key::Kp9 => Some('9'),
-                            _ => None,
-                        };
-                        if let Some(d) = digit {
-                            if let Ok(mut nq) = NUMBER_KEY_QUEUE.lock() {
-                                nq.push(d);
+                        if active_mods == 0 {
+                            let digit = match key {
+                                rdev::Key::Num0 | rdev::Key::Kp0 => Some('0'),
+                                rdev::Key::Num1 | rdev::Key::Kp1 => Some('1'),
+                                rdev::Key::Num2 | rdev::Key::Kp2 => Some('2'),
+                                rdev::Key::Num3 | rdev::Key::Kp3 => Some('3'),
+                                rdev::Key::Num4 | rdev::Key::Kp4 => Some('4'),
+                                rdev::Key::Num5 | rdev::Key::Kp5 => Some('5'),
+                                rdev::Key::Num6 | rdev::Key::Kp6 => Some('6'),
+                                rdev::Key::Num7 | rdev::Key::Kp7 => Some('7'),
+                                rdev::Key::Num8 | rdev::Key::Kp8 => Some('8'),
+                                rdev::Key::Num9 | rdev::Key::Kp9 => Some('9'),
+                                _ => None,
+                            };
+                            if let Some(d) = digit {
+                                if let Ok(mut nq) = NUMBER_KEY_QUEUE.lock() {
+                                    nq.push(d);
+                                }
+                                trigger_repaint();
+                                return;
                             }
-                            trigger_repaint();
-                            return;
                         }
 
-                        match key {
-                            rdev::Key::Space => {
-                                if let Ok(mut t) = SPACE_DOWN_TIME.lock() {
-                                    if t.is_none() { *t = Some(Instant::now()); }
+                        let is_shift = (active_mods & MOD_SHIFT) != 0;
+                        if active_mods == 0 || (active_mods == MOD_SHIFT && matches!(key, rdev::Key::Tab)) {
+                            match key {
+                                rdev::Key::Space => {
+                                    if let Ok(mut t) = SPACE_DOWN_TIME.lock() {
+                                        if t.is_none() { *t = Some(Instant::now()); }
+                                    }
                                 }
-                            }
-                            rdev::Key::Return => {
-                                if let Ok(mut t) = RETURN_DOWN_TIME.lock() {
-                                    if t.is_none() { *t = Some(Instant::now()); }
+                                rdev::Key::Return => {
+                                    if let Ok(mut t) = RETURN_DOWN_TIME.lock() {
+                                        if t.is_none() { *t = Some(Instant::now()); }
+                                    }
                                 }
-                            }
-                            rdev::Key::Tab | rdev::Key::RightArrow | rdev::Key::DownArrow => {
-                                if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
-                                    q.push(SwitchKeyEvent::Next);
+                                rdev::Key::Tab => {
+                                    let evt = if is_shift { SwitchKeyEvent::Prev } else { SwitchKeyEvent::Next };
+                                    if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                        q.push(evt);
+                                    }
+                                    trigger_repaint();
                                 }
-                                trigger_repaint();
-                            }
-                            rdev::Key::LeftArrow | rdev::Key::UpArrow => {
-                                if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
-                                    q.push(SwitchKeyEvent::Prev);
+                                rdev::Key::RightArrow | rdev::Key::DownArrow | rdev::Key::PageDown => {
+                                    if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                        q.push(SwitchKeyEvent::Next);
+                                    }
+                                    trigger_repaint();
                                 }
-                                trigger_repaint();
-                            }
-                            rdev::Key::Backspace => {
-                                if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
-                                    q.push(SwitchKeyEvent::Back);
+                                rdev::Key::LeftArrow | rdev::Key::UpArrow | rdev::Key::PageUp => {
+                                    if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                        q.push(SwitchKeyEvent::Prev);
+                                    }
+                                    trigger_repaint();
                                 }
-                                trigger_repaint();
+                                rdev::Key::Backspace => {
+                                    if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+                                        q.push(SwitchKeyEvent::Back);
+                                    }
+                                    trigger_repaint();
+                                }
+                                _ => {}
                             }
-                            _ => {}
                         }
                     }
                     rdev::EventType::KeyRelease(key) => {
+                        match key {
+                            rdev::Key::ControlLeft | rdev::Key::ControlRight => {
+                                RDEV_TRACKED_CTRL.store(false, Ordering::Relaxed);
+                            }
+                            rdev::Key::ShiftLeft | rdev::Key::ShiftRight => {
+                                RDEV_TRACKED_SHIFT.store(false, Ordering::Relaxed);
+                            }
+                            rdev::Key::Alt | rdev::Key::AltGr => {
+                                RDEV_TRACKED_ALT.store(false, Ordering::Relaxed);
+                            }
+                            rdev::Key::MetaLeft | rdev::Key::MetaRight => {
+                                RDEV_TRACKED_META.store(false, Ordering::Relaxed);
+                            }
+                            _ => {}
+                        }
                         if matches!(key, rdev::Key::Escape) {
                             crate::eyetracking::ESCAPE_PRESSED.store(false, Ordering::Relaxed);
                         }

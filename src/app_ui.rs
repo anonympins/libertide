@@ -1211,6 +1211,11 @@ impl OverlayApp {
                 ctx.request_repaint();
             }
         }
+        if hook_events.contains(&SwitchKeyEvent::StopSpeech) {
+            self.stop_speaking();
+            play_earcon(Earcon::Success);
+            ctx.request_repaint();
+        }
         if (egui_f8 || hook_events.contains(&SwitchKeyEvent::ToggleDictation))
             && self.last_switch_input.elapsed() >= Duration::from_millis(200)
         {

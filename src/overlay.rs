@@ -1358,6 +1358,7 @@ pub fn parse_agent_response(raw: &str) -> AgentResponsePayload {
             actions: Vec::new(),
             quick_suggestions: Vec::new(),
             invalid_request: true,
+            next_pass: Some(false),
             next_passes: None,
         };
     }
@@ -1389,6 +1390,7 @@ pub fn parse_agent_response(raw: &str) -> AgentResponsePayload {
                 actions: Vec::new(),
                 quick_suggestions: Vec::new(),
                 invalid_request: true,
+                next_pass: Some(false),
                 next_passes: None,
             };
         }
@@ -1405,6 +1407,7 @@ pub fn parse_agent_response(raw: &str) -> AgentResponsePayload {
                         actions: Vec::new(),
                         quick_suggestions: Vec::new(),
                         invalid_request: true,
+                        next_pass: Some(false),
                         next_passes: None,
                     };
                 }
@@ -1422,6 +1425,17 @@ pub fn parse_agent_response(raw: &str) -> AgentResponsePayload {
                     .get("invalid_request")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+
+                let next_pass = val
+                    .get("nextPass")
+                    .or_else(|| val.get("next_pass"))
+                    .and_then(|v| v.as_bool())
+                    .or_else(|| {
+                        val.get("next_passes")
+                            .or_else(|| val.get("reasoning_passes"))
+                            .and_then(|v| v.as_u64())
+                            .map(|n| n > 0)
+                    });
 
                 let next_passes = val
                     .get("next_passes")
@@ -1455,6 +1469,7 @@ pub fn parse_agent_response(raw: &str) -> AgentResponsePayload {
                             actions: Vec::new(),
                             quick_suggestions: Vec::new(),
                             invalid_request: true,
+                            next_pass: Some(false),
                             next_passes: None,
                         };
                     }
@@ -1463,6 +1478,7 @@ pub fn parse_agent_response(raw: &str) -> AgentResponsePayload {
                         actions,
                         quick_suggestions,
                         invalid_request,
+                        next_pass,
                         next_passes,
                     };
                 }
@@ -1476,6 +1492,7 @@ pub fn parse_agent_response(raw: &str) -> AgentResponsePayload {
             actions: Vec::new(),
             quick_suggestions: Vec::new(),
             invalid_request: true,
+            next_pass: Some(false),
             next_passes: None,
         };
     }
@@ -1484,6 +1501,7 @@ pub fn parse_agent_response(raw: &str) -> AgentResponsePayload {
         narration: clean.to_string(),
         actions: Vec::new(),
         quick_suggestions: Vec::new(),
+        next_pass: Some(false),
         next_passes: None,
         invalid_request: false,
     }

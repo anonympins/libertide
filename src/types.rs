@@ -121,6 +121,7 @@ pub enum SwitchKeyEvent {
     ToggleVoice,
     Clear,
     Scroll,
+    StopSpeech,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1043,7 +1044,9 @@ pub struct AgentResponsePayload {
     pub quick_suggestions: Vec<QuickSuggestionItem>,
     #[serde(default)]
     pub invalid_request: bool,
-    #[serde(default, alias = "max_passes", alias = "reasoning_passes")]
+    #[serde(default, rename = "nextPass", alias = "next_pass")]
+    pub next_pass: Option<bool>,
+    #[serde(default, alias = "next_passes", alias = "max_passes", alias = "reasoning_passes")]
     pub next_passes: Option<usize>,
 }
 

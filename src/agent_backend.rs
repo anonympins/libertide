@@ -146,6 +146,38 @@ pub fn get_recent_history_capped_at_user_messages(history: &[ChatMessage], max_u
     recent
 }
 
+/// Génère une signature macroscopique d'action pour identifier les boucles fonctionnelles
+fn action_coarse_key(action: &AgentAction) -> String {
+    match action {
+        AgentAction::NavigateToUrl { url, .. } => {
+            let u = url.to_lowercase();
+            if u.contains("google.") && u.contains("/search") {
+                "navigate:google_search".to_string()
+            } else if u.contains("google.com/travel/flights") {
+                "navigate:google_flights".to_string()
+            } else if u.contains("youtube.com/results") {
+                "navigate:youtube_search".to_string()
+            } else {
+                let domain = u.split("://").nth(1).unwrap_or(&u).split('/').next().unwrap_or(&u);
+                format!("navigate:{domain}")
+            }
+        }
+        AgentAction::ClickElement { target_name, .. } => {
+            format!("click_elem:{}", target_name.trim().to_lowercase())
+        }
+        AgentAction::ClickButton { button_name, .. } => {
+            format!("click_btn:{}", button_name.trim().to_lowercase())
+        }
+        AgentAction::Scroll { direction, .. } => {
+            format!("scroll:{}", direction.trim().to_lowercase())
+        }
+        AgentAction::FocusWindow { title, .. } => {
+            format!("focus:{}", title.as_deref().unwrap_or("").trim().to_lowercase())
+        }
+        other => format!("{:?}", other),
+    }
+}
+
 pub struct BusyGuard;
 impl Drop for BusyGuard {
     fn drop(&mut self) {
@@ -764,35 +796,26 @@ pub async fn call_llm_prompt(
             return;
         }
 
-        let requested_passes = if consecutive_repeat_count == 0 {
-            payload.next_passes.or_else(|| {
-                payload.actions.iter().find_map(|act| match act {
-                    AgentAction::SetReasoningPasses { passes, .. } => Some(*passes),
-                    _ => None,
-                })
-            })
+        // Évaluation de la poursuite d'analyse via nextPass (booléen)
+        let should_continue = if consecutive_repeat_count > 0 {
+            false
+        } else if let Some(np_bool) = payload.next_pass {
+            np_bool
+        } else if let Some(np) = payload.next_passes {
+            np > 0
         } else {
-            None
+            false
         };
 
-        let mut stop_requested = false;
-        if let Some(np) = requested_passes {
-            const MAX_LIMIT: usize = 15;
-            if np == 0 || (payload.actions.is_empty() && pass >= 1) {
-                max_agent_passes = pass;
-                TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
-                stop_requested = true;
-                println!("[Agent] Arrêt demandé (next_passes: {np}) : fin après la passe courante ({pass}).");
-            } else if np <= pass && pass > 1 {
-                max_agent_passes = pass;
-                TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
-                stop_requested = true;
-                println!("[Agent] Quota de passes atteint (next_passes: {np} <= passe {pass}) : arrêt à cette passe.");
-            } else {
-                max_agent_passes = np.clamp(pass, MAX_LIMIT);
-                TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
-                println!("[Agent] Quota de raisonnement mis à jour via next_passes (+{np}) : {max_agent_passes} passe(s) max");
-            }
+        set_next_pass(should_continue);
+        let mut stop_requested = !should_continue;
+
+        if stop_requested {
+            max_agent_passes = pass;
+            println!("[Agent] Arrêt demandé (nextPass: false) : fin après la passe courante ({pass}).");
+        } else {
+            max_agent_passes = 15;
+            println!("[Agent] Poursuite de navigation en cours (nextPass: true) : étape {pass} vers étape {}", pass + 1);
         }
 
         if payload.invalid_request
@@ -1085,7 +1108,7 @@ pub async fn call_llm_prompt(
             });
         }
 
-        let actions_to_run = payload.actions;
+        let mut actions_to_run = payload.actions;
 
         let lower_user_cmd = safe_user_instruction.to_lowercase();
         let is_media_request = lower_user_cmd.contains("radio")
@@ -1110,15 +1133,38 @@ pub async fn call_llm_prompt(
             println!("[Agent Radio/Média - NAVIGATE_IN_WEBPAGE] Page ouverte : maintien des passes actives (max: {max_agent_passes}) pour naviguer dans la page web.");
         }
 
+        // Filtrage préventif des navigations de recherche redondantes
+        let screen_lower = LAST_SCREEN_SUMMARY.lock().ok().and_then(|s| s.clone()).unwrap_or_default().to_lowercase();
+        let already_on_search = screen_lower.contains("google.com/search")
+            || screen_lower.contains("google.com/travel/flights")
+            || (screen_lower.contains("google") && screen_lower.contains("résultats"));
+
+        if pass > 1 && already_on_search {
+            actions_to_run.retain(|a| {
+                if let AgentAction::NavigateToUrl { url, .. } = a {
+                    let u = url.to_lowercase();
+                    if u.contains("google.") && u.contains("/search") {
+                        println!("[Agent Anti-Boucle] Suppression d'un navigate_to_url redondant vers Google Search (la recherche est déjà ouverte).");
+                        return false;
+                    }
+                }
+                true
+            });
+        }
+
         let current_action_signatures: Vec<String> = actions_to_run
             .iter()
             .filter(|a| !matches!(a, AgentAction::SetReasoningPasses { .. }))
-            .map(|a| format!("{:?}", a))
+            .map(action_coarse_key)
             .collect();
 
         if !current_action_signatures.is_empty() && current_action_signatures == last_executed_actions {
             consecutive_repeat_count += 1;
             println!("[Agent] Répétition d'action détectée (occurrence {}) : {:?}", consecutive_repeat_count, current_action_signatures);
+            if consecutive_repeat_count >= 1 && current_action_signatures.iter().any(|s| s.starts_with("navigate:google_search")) {
+                println!("[Agent] Répétition de recherche Google interceptée : interruption immédiate de la boucle.");
+                break;
+            }
             if consecutive_repeat_count >= 2 {
                 println!("[Agent] Boucle répétitive interrompue (action identique répétée {} fois consécutives).", consecutive_repeat_count + 1);
                 if !payload.narration.trim().is_empty() || !payload.quick_suggestions.is_empty() {
@@ -1286,6 +1332,15 @@ pub async fn call_llm_prompt(
                 safe_user_instruction,
                 next_pass = pass + 1
             );
+
+            let screen_summary_lower = screen_after.to_lowercase();
+            let is_on_search_page = screen_summary_lower.contains("google.com/search")
+                || (screen_summary_lower.contains("google") && screen_summary_lower.contains("résultats"))
+                || screen_summary_lower.contains("google.com/travel/flights");
+            if is_on_search_page {
+                step_prompt.push_str("\n\n- [ATTENTION ANTI-BOUCLE IMPÉRATIVE] : La recherche est DÉJÀ affichée et visible à l'écran ! INTERDICTION FORMELLE d'émettre \"navigate_to_url\" ou d'ouvrir un nouvel onglet de recherche. Analyse les résultats déjà présents à l'écran dans [État de l'écran suite aux actions], délivre la réponse dans \"narration\" et termine avec \"actions\": [], \"next_passes\": 0, OU clique sur un résultat/lien précis avec \"click_element\".");
+            }
+
             if is_media_request {
                 if lower_user_cmd.contains("vidéo") || lower_user_cmd.contains("video") || lower_user_cmd.contains("youtube") || lower_user_cmd.contains("arte") || lower_user_cmd.contains("film") {
                     step_prompt.push_str("\n\n- [NAVIGATION VIDÉO EN COURS] : Valide/ferme les cookies si présents ('Tout accepter'), et clique DIRECTEMENT sur le premier résultat vidéo pour lancer la lecture immédiatement.");

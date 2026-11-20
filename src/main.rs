@@ -1005,6 +1005,7 @@ impl eframe::App for OverlayApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        crate::keyboard_hook::apply_egui_key_remaps(&ctx);
         ctx.set_zoom_factor(self.zoom_factor);
 
         IS_CHAT_TAB_ACTIVE.store(self.active_tab == ActiveTab::Chat, Ordering::Relaxed);
@@ -1021,19 +1022,25 @@ impl eframe::App for OverlayApp {
         #[cfg(not(windows))]
         let is_libertide_fg = true;
 
-        let is_egui_text_focused = !self.is_hidden && is_libertide_fg && ctx.memory(|m| {
-            m.has_focus(egui::Id::NULL.with("prompt_input_text"))
-                || m.has_focus(egui::Id::NULL.with("api_key_input_field"))
-                || m.has_focus(egui::Id::NULL.with("model_input_field"))
-                || m.has_focus(egui::Id::NULL.with("endpoint_input_field"))
-                || m.has_focus(egui::Id::NULL.with("macro_shortcut_input"))
-                || m.has_focus(egui::Id::NULL.with("macro_text_input"))
-                || m.has_focus(egui::Id::NULL.with("twitch_search_query_input"))
-                || m.has_focus(egui::Id::NULL.with("voice_clone_url_input"))
-                || m.has_focus(egui::Id::NULL.with("voice_reference_wav_input"))
-                || m.has_focus(egui::Id::NULL.with("voice_reference_text_input"))
-                || m.has_focus(egui::Id::NULL.with("voice_test_text_input"))
-        });
+        let is_egui_text_focused = !self.is_hidden
+            && is_libertide_fg
+            && (ctx.egui_wants_keyboard_input()
+                || ctx.memory(|m| {
+                    m.has_focus(egui::Id::NULL.with("prompt_input_text"))
+                        || m.has_focus(egui::Id::NULL.with("api_key_input_field"))
+                        || m.has_focus(egui::Id::NULL.with("model_input_field"))
+                        || m.has_focus(egui::Id::NULL.with("endpoint_input_field"))
+                        || m.has_focus(egui::Id::NULL.with("macro_shortcut_input"))
+                        || m.has_focus(egui::Id::NULL.with("macro_text_input"))
+                        || m.has_focus(egui::Id::NULL.with("twitch_search_query_input"))
+                        || m.has_focus(egui::Id::NULL.with("voice_clone_url_input"))
+                        || m.has_focus(egui::Id::NULL.with("voice_reference_wav_input"))
+                        || m.has_focus(egui::Id::NULL.with("voice_reference_text_input"))
+                        || m.has_focus(egui::Id::NULL.with("voice_test_text_input"))
+                        || m.has_focus(egui::Id::NULL.with("hass_url_input_field"))
+                        || m.has_focus(egui::Id::NULL.with("hass_token_input_field"))
+                        || m.has_focus(egui::Id::NULL.with("knx_gateway_input_field"))
+                }));
         let is_typing = !self.is_hidden && is_libertide_fg && (self.show_api_key_modal || is_egui_text_focused);
         crate::automation::IS_USER_TYPING.store(is_typing, Ordering::Relaxed);
         self.dictation_mode = IS_DICTATION_ACTIVE.load(Ordering::SeqCst);
@@ -1427,6 +1434,7 @@ fn main() -> eframe::Result<()> {
     #[cfg(windows)]
     disable_crt_assertion_dialogs();
     fix_startup_working_directory();
+    load_keybindings();
 
     let (event_tx, event_rx) = channel::<AgentEvent>();
     let (cmd_tx, cmd_rx) = unbounded_channel::<AgentCommand>();

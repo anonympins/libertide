@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use eframe::egui;
 use eframe::egui::text::LayoutJob;
 use eframe::egui::TextFormat;
@@ -7,6 +9,8 @@ use crate::clipboard::set_clipboard_text;
 use crate::{apply_dwell_to_response, DwellState};
 use crate::{play_earcon, Earcon};
 use crate::theme::ThemeColors;
+
+static CARD_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenCardSummary {
@@ -195,6 +199,18 @@ pub enum FloatingContentType {
     VirtualKeyboard,
 }
 
+/// Garantit que chaque champ d'un formulaire dispose d'un ID valide et unique
+fn sanitize_form_fields(fields: &mut [FormField]) {
+    let mut seen_ids = HashSet::new();
+    for (idx, field) in fields.iter_mut().enumerate() {
+        if field.id.trim().is_empty() || seen_ids.contains(&field.id) {
+            let suffix = if field.id.trim().is_empty() { "field".to_string() } else { field.id.clone() };
+            field.id = format!("{}_{idx}", suffix);
+        }
+        seen_ids.insert(field.id.clone());
+    }
+}
+
 fn default_submit_label() -> String {
     "🔍 Lancer la recherche".to_string()
 }
@@ -257,10 +273,12 @@ impl FloatingCard {
         data: &serde_json::Value,
     ) -> Self {
         let clean_id = id.unwrap_or_else(|| {
-            format!("card_{}", std::time::SystemTime::now()
+            let count = CARD_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let micros = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_millis())
+                .as_micros();
+            format!("card_{micros}_{count}")
         });
 
         let content = match card_type.to_lowercase().as_str() {
@@ -316,7 +334,10 @@ impl FloatingCard {
                 FloatingContentType::Stats { items }
             }
             "form" | "search_form" | "filter" | "filters" | "search" => {
-                if let Ok(form_data) = serde_json::from_value::<FloatingContentType>(data.clone()) {
+                if let Ok(mut form_data) = serde_json::from_value::<FloatingContentType>(data.clone()) {
+                    if let FloatingContentType::Form { ref mut fields, .. } = form_data {
+                        sanitize_form_fields(fields);
+                    }
                     form_data
                 } else {
                     let mut fields = Vec::new();
@@ -404,6 +425,7 @@ impl FloatingCard {
                             }
                         }
                     }
+                    sanitize_form_fields(&mut fields);
                     FloatingContentType::Form { fields, submit_label, prompt_prefix }
                 }
             }
@@ -865,104 +887,110 @@ impl FloatingCard {
                                     let mut form_submitted = false;
 
                                     ui.vertical(|ui| {
-                                        for field in fields.iter_mut() {
-                                            ui.add_space(3.0);
-                                            match &mut field.field_type {
-                                                FormFieldType::Checkbox { checked } => {
-                                                    let resp = ui.checkbox(
-                                                        checked,
-                                                        egui::RichText::new(&field.label)
-                                                            .size(12.5)
-                                                            .color(theme.text_primary),
-                                                    );
-                                                    resp.on_hover_text(format!("Activer/Désactiver : {}", field.label));
-                                                }
-                                                FormFieldType::Text { placeholder, value } => {
-                                                    ui.label(
-                                                        egui::RichText::new(&field.label)
-                                                            .size(11.5)
-                                                            .color(theme.accent)
-                                                            .strong(),
-                                                    );
-                                                    ui.add_space(1.0);
-                                                    let field_input_id = egui::Id::NULL.with(format!("form_field_{}_{}", card_id, field.id));
-                                                    crate::overlay::render_accessible_input(
-                                                        ui,
-                                                        field_input_id,
-                                                        value,
-                                                        placeholder.as_str(),
-                                                        false,
-                                                        Some(ui.available_width()),
-                                                        None,
-                                                        false,
-                                                        theme,
-                                                    );
-                                                }
-                                                FormFieldType::NumberSlider { min, max, step, value, unit } => {
-                                                    ui.horizontal(|ui| {
+                                        for (f_idx, field) in fields.iter_mut().enumerate() {
+                                            ui.push_id((f_idx, &field.id), |ui| {
+                                                ui.add_space(3.0);
+                                                match &mut field.field_type {
+                                                    FormFieldType::Checkbox { checked } => {
+                                                        let resp = ui.checkbox(
+                                                            checked,
+                                                            egui::RichText::new(&field.label)
+                                                                .size(12.5)
+                                                                .color(theme.text_primary),
+                                                        );
+                                                        resp.on_hover_text(format!("Activer/Désactiver : {}", field.label));
+                                                    }
+                                                    FormFieldType::Text { placeholder, value } => {
                                                         ui.label(
                                                             egui::RichText::new(&field.label)
                                                                 .size(11.5)
                                                                 .color(theme.accent)
                                                                 .strong(),
                                                         );
-                                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                            let display_val = if unit.is_empty() {
-                                                                format!("{:.0}", *value)
-                                                            } else {
-                                                                format!("{:.0} {}", *value, unit)
-                                                            };
+                                                        ui.add_space(1.0);
+                                                        let field_input_id = ui.make_persistent_id(format!("input_{card_id}_{f_idx}_{}", field.id));
+                                                        crate::overlay::render_accessible_input(
+                                                            ui,
+                                                            field_input_id,
+                                                            value,
+                                                            placeholder.as_str(),
+                                                            false,
+                                                            Some(ui.available_width()),
+                                                            None,
+                                                            false,
+                                                            theme,
+                                                        );
+                                                    }
+                                                    FormFieldType::NumberSlider { min, max, step, value, unit } => {
+                                                        ui.horizontal(|ui| {
                                                             ui.label(
-                                                                egui::RichText::new(display_val)
-                                                                    .size(12.0)
-                                                                    .color(theme.text_user)
+                                                                egui::RichText::new(&field.label)
+                                                                    .size(11.5)
+                                                                    .color(theme.accent)
                                                                     .strong(),
                                                             );
+                                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                                let display_val = if unit.is_empty() {
+                                                                    format!("{:.0}", *value)
+                                                                } else {
+                                                                    format!("{:.0} {}", *value, unit)
+                                                                };
+                                                                ui.label(
+                                                                    egui::RichText::new(display_val)
+                                                                        .size(12.0)
+                                                                        .color(theme.text_user)
+                                                                        .strong(),
+                                                                );
+                                                            });
                                                         });
-                                                    });
-                                                    ui.add_space(1.0);
-                                                    let mut slider = egui::Slider::new(value, *min..=*max)
-                                                        .show_value(false);
-                                                    if let Some(s) = step {
-                                                        slider = slider.step_by(*s);
+                                                        ui.add_space(1.0);
+                                                        let mut slider = egui::Slider::new(value, *min..=*max)
+                                                            .show_value(false);
+                                                        if let Some(s) = step {
+                                                            slider = slider.step_by(*s);
+                                                        }
+                                                        ui.add_sized([ui.available_width(), 20.0], slider);
                                                     }
-                                                    ui.add_sized([ui.available_width(), 20.0], slider);
-                                                }
-                                                FormFieldType::Select { options, selected } => {
-                                                    ui.label(
-                                                        egui::RichText::new(&field.label)
-                                                            .size(11.5)
-                                                            .color(theme.accent)
-                                                            .strong(),
-                                                    );
-                                                    ui.add_space(1.0);
-                                                    let combo_id = format!("combo_{card_id}_{}", field.id);
-                                                    egui::ComboBox::from_id_salt(combo_id)
-                                                        .selected_text(selected.as_str())
-                                                        .width(ui.available_width().max(120.0))
-                                                        .show_ui(ui, |ui| {
-                                                            for opt in options {
-                                                                ui.selectable_value(selected, opt.clone(), opt.as_str());
+                                                    FormFieldType::Select { options, selected } => {
+                                                        ui.label(
+                                                            egui::RichText::new(&field.label)
+                                                                .size(11.5)
+                                                                .color(theme.accent)
+                                                                .strong(),
+                                                        );
+                                                        ui.add_space(1.0);
+                                                        let combo_id = format!("combo_{card_id}_{f_idx}_{}", field.id);
+                                                        egui::ComboBox::from_id_salt(combo_id)
+                                                            .selected_text(selected.as_str())
+                                                            .width(ui.available_width().max(120.0))
+                                                            .show_ui(ui, |ui| {
+                                                                for (opt_idx, opt) in options.iter().enumerate() {
+                                                                    ui.push_id(opt_idx, |ui| {
+                                                                        ui.selectable_value(selected, opt.clone(), opt.as_str());
+                                                                    });
+                                                                }
+                                                            });
+                                                    }
+                                                    FormFieldType::Radio { options, selected } => {
+                                                        ui.label(
+                                                            egui::RichText::new(&field.label)
+                                                                .size(11.5)
+                                                                .color(theme.accent)
+                                                                .strong(),
+                                                        );
+                                                        ui.add_space(2.0);
+                                                        ui.horizontal_wrapped(|ui| {
+                                                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
+                                                            for (opt_idx, opt) in options.iter().enumerate() {
+                                                                ui.push_id(opt_idx, |ui| {
+                                                                    ui.radio_value(selected, opt.clone(), opt.as_str());
+                                                                });
                                                             }
                                                         });
+                                                    }
                                                 }
-                                                FormFieldType::Radio { options, selected } => {
-                                                    ui.label(
-                                                        egui::RichText::new(&field.label)
-                                                            .size(11.5)
-                                                            .color(theme.accent)
-                                                            .strong(),
-                                                    );
-                                                    ui.add_space(2.0);
-                                                    ui.horizontal_wrapped(|ui| {
-                                                        ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
-                                                        for opt in options {
-                                                            ui.radio_value(selected, opt.clone(), opt.as_str());
-                                                        }
-                                                    });
-                                                }
-                                            }
-                                            ui.add_space(4.0);
+                                                ui.add_space(4.0);
+                                            });
                                         }
 
                                         ui.add_space(6.0);
