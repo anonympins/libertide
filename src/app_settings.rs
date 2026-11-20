@@ -2,6 +2,7 @@ use std::sync::atomic::Ordering;
 use rust_i18n::t;
 use std::time::{Duration, Instant};
 use eframe::egui;
+use eframe::egui::Color32;
 
 use crate::clipboard::{
     get_clipboard_text, get_plain_clipboard_text
@@ -564,6 +565,29 @@ impl OverlayApp {
                                 let is_keybinds_key = make_widget_accessible_and_activated(ui, &tab_keybinds, theme.accent);
                                 if keybinds_activated || is_keybinds_key {
                                     self.settings_tab = SettingsTab::Keybindings;
+                                }
+
+                                let is_home_active = self.settings_tab == SettingsTab::HomeAutomation;
+                                let tab_home = ui.selectable_label(
+                                    is_home_active,
+                                    egui::RichText::new("🏠 Domotique")
+                                        .size(12.0)
+                                        .color(if is_home_active { theme.accent } else { theme.text_secondary })
+                                        .strong(),
+                                );
+                                let tab_home_id = ui.make_persistent_id("dwell_tab_home_automation");
+                                let home_activated = if !is_home_active {
+                                    apply_dwell_to_response(ui, &mut self.dwell_state, tab_home_id, &tab_home)
+                                } else {
+                                    tab_home.clicked()
+                                };
+                                let is_home_key = make_widget_accessible_and_activated(ui, &tab_home, theme.accent);
+                                if home_activated || is_home_key {
+                                    self.settings_tab = SettingsTab::HomeAutomation;
+                                    self.hass_url_input = crate::home_automation::get_home_assistant_url();
+                                    self.hass_token_input = crate::home_automation::get_home_assistant_token();
+                                    self.knx_gateway_input = crate::home_automation::get_knx_gateway_ip();
+                                    self.hass_status_feedback = None;
                                 }
                             });
                         });
@@ -2579,6 +2603,73 @@ impl OverlayApp {
                                 ui.separator();
                                 ui.add_space(6.0);
 
+                                // 2. Section Passerelle Contacteur Déporté (BLE / Wi-Fi / Smartphone / ESP32)
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 230, 118)))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        let companion_url = crate::keyboard_hook::get_local_companion_url();
+                                        let is_running = crate::keyboard_hook::is_companion_server_running();
+                                        let clients = crate::keyboard_hook::COMPANION_CLIENTS_COUNT.load(Ordering::Relaxed);
+
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("📱 Contacteur Déporté sans fil (Wi-Fi / Smartphone / ESP32)").size(12.0).color(egui::Color32::from_rgb(0, 230, 118)).strong());
+                                            let status_str = if is_running && clients > 0 {
+                                                format!("● Connecté ({} client{})", clients, if clients > 1 { "s" } else { "" })
+                                            } else if is_running {
+                                                "● Prêt & En écoute".to_string()
+                                            } else {
+                                                "○ Inactif".to_string()
+                                            };
+                                            let status_col = if is_running { egui::Color32::from_rgb(0, 230, 118) } else { theme.text_secondary };
+                                            ui.label(egui::RichText::new(status_str).size(10.5).color(status_col));
+                                        });
+                                        ui.add_space(2.0);
+                                        ui.label(egui::RichText::new("Transforme n'importe quel smartphone, tablette ou microcontrôleur ESP32 à bas coût en contacteur unique sans fil avec retour haptique.").size(10.5).color(theme.text_secondary));
+                                        ui.add_space(4.0);
+
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("Lien WebApp Mobile :").size(11.0).color(Color32::WHITE).strong());
+                                            ui.label(egui::RichText::new(&companion_url).size(11.5).color(theme.accent).underline());
+
+                                            let copy_btn = ui.small_button("📋 Copier").on_hover_text("Copier l'URL pour l'ouvrir sur votre smartphone ou tablette");
+                                            if make_widget_accessible_and_activated(ui, &copy_btn, theme.accent) {
+                                                crate::clipboard::set_clipboard_text(&companion_url);
+                                                play_earcon(Earcon::Success);
+                                            }
+                                            let open_btn = ui.small_button("↗ Ouvrir").on_hover_text("Tester le contacteur dans votre navigateur");
+                                            if make_widget_accessible_and_activated(ui, &open_btn, theme.accent) {
+                                                crate::automation::open_browser_smart(&companion_url);
+                                            }
+                                        });
+
+                                        ui.add_space(4.0);
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(format!("Port UDP pour ESP32 / Pédales matérielles : {}", crate::keyboard_hook::COMPANION_UDP_PORT)).size(10.5).color(theme.text_secondary));
+                                            let test_switch_btn = ui.small_button("🎯 Tester Clic Contacteur");
+                                            if make_widget_accessible_and_activated(ui, &test_switch_btn, theme.accent) {
+                                                crate::keyboard_hook::inject_switch_event(crate::types::SwitchKeyEvent::Select);
+                                                play_earcon(Earcon::Success);
+                                            }
+                                        });
+
+                                        if let Ok(last_ev) = crate::keyboard_hook::LAST_COMPANION_EVENT.lock() {
+                                            if let Some((ref name, ref time)) = *last_ev {
+                                                let elapsed = time.elapsed().as_secs();
+                                                if elapsed < 15 {
+                                                    ui.add_space(2.0);
+                                                    ui.label(egui::RichText::new(format!("⚡ Dernier signal reçu : {} (il y a {}s)", name, elapsed)).size(10.5).color(egui::Color32::from_rgb(255, 214, 0)));
+                                                }
+                                            }
+                                        }
+                                    });
+
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(6.0);
+
                                 // 2. Section Rebinding des touches
                                 ui.label(egui::RichText::new("Personnalisation des touches de contrôle (Rebinding)").size(12.0).color(egui::Color32::WHITE).strong());
                                 ui.add_space(2.0);
@@ -2737,6 +2828,144 @@ impl OverlayApp {
                                         self.show_api_key_modal = false;
                                     }
                                 });
+                            }
+                            SettingsTab::HomeAutomation => {
+                                ui.label(egui::RichText::new("Contrôle domotique local direct (Home Assistant, KNX-IP, BACnet/IP, Matter, Zigbee).").size(11.5).color(theme.text_secondary));
+                                ui.add_space(2.0);
+                                ui.label(egui::RichText::new("Permet aux personnes à mobilité réduite de piloter directement l'environnement physique (éclairage, volets, lit médicalisé, climatisation GTB) sans cloud externe.").size(10.5).color(theme.text_secondary));
+                                ui.add_space(6.0);
+
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.label(egui::RichText::new("🌐 Serveur Home Assistant / Passerelle locale").size(11.0).color(Color32::WHITE).strong());
+                                        ui.add_space(2.0);
+
+                                        render_accessible_input(
+                                            ui,
+                                            egui::Id::NULL.with("hass_url_input_field"),
+                                            &mut self.hass_url_input,
+                                            "http://homeassistant.local:8123",
+                                            false,
+                                            Some(ui.available_width().max(240.0)),
+                                            None,
+                                            false,
+                                            theme,
+                                        ).on_hover_text("URL locale de votre instance Home Assistant (ex: http://homeassistant.local:8123 ou http://192.168.1.50:8123)");
+
+                                        ui.add_space(6.0);
+                                        ui.label(egui::RichText::new("🔑 Jeton d'accès longue durée (Long-Lived Access Token)").size(11.0).color(Color32::WHITE).strong());
+                                        ui.add_space(2.0);
+
+                                        ui.horizontal(|ui| {
+                                            let token_id = egui::Id::NULL.with("hass_token_input_field");
+                                            render_accessible_input(
+                                                ui,
+                                                token_id,
+                                                &mut self.hass_token_input,
+                                                "eyJhbGciOiJIUzI1NiIsIn...",
+                                                false,
+                                                Some((ui.available_width() - 40.0).max(180.0)),
+                                                None,
+                                                !self.show_api_key_plain,
+                                                theme,
+                                            ).on_hover_text("Généré dans Home Assistant > Profil utilisateur > Jetons d'accès longue durée");
+
+                                            let paste_btn = ui.button("📋").on_hover_text("Coller le jeton depuis le presse-papiers");
+                                            if make_widget_accessible_and_activated(ui, &paste_btn, theme.accent) {
+                                                if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
+                                                    self.hass_token_input = clip.trim().to_string();
+                                                    play_earcon(Earcon::Success);
+                                                }
+                                            }
+                                        });
+
+                                        ui.add_space(6.0);
+                                        ui.label(egui::RichText::new("🔌 Passerelle KNXnet/IP directe (Multicast ou IP routeur)").size(11.0).color(Color32::WHITE).strong());
+                                        ui.add_space(2.0);
+                                        render_accessible_input(
+                                            ui,
+                                            egui::Id::NULL.with("knx_gateway_input_field"),
+                                            &mut self.knx_gateway_input,
+                                            "224.0.23.12:3671",
+                                            false,
+                                            Some(ui.available_width().max(240.0)),
+                                            None,
+                                            false,
+                                            theme,
+                                        ).on_hover_text("Adresse de routage KNXnet/IP UDP (par défaut 224.0.23.12:3671 en multicast local ou IP unicast du routeur/passerelle)");
+
+                                        if let Some(ref feedback) = self.hass_status_feedback {
+                                            ui.add_space(4.0);
+                                            let is_err = feedback.to_lowercase().contains("erreur") || feedback.to_lowercase().contains("échec") || feedback.to_lowercase().contains("non configuré");
+                                            let color = if is_err { Color32::from_rgb(255, 110, 110) } else { Color32::from_rgb(0, 230, 118) };
+                                            ui.label(egui::RichText::new(feedback).size(10.5).color(color));
+                                        }
+
+                                        ui.add_space(8.0);
+                                        ui.horizontal(|ui| {
+                                            let test_btn = ui.button("🔌 Tester la connexion");
+                                            if make_widget_accessible_and_activated(ui, &test_btn, theme.accent) {
+                                                let url = self.hass_url_input.trim();
+                                                let token = self.hass_token_input.trim();
+                                                let _ = crate::home_automation::set_home_assistant_config(url, token);
+                                                match crate::home_automation::test_home_assistant_connection() {
+                                                    Ok(msg) => {
+                                                        self.hass_status_feedback = Some(format!("✓ {msg}"));
+                                                        play_earcon(Earcon::Success);
+                                                    }
+                                                    Err(err) => {
+                                                        self.hass_status_feedback = Some(format!("✕ Connexion impossible : {err}"));
+                                                        play_earcon(Earcon::Error);
+                                                    }
+                                                }
+                                            }
+
+                                            let save_btn = ui.button(egui::RichText::new("💾 Enregistrer et Appliquer").strong().color(theme.accent));
+                                            if make_widget_accessible_and_activated(ui, &save_btn, theme.accent) {
+                                                let url = self.hass_url_input.trim();
+                                                let token = self.hass_token_input.trim();
+                                                let knx_ip = self.knx_gateway_input.trim();
+                                                let _ = crate::home_automation::set_knx_gateway_ip(knx_ip);
+                                                match crate::home_automation::set_home_assistant_config(url, token) {
+                                                    Ok(()) => {
+                                                        self.hass_status_feedback = Some("✓ Configuration enregistrée dans .env".to_string());
+                                                        play_earcon(Earcon::Success);
+                                                    }
+                                                    Err(e) => {
+                                                        self.hass_status_feedback = Some(format!("✕ Erreur sauvegarde : {e}"));
+                                                        play_earcon(Earcon::Error);
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    });
+
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Exemples d'ordres vocaux & oculaires reconnus :").size(11.0).strong().color(Color32::WHITE));
+                                ui.add_space(2.0);
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                    .corner_radius(egui::CornerRadius::same(6))
+                                    .inner_margin(egui::Margin::symmetric(8, 6))
+                                    .show(ui, |ui| {
+                                        ui.label(egui::RichText::new("• « Allume la lumière du salon » / « Éteins la chambre »").size(10.5).color(theme.text_secondary));
+                                        ui.label(egui::RichText::new("• « Ouvre les volets » / « Ferme les stores »").size(10.5).color(theme.text_secondary));
+                                                ui.label(egui::RichText::new("• « Allume la lumière KNX » (alias ou adresse de groupe configurée dans .env)").size(10.5).color(theme.text_secondary));
+                                        ui.label(egui::RichText::new("• « Règle le chauffage à 21 degrés »").size(10.5).color(theme.text_secondary));
+                                        ui.label(egui::RichText::new("• « Incline / relève le lit médicalisé »").size(10.5).color(theme.text_secondary));
+                                    });
+
+                                ui.add_space(6.0);
+                                if ui.button(t!("ui.btn_close")).clicked() {
+                                    self.show_api_key_modal = false;
+                                }
                             }
                         }
                     });

@@ -1,3 +1,5 @@
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -51,6 +53,672 @@ pub static KEY_BIND_DICTATION: AtomicU32 = AtomicU32::new(0x77); // F8 (Par déf
 pub static KEY_BIND_VOICE: AtomicU32 = AtomicU32::new(0x78);     // F9 (Par défaut : Synthèse vocale TTS)
 pub static KEY_BIND_CLEAR: AtomicU32 = AtomicU32::new(0x73);     // F4 (Par défaut : Vider / Effacer)
 pub static REBIND_LISTENING_TARGET: Mutex<Option<&'static str>> = Mutex::new(None);
+
+// ============================================================================
+// Passerelle Contacteur Déporté sans fil (Wi-Fi / Smartphone / ESP32)
+// ============================================================================
+
+pub static COMPANION_SERVER_RUNNING: AtomicBool = AtomicBool::new(false);
+pub static COMPANION_CLIENTS_COUNT: AtomicU32 = AtomicU32::new(0);
+pub static LAST_COMPANION_EVENT: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+
+pub const COMPANION_HTTP_PORT: u16 = 8765;
+pub const COMPANION_UDP_PORT: u16 = 8766;
+
+pub fn is_companion_server_running() -> bool {
+    COMPANION_SERVER_RUNNING.load(Ordering::Relaxed)
+}
+
+/// Récupère l'adresse IPv4 locale de la machine sur le réseau local
+pub fn get_local_ip_address() -> Option<String> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let local_addr = socket.local_addr().ok()?;
+    Some(local_addr.ip().to_string())
+}
+
+pub fn get_local_companion_url() -> String {
+    let ip = get_local_ip_address().unwrap_or_else(|| "127.0.0.1".to_string());
+    format!("http://{}:{}", ip, COMPANION_HTTP_PORT)
+}
+
+/// Injecte un événement de contacteur
+pub fn inject_switch_event(event: SwitchKeyEvent) {
+    if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
+        q.push(event);
+    }
+    if let Ok(mut last) = LAST_COMPANION_EVENT.lock() {
+        let label = format!("{:?}", event);
+        *last = Some((label, Instant::now()));
+    }
+    trigger_repaint();
+}
+
+/// Injecte un chiffre de badge interactif
+pub fn inject_number_digit(digit: char) {
+    if digit.is_ascii_digit() {
+        if let Ok(mut nq) = NUMBER_KEY_QUEUE.lock() {
+            nq.push(digit);
+        }
+        if let Ok(mut last) = LAST_COMPANION_EVENT.lock() {
+            *last = Some((format!("Badge #{digit}"), Instant::now()));
+        }
+        trigger_repaint();
+    }
+}
+
+fn sha1_digest(data: &[u8]) -> [u8; 20] {
+    let mut h0: u32 = 0x67452301;
+    let mut h1: u32 = 0xEFCDAB89;
+    let mut h2: u32 = 0x98BADCFE;
+    let mut h3: u32 = 0x10325476;
+    let mut h4: u32 = 0xC3D2E1F0;
+
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+
+    let mut msg = Vec::with_capacity(data.len() + 72);
+    msg.extend_from_slice(data);
+    msg.push(0x80);
+    while (msg.len() % 64) != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in msg.chunks_exact(64) {
+        let mut w = [0u32; 80];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+
+        let mut a = h0;
+        let mut b = h1;
+        let mut c = h2;
+        let mut d = h3;
+        let mut e = h4;
+
+        for i in 0..80 {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | ((!b) & d), 0x5A827999),
+                20..=39 => (b ^ c ^ d, 0x6ED9EBA1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDC),
+                _ => (b ^ c ^ d, 0xCA62C1D6),
+            };
+
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(w[i]);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+
+        h0 = h0.wrapping_add(a);
+        h1 = h1.wrapping_add(b);
+        h2 = h2.wrapping_add(c);
+        h3 = h3.wrapping_add(d);
+        h4 = h4.wrapping_add(e);
+    }
+
+    let mut out = [0u8; 20];
+    out[0..4].copy_from_slice(&h0.to_be_bytes());
+    out[4..8].copy_from_slice(&h1.to_be_bytes());
+    out[8..12].copy_from_slice(&h2.to_be_bytes());
+    out[12..16].copy_from_slice(&h3.to_be_bytes());
+    out[16..20].copy_from_slice(&h4.to_be_bytes());
+    out
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn parse_and_dispatch_companion_action(raw_action: &str) -> bool {
+    let cleaned = raw_action.trim().to_lowercase();
+    if cleaned.is_empty() {
+        return false;
+    }
+
+    if cleaned.len() == 1 {
+        let c = cleaned.chars().next().unwrap();
+        if c.is_ascii_digit() {
+            inject_number_digit(c);
+            return true;
+        }
+    }
+
+    match cleaned.as_str() {
+        "select" | "click" | "valider" | "enter" | "space" => {
+            inject_switch_event(SwitchKeyEvent::Select);
+            true
+        }
+        "next" | "suivant" | "right" | "down" | "tab" => {
+            inject_switch_event(SwitchKeyEvent::Next);
+            true
+        }
+        "prev" | "previous" | "precedent" | "précédent" | "left" | "up" => {
+            inject_switch_event(SwitchKeyEvent::Prev);
+            true
+        }
+        "back" | "retour" | "backspace" => {
+            inject_switch_event(SwitchKeyEvent::Back);
+            true
+        }
+        "escape" | "echap" | "échap" | "cancel" | "annuler" => {
+            inject_switch_event(SwitchKeyEvent::Escape);
+            true
+        }
+        "gaze" | "gaze_click" | "clic_regard" => {
+            inject_switch_event(SwitchKeyEvent::GazeClick);
+            true
+        }
+        "switch" | "toggle_switch" | "mode_contacteur" => {
+            inject_switch_event(SwitchKeyEvent::ToggleSwitch);
+            true
+        }
+        "dictation" | "toggle_dictation" | "dictee" | "dictée" => {
+            inject_switch_event(SwitchKeyEvent::ToggleDictation);
+            true
+        }
+        "voice" | "toggle_voice" | "voix" => {
+            inject_switch_event(SwitchKeyEvent::ToggleVoice);
+            true
+        }
+        "clear" | "effacer" => {
+            inject_switch_event(SwitchKeyEvent::Clear);
+            true
+        }
+        _ => {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&cleaned) {
+                if let Some(act) = val.get("action").or_else(|| val.get("event")).and_then(|v| v.as_str()) {
+                    return parse_and_dispatch_companion_action(act);
+                }
+                if let Some(num) = val.get("number").or_else(|| val.get("digit")).and_then(|v| v.as_u64()) {
+                    for ch in num.to_string().chars() {
+                        inject_number_digit(ch);
+                    }
+                    return true;
+                }
+            }
+            false
+        }
+    }
+}
+
+const COMPANION_HTML_PAGE: &str = r#"<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Libertide Switch Companion</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; }
+  body {
+    margin: 0; padding: 12px; height: 100vh; height: 100dvh;
+    background: #0B0E14; color: #FFFFFF; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; touch-action: manipulation;
+  }
+  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .status { font-size: 13px; font-weight: bold; color: #00E676; display: flex; align-items: center; gap: 6px; }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #00E676; }
+  .status-dot.disconnected { background: #FF3D00; }
+  .switch-main-btn {
+    flex: 1; background: #FFD600; color: #000000; border: none; border-radius: 20px;
+    font-size: 32px; font-weight: 900; text-transform: uppercase; letter-spacing: 1px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    box-shadow: 0 10px 25px rgba(255, 214, 0, 0.4); margin-bottom: 10px; cursor: pointer;
+    transition: transform 0.06s ease, background 0.06s ease;
+  }
+  .switch-main-btn:active { transform: scale(0.97); background: #FFAB00; }
+  .switch-main-btn .sub { font-size: 14px; font-weight: 600; opacity: 0.8; margin-top: 4px; }
+  .nav-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 8px; }
+  .nav-btn {
+    background: #18202C; color: #00E5FF; border: 1.5px solid #00B0FF; border-radius: 12px;
+    padding: 14px 6px; font-size: 15px; font-weight: 700; text-align: center; cursor: pointer;
+  }
+  .nav-btn:active { background: #00B0FF; color: #000000; }
+  .actions-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .act-btn {
+    background: #151A22; color: #E0E6ED; border: 1px solid #303E4D; border-radius: 10px;
+    padding: 10px 4px; font-size: 12px; font-weight: 600; text-align: center; cursor: pointer;
+  }
+  .act-btn:active { background: #00E676; color: #000; }
+  .numpad-drawer { display: none; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 8px; }
+  .numpad-drawer.open { display: grid; }
+  .num-btn {
+    background: #1E2836; color: #FFF; border: 1px solid #00E5FF; border-radius: 8px;
+    padding: 10px; font-size: 18px; font-weight: bold; text-align: center;
+  }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div style="font-weight: 800; font-size: 16px; color: #00E5FF;">⚡ LIBERTIDE COMPANION</div>
+    <div class="status" id="status"><span class="status-dot" id="dot"></span><span id="st-txt">Connecté</span></div>
+  </div>
+
+  <button class="switch-main-btn" id="btn-select">
+    <span>CONTACTEUR</span>
+    <span class="sub">Toucher / Clic Principal (Sélection)</span>
+  </button>
+
+  <div class="nav-grid">
+    <button class="nav-btn" id="btn-prev">⬅ PRÉC</button>
+    <button class="nav-btn" id="btn-back">↩ RETOUR</button>
+    <button class="nav-btn" id="btn-next">SUIV ➔</button>
+  </div>
+
+  <div class="actions-grid">
+    <button class="act-btn" id="btn-dict">🎙 DICTÉE</button>
+    <button class="act-btn" id="btn-voice">🗣 VOIX</button>
+    <button class="act-btn" id="btn-pad">🔢 BADGES</button>
+    <button class="act-btn" id="btn-esc" style="color: #FF5252; border-color: #FF5252;">✕ ÉCHAP</button>
+  </div>
+
+  <div class="numpad-drawer" id="numpad">
+    <button class="num-btn" data-n="1">1</button>
+    <button class="num-btn" data-n="2">2</button>
+    <button class="num-btn" data-n="3">3</button>
+    <button class="num-btn" data-n="4">4</button>
+    <button class="num-btn" data-n="5">5</button>
+    <button class="num-btn" data-n="6">6</button>
+    <button class="num-btn" data-n="7">7</button>
+    <button class="num-btn" data-n="8">8</button>
+    <button class="num-btn" data-n="9">9</button>
+    <button class="num-btn" data-n="back">⌫</button>
+    <button class="num-btn" data-n="0">0</button>
+    <button class="num-btn" data-n="enter" style="color: #FFD600;">OK</button>
+  </div>
+
+<script>
+  let ws = null;
+  const host = window.location.host;
+
+  function vibrate() {
+    if (navigator.vibrate) navigator.vibrate(35);
+  }
+
+  function sendCmd(action) {
+    vibrate();
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ action: action }));
+    } else {
+      fetch('/api/switch?action=' + encodeURIComponent(action), { method: 'POST', keepalive: true }).catch(()=>{});
+    }
+  }
+
+  function sendDigit(d) {
+    vibrate();
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ digit: d }));
+    } else {
+      fetch('/api/digit?n=' + encodeURIComponent(d), { method: 'POST', keepalive: true }).catch(()=>{});
+    }
+  }
+
+  function initWs() {
+    try {
+      ws = new WebSocket('ws://' + host + '/ws');
+      ws.onopen = () => {
+        document.getElementById('dot').className = 'status-dot';
+        document.getElementById('st-txt').innerText = 'Connecté (WS)';
+      };
+      ws.onclose = () => {
+        document.getElementById('dot').className = 'status-dot disconnected';
+        document.getElementById('st-txt').innerText = 'Déconnecté';
+        setTimeout(initWs, 2000);
+      };
+      ws.onerror = () => { ws.close(); };
+    } catch(e) {
+      setTimeout(initWs, 2000);
+    }
+  }
+  initWs();
+
+  document.getElementById('btn-select').addEventListener('pointerdown', (e) => { e.preventDefault(); sendCmd('select'); });
+  document.getElementById('btn-next').addEventListener('pointerdown', (e) => { e.preventDefault(); sendCmd('next'); });
+  document.getElementById('btn-prev').addEventListener('pointerdown', (e) => { e.preventDefault(); sendCmd('prev'); });
+  document.getElementById('btn-back').addEventListener('pointerdown', (e) => { e.preventDefault(); sendCmd('back'); });
+  document.getElementById('btn-esc').addEventListener('pointerdown', (e) => { e.preventDefault(); sendCmd('escape'); });
+  document.getElementById('btn-dict').addEventListener('pointerdown', (e) => { e.preventDefault(); sendCmd('dictation'); });
+  document.getElementById('btn-voice').addEventListener('pointerdown', (e) => { e.preventDefault(); sendCmd('voice'); });
+
+  const numpad = document.getElementById('numpad');
+  document.getElementById('btn-pad').addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    vibrate();
+    numpad.classList.toggle('open');
+  });
+
+  document.querySelectorAll('.num-btn').forEach(btn => {
+    btn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      const n = btn.getAttribute('data-n');
+      if (n === 'back') sendCmd('back');
+      else if (n === 'enter') sendCmd('select');
+      else sendDigit(n);
+    });
+  });
+</script>
+</body>
+</html>"#;
+
+fn handle_companion_client(mut stream: TcpStream) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_millis(1500)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(1500)))?;
+
+    let mut header_buf = [0u8; 2048];
+    let mut bytes_read = 0;
+
+    while bytes_read < header_buf.len() {
+        match stream.read(&mut header_buf[bytes_read..bytes_read + 1]) {
+            Ok(1) => {
+                bytes_read += 1;
+                if bytes_read >= 4 && &header_buf[bytes_read - 4..bytes_read] == b"\r\n\r\n" {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    if bytes_read == 0 {
+        return Ok(());
+    }
+
+    let request_str = String::from_utf8_lossy(&header_buf[..bytes_read]);
+    let mut lines = request_str.lines();
+    let req_line = lines.next().unwrap_or("");
+    let mut parts = req_line.split_whitespace();
+    let _method = parts.next().unwrap_or("GET");
+    let path = parts.next().unwrap_or("/");
+
+    let is_upgrade = lines.clone().any(|l| l.to_lowercase().contains("upgrade: websocket"));
+    if is_upgrade {
+        let sec_key = lines
+            .filter(|l| l.to_lowercase().starts_with("sec-websocket-key:"))
+            .filter_map(|l| l.split_once(':').map(|(_, v)| v.trim()))
+            .next();
+
+        if let Some(key) = sec_key {
+            let magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+            let combined = format!("{}{}", key, magic);
+            let digest = sha1_digest(combined.as_bytes());
+            let accept = base64_encode(&digest);
+
+            let response = format!(
+                "HTTP/1.1 101 Switching Protocols\r\n\
+                 Upgrade: websocket\r\n\
+                 Connection: Upgrade\r\n\
+                 Sec-WebSocket-Accept: {}\r\n\r\n",
+                accept
+            );
+            stream.write_all(response.as_bytes())?;
+            stream.flush()?;
+
+            COMPANION_CLIENTS_COUNT.fetch_add(1, Ordering::Relaxed);
+            stream.set_read_timeout(Some(Duration::from_secs(60)))?;
+
+            while COMPANION_SERVER_RUNNING.load(Ordering::Relaxed) {
+                let mut frame_hdr = [0u8; 2];
+                if stream.read_exact(&mut frame_hdr).is_err() {
+                    break;
+                }
+                let opcode = frame_hdr[0] & 0x0F;
+                if opcode == 0x08 {
+                    break;
+                }
+                let masked = (frame_hdr[1] & 0x80) != 0;
+                let payload_len_raw = frame_hdr[1] & 0x7F;
+
+                let payload_len: usize = if payload_len_raw <= 125 {
+                    payload_len_raw as usize
+                } else if payload_len_raw == 126 {
+                    let mut ext = [0u8; 2];
+                    if stream.read_exact(&mut ext).is_err() {
+                        break;
+                    }
+                    u16::from_be_bytes(ext) as usize
+                } else {
+                    let mut ext = [0u8; 8];
+                    if stream.read_exact(&mut ext).is_err() {
+                        break;
+                    }
+                    u64::from_be_bytes(ext) as usize
+                };
+
+                let mask_key = if masked {
+                    let mut m = [0u8; 4];
+                    if stream.read_exact(&mut m).is_err() {
+                        break;
+                    }
+                    Some(m)
+                } else {
+                    None
+                };
+
+                let mut payload = vec![0u8; payload_len];
+                if stream.read_exact(&mut payload).is_err() {
+                    break;
+                }
+                if let Some(mask) = mask_key {
+                    for (i, b) in payload.iter_mut().enumerate() {
+                        *b ^= mask[i % 4];
+                    }
+                }
+
+                if opcode == 0x01 {
+                    if let Ok(text) = std::str::from_utf8(&payload) {
+                        parse_and_dispatch_companion_action(text);
+                    }
+                } else if opcode == 0x09 {
+                    let pong = [0x8A, 0x00];
+                    let _ = stream.write_all(&pong);
+                }
+            }
+
+            COMPANION_CLIENTS_COUNT.fetch_sub(1, Ordering::Relaxed);
+            return Ok(());
+        }
+    }
+
+    if path == "/" || path == "/index.html" {
+        let html = COMPANION_HTML_PAGE;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: text/html; charset=utf-8\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {}",
+            html.len(),
+            html
+        );
+        stream.write_all(resp.as_bytes())?;
+        stream.flush()?;
+    } else if path.starts_with("/api/switch") || path.starts_with("/switch") {
+        let action = path.split_once("action=").map(|(_, a)| a.split('&').next().unwrap_or(a)).unwrap_or("select");
+        parse_and_dispatch_companion_action(action);
+        let body = r#"{"status":"ok"}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Access-Control-Allow-Origin: *\r\n\
+             Connection: close\r\n\r\n\
+             {}",
+            body.len(),
+            body
+        );
+        stream.write_all(resp.as_bytes())?;
+        stream.flush()?;
+    } else if path.starts_with("/api/digit") || path.starts_with("/digit") {
+        let digit_str = path.split_once("n=").map(|(_, a)| a.split('&').next().unwrap_or(a)).unwrap_or("1");
+        for ch in digit_str.chars() {
+            inject_number_digit(ch);
+        }
+        let body = r#"{"status":"ok"}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Access-Control-Allow-Origin: *\r\n\
+             Connection: close\r\n\r\n\
+             {}",
+            body.len(),
+            body
+        );
+        stream.write_all(resp.as_bytes())?;
+        stream.flush()?;
+    } else if path == "/api/status" || path == "/status" {
+        let body = format!(
+            r#"{{"server":"Libertide Companion","ip":"{}","clients":{}}}"#,
+            get_local_ip_address().unwrap_or_default(),
+            COMPANION_CLIENTS_COUNT.load(Ordering::Relaxed)
+        );
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Access-Control-Allow-Origin: *\r\n\
+             Connection: close\r\n\r\n\
+             {}",
+            body.len(),
+            body
+        );
+        stream.write_all(resp.as_bytes())?;
+        stream.flush()?;
+    } else {
+        let not_found = "404 Not Found";
+        let resp = format!(
+            "HTTP/1.1 404 Not Found\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {}",
+            not_found.len(),
+            not_found
+        );
+        stream.write_all(resp.as_bytes())?;
+        stream.flush()?;
+    }
+
+    Ok(())
+}
+
+pub fn start_companion_switch_server() {
+    if COMPANION_SERVER_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    std::thread::Builder::new()
+        .name("companion_http_ws_server".to_string())
+        .spawn(move || {
+            let bind_addr = format!("0.0.0.0:{}", COMPANION_HTTP_PORT);
+            let listener = match TcpListener::bind(&bind_addr) {
+                Ok(l) => {
+                    let _ = l.set_nonblocking(true);
+                    println!(
+                        "[Companion Switch] Passerelle Web & WebSocket active sur {} (URL: {})",
+                        bind_addr,
+                        get_local_companion_url()
+                    );
+                    l
+                }
+                Err(e) => {
+                    eprintln!("[Companion Switch] Impossible de lier le port TCP {}: {e}", COMPANION_HTTP_PORT);
+                    return;
+                }
+            };
+
+            while COMPANION_SERVER_RUNNING.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        std::thread::spawn(move || {
+                            let _ = handle_companion_client(stream);
+                        });
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            }
+        })
+        .expect("Échec lancement worker companion_http_ws_server");
+
+    std::thread::Builder::new()
+        .name("companion_udp_server".to_string())
+        .spawn(move || {
+            let bind_addr = format!("0.0.0.0:{}", COMPANION_UDP_PORT);
+            let socket = match UdpSocket::bind(&bind_addr) {
+                Ok(s) => {
+                    let _ = s.set_read_timeout(Some(Duration::from_millis(250)));
+                    println!("[Companion Switch] Passerelle UDP (ESP32 / Pédales) active sur {}", bind_addr);
+                    s
+                }
+                Err(e) => {
+                    eprintln!("[Companion Switch] Impossible de lier le port UDP {}: {e}", COMPANION_UDP_PORT);
+                    return;
+                }
+            };
+
+            let mut buf = [0u8; 512];
+            while COMPANION_SERVER_RUNNING.load(Ordering::Relaxed) {
+                match socket.recv_from(&mut buf) {
+                    Ok((len, _src)) if len > 0 => {
+                        if let Ok(text) = std::str::from_utf8(&buf[..len]) {
+                            parse_and_dispatch_companion_action(text);
+                        }
+                    }
+                    _ => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
+            }
+        })
+        .expect("Échec lancement worker companion_udp_server");
+}
+
+pub fn stop_companion_switch_server() {
+    COMPANION_SERVER_RUNNING.store(false, Ordering::SeqCst);
+}
 
 pub const AVAILABLE_REBIND_KEYS: &[(u32, &str)] = &[
     (0x70, "F1"),
@@ -682,6 +1350,8 @@ unsafe extern "system" fn switch_mouse_hook_proc(
 
 #[cfg(windows)]
 pub fn install_switch_keyboard_hook() {
+    start_companion_switch_server();
+
     let mut guard = HOOK_WORKER.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_some() {
         return;
@@ -756,6 +1426,8 @@ pub fn install_switch_keyboard_hook() {
 
 #[cfg(windows)]
 pub fn uninstall_switch_keyboard_hook() {
+    stop_companion_switch_server();
+
     let mut guard = HOOK_WORKER.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(state) = guard.take() {
         unsafe {
@@ -817,6 +1489,8 @@ fn vk_to_rdev_key(vk: u32) -> Option<rdev::Key> {
 
 #[cfg(not(windows))]
 pub fn install_switch_keyboard_hook() {
+    start_companion_switch_server();
+
     if HOOK_THREAD_ACTIVE.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -976,5 +1650,7 @@ pub fn install_switch_keyboard_hook() {
 
 #[cfg(not(windows))]
 pub fn uninstall_switch_keyboard_hook() {
+    stop_companion_switch_server();
+
     HOOK_THREAD_ACTIVE.store(false, Ordering::SeqCst);
 }

@@ -3,6 +3,47 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.8.7] - 2026-11-20
+
+### 📱 Remote Wireless Switch WebApp & Companion Gateway (`keyboard_hook.rs`, `app_settings.rs`)
+- **Embedded Standalone Web & WebSocket Companion Server (`start_companion_switch_server`)**:
+  - Integrated lightweight zero-dependency HTTP and WebSocket server running on port `8765` alongside an incoming UDP listener on port `8766`.
+  - Hosts a touch-optimized mobile web app (`COMPANION_HTML_PAGE`) transforming any smartphone, tablet, or secondary device on the local network into an accessible wireless single-switch button with haptic vibration feedback.
+  - Supports bidirectional real-time commands: switch selection, step navigation (Next / Prev / Back), emergency Escape, TTS voice profile rotation, dictation toggle, and an expandable interactive badge numpad.
+  - Direct UDP packet ingestion allowing low-cost microcontrollers (ESP32, Arduino, Raspberry Pi Pico) and wireless foot pedals to trigger switch events with sub-millisecond latency.
+- **Interactive Hardware Key Rebinding**:
+  - Added dedicated Settings UI for on-the-fly hardware key rebinding with real-time keystroke capture listening for any physical keyboard key or AZERTY symbol.
+
+### 🏠 Local Smart Home & Matter / Home Assistant Integration (`home_automation.rs`, `types.rs`, `commands.rs`, `app_settings.rs`)
+- **Zero-Cloud Local Home Automation (`AgentAction::HomeControl`)**:
+  - Integrated direct local automation control targeting Home Assistant (`HASS_URL`, `HASS_TOKEN`) via RFC 6455 WebSockets with transparent fallback to the local REST service API.
+  - Dedicated control over everyday physical independence appliances: lighting (`light`), electric shutters and blinds (`cover`), climate/thermostat (`climate`), motorized medical beds (`switch`), fans, and smart plugs.
+  - Comprehensive multilingual semantic normalization of home automation domains and services across all 9 supported languages (French, English, German, Spanish, Italian, Portuguese, Russian, Japanese, Chinese).
+- **KNX Group Address Alias Resolution & `.env` Default Macros (`home_automation.rs`, `fs_util.rs`)**:
+  - Added transparent KNX alias resolution (`resolve_knx_alias`) mapping human-friendly names (e.g. `lumiere_salon`, `volet_chambre`, `lit_tete`) to technical ETS group addresses (`1/2/3`, `1/200`) via `KNX_ALIASES` JSON or individual `KNX_ADDR_*` / `KNX_ALIAS_*` variables in `.env`.
+  - Native direct UDP KNXnet/IP routing indication and Home Assistant `knx.send` integration allowing users to control appliances without pronouncing technical group addresses.
+  - Configurable default voice macros via `DEFAULT_MACROS` (or `MACROS`) in `.env`, automatically merged with `macros.json` on startup.
+
+### 🎧 3D Binaural Spatial Audio & Acoustic Localization (`audio_player.rs`, `overlay.rs`, `app_switch.rs`)
+- **Screen-Positioned Spatial Earcons (`play_earcon_spatial`, `spatialize_mono_to_stereo`)**:
+  - Real-time acoustic spatialization rendering earcons and navigation feedback in true binaural 3D based on the physical screen coordinates $(X, Y)$ of active targets and controls.
+  - Woodworth Interaural Time Difference (ITD) simulation generating up to $0.65\text{ ms}$ interaural delay between ears.
+  - Equal-power Interaural Level Difference (ILD) panning law coupled with continuous head-shadow IIR filtering for the contralateral ear.
+  - Anatomical pinna elevation filtering: boosts treble frequencies for upper-screen elements and softens lower-screen targets.
+
+### 🧠 Small Language Model (SLM) & Low-Resource Inference (`local_llm.rs`, `agent_backend.rs`)
+- **Cognitive Anti-Saturation & Context Pruning (`lighten_screen_context_for_small_model`)**:
+  - Added specialized context budgeting and filtering for 1B and 1.5B parameters local models (`Qwen 2.5 1.5B`, `Llama 3.2 1B`), capping interactive elements to 25 priority controls.
+  - Adjusted prompt token limits ($2\,500$ tokens for small models vs $6\,000$ tokens for high-capacity models) to prevent KV-cache overflows and runaway generation loops.
+  - Bypasses floating card generation on small models in favor of direct, concise answers in `"narration"`, eliminating empty or truncated card payloads.
+
+### ⚡ Asynchronous Caching & Resource Decoupling (`audio.rs`, `window_util.rs`)
+- **Decoupled Whisper Loading & Non-Blocking Initialization**:
+  - Ensured UI presentation and switch navigation remain operational even when Whisper neural models are downloading or initializing in the background.
+  - Stabilized scan result caching to avoid redundant UI Automation and OCR round-trips.
+
+---
+
 ## [0.8.6] - 2026-11-19
 
 ### 🎙️⚡ 500 ms Voice Responsiveness & Early Intent Detection (`audio.rs`)

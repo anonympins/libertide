@@ -462,5 +462,13 @@
     "cognitive_clarity": "spiega semplice,piu semplice,passo dopo passo",
     "greetings": "ciao,buongiorno,buonasera,grazie,mille grazie,arrivederci,buonanotte",
     "identity": "chi sei,chi ti ha creato,cosa sai fare,come ti chiami"
+  },
+  "home_automation": {
+    "token_missing": "Token Home Assistant (HASS_TOKEN) non configurato in .env",
+    "all_entities": "tutte le entità",
+    "action_sent_ws": "Azione domotica inviata tramite WebSocket: %{domain}.%{service} (%{entity})",
+    "action_sent_rest": "Azione domotica eseguita tramite REST: %{domain}.%{service} (%{entity})",
+    "control_failed": "Errore nel controllo domotico di Home Assistant: %{error}",
+    "test_ok": "Home Assistant operativo (%{url})"
   }
 }

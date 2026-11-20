@@ -462,5 +462,13 @@
     "cognitive_clarity": "简单解释,简单点,一步一步",
     "greetings": "你好,早上好,晚上好,谢谢,非常感谢,再见,晚安",
     "identity": "你是谁,你能做什么,你叫什么名字"
+  },
+  "home_automation": {
+    "token_missing": "未在 .env 中配置 Home Assistant 访问令牌 (HASS_TOKEN)",
+    "all_entities": "所有设备",
+    "action_sent_ws": "已通过 WebSocket 发送智能家居操作: %{domain}.%{service} (%{entity})",
+    "action_sent_rest": "已通过 REST 执行智能家居操作: %{domain}.%{service} (%{entity})",
+    "control_failed": "Home Assistant 智能家居控制失败: %{error}",
+    "test_ok": "Home Assistant 运行正常 (%{url})"
   }
 }

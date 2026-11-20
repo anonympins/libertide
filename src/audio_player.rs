@@ -7,14 +7,101 @@ use std::thread;
 
 #[derive(Clone)]
 pub struct AudioPlayer {
-    sender: Sender<(u64, Vec<f32>, u32)>,
+    sender: Sender<(u64, Vec<f32>, u32, Option<(i32, i32)>)>,
     ring_buffer: Arc<Mutex<VecDeque<f32>>>,
     generation: Arc<AtomicU64>,
 }
 
+/// Applique la spatialisation binaurale 3D (ITD + ILD + filtre d'élévation de pinna)
+/// à un flux mono pour générer un flux stéréo entrelacé [L, R, L, R, ...]
+pub fn spatialize_mono_to_stereo(
+    mono_samples: &[f32],
+    sample_rate: u32,
+    click_x: i32,
+    click_y: i32,
+    screen_width: f32,
+    screen_height: f32,
+) -> Vec<f32> {
+    if mono_samples.is_empty() {
+        return Vec::new();
+    }
+
+    let sw = screen_width.max(640.0);
+    let sh = screen_height.max(480.0);
+
+    // Coordonnées normalisées : azimut x_norm dans [-1.0 (gauche), +1.0 (droite)]
+    let x_norm = ((click_x as f32 / sw) * 2.0 - 1.0).clamp(-1.0, 1.0);
+    // Élévation y_norm dans [-1.0 (bas), +1.0 (haut)]
+    let y_norm = (1.0 - (click_y as f32 / sh) * 2.0).clamp(-1.0, 1.0);
+
+    // 1. ILD (Interaural Level Difference) avec loi de panoramique à puissance constante (equal-power)
+    let pan_angle = (x_norm + 1.0) * 0.25 * std::f32::consts::PI; // [0, PI/2]
+    let mut gain_left = pan_angle.cos();
+    let mut gain_right = pan_angle.sin();
+
+    // 2. ITD (Interaural Time Difference) : retard physique entre les deux oreilles
+    // Modèle de Woodworth : retard max de ~0.65 ms pour un azimut de 90°
+    let max_delay_secs = 0.00065f32;
+    let max_delay_samples = (max_delay_secs * sample_rate as f32).round() as usize;
+    let delay_samples = ((x_norm.abs() * max_delay_samples as f32).round() as usize).min(max_delay_samples);
+
+    // 3. Filtre spectral d'élévation (effet de pavillon de l'oreille / Pinna) :
+    // Haut d'écran (y > 0) : accentuation de la clarté et des hautes fréquences (treble boost)
+    // Bas d'écran (y < 0) : son légèrement étouffé/plus mat (treble cut)
+    let elevation_brightness = 1.0 + (y_norm * 0.25);
+
+    let out_len = (mono_samples.len() + max_delay_samples) * 2;
+    let mut stereo = vec![0.0f32; out_len];
+
+    // Filtre IIR 1er ordre pour l'ombre acoustique crânienne (Head Shadowing)
+    let shadow_alpha = (0.28 + 0.42 * (1.0 - x_norm.abs())).clamp(0.15, 0.95);
+    let mut left_filter_state = 0.0f32;
+    let mut right_filter_state = 0.0f32;
+
+    // Attribution des retards : si le son vient de droite, l'oreille gauche a du retard (et vice-versa)
+    let (left_offset, right_offset) = if x_norm >= 0.0 {
+        (delay_samples, 0)
+    } else {
+        (0, delay_samples)
+    };
+
+    for (i, &sample) in mono_samples.iter().enumerate() {
+        let shaped = sample * elevation_brightness;
+
+        // Oreille gauche
+        let l_in = shaped * gain_left;
+        let l_sample = if x_norm > 0.15 {
+            // Ombre acoustique crânienne appliquée à l'oreille opposée
+            left_filter_state += shadow_alpha * (l_in - left_filter_state);
+            left_filter_state
+        } else {
+            l_in
+        };
+        let l_idx = (i + left_offset) * 2;
+        if l_idx < stereo.len() {
+            stereo[l_idx] = l_sample.clamp(-1.0, 1.0);
+        }
+
+        // Oreille droite
+        let r_in = shaped * gain_right;
+        let r_sample = if x_norm < -0.15 {
+            right_filter_state += shadow_alpha * (r_in - right_filter_state);
+            right_filter_state
+        } else {
+            r_in
+        };
+        let r_idx = (i + right_offset) * 2 + 1;
+        if r_idx < stereo.len() {
+            stereo[r_idx] = r_sample.clamp(-1.0, 1.0);
+        }
+    }
+
+    stereo
+}
+
 impl AudioPlayer {
     pub fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let (tx, rx) = channel::<(u64, Vec<f32>, u32)>();
+        let (tx, rx) = channel::<(u64, Vec<f32>, u32, Option<(i32, i32)>)>();
         let ring_buffer: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
         let ring_buffer_clone = Arc::clone(&ring_buffer);
         let generation = Arc::new(AtomicU64::new(0));
@@ -111,7 +198,7 @@ impl AudioPlayer {
                     let rx_guard = rx.lock().unwrap_or_else(|e| e.into_inner());
                     rx_guard.recv()
                 };
-                let (gen, raw_samples, src_rate) = match recv_res {
+                let (gen, raw_samples, src_rate, spatial_coords) = match recv_res {
                     Ok(item) => item,
                     Err(_) => break,
                 };
@@ -121,7 +208,25 @@ impl AudioPlayer {
                 if raw_samples.is_empty() {
                     continue;
                 }
-                let converted = resample_audio(&raw_samples, src_rate, sample_rate, channels);
+                let converted = if let Some((cx, cy)) = spatial_coords {
+                    // Spatialisation 3D binaurale de la source mono vers les canaux stéréo
+                    #[cfg(windows)]
+                    let (scr_w, scr_h) = {
+                        let wa = crate::window_util::get_desktop_work_area();
+                        ((wa.right - wa.left).max(800) as f32, (wa.bottom - wa.top).max(600) as f32)
+                    };
+                    #[cfg(not(windows))]
+                    let (scr_w, scr_h) = (1920.0f32, 1080.0f32);
+
+                    let stereo_samples = spatialize_mono_to_stereo(&raw_samples, src_rate, cx, cy, scr_w, scr_h);
+                    if channels == 2 {
+                        resample_interleaved(&stereo_samples, 2, src_rate, sample_rate, 2)
+                    } else {
+                        resample_audio(&raw_samples, src_rate, sample_rate, channels)
+                    }
+                } else {
+                    resample_audio(&raw_samples, src_rate, sample_rate, channels)
+                };
                 if gen != generation_clone.load(Ordering::SeqCst) {
                     continue;
                 }
@@ -139,7 +244,13 @@ impl AudioPlayer {
 
     pub fn play_samples(&self, samples: Vec<f32>, sample_rate: u32) {
         let gen = self.generation.load(Ordering::SeqCst);
-        let _ = self.sender.send((gen, samples, sample_rate));
+        let _ = self.sender.send((gen, samples, sample_rate, None));
+    }
+
+    /// Joue un flux audio mono en le spatialisant en 3D selon les coordonnées écran (X, Y)
+    pub fn play_spatial_samples(&self, samples: Vec<f32>, sample_rate: u32, click_x: i32, click_y: i32) {
+        let gen = self.generation.load(Ordering::SeqCst);
+        let _ = self.sender.send((gen, samples, sample_rate, Some((click_x, click_y))));
     }
 
     pub fn stop(&self) {
@@ -155,6 +266,33 @@ impl AudioPlayer {
             .map(|b| !b.is_empty())
             .unwrap_or_else(|e| !e.into_inner().is_empty())
     }
+}
+
+fn resample_interleaved(input: &[f32], in_channels: usize, src_rate: u32, dst_rate: u32, dst_channels: usize) -> Vec<f32> {
+    if input.is_empty() {
+        return Vec::new();
+    }
+    if src_rate == dst_rate && in_channels == dst_channels {
+        return input.to_vec();
+    }
+    let frames_in = input.len() / in_channels;
+    let ratio = dst_rate as f64 / src_rate as f64;
+    let frames_out = (frames_in as f64 * ratio) as usize;
+    let mut out = Vec::with_capacity(frames_out * dst_channels);
+
+    for f in 0..frames_out {
+        let src_frame = f as f64 / ratio;
+        let f_idx = (src_frame.floor() as usize).min(frames_in.saturating_sub(1));
+        let frac = (src_frame - f_idx as f64) as f32;
+        let next_f = (f_idx + 1).min(frames_in.saturating_sub(1));
+
+        for ch in 0..dst_channels.min(in_channels) {
+            let s0 = input[f_idx * in_channels + ch];
+            let s1 = input[next_f * in_channels + ch];
+            out.push(s0 + frac * (s1 - s0));
+        }
+    }
+    out
 }
 
 fn resample_audio(input: &[f32], src_rate: u32, dst_rate: u32, dst_channels: usize) -> Vec<f32> {

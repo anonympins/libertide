@@ -12,6 +12,7 @@ use crate::intent::*;
 use crate::keyboard_hook::*;
 use crate::locale::*;
 use crate::overlay::*;
+use crate::overlay::play_earcon_spatial;
 use crate::theme::{AppTheme, SettingsTab, ThemeColors};
 use crate::tts::{sanitize_for_tts, TtsCommand};
 use crate::types::*;
@@ -1744,16 +1745,16 @@ impl OverlayApp {
                                 self.switch_focus_index = (self.switch_focus_index + 1) % num_windows;
                             }
                             self.switch_focus_index %= num_windows;
+                            let cur_win = self.switch_windows[self.switch_focus_index].clone();
                             self.switch_last_tick = Instant::now();
                             self.last_switch_input = Instant::now();
                             self.hover_controls_speech_enabled = false;
                             if user_nav_hit {
-                                play_earcon(Earcon::Navigation);
+                                play_earcon_spatial(Earcon::Navigation, cur_win.click_x, cur_win.click_y);
                             }
                             self.switch_auto_scroll = self.is_single_switch_mode();
                             self.hover_physical_mouse_moved = false;
 
-                            let cur_win = self.switch_windows[self.switch_focus_index % num_windows].clone();
                             self.switch_active_window_id = Some(cur_win.id);
                             self.numbered_last_hwnd = Some(cur_win.id);
                             self.switch_zones.clear();
@@ -1825,10 +1826,11 @@ impl OverlayApp {
                                 self.switch_focus_index = (self.switch_focus_index + 1) % num_zones;
                             }
                             self.switch_focus_index %= num_zones;
+                            let cur_zone = &self.switch_zones[self.switch_focus_index];
                             self.hover_controls_speech_enabled = true;
                             self.switch_last_tick = Instant::now();
                             if user_nav_hit {
-                                play_earcon(Earcon::Navigation);
+                                play_earcon_spatial(Earcon::Navigation, cur_zone.click_x, cur_zone.click_y);
                             }
                             self.hover_physical_mouse_moved = false;
                             if nav_next_hit || nav_prev_hit {
@@ -1836,7 +1838,6 @@ impl OverlayApp {
                                 self.switch_auto_scroll = self.is_single_switch_mode();
                             }
 
-                            let cur_zone = &self.switch_zones[self.switch_focus_index % num_zones];
                             set_global_cursor_pos(cur_zone.click_x, cur_zone.click_y);
                             self.hover_last_cursor_pos = Some((cur_zone.click_x, cur_zone.click_y));
                             self.hover_cursor_still_since = Instant::now();
@@ -1892,10 +1893,11 @@ impl OverlayApp {
                                 self.switch_focus_index = (self.switch_focus_index + 1) % num_targets;
                             }
                             self.switch_focus_index %= num_targets;
+                            let cur_target = &self.numbered_targets[self.switch_focus_index];
                             self.hover_controls_speech_enabled = true;
                             self.switch_last_tick = Instant::now();
                             if user_nav_hit {
-                                play_earcon(Earcon::Navigation);
+                                play_earcon_spatial(Earcon::Navigation, cur_target.click_x, cur_target.click_y);
                             }
                             self.hover_physical_mouse_moved = false;
                             if nav_next_hit || nav_prev_hit {
@@ -1903,7 +1905,6 @@ impl OverlayApp {
                                 self.switch_auto_scroll = self.is_single_switch_mode();
                             }
 
-                            let cur_target = &self.numbered_targets[self.switch_focus_index % num_targets];
                             focus_element_target(cur_target);
                             self.hover_last_cursor_pos = Some((cur_target.click_x, cur_target.click_y));
                             self.hover_cursor_still_since = Instant::now();
@@ -1947,12 +1948,12 @@ impl OverlayApp {
                         }
 
                         if switch_input_hit {
+                            let cur_target = self.numbered_targets[self.switch_focus_index % num_targets].clone();
                             self.last_switch_input = Instant::now();
                             self.switch_auto_scroll = self.is_single_switch_mode();
                             self.hover_physical_mouse_moved = false;
-                            play_earcon(Earcon::Success);
+                            play_earcon_spatial(Earcon::Success, cur_target.click_x, cur_target.click_y);
 
-                            let cur_target = self.numbered_targets[self.switch_focus_index % num_targets].clone();
                             self.click_numbered_target_by_index(cur_target.index);
                         }
                     }

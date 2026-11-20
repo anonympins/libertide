@@ -462,5 +462,13 @@
     "cognitive_clarity": "объясни проще,простыми словами,пошагово",
     "greetings": "привет,здравствуй,доброе утро,добрый вечер,спасибо,большое спасибо,пока,до свидания",
     "identity": "кто ты,кто тебя создал,что ты умеешь,как тебя зовут"
+  },
+  "home_automation": {
+    "token_missing": "Токен Home Assistant (HASS_TOKEN) не настроен в .env",
+    "all_entities": "все объекты",
+    "action_sent_ws": "Команда умного дома отправлена через WebSocket: %{domain}.%{service} (%{entity})",
+    "action_sent_rest": "Команда умного дома выполнена через REST: %{domain}.%{service} (%{entity})",
+    "control_failed": "Ошибка управления Home Assistant: %{error}",
+    "test_ok": "Home Assistant готов к работе (%{url})"
   }
 }

@@ -11,6 +11,7 @@ pub enum SettingsTab {
     Macros,
     Devices,
     Keybindings,
+    HomeAutomation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
