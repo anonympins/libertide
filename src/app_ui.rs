@@ -3,10 +3,9 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use rust_i18n::t;
 
-use crate::audio;
 use crate::automation::*;
 use crate::clipboard::*;
-use crate::floating_window::{self, update_open_floating_cards, FloatingCard, FloatingContentType};
+use crate::floating_window::{self, update_open_floating_cards, FloatingContentType};
 use crate::fs_util::*;
 use crate::intent::*;
 use crate::keyboard_hook::*;
@@ -16,7 +15,6 @@ use crate::overlay::play_earcon_spatial;
 use crate::theme::{AppTheme, SettingsTab, ThemeColors};
 use crate::tts::{sanitize_for_tts, TtsCommand};
 use crate::types::*;
-use crate::ui;
 use crate::window_util::*;
 use crate::OverlayApp;
 
@@ -167,6 +165,11 @@ impl OverlayApp {
                             self.is_recording = true;
                         } else if new_status == AgentStatus::Idle {
                             self.is_recording = false;
+                            if self.dictation_mode && self.switch_access_mode {
+                                if let Some(ref target) = self.dictation_origin_target {
+                                    draw_screen_control_border(target.rect, false);
+                                }
+                            }
                             if !has_pending_twitch {
                                 if !self.mic_manually_disabled
                                     && (self.dictation_mode
@@ -180,7 +183,8 @@ impl OverlayApp {
                                     && (!self.is_hidden || self.switch_access_mode)
                                     && !AGENT_BUSY.load(Ordering::SeqCst)
                                 {
-                                    self.start_recording(ctx, false);
+                                    let play_indicator = self.dictation_mode;
+                                    self.start_recording(ctx, play_indicator);
                                 }
                             }
                         }
@@ -483,7 +487,9 @@ impl OverlayApp {
                 }
                 AgentEvent::CloseFloatingCard(id) => {
                     let vp_id = egui::ViewportId::from_hash_of(&id);
-                    if let Some(card) = self.floating_cards.iter().find(|c| c.id == id) {
+                    ctx.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Close);
+                    if let Some(card) = self.floating_cards.iter_mut().find(|c| c.id == id) {
+                        card.open = false;
                         if matches!(card.content, FloatingContentType::Subtitles { .. }) {
                             floating_window::stop_live_subtitles();
                             crate::audio::stop_live_subtitles();
@@ -492,7 +498,6 @@ impl OverlayApp {
                     self.floating_cards.retain(|c| c.id != id);
                     update_open_floating_cards(&self.floating_cards);
                     ctx.request_repaint();
-                    ctx.request_repaint_of(vp_id);
                 }
                 AgentEvent::ClickNumberedTarget(idx) => {
                     self.click_numbered_target_by_index(idx);
@@ -2157,6 +2162,7 @@ impl OverlayApp {
         time: f64,
         theme: &ThemeColors,
     ) {
+        let ctx = ui.ctx().clone();
         ui.scope_builder(egui::UiBuilder::new().max_rect(control_rect), |ui| {
             egui::Frame::new()
                 .fill(theme.control_bg)
@@ -2659,6 +2665,11 @@ impl OverlayApp {
                                     });
                                     if kbd_resp.clicked() || kbd_dwell || is_kbd_key {
                                         if is_kbd_open {
+                                            let vp_id = egui::ViewportId::from_hash_of("virtual_keyboard");
+                                            ctx.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Close);
+                                            if let Some(card) = self.floating_cards.iter_mut().find(|c| c.id == "virtual_keyboard") {
+                                                card.open = false;
+                                            }
                                             self.floating_cards.retain(|c| c.id != "virtual_keyboard");
                                             crate::floating_window::update_open_floating_cards(&self.floating_cards);
                                             play_earcon(Earcon::MicClose);
@@ -2692,6 +2703,11 @@ impl OverlayApp {
                                 });
                                 if rhythm_resp.clicked() || rhythm_dwell || is_rhythm_key {
                                     if is_open {
+                                        let vp_id = egui::ViewportId::from_hash_of("instrument_toy");
+                                        ctx.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Close);
+                                        if let Some(card) = self.floating_cards.iter_mut().find(|c| c.id == "instrument_toy") {
+                                            card.open = false;
+                                        }
                                         self.floating_cards.retain(|c| c.id != "instrument_toy");
                                         crate::floating_window::update_open_floating_cards(&self.floating_cards);
                                         play_earcon(Earcon::MicClose);
@@ -3825,6 +3841,10 @@ impl OverlayApp {
                     floating_window::FloatingCardOutput::Prompt(prompt) => submitted_card_prompts.push(prompt),
                     floating_window::FloatingCardOutput::Speak(speech) => card_speech = Some(speech),
                 }
+            }
+            if !card.open {
+                let vp_id = egui::ViewportId::from_hash_of(&card.id);
+                ctx.send_viewport_cmd_to(vp_id, egui::ViewportCommand::Close);
             }
             card.open
         });

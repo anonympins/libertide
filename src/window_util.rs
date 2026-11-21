@@ -298,6 +298,41 @@ pub fn is_window_visible_on_screen(hwnd: HWND) -> bool {
     w > 10 && h > 10
 }
 
+/// Indique si la fenêtre au premier plan est en plein écran complet (visionnage de film, YouTube, Netflix, jeu)
+#[cfg(windows)]
+pub fn is_foreground_window_fullscreen() -> bool {
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.0.is_null() || is_window_hung(fg) {
+        return false;
+    }
+    let (pid, _) = get_window_process_info(fg);
+    if pid == std::process::id() {
+        return false;
+    }
+    let mut r = RECT::default();
+    if unsafe { GetWindowRect(fg, &mut r).is_ok() } {
+        let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+        let sh = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+        let win_w = r.right - r.left;
+        let win_h = r.bottom - r.top;
+        return r.left <= 0 && r.top <= 0 && win_w >= sw && win_h >= sh;
+    }
+    false
+}
+
+#[cfg(not(windows))]
+pub fn is_foreground_window_fullscreen() -> bool {
+    if let Some(rect) = get_active_window_rect() {
+        let mon_w = 1920;
+        let mon_h = 1080;
+        let w = rect[2] - rect[0];
+        let h = rect[3] - rect[1];
+        rect[0] <= 0 && rect[1] <= 0 && w >= mon_w && h >= mon_h
+    } else {
+        false
+    }
+}
+
 #[cfg(not(windows))]
 pub fn is_window_visible_on_screen(_target: impl std::fmt::Display) -> bool {
     true

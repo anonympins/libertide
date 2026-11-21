@@ -24,6 +24,7 @@ static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 static ACTIVE_TASKS: Mutex<Vec<ActiveScheduledTask>> = Mutex::new(Vec::new());
 pub static PROACTIVE_COMPANION_ENABLED: AtomicBool = AtomicBool::new(true);
 pub static PROACTIVE_INTERVAL_MINUTES: AtomicU64 = AtomicU64::new(22);
+pub static PROACTIVE_ALLOW_REMOTE: AtomicBool = AtomicBool::new(false);
 
 static SCHEDULER_CMD_TX: Mutex<Option<UnboundedSender<AgentCommand>>> = Mutex::new(None);
 static SCHEDULER_EVENT_TX: Mutex<Option<StdSender<AgentEvent>>> = Mutex::new(None);
@@ -552,6 +553,10 @@ pub fn spawn_proactive_companion_loop(tx: UnboundedSender<AgentCommand>) {
                 .map(|v| v.trim().eq_ignore_ascii_case("true") || v == "1")
                 .unwrap_or(true);
             PROACTIVE_COMPANION_ENABLED.store(env_enabled, Ordering::SeqCst);
+            let allow_remote = crate::fs_util::read_env_var_from_file(".env", "PROACTIVE_ALLOW_REMOTE")
+                .map(|v| v.trim().eq_ignore_ascii_case("true") || v == "1")
+                .unwrap_or(false);
+            PROACTIVE_ALLOW_REMOTE.store(allow_remote, Ordering::SeqCst);
 
             if let Some(m_str) = crate::fs_util::read_env_var_from_file(".env", "PROACTIVE_INTERVAL_MINS") {
                 if let Ok(mins) = m_str.trim().parse::<u64>() {
@@ -572,6 +577,14 @@ pub fn spawn_proactive_companion_loop(tx: UnboundedSender<AgentCommand>) {
                     continue;
                 }
 
+                // Protection Tokens : ne pas réveiller de LLM distant payant en arrière-plan sans autorisation
+                let cur_config = crate::overlay::resolve_llm_config();
+                if cur_config.provider != crate::types::LlmProvider::Local && !PROACTIVE_ALLOW_REMOTE.load(Ordering::Relaxed) {
+                    // Le compagnon d'arrière-plan reste en sommeil sur les modèles cloud payants
+                    std::thread::sleep(Duration::from_secs(30));
+                    continue;
+                }
+
                 let base_mins = PROACTIVE_INTERVAL_MINUTES.load(Ordering::Relaxed);
                 // Gigue pseudo-aléatoire naturelle (± 3 minutes)
                 let jitter_secs = ((Instant::now().elapsed().as_millis() % 7) as i64 - 3) * 60;
@@ -589,8 +602,15 @@ pub fn spawn_proactive_companion_loop(tx: UnboundedSender<AgentCommand>) {
                 let is_busy = AGENT_BUSY.load(Ordering::Relaxed);
                 let is_typing = IS_USER_TYPING.load(Ordering::Relaxed);
 
-                if is_emergency || is_dictation || is_busy || is_typing {
-                    // Remise à plus tard dans 45 secondes si l'utilisateur est occupé
+                // Détection de film / musique / son en cours de lecture
+                let is_sound_playing = crate::ui::is_external_audio_playing();
+                let is_movie_fullscreen = crate::window_util::is_foreground_window_fullscreen();
+
+                if is_emergency || is_dictation || is_busy || is_typing || is_sound_playing || is_movie_fullscreen {
+                    // Remise à plus tard discrète : on ne dérange jamais pendant un film ou une écoute
+                    if is_sound_playing || is_movie_fullscreen {
+                        std::thread::sleep(Duration::from_secs(30));
+                    }
                     continue;
                 }
 

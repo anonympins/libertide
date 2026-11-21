@@ -686,6 +686,23 @@ impl OverlayApp {
                                 });
                                 ui.add_space(4.0);
 
+                                // Option de contrôle des tokens distants en arrière-plan
+                                let mut allow_remote_proactive = crate::scheduler::PROACTIVE_ALLOW_REMOTE.load(Ordering::Relaxed);
+                                let label_color = if allow_remote_proactive { theme.accent } else { theme.text_secondary };
+                                if ui.checkbox(
+                                    &mut allow_remote_proactive,
+                                    egui::RichText::new("Autoriser les réveils spontanés sur les LLMs distants (consomme des tokens)")
+                                        .size(11.0)
+                                        .color(label_color),
+                                ).on_hover_text("Par défaut désactivé : les réveils en arrière-plan (compagnon proactif, vérification d'écran) sont réservés au modèle local gratuit pour ne pas consommer vos crédits d'API distants.").changed() {
+                                    crate::scheduler::PROACTIVE_ALLOW_REMOTE.store(allow_remote_proactive, Ordering::SeqCst);
+                                    let val_str = if allow_remote_proactive { "true" } else { "false" };
+                                    let _ = write_env_var_to_file(".env", "PROACTIVE_ALLOW_REMOTE", val_str);
+                                    std::env::set_var("PROACTIVE_ALLOW_REMOTE", val_str);
+                                    play_earcon(Earcon::Success);
+                                }
+                                ui.add_space(4.0);
+
                                 if self.selected_provider_modal == LlmProvider::Local {
                                     let active_preset = local_llm::get_active_preset();
                                     egui::Frame::new()
