@@ -2446,7 +2446,12 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
             AgentAction::LiveSubtitles { target_window, enabled } => {
                 if *enabled {
                     crate::audio::start_live_subtitles(target_window.clone());
-                    let win_name = target_window.as_deref().unwrap_or("Sortie audio système");
+                    let all_str = t!("commands.subtitles_source_all").to_string();
+                    let win_name = if crate::audio::is_all_sources_target(target_window.as_deref()) {
+                        &all_str
+                    } else {
+                        target_window.as_deref().unwrap_or(&all_str)
+                    };
                     feedback.push(format!("Sous-titres en direct activés pour '{win_name}'. Overlay spectral et transcription ouverts à l'écran."));
                 } else {
                     crate::audio::stop_live_subtitles();

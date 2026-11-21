@@ -551,7 +551,12 @@ impl FloatingCard {
                 speech.push_str(&format!("Interactions possibles : vous pouvez modifier ces critères puis cliquer sur le bouton {} pour lancer la requête.", submit_label));
             }
             FloatingContentType::Subtitles { text, target_window, history } => {
-                let target = target_window.as_deref().unwrap_or("la sortie audio");
+                let all_sources = t!("commands.subtitles_source_all").to_string();
+                let target = if crate::audio::is_all_sources_target(target_window.as_deref()) {
+                    &all_sources
+                } else {
+                    target_window.as_deref().unwrap_or(&all_sources)
+                };
                 speech.push_str(&format!("Sous-titres en direct de {target}. "));
                 if !history.is_empty() {
                     let recent: Vec<&str> = history.iter().rev().take(3).map(|s| s.as_str()).collect();
@@ -1109,11 +1114,89 @@ impl FloatingCard {
                                                 crate::audio::set_live_subtitles_translate(!is_trans);
                                             }
 
-                                            if target_window.is_none() && live_target.is_some() {
-                                                *target_window = live_target.clone();
+                                            // Sélecteur de source de sous-titres (Tous / Fenêtres applicatives / Micro)
+                                            let all_sources_label = t!("commands.subtitles_source_all").to_string();
+                                            let mic_label = t!("commands.subtitles_source_mic").to_string();
+                                            let source_prefix = t!("commands.subtitles_source_label").to_string();
+                                            let is_all = crate::audio::is_all_sources_target(target_window.as_deref());
+                                            let is_mic = target_window.as_deref().map_or(false, |s| {
+                                                let low = s.to_lowercase();
+                                                low.contains("micro") || low == "mic"
+                                            });
+
+                                            let current_display = if is_all {
+                                                all_sources_label.clone()
+                                            } else if is_mic {
+                                                mic_label.clone()
+                                            } else {
+                                                target_window.as_deref().unwrap_or(&all_sources_label).to_string()
+                                            };
+
+                                            ui.add_space(4.0);
+                                            ui.label(egui::RichText::new(&source_prefix).size(10.5).color(theme.text_secondary));
+
+                                            let user_wins = crate::window_util::list_user_windows();
+                                            let mut open_windows: Vec<String> = user_wins
+                                                .into_iter()
+                                                .map(|(_, title)| title.trim().to_string())
+                                                .filter(|t| !t.is_empty() && !t.to_lowercase().contains("libertide") && t != "Program Manager")
+                                                .collect();
+                                            open_windows.dedup();
+
+                                            let mut selected_source = current_display.clone();
+                                            let mut source_changed = false;
+
+                                            let display_truncated = if current_display.chars().count() > 22 {
+                                                let mut s: String = current_display.chars().take(20).collect();
+                                                s.push('…');
+                                                s
+                                            } else {
+                                                current_display.clone()
+                                            };
+
+                                            let combo_id = format!("subtitles_source_combo_{}", self.id);
+                                            egui::ComboBox::from_id_salt(combo_id)
+                                                .selected_text(egui::RichText::new(display_truncated).size(10.5).color(theme.accent).strong())
+                                                .width(140.0)
+                                                .show_ui(ui, |ui| {
+                                                    if ui.selectable_value(&mut selected_source, all_sources_label.clone(), format!("🌐 {all_sources_label}")).clicked() {
+                                                        source_changed = true;
+                                                    }
+                                                    ui.separator();
+                                                    for win in &open_windows {
+                                                        let item_label = if win.chars().count() > 34 {
+                                                            let mut s: String = win.chars().take(31).collect();
+                                                            s.push('…');
+                                                            s
+                                                        } else {
+                                                            win.clone()
+                                                        };
+                                                        if ui.selectable_value(&mut selected_source, win.clone(), format!("🪟 {item_label}")).clicked() {
+                                                            source_changed = true;
+                                                        }
+                                                    }
+                                                    ui.separator();
+                                                    if ui.selectable_value(&mut selected_source, mic_label.clone(), format!("🎙️ {mic_label}")).clicked() {
+                                                        source_changed = true;
+                                                    }
+                                                });
+
+                                            if source_changed {
+                                                if selected_source == all_sources_label {
+                                                    *target_window = None;
+                                                    crate::audio::set_live_subtitles_target(None);
+                                                    self.title = t!("commands.subtitles_title").to_string();
+                                                } else if selected_source == mic_label {
+                                                    *target_window = Some("Microphone".to_string());
+                                                    crate::audio::set_live_subtitles_target(Some("Microphone".to_string()));
+                                                    self.title = format!("{} ({})", t!("commands.subtitles_title"), mic_label);
+                                                } else {
+                                                    *target_window = Some(selected_source.clone());
+                                                    crate::audio::set_live_subtitles_target(Some(selected_source.clone()));
+                                                    self.title = selected_source.clone();
+                                                }
+                                                play_earcon(Earcon::Success);
                                             }
-                                            let target_label = target_window.as_deref().or(live_target.as_deref()).unwrap_or("Sortie audio (Loopback)");
-                                            ui.label(egui::RichText::new(format!("— Source : {target_label}")).size(11.0).color(theme.text_secondary));
 
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 let stop_btn = ui.add(

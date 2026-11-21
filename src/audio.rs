@@ -1467,6 +1467,38 @@ pub fn is_live_subtitles_active() -> bool {
     LIVE_SUBTITLES_RUNNING.load(Ordering::SeqCst)
 }
 
+/// Indique si la cible demandée correspond à l'ensemble des sources (« Tous » / Système global)
+pub fn is_all_sources_target(target: Option<&str>) -> bool {
+    match target {
+        None => true,
+        Some(s) => {
+            let t = s.trim().to_lowercase();
+            t.is_empty()
+                || t == "tous"
+                || t == "all"
+                || t == "alle"
+                || t == "todos"
+                || t == "tutti"
+                || t == "все"
+                || t == "すべて"
+                || t == "全部"
+                || t.starts_with("tous (")
+                || t.starts_with("all (")
+                || t.starts_with("alle (")
+                || t.starts_with("todos (")
+                || t.starts_with("tutti (")
+                || t.starts_with("все (")
+                || t == "__all__"
+        }
+    }
+}
+
+pub fn set_live_subtitles_target(target: Option<String>) {
+    if let Ok(mut lock) = LIVE_SUBTITLES_TARGET.lock() {
+        *lock = target;
+    }
+}
+
 const FREQ_BANDS: [f32; 16] = [
     80.0, 150.0, 250.0, 400.0, 600.0, 850.0, 1200.0, 1600.0,
     2100.0, 2700.0, 3400.0, 4200.0, 5200.0, 6400.0, 7800.0, 9500.0,
@@ -1599,7 +1631,15 @@ fn run_live_subtitles_loop(
             }
         }
 
-        // Construction résiliente du flux audio : tentative loopback, sinon repli sur le micro.
+        let is_mic_source = {
+            let lock = LIVE_SUBTITLES_TARGET.lock().ok();
+            lock.as_ref().and_then(|l| l.as_deref()).map_or(false, |s| {
+                let lower = s.to_lowercase();
+                lower.contains("micro") || lower == "mic"
+            })
+        };
+
+        // Construction résiliente du flux audio : microphone dédié ou loopback système
         let host = cpal::default_host();
         let (loopback_tx, loopback_rx) = channel::<Vec<f32>>();
         let mut stream_opt: Option<cpal::Stream> = None;
@@ -1607,9 +1647,27 @@ fn run_live_subtitles_loop(
         let mut channels = 2;
         let mut source_name = "Inconnu".to_string();
 
+        if is_mic_source {
+            if let Some(in_dev) = crate::devices::get_audio_input_device(&host) {
+                source_name = in_dev.to_string();
+                if let Ok(config) = in_dev.default_input_config() {
+                    sample_rate = config.sample_rate();
+                    channels = config.channels();
+                    let fmt = config.sample_format();
+                    let s_cfg: cpal::StreamConfig = config.into();
+                    if let Some(s) = build_input_stream(&in_dev, &s_cfg, fmt, loopback_tx.clone()) {
+                        if s.play().is_ok() {
+                            stream_opt = Some(s);
+                        }
+                    }
+                }
+            }
+        }
+
         // Stratégie de sélection de l'appareil de capture audio :
         // 1. (Linux/macOS uniquement) Recherche d'un appareil virtuel explicite (.monitor, BlackHole, etc.)
         #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if !is_mic_source {
         if let Ok(devices) = host.input_devices() {
             for device in devices {
                 let name = device.to_string();
@@ -1637,10 +1695,11 @@ fn run_live_subtitles_loop(
                     }
             }
         }
+        }
 
         // 2. (Windows) Capture loopback WASAPI directe sur le périphérique de sortie par défaut
         #[cfg(target_os = "windows")]
-        if stream_opt.is_none() {
+        if !is_mic_source && stream_opt.is_none() {
             if let Some(out_dev) = host.default_output_device() {
                 source_name = out_dev.to_string();
                 if let Ok(config) = out_dev.default_output_config() {
@@ -1695,6 +1754,17 @@ fn run_live_subtitles_loop(
         let mut noise_floor: f32 = 0.005;
 
         while LIVE_SUBTITLES_RUNNING.load(Ordering::SeqCst) {
+            // Détection du basculement à chaud de la source audio (Microphone <-> Système)
+            let cur_is_mic = {
+                let lock = LIVE_SUBTITLES_TARGET.lock().ok();
+                lock.as_ref().and_then(|l| l.as_deref()).map_or(false, |s| {
+                    let lower = s.to_lowercase();
+                    lower.contains("micro") || lower == "mic"
+                })
+            };
+            if cur_is_mic != is_mic_source {
+                break;
+            }
             while let Ok(chunk) = loopback_rx.try_recv() {
                 let ch = channels as usize;
                 for frame in chunk.chunks(ch) {

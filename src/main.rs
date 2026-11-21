@@ -724,8 +724,8 @@ impl OverlayApp {
         }
         update_open_floating_cards(&self.floating_cards);
         play_earcon(Earcon::Success);
-        let default_source = t!("commands.subtitles_system_audio").to_string();
-        let source_desc = target_window.as_deref().unwrap_or(&default_source);
+        let all_sources = t!("commands.subtitles_source_all").to_string();
+        let source_desc = target_window.as_deref().filter(|s| !crate::audio::is_all_sources_target(Some(s))).unwrap_or(&all_sources);
         let msg = t!("speech.subtitles_enabled", source = source_desc).to_string();
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
@@ -1472,6 +1472,12 @@ fn main() -> eframe::Result<()> {
     spawn_periodic_screen_monitor(cmd_tx.clone());
     crate::scheduler::spawn_proactive_companion_loop(cmd_tx.clone());
     spawn_agent_backend(cmd_rx, cmd_tx.clone(), event_tx.clone(), tts_tx.clone(), llm_config.clone());
+
+    // Préchargement asynchrone du modèle de complétion ONNX pour le clavier virtuel
+    {
+        let event_tx_kb = event_tx.clone();
+        virtual_keyboard::init_keyboard_model_async(event_tx_kb);
+    }
 
     if llm_config.provider == LlmProvider::Local {
         std::thread::sleep(Duration::from_millis(500));
