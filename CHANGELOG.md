@@ -3,6 +3,49 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.8.8] - 2026-11-21
+
+### ⌨️🧠 Semantic Word Prediction & 0.5B SLM Auto-Completion (`virtual_keyboard.rs`, `floating_window.rs`, `main.rs`)
+- **Intelligent Text Completion via Qwen 2.5 0.5B (`init_llm_predictor_engine`, `spawn_llm_prediction_worker`)**:
+  - Integrated an asynchronous background inference worker running off the UI thread powered by the lightweight quantized **Qwen 2.5 0.5B Instruct** GGUF model (`qwen2.5-0.5b-instruct-q4_k_m.gguf`, ~398 MB) with automatic background provisioning and caching.
+  - Dynamic generative word and natural phrase completion tailored for aphasic individuals, locked-in users, and single-switch navigators.
+  - Smart token concatenation and buffer merging (`apply_prediction_to_buffer`) handling contextual casing, spacing, and word overlap resolution.
+  - Hybrid dual-engine prediction pipeline coupling zero-latency frequency n-grams (`FRENCH_BIGRAMS`, `ENGLISH_BIGRAMS`) with speculative Small Language Model projection.
+
+### 🏠🏥 Smart Home & Combined Medical Independence Scenarios (`home_automation.rs`, `commands.rs`, `app_settings.rs`)
+- **One-Touch Combined Medical Scenes (`execute_medical_scene`)**:
+  - **Sleep Scene (`execute_sleep_scene`)**: Reclines medical bed flat (`switch.lit_medicalise_plat` / KNX alias `lit_plat`), closes window shutters (`cover.chambre`), switches off lights, mutes all system audio (`mute_all_audio_os`), and securely locks workstation OS session (`lock_workstation_os`).
+  - **Meal / Work Scene (`execute_meal_work_scene`)**: Motorized elevation of bed headrest (`switch.lit_medicalise_tete`), brings ambient lighting to 85%, opens window blinds, and auto-centers the active writing/editor window (`center_writing_window_os`).
+  - **Relax Scene (`execute_relax_scene`)**: Adjusts resting posture and dims lights to 30%.
+  - Hands-free execution triggered via natural multilingual voice prompts (*"sleep mode"*, *"good night"*, *"meal mode"*, *"work mode"*) or accessible dashboard triggers in the Home Automation tab.
+
+### 🎮🔀 Universal Key Remapper & Advanced Hardware Rebinding (`keyboard_hook.rs`, `app_settings.rs`)
+- **Global Hardware Key Redirection Engine (`CustomKeyRemap`, `apply_egui_key_remaps`)**:
+  - Introduced a low-level key remapping engine to reroute any physical keyboard key to arbitrary keys or modifier combinations (`MOD_CTRL`, `MOD_ALT`, `MOD_SHIFT`, `MOD_WIN`).
+  - Bidirectional pipeline: low-level OS injection (`inject_remapped_key`) for third-party desktop software and direct in-memory `egui` event rewrite (`apply_egui_key_remaps`) for internal text inputs and virtual keyboard components.
+  - Automatic JSON configuration persistence in `key_remaps.json`.
+- **Interactive Real-Time Key Rebinding (Parts 1 & 2)**:
+  - Interactive keypress listener with live modifier combination detection and ergonomic escape cancellation (`Esc`).
+  - Dropdown key selector with standalone checkboxes for each modifier in the Settings UI.
+
+### 📺🗣️ Non-Preemptive Twitch Voice Queue (`app_ui.rs`, `main.rs`, `twitch.rs`)
+- **Audio Conflict Resolution (`pending_twitch_speech`)**:
+  - Fixed audio preemption collisions between incoming Twitch chat messages and agent spoken responses: incoming Twitch messages no longer cut off active speech.
+  - Incoming live chat announcements are buffered in a FIFO queue (`VecDeque<String>`) and spoken sequentially as soon as preceding utterances finish via `AgentEvent::TtsFinished`.
+
+### 🧠⚡ `nextPass` Reasoning Simplification & Local Model Resilience (`local_llm.rs`, `agent_backend.rs`)
+- **Streamlined Pass Control (`nextPass`)**:
+  - Replaced ambiguous numeric loop counts with an explicit boolean flag `nextPass` (`true` to continue multi-step execution, `false` to conclude).
+  - Loop-breaking heuristics that halt execution immediately once the primary goal or informative answer is presented.
+  - Reinforced trailing comma, brace repair, and unescaped quote sanitization in the local JSON response parser.
+
+### 🎨♿ Accessible Button Ergonomics & WCAG 2.2 AAA Harmonization (`overlay.rs`, `app_ui.rs`, `theme.rs`)
+- **Refined Control Aesthetics & Visual Contrasts**:
+  - Upgraded button shapes, hover states, active halos, and keyboard focus indicators to WCAG 2.2 AAA standards.
+  - Locale parity and tooltip synchronization across all 9 supported languages (`locales/*.json`).
+
+---
+
 ## [0.8.7] - 2026-11-20
 
 ### 📱 Remote Wireless Switch WebApp & Companion Gateway (`keyboard_hook.rs`, `app_settings.rs`)
