@@ -349,6 +349,18 @@ impl Default for VirtualKeyboardState {
 
 static KEYBOARD_STATE: Mutex<Option<VirtualKeyboardState>> = Mutex::new(None);
 
+pub fn reset_keyboard_scan() {
+    let mut guard = KEYBOARD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref mut state) = *guard {
+        state.scan_stage = ScanningStage::Row;
+        state.current_row = 0;
+        state.current_col = 0;
+        state.last_scan_tick = Instant::now();
+    } else {
+        *guard = Some(VirtualKeyboardState::default());
+    }
+}
+
 fn get_letter_rows(lang: &str) -> &'static [&'static [&'static str]] {
     match lang {
         "en" => &[
@@ -864,7 +876,7 @@ pub fn render_keyboard_view(
         .fill(egui::Color32::from_rgb(12, 14, 18))
         .stroke(egui::Stroke::new(1.2, theme.accent))
         .corner_radius(egui::CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(12, 10))
+        .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let placeholder = t!("keyboard.placeholder").to_string();
@@ -878,11 +890,11 @@ pub fn render_keyboard_view(
                 } else {
                     egui::Color32::WHITE
                 };
-                ui.label(egui::RichText::new(display_text).size(18.0).color(color).strong());
+                ui.label(egui::RichText::new(display_text).size(17.0).color(color).strong());
             });
         });
 
-    ui.add_space(6.0);
+    ui.add_space(3.0);
 
     // 2. Rangée des prédictions de mots
     let is_row_0_active = state.scanning_enabled && state.current_row == 0;
@@ -908,15 +920,15 @@ pub fn render_keyboard_view(
         }
     });
 
-    ui.add_space(6.0);
+    ui.add_space(3.0);
     ui.separator();
-    ui.add_space(4.0);
+    ui.add_space(3.0);
 
     // 3. Grille des lettres (rangées adaptées à la langue)
     let total_w = ui.available_width();
     let max_cols_in_grid = letter_rows.iter().map(|r| r.len()).max().unwrap_or(8);
-    let key_w = ((total_w - (max_cols_in_grid as f32 - 1.0) * 6.0) / max_cols_in_grid as f32).max(28.0);
-    let key_h = 38.0;
+    let key_w = ((total_w - (max_cols_in_grid as f32 - 1.0) * 5.0) / max_cols_in_grid as f32).max(28.0);
+    let key_h = 34.0;
 
     for (r_idx, row) in letter_rows.iter().enumerate() {
         let row_num = r_idx + 1;
@@ -924,7 +936,7 @@ pub fn render_keyboard_view(
         let is_row_highlight = is_current_row && state.scan_stage == ScanningStage::Row;
 
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.spacing_mut().item_spacing.x = 5.0;
             for (c_idx, &letter) in row.iter().enumerate() {
                 let is_key_highlight = is_current_row && state.scan_stage == ScanningStage::Key && state.current_col == c_idx;
 
@@ -959,19 +971,18 @@ pub fn render_keyboard_view(
                 }
             }
         });
-        ui.add_space(4.0);
+        ui.add_space(3.0);
     }
 
-    ui.add_space(4.0);
     ui.separator();
-    ui.add_space(6.0);
+    ui.add_space(3.0);
 
     // 4. Rangée des actions (Espace, Effacer, Parler, Tchat, Insérer, Vider) localisée
     let is_actions_row = state.scanning_enabled && state.current_row == (total_rows - 1);
     let is_action_row_selected = is_actions_row && state.scan_stage == ScanningStage::Row;
 
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.spacing_mut().item_spacing.x = 5.0;
 
         let actions: [(String, usize); 6] = [
             (t!("keyboard.btn_space").to_string(), 0),
@@ -1002,11 +1013,11 @@ pub fn render_keyboard_view(
                 theme.text_primary
             };
 
-            let btn = egui::Button::new(egui::RichText::new(label.as_str()).size(13.0).color(txt_col).strong())
+            let btn = egui::Button::new(egui::RichText::new(label.as_str()).size(12.5).color(txt_col).strong())
                 .fill(bg)
                 .stroke(egui::Stroke::new(if is_action_key { 2.5 } else { 1.0 }, theme.border))
                 .corner_radius(egui::CornerRadius::same(6))
-                .min_size(egui::vec2(68.0, 34.0));
+                .min_size(egui::vec2(66.0, 32.0));
 
             let resp = ui.add(btn);
             let act_dwell_id = ui.make_persistent_id(format!("dwell_act_{col_idx}"));
@@ -1058,7 +1069,7 @@ pub fn render_keyboard_view(
         }
     });
 
-    ui.add_space(4.0);
+    ui.add_space(3.0);
     ui.horizontal(|ui| {
         ui.checkbox(&mut state.scanning_enabled, t!("keyboard.auto_scan"));
         let mut ms = state.scan_interval.as_millis() as u64;

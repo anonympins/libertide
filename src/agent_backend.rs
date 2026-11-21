@@ -398,7 +398,7 @@ pub fn build_standard_system_instructions(lang_name: &str) -> String {
 
 pub const DICTATION_SYSTEM_INSTRUCTIONS: &str = r#"Tu es l'assistant de dictée vocale et de saisie textuelle pour Windows.
  Tu ne traites AUCUNE tâche d'exploration, navigation web, clic d'interface ou manipulation de fenêtres.
- Tu analyses STRICTEMENT la voix pour retranscrire du texte, déplacer le curseur ou stopper la dictée.
+ Tu analyses STRICTEMENT la voix pour retranscrire du texte, déplacer le curseur ou stopper la dictée en confirmant le texte oralement pour les personnes non-voyantes.
  Réponds STRICTEMENT en JSON sans aucun texte autour.
 
  Règles de décision :
@@ -410,13 +410,13 @@ pub const DICTATION_SYSTEM_INSTRUCTIONS: &str = r#"Tu es l'assistant de dictée 
  3. Retranscription de texte dicté ("dictate") :
     - Pour tout autre propos dicté : retranscris fidèlement le texte parlé avec ponctuation naturelle et soignée (points, virgules, majuscules).
     - Utilise l'action "dictate" avec "target": null, "window": null, "press_enter": false (ou true si "entrée" explicite).
-    - Maintiens STRICTEMENT "narration": "" (silence complet).
+    - NARRATION OBLIGATOIRE POUR NON-VOYANTS : Formule TOUJOURS dans "narration" le texte inséré sous la forme : "Écrit : <texte retranscrit>". Cela permet à l'utilisateur non-voyant de valider à l'oreille ce qui a été tapé.
  4. Silence / Bruit :
     - Si inintelligible ou bruit de micro : "invalid_request": true, "narration": "", "actions": [].
 
  Format JSON obligatoire :
  {
-   "narration": "",
+   "narration": "Écrit : texte inséré",
    "actions": [
      {"action": "dictate", "text": "texte à insérer", "target": null, "window": null, "press_enter": false}
    ],
@@ -1366,7 +1366,7 @@ pub fn spawn_agent_backend(
                                 if is_request_cancelled(request_id) { return; }
                                 let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
                                 let final_prompt = format!(
-                                    "[MODE DICTÉE ACTIF] : L'utilisateur est en mode dictée vocale. Analyse sa voix : s'il s'agit d'une consigne pour arrêter/quitter la dictée, appelle 'deactivate_dictation'. S'il s'agit de texte à insérer, retranscris-le avec ponctuation soignée via 'dictate' (target: null) et garde narration: \"\".\n\n[Demande utilisateur]\n{prompt}"
+                                    "[MODE DICTÉE ACTIF] : L'utilisateur est en mode dictée vocale. Analyse sa voix : s'il s'agit d'une consigne pour arrêter/quitter la dictée, appelle 'deactivate_dictation'. S'il s'agit de texte à insérer, retranscris-le avec ponctuation soignée via 'dictate' (target: null) et valide oralement le contenu dans narration sous la forme : \"Écrit : <texte>\".\n\n[Demande utilisateur]\n{prompt}"
                                 );
                                 call_llm_prompt(
                                     current_llm_config,
