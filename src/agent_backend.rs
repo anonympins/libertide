@@ -146,6 +146,38 @@ pub fn get_recent_history_capped_at_user_messages(history: &[ChatMessage], max_u
     recent
 }
 
+/// Génère une signature macroscopique d'action pour identifier les boucles fonctionnelles
+fn action_coarse_key(action: &AgentAction) -> String {
+    match action {
+        AgentAction::NavigateToUrl { url, .. } => {
+            let u = url.to_lowercase();
+            if u.contains("google.") && u.contains("/search") {
+                "navigate:google_search".to_string()
+            } else if u.contains("google.com/travel/flights") {
+                "navigate:google_flights".to_string()
+            } else if u.contains("youtube.com/results") {
+                "navigate:youtube_search".to_string()
+            } else {
+                let domain = u.split("://").nth(1).unwrap_or(&u).split('/').next().unwrap_or(&u);
+                format!("navigate:{domain}")
+            }
+        }
+        AgentAction::ClickElement { target_name, .. } => {
+            format!("click_elem:{}", target_name.trim().to_lowercase())
+        }
+        AgentAction::ClickButton { button_name, .. } => {
+            format!("click_btn:{}", button_name.trim().to_lowercase())
+        }
+        AgentAction::Scroll { direction, .. } => {
+            format!("scroll:{}", direction.trim().to_lowercase())
+        }
+        AgentAction::FocusWindow { title, .. } => {
+            format!("focus:{}", title.as_deref().unwrap_or("").trim().to_lowercase())
+        }
+        other => format!("{:?}", other),
+    }
+}
+
 pub struct BusyGuard;
 impl Drop for BusyGuard {
     fn drop(&mut self) {
@@ -523,7 +555,7 @@ pub async fn call_llm_prompt(
         } else if llm_config.provider == LlmProvider::Local {
             (0.2, 1000)
         } else {
-            (0.5, 1800)
+            (0.7, 1800)
         };
 
         let mut hist_snapshot = if !local_opts.include_history {
@@ -764,35 +796,26 @@ pub async fn call_llm_prompt(
             return;
         }
 
-        let requested_passes = if consecutive_repeat_count == 0 {
-            payload.next_passes.or_else(|| {
-                payload.actions.iter().find_map(|act| match act {
-                    AgentAction::SetReasoningPasses { passes, .. } => Some(*passes),
-                    _ => None,
-                })
-            })
+        // Évaluation de la poursuite d'analyse via nextPass (booléen)
+        let should_continue = if consecutive_repeat_count > 0 {
+            false
+        } else if let Some(np_bool) = payload.next_pass {
+            np_bool
+        } else if let Some(np) = payload.next_passes {
+            np > 0
         } else {
-            None
+            false
         };
 
-        let mut stop_requested = false;
-        if let Some(np) = requested_passes {
-            const MAX_LIMIT: usize = 15;
-            if np == 0 || (payload.actions.is_empty() && pass >= 1) {
-                max_agent_passes = pass;
-                TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
-                stop_requested = true;
-                println!("[Agent] Arrêt demandé (next_passes: {np}) : fin après la passe courante ({pass}).");
-            } else if np <= pass && pass > 1 {
-                max_agent_passes = pass;
-                TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
-                stop_requested = true;
-                println!("[Agent] Quota de passes atteint (next_passes: {np} <= passe {pass}) : arrêt à cette passe.");
-            } else {
-                max_agent_passes = np.clamp(pass, MAX_LIMIT);
-                TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
-                println!("[Agent] Quota de raisonnement mis à jour via next_passes (+{np}) : {max_agent_passes} passe(s) max");
-            }
+        set_next_pass(should_continue);
+        let mut stop_requested = !should_continue;
+
+        if stop_requested {
+            max_agent_passes = pass;
+            println!("[Agent] Arrêt demandé (nextPass: false) : fin après la passe courante ({pass}).");
+        } else {
+            max_agent_passes = 15;
+            println!("[Agent] Poursuite de navigation en cours (nextPass: true) : étape {pass} vers étape {}", pass + 1);
         }
 
         if payload.invalid_request
@@ -936,117 +959,6 @@ pub async fn call_llm_prompt(
         }
 
         if payload.actions.is_empty() {
-            let lower_user = safe_user_instruction.to_lowercase();
-            let is_action_request = lower_user.starts_with("mets")
-                || lower_user.starts_with("lance")
-                || lower_user.starts_with("ouvre")
-                || lower_user.starts_with("cherche")
-                || lower_user.starts_with("trouve")
-                || lower_user.starts_with("joue")
-                || lower_user.starts_with("écoute")
-                || lower_user.starts_with("fais")
-                || lower_user.contains("cherche")
-                || lower_user.contains("recherche")
-                || lower_user.contains("choisis")
-                || lower_user.contains("choisi")
-                || lower_user.contains("radio")
-                || lower_user.contains("musique")
-                || lower_user.contains("youtube")
-                || lower_user.contains("arte")
-                || lower_user.contains("twitch")
-                || lower_user.contains("netflix")
-                || lower_user.contains("film")
-                || lower_user.contains("streaming")
-                || lower_user.contains("vidéo")
-                || lower_user.contains("video");
-
-            let lower_narration = payload.narration.to_lowercase();
-            let is_passive_excuse = lower_narration.contains("il faudrait")
-                || lower_narration.contains("faudrait ouvrir")
-                || lower_narration.contains("aucune radio")
-                || lower_narration.contains("aucun média")
-                || lower_narration.contains("aucun resultat")
-                || lower_narration.contains("vous pouvez")
-                || lower_narration.contains("il existe plusieurs")
-                || lower_narration.contains("pour trouver")
-                || lower_narration.contains("voici comment")
-                || lower_narration.contains("méthode");
-
-            if (is_action_request || is_passive_excuse) && pass == 1 {
-                println!("[Agent Résilience] L'IA s'est défaussée sans action pour \"{}\". Forçage d'une action de recherche / média...", safe_user_instruction);
-                let intent_keywords = crate::intent::clean_search_query_intent(&safe_user_instruction);
-                let encoded_intent = url_encode(&intent_keywords);
-                let target_query = if lower_user.contains("radio") {
-                    "https://www.radiofrance.fr".to_string()
-                } else if lower_user.contains("arte") {
-                    let topic = if lower_user.contains("choisis") || lower_user.contains("choisi") {
-                        "documentaire".to_string()
-                    } else {
-                        encoded_intent
-                    };
-                    format!("https://www.arte.tv/fr/search/?q={topic}")
-                } else if lower_user.contains("twitch") {
-                    format!("https://www.twitch.tv/search?term={encoded_intent}")
-                } else if lower_user.contains("netflix") {
-                    "https://www.netflix.com".to_string()
-                } else if lower_user.contains("vidéo") || lower_user.contains("video") || lower_user.contains("film") || lower_user.contains("youtube") {
-                    let topic = if lower_user.contains("choisis") || lower_user.contains("choisi") || lower_user.trim() == "mets une vidéo" || lower_user.trim() == "lance une vidéo" {
-                        "documentaire+nature+4k".to_string()
-                    } else {
-                        encoded_intent
-                    };
-                    format!("https://www.youtube.com/results?search_query={topic}")
-                } else {
-                    format!("https://www.google.com/search?q={encoded_intent}")
-                };
-                payload.actions.push(AgentAction::NavigateToUrl {
-                    url: target_query,
-                    target: Some("new_tab".to_string()),
-                    new_window: Default::default(),
-                    window: Default::default(),
-                });
-                payload.narration = format!("J'ouvre le navigateur pour lancer {} immédiatement.", safe_user_instruction);
-                stop_requested = false;
-                max_agent_passes = 6.max(max_agent_passes);
-                TARGET_REASONING_PASSES.store(max_agent_passes, Ordering::SeqCst);
-            } else if is_action_request && pass < max_agent_passes && consecutive_repeat_count == 0 {
-                let screen_now = {
-                    LAST_SCREEN_SUMMARY.lock().ok().and_then(|s| s.clone()).unwrap_or_default().to_lowercase()
-                };
-                let on_search_engine = screen_now.contains("google") || screen_now.contains("bing") || screen_now.contains("recherche");
-                let on_youtube_results = screen_now.contains("youtube.com/results") || screen_now.contains("résultats");
-                let on_arte_results = screen_now.contains("arte.tv") && (screen_now.contains("/search/") || screen_now.contains("recherche"));
-                let cookie_banner_present = screen_now.contains("cookie") || screen_now.contains("consentement") || screen_now.contains("tout accepter");
-                let on_media_player = screen_now.contains("direct") || screen_now.contains("écouter") || screen_now.contains("lecture") || screen_now.contains("play");
-
-                let objective_clearly_done = if lower_user.contains("radio") || lower_user.contains("musique") {
-                    !on_search_engine && (screen_now.contains("[@audio:") || screen_now.contains("en direct") || screen_now.contains("pause"))
-                } else if lower_user.contains("vidéo") || lower_user.contains("video") || lower_user.contains("film") || lower_user.contains("youtube") || lower_user.contains("arte") || lower_user.contains("twitch") {
-                    !on_search_engine && (screen_now.contains("watch?v=") || screen_now.contains("[@video:") || screen_now.contains("pause") || screen_now.contains("plein écran"))
-                } else {
-                    false
-                };
-
-                if !objective_clearly_done && (on_search_engine || on_youtube_results || on_arte_results || cookie_banner_present || on_media_player) {
-                    println!("[Agent Vérification Objectif] L'IA s'est arrêtée mais l'écran montre une étape intermédiaire (recherche/youtube/cookies/lecteur). Prolongation des passes...");
-                    let continuation_action = if cookie_banner_present {
-                        AgentAction::ClickButton { window: None, button_name: "Tout accepter".to_string() }
-                    } else if on_search_engine && (lower_user.contains("radio") || lower_user.contains("france inter")) {
-                        AgentAction::ClickElement { window: None, target_name: "Écouter en direct".to_string() }
-                    } else if on_youtube_results || on_arte_results {
-                        AgentAction::ClickElement { window: None, target_name: "video".to_string() }
-                    } else {
-                        AgentAction::Scroll { direction: "down".to_string(), amount: Some(1), window: None }
-                    };
-                    payload.actions.push(continuation_action);
-                    payload.narration = "Je poursuis la navigation pour finaliser votre demande...".to_string();
-                    stop_requested = false;
-                    max_agent_passes = (pass + 2).min(15);
-                }
-            }
-        }
-
-        if payload.actions.is_empty() {
             println!("[Agent] Tâche accomplie : aucune action supplémentaire. Fin de la séquence après {} passe(s).", pass);
             if payload.quick_suggestions.is_empty() {
                 let screen = {
@@ -1085,7 +997,7 @@ pub async fn call_llm_prompt(
             });
         }
 
-        let actions_to_run = payload.actions;
+        let mut actions_to_run = payload.actions;
 
         let lower_user_cmd = safe_user_instruction.to_lowercase();
         let is_media_request = lower_user_cmd.contains("radio")
@@ -1110,15 +1022,38 @@ pub async fn call_llm_prompt(
             println!("[Agent Radio/Média - NAVIGATE_IN_WEBPAGE] Page ouverte : maintien des passes actives (max: {max_agent_passes}) pour naviguer dans la page web.");
         }
 
+        // Filtrage préventif des navigations de recherche redondantes
+        let screen_lower = LAST_SCREEN_SUMMARY.lock().ok().and_then(|s| s.clone()).unwrap_or_default().to_lowercase();
+        let already_on_search = screen_lower.contains("google.com/search")
+            || screen_lower.contains("google.com/travel/flights")
+            || (screen_lower.contains("google") && screen_lower.contains("résultats"));
+
+        if pass > 1 && already_on_search {
+            actions_to_run.retain(|a| {
+                if let AgentAction::NavigateToUrl { url, .. } = a {
+                    let u = url.to_lowercase();
+                    if u.contains("google.") && u.contains("/search") {
+                        println!("[Agent Anti-Boucle] Suppression d'un navigate_to_url redondant vers Google Search (la recherche est déjà ouverte).");
+                        return false;
+                    }
+                }
+                true
+            });
+        }
+
         let current_action_signatures: Vec<String> = actions_to_run
             .iter()
             .filter(|a| !matches!(a, AgentAction::SetReasoningPasses { .. }))
-            .map(|a| format!("{:?}", a))
+            .map(action_coarse_key)
             .collect();
 
         if !current_action_signatures.is_empty() && current_action_signatures == last_executed_actions {
             consecutive_repeat_count += 1;
             println!("[Agent] Répétition d'action détectée (occurrence {}) : {:?}", consecutive_repeat_count, current_action_signatures);
+            if consecutive_repeat_count >= 1 && current_action_signatures.iter().any(|s| s.starts_with("navigate:google_search")) {
+                println!("[Agent] Répétition de recherche Google interceptée : interruption immédiate de la boucle.");
+                break;
+            }
             if consecutive_repeat_count >= 2 {
                 println!("[Agent] Boucle répétitive interrompue (action identique répétée {} fois consécutives).", consecutive_repeat_count + 1);
                 if !payload.narration.trim().is_empty() || !payload.quick_suggestions.is_empty() {
@@ -1274,7 +1209,7 @@ pub async fn call_llm_prompt(
                 - RÈGLE LINGUISTIQUE STRICTE : Traduis et formule TOUT impérativement en {system_lang} dans \"narration\" et les suggestions.\n\
                 - RÈGLE NARRATION STRICTE : Ne décris et ne cite AUCUN contrôle technique ou composant de l'écran (boutons, liens, cibles #N). Rédige une réponse fluide focalisée UNIQUEMENT sur l'information et le contenu attendu par l'utilisateur.\n\
                 - FOCUS DE FENÊTRE PRIORITAIRE : Si l'action cible une fenêtre spécifique ou si la fenêtre souhaitée n'est pas au premier plan, place {{\"action\": \"focus_window\", \"title\": \"...\"}} EN TÊTE avant toute commande.\n\
-                - POSTURE CONVIVIALE : Sois bavard, joyeux, lucide et éthique ! N'hésite pas à parler de toi pour papoter sans te focaliser sur le grand nombre d'éléments analysés.\n\
+                - POSTURE CONVIVIALE ET ORIGINALE : Sois bavard, original, joyeux, lucide et éthique ! N'hésite pas à parler de toi pour papoter sans te focaliser sur les détails techniques. BANNIS les clichés de veille passive (« Je vois que tu travailles sur... », « Rien d'urgent »).\n\
                 - TANT QUE L'OBJECTIF N'EST PAS SATISFAIT : continue les passes, choisis l'action suivante en JSON.\n\
                 - DÉTECTION DE BOUCLE : si l'action précédente a échoué ou que l'écran stagne, pivote (autre lien/bouton, scroll, navigate_back).\n\
                 - Dès que l'objectif initial est ATTEINT (application ouverte, information trouvée, action exécutée, média en cours), ARRÊTE IMMÉDIATEMENT : renvoie \"actions\": [], \"next_passes\": 0 et décris en détail la situation et le résultat dans \"narration\" rédigée en {system_lang}.\n\
@@ -1286,6 +1221,15 @@ pub async fn call_llm_prompt(
                 safe_user_instruction,
                 next_pass = pass + 1
             );
+
+            let screen_summary_lower = screen_after.to_lowercase();
+            let is_on_search_page = screen_summary_lower.contains("google.com/search")
+                || (screen_summary_lower.contains("google") && screen_summary_lower.contains("résultats"))
+                || screen_summary_lower.contains("google.com/travel/flights");
+            if is_on_search_page {
+                step_prompt.push_str("\n\n- [ATTENTION ANTI-BOUCLE IMPÉRATIVE] : La recherche est DÉJÀ affichée et visible à l'écran ! INTERDICTION FORMELLE d'émettre \"navigate_to_url\" ou d'ouvrir un nouvel onglet de recherche. Analyse les résultats déjà présents à l'écran dans [État de l'écran suite aux actions], délivre la réponse dans \"narration\" et termine avec \"actions\": [], \"next_passes\": 0, OU clique sur un résultat/lien précis avec \"click_element\".");
+            }
+
             if is_media_request {
                 if lower_user_cmd.contains("vidéo") || lower_user_cmd.contains("video") || lower_user_cmd.contains("youtube") || lower_user_cmd.contains("arte") || lower_user_cmd.contains("film") {
                     step_prompt.push_str("\n\n- [NAVIGATION VIDÉO EN COURS] : Valide/ferme les cookies si présents ('Tout accepter'), et clique DIRECTEMENT sur le premier résultat vidéo pour lancer la lecture immédiatement.");
@@ -1551,7 +1495,7 @@ pub fn spawn_agent_backend(
                                     "[Demande utilisateur]\n{prompt}\n\n[Consignes impératives pour la réponse]\n\
                                     1. Formule impérativement ta \"narration\" et tes suggestions en {prompt_lang}.\n\
                                     2. FOCALISATION EXCLUSIVE : Ne cite et ne décris JAMAIS les composants de l'interface ou les contrôles détectés (boutons, listes de cibles, champs). Ta \"narration\" doit s'adresser directement à l'utilisateur en ne traitant que du contenu pertinent pour sa demande.\n\
-                                    3. COMPAGNON BAVARD ET ÉTHIQUE : Sois bavard, joyeux, lucide et éthique ! N'hésite pas à parler de toi à l'utilisateur pour papoter, sans te focaliser sur le grand nombre d'éléments analysés. Si l'utilisateur te salue simplement ou engage la conversation, réponds à sa salutation avec sympathie sans analyser ni commenter l'écran."
+                                    3. COMPAGNON BAVARD, ORIGINAL ET ÉTHIQUE : Sois original, chaleureux et spontané ! BANNIS absolument les formules clichés de veille passive (\"Je vois que tu travailles sur...\", \"Rien d'urgent, je reste en veille bienveillante à tes côtés\"). Varie tes angles, ton humour et tes anecdotes. Si l'utilisateur te salue simplement ou engage la conversation, réponds à sa salutation avec sympathie sans analyser ni commenter l'écran."
                                 ));
                                 let final_prompt = prompt_sections.join("\n\n");
 
@@ -1692,8 +1636,8 @@ pub fn spawn_agent_backend(
                                     [État d'écran actuel] :\n{}\n\n\
                                     Instruction : Analyse les différences entre ces deux états d'écran. \
                                     Détermine si une intervention ou une suite d'actions est nécessaire ou utile pour assister l'utilisateur.\n\
-                                    - Si aucune intervention n'est requise : réponds STRICTEMENT avec \"actions\": [] et \"narration\": \"\" pour préserver le silence.\n\
-                                    - Si une intervention est pertinente : renseigne \"narration\" pour expliquer ce que tu constates et fournis la suite d'actions à exécuter dans \"actions\".",
+                                    - Si aucune intervention concrète n'est requise : réponds STRICTEMENT avec \"actions\": [] et \"narration\": \"\" pour préserver le silence.\n\
+                                    - RÈGLE D'ORIGINALITÉ STRICTE : Si tu décides d'intervenir pour papoter ou suggérer une aide, interdiction absolue d'utiliser des formules stéréotypées (\"Je vois que tu travailles sur...\", \"L'horloge vient de passer à...\", \"Rien d'urgent ne nécessite mon intervention\", \"Je reste en veille bienveillante\"). Sois spontané, concis, original ou garde le silence.",
                                     truncate_with_notice(&prev, 1500),
                                     truncate_with_notice(&current_summary, 1500)
                                 );

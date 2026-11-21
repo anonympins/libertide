@@ -58,6 +58,7 @@ use keyboard_hook::*;
 use eframe::egui;
 pub use overlay::*;
 use types::*;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{channel, Receiver, Sender as StdSender};
@@ -206,7 +207,7 @@ pub struct OverlayApp {
     detected_microphones: Vec<String>,
     selected_microphone: String,
     detected_pointing_devices: Vec<crate::devices::PointingDevice>,
-    pending_twitch_speech: Option<String>,
+    pending_twitch_speech: VecDeque<String>,
 }
 
 impl OverlayApp {
@@ -512,7 +513,7 @@ impl OverlayApp {
             detected_microphones,
             selected_microphone,
             detected_pointing_devices,
-            pending_twitch_speech: None,
+            pending_twitch_speech: VecDeque::new(),
         };
         app.sync_modal_inputs_for_provider(llm_config.provider);
         update_open_floating_cards(&app.floating_cards);
@@ -538,6 +539,22 @@ impl OverlayApp {
         self.active_disability_presets.contains(&DisabilityPreset::MotorSwitch)
             || self.active_disability_presets.contains(&DisabilityPreset::Tremor)
             || self.switch_access_mode
+    }
+
+    pub fn should_show_hover_mode_button(&self) -> bool {
+        self.switch_access_mode
+            || self.active_disability_presets.contains(&DisabilityPreset::Visual)
+            || self.active_disability_presets.contains(&DisabilityPreset::MotorSwitch)
+            || self.active_disability_presets.contains(&DisabilityPreset::Tremor)
+    }
+
+    pub fn should_show_eye_tracking_button(&self) -> bool {
+        (crate::eyetracking::is_eyetracking_model_installed()
+            || crate::eyetracking::get_eye_tracker_source() != crate::eyetracking::EyeTrackerSource::WebcamNeural
+            || crate::eyetracking::is_eye_tracking_enabled())
+            && (self.has_motor_disability()
+                || self.active_disability_presets.contains(&DisabilityPreset::Cognitive)
+                || crate::eyetracking::is_eye_tracking_enabled())
     }
 
     pub fn open_instrument_card(&mut self) {
@@ -570,6 +587,11 @@ impl OverlayApp {
 
     pub fn is_keyboard_open(&self) -> bool {
         self.floating_cards.iter().any(|c| c.id == "virtual_keyboard" && c.open)
+    }
+
+    pub fn is_subtitles_open(&self) -> bool {
+        crate::audio::is_live_subtitles_active()
+            && self.floating_cards.iter().any(|c| matches!(c.content, FloatingContentType::Subtitles { .. }) && c.open)
     }
 
     fn draw_avatar(&self, ui: &mut egui::Ui, center: egui::Pos2, base_radius: f32, time: f64) {
@@ -623,7 +645,7 @@ impl OverlayApp {
     }
 
     pub fn stop_speaking(&mut self) {
-        self.pending_twitch_speech = None;
+        self.pending_twitch_speech.clear();
         self.is_streaming_narration = false;
         let _ = self.tts_sender.send(TtsCommand::Stop);
         set_tts_audio_level(0.0);
@@ -641,6 +663,7 @@ impl OverlayApp {
         self.continuous_mode = false;
         self.dictation_mode = false;
         self.is_streaming_narration = false;
+        self.pending_twitch_speech.clear();
         IS_DICTATION_ACTIVE.store(false, Ordering::SeqCst);
         cancel_all_scheduled_tasks();
         floating_window::stop_live_subtitles();
@@ -701,8 +724,8 @@ impl OverlayApp {
         }
         update_open_floating_cards(&self.floating_cards);
         play_earcon(Earcon::Success);
-        let default_source = t!("commands.subtitles_system_audio").to_string();
-        let source_desc = target_window.as_deref().unwrap_or(&default_source);
+        let all_sources = t!("commands.subtitles_source_all").to_string();
+        let source_desc = target_window.as_deref().filter(|s| !crate::audio::is_all_sources_target(Some(s))).unwrap_or(&all_sources);
         let msg = t!("speech.subtitles_enabled", source = source_desc).to_string();
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
@@ -1005,6 +1028,7 @@ impl eframe::App for OverlayApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        crate::keyboard_hook::apply_egui_key_remaps(&ctx);
         ctx.set_zoom_factor(self.zoom_factor);
 
         IS_CHAT_TAB_ACTIVE.store(self.active_tab == ActiveTab::Chat, Ordering::Relaxed);
@@ -1021,19 +1045,25 @@ impl eframe::App for OverlayApp {
         #[cfg(not(windows))]
         let is_libertide_fg = true;
 
-        let is_egui_text_focused = !self.is_hidden && is_libertide_fg && ctx.memory(|m| {
-            m.has_focus(egui::Id::NULL.with("prompt_input_text"))
-                || m.has_focus(egui::Id::NULL.with("api_key_input_field"))
-                || m.has_focus(egui::Id::NULL.with("model_input_field"))
-                || m.has_focus(egui::Id::NULL.with("endpoint_input_field"))
-                || m.has_focus(egui::Id::NULL.with("macro_shortcut_input"))
-                || m.has_focus(egui::Id::NULL.with("macro_text_input"))
-                || m.has_focus(egui::Id::NULL.with("twitch_search_query_input"))
-                || m.has_focus(egui::Id::NULL.with("voice_clone_url_input"))
-                || m.has_focus(egui::Id::NULL.with("voice_reference_wav_input"))
-                || m.has_focus(egui::Id::NULL.with("voice_reference_text_input"))
-                || m.has_focus(egui::Id::NULL.with("voice_test_text_input"))
-        });
+        let is_egui_text_focused = !self.is_hidden
+            && is_libertide_fg
+            && (ctx.egui_wants_keyboard_input()
+                || ctx.memory(|m| {
+                    m.has_focus(egui::Id::NULL.with("prompt_input_text"))
+                        || m.has_focus(egui::Id::NULL.with("api_key_input_field"))
+                        || m.has_focus(egui::Id::NULL.with("model_input_field"))
+                        || m.has_focus(egui::Id::NULL.with("endpoint_input_field"))
+                        || m.has_focus(egui::Id::NULL.with("macro_shortcut_input"))
+                        || m.has_focus(egui::Id::NULL.with("macro_text_input"))
+                        || m.has_focus(egui::Id::NULL.with("twitch_search_query_input"))
+                        || m.has_focus(egui::Id::NULL.with("voice_clone_url_input"))
+                        || m.has_focus(egui::Id::NULL.with("voice_reference_wav_input"))
+                        || m.has_focus(egui::Id::NULL.with("voice_reference_text_input"))
+                        || m.has_focus(egui::Id::NULL.with("voice_test_text_input"))
+                        || m.has_focus(egui::Id::NULL.with("hass_url_input_field"))
+                        || m.has_focus(egui::Id::NULL.with("hass_token_input_field"))
+                        || m.has_focus(egui::Id::NULL.with("knx_gateway_input_field"))
+                }));
         let is_typing = !self.is_hidden && is_libertide_fg && (self.show_api_key_modal || is_egui_text_focused);
         crate::automation::IS_USER_TYPING.store(is_typing, Ordering::Relaxed);
         self.dictation_mode = IS_DICTATION_ACTIVE.load(Ordering::SeqCst);
@@ -1052,11 +1082,6 @@ impl eframe::App for OverlayApp {
             }
         } else {
             self.smoothed_audio_level += (0.0 - self.smoothed_audio_level) * 0.25;
-        }
-        if self.status == AgentStatus::Speaking && target_level <= 0.001 && self.smoothed_audio_level <= 0.01 {
-            if !self.is_streaming_narration {
-                self.status = AgentStatus::Idle;
-            }
         }
 
         let theme = self.theme.colors();
@@ -1427,6 +1452,7 @@ fn main() -> eframe::Result<()> {
     #[cfg(windows)]
     disable_crt_assertion_dialogs();
     fix_startup_working_directory();
+    load_keybindings();
 
     let (event_tx, event_rx) = channel::<AgentEvent>();
     let (cmd_tx, cmd_rx) = unbounded_channel::<AgentCommand>();
@@ -1446,6 +1472,12 @@ fn main() -> eframe::Result<()> {
     spawn_periodic_screen_monitor(cmd_tx.clone());
     crate::scheduler::spawn_proactive_companion_loop(cmd_tx.clone());
     spawn_agent_backend(cmd_rx, cmd_tx.clone(), event_tx.clone(), tts_tx.clone(), llm_config.clone());
+
+    // Préchargement asynchrone du modèle de complétion ONNX pour le clavier virtuel
+    {
+        let event_tx_kb = event_tx.clone();
+        virtual_keyboard::init_keyboard_model_async(event_tx_kb);
+    }
 
     if llm_config.provider == LlmProvider::Local {
         std::thread::sleep(Duration::from_millis(500));

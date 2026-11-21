@@ -53,6 +53,54 @@ pub fn find_macros_file() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("macros.json"))
 }
 
+/// Résout l'emplacement du fichier de configuration des remappages de touches (key_remaps.json)
+pub fn find_key_remaps_file() -> PathBuf {
+    let direct = PathBuf::from("key_remaps.json");
+    if direct.is_file() {
+        return direct;
+    }
+    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("key_remaps.json");
+    if manifest_path.is_file() {
+        return manifest_path;
+    }
+    let env_file = find_env_file();
+    if let Some(parent) = env_file.parent() {
+        let p = parent.join("key_remaps.json");
+        if p.is_file() {
+            return p;
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut curr = exe.parent();
+        for _ in 0..6 {
+            if let Some(dir) = curr {
+                let p = dir.join("key_remaps.json");
+                if p.is_file() {
+                    return p;
+                }
+                curr = dir.parent();
+            } else {
+                break;
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut curr = Some(cwd.as_path());
+        for _ in 0..5 {
+            if let Some(dir) = curr {
+                let p = dir.join("key_remaps.json");
+                if p.is_file() {
+                    return p;
+                }
+                curr = dir.parent();
+            } else {
+                break;
+            }
+        }
+    }
+    PathBuf::from("key_remaps.json")
+}
+
 /// Charge la liste des macros enregistrées ('raccourci' => 'texte complet') en fusionnant .env et macros.json
 pub fn load_macros() -> Vec<(String, String)> {
     let path = find_macros_file();

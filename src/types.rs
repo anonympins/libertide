@@ -46,7 +46,7 @@ impl DisabilityPreset {
         match s.trim().to_lowercase().as_str() {
             "visual" | "visuel" => Some(Self::Visual),
             "motorswitch" | "switch" | "moteur" => Some(Self::MotorSwitch),
-            "tremor" | "tremblement" => Some(Self::Tremor),
+            "tremor" | "tremblement" | "parkinson" => Some(Self::Tremor),
             "cognitive" | "cognitif" => Some(Self::Cognitive),
             _ => None,
         }
@@ -121,6 +121,7 @@ pub enum SwitchKeyEvent {
     ToggleVoice,
     Clear,
     Scroll,
+    StopSpeech,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -908,6 +909,10 @@ pub enum AgentAction {
         #[serde(default)]
         data: Option<serde_json::Value>,
     },
+    #[serde(alias = "scene", alias = "medical_scene", alias = "scenario_domotique", alias = "home_scene")]
+    HomeScene {
+        scene: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1027,6 +1032,18 @@ impl QuickSuggestionItem {
                     let ent = entity_id.as_deref().or(address.as_deref()).unwrap_or(domain.as_str());
                     Some(format!("Domotique : {service} ({ent})"))
                 }
+                AgentAction::HomeScene { scene } => {
+                    let sc = scene.to_lowercase();
+                    if sc.contains("sleep") || sc.contains("sommeil") || sc.contains("nuit") {
+                        Some("🌙 Mode Sommeil (Lit à plat, volets, lumières, verrouillage)".to_string())
+                    } else if sc.contains("repas") || sc.contains("travail") || sc.contains("meal") || sc.contains("work") {
+                        Some("🥣 Mode Repas / Travail (Tête relevée, lumière, fenêtre centrée)".to_string())
+                    } else if sc.contains("relax") || sc.contains("detente") || sc.contains("détente") {
+                        Some("🛋️ Mode Détente (Relaxation, lumière tamisée)".to_string())
+                    } else {
+                        Some(format!("Scénario domotique : {scene}"))
+                    }
+                }
                 _ => None,
             },
         }
@@ -1043,7 +1060,9 @@ pub struct AgentResponsePayload {
     pub quick_suggestions: Vec<QuickSuggestionItem>,
     #[serde(default)]
     pub invalid_request: bool,
-    #[serde(default, alias = "max_passes", alias = "reasoning_passes")]
+    #[serde(default, rename = "nextPass", alias = "next_pass")]
+    pub next_pass: Option<bool>,
+    #[serde(default, alias = "next_passes", alias = "max_passes", alias = "reasoning_passes")]
     pub next_passes: Option<usize>,
 }
 

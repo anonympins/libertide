@@ -1612,7 +1612,18 @@ pub static CURRENT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 pub static SCAN_EPOCH: AtomicU64 = AtomicU64::new(0);
 pub static IS_EMERGENCY_STOPPED: AtomicBool = AtomicBool::new(false);
 pub static AGENT_BUSY: AtomicBool = AtomicBool::new(false);
-pub static TARGET_REASONING_PASSES: AtomicUsize = AtomicUsize::new(5);
+pub static NEXT_PASS: AtomicBool = AtomicBool::new(false);
+/// Maintenu temporairement pour rétro-compatibilité
+pub static TARGET_REASONING_PASSES: AtomicUsize = AtomicUsize::new(0);
+
+pub fn set_next_pass(should_continue: bool) {
+    NEXT_PASS.store(should_continue, Ordering::SeqCst);
+}
+
+pub fn should_continue_next_pass() -> bool {
+    NEXT_PASS.load(Ordering::SeqCst) && !IS_EMERGENCY_STOPPED.load(Ordering::SeqCst)
+}
+
 pub fn is_request_cancelled(request_id: u64) -> bool {
     CURRENT_REQUEST_ID.load(Ordering::SeqCst) != request_id || IS_EMERGENCY_STOPPED.load(Ordering::SeqCst)
 }

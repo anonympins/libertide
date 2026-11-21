@@ -3,11 +3,14 @@ use rust_i18n::t;
 use std::time::{Duration, Instant};
 use eframe::egui;
 use eframe::egui::Color32;
-
+use egui::TextBuffer;
 use crate::clipboard::{
     get_clipboard_text, get_plain_clipboard_text
 };
 use crate::keyboard_hook::{
+    apply_rebound_key,
+    save_custom_key_remaps,
+    CustomKeyRemap,
     SWITCH_DEBOUNCE_MS,
     SWITCH_LONG_PRESS_MS,
 };
@@ -24,11 +27,17 @@ use crate::OverlayApp;
 
 impl OverlayApp {
     pub fn set_voice_clone_gender(&mut self, gender: &str) {
+        if self.voice_guide_generating {
+            return;
+        }
         let clean = if gender.trim().eq_ignore_ascii_case("male") || gender.trim().eq_ignore_ascii_case("homme") {
             "male"
         } else {
             "female"
         };
+        if self.voice_clone_gender == clean {
+            return;
+        }
         self.voice_clone_gender = clean.to_string();
         std::env::set_var("VOICE_CLONE_GENDER", clean);
         let _ = write_env_var_to_file(".env", "VOICE_CLONE_GENDER", clean);
@@ -240,8 +249,6 @@ impl OverlayApp {
             .map(|p| p.key())
             .collect::<Vec<_>>()
             .join(",");
-        let _ = write_env_var_to_file(".env", "DISABILITY_PRESETS", &keys_str);
-        std::env::set_var("DISABILITY_PRESETS", &keys_str);
 
         // Si aucun profil ou un seul profil est actif (bascule d'un preset à l'autre),
         // on réinitialise l'ensemble des réglages par défaut avant d'appliquer le profil.
@@ -312,12 +319,22 @@ impl OverlayApp {
             SWITCH_LONG_PRESS_MS.store(1200, Ordering::Relaxed);
             self.switch_auto_scroll = true;
         }
-        let _ = write_env_var_to_file(".env", "DWELL_TIME_MS", &self.dwell_state.dwell_duration.as_millis().to_string());
-        let _ = write_env_var_to_file(".env", "DWELL_ACTIVATION_DELAY_MS", &self.dwell_state.activation_delay.as_millis().to_string());
-        let _ = write_env_var_to_file(".env", "SWITCH_DEBOUNCE_MS", &SWITCH_DEBOUNCE_MS.load(Ordering::Relaxed).to_string());
-        let _ = write_env_var_to_file(".env", "SWITCH_LONG_PRESS_MS", &SWITCH_LONG_PRESS_MS.load(Ordering::Relaxed).to_string());
-        let _ = write_env_var_to_file(".env", "AUTO_READ_MESSAGES", if self.auto_read_agent_messages { "true" } else { "false" });
-        let _ = write_env_var_to_file(".env", "AUTO_READ_SUGGESTIONS", if self.auto_read_suggestions { "true" } else { "false" });
+
+        // Sauvegarde groupée en arrière-plan pour éviter de bloquer l'UI par de multiples accès disque
+        let dwell_ms = self.dwell_state.dwell_duration.as_millis().to_string();
+        let act_delay_ms = self.dwell_state.activation_delay.as_millis().to_string();
+        let debounce_ms = SWITCH_DEBOUNCE_MS.load(Ordering::Relaxed).to_string();
+        let long_press_ms = SWITCH_LONG_PRESS_MS.load(Ordering::Relaxed).to_string();
+        let auto_msgs = if self.auto_read_agent_messages { "true" } else { "false" };
+        let auto_sugs = if self.auto_read_suggestions { "true" } else { "false" };
+
+        let _ = write_env_var_to_file(".env", "DISABILITY_PRESETS", &keys_str);
+        let _ = write_env_var_to_file(".env", "DWELL_TIME_MS", &dwell_ms);
+        let _ = write_env_var_to_file(".env", "DWELL_ACTIVATION_DELAY_MS", &act_delay_ms);
+        let _ = write_env_var_to_file(".env", "SWITCH_DEBOUNCE_MS", &debounce_ms);
+        let _ = write_env_var_to_file(".env", "SWITCH_LONG_PRESS_MS", &long_press_ms);
+        let _ = write_env_var_to_file(".env", "AUTO_READ_MESSAGES", auto_msgs);
+        let _ = write_env_var_to_file(".env", "AUTO_READ_SUGGESTIONS", auto_sugs);
     }
 
     pub fn current_agent_model_display_name(&self) -> String {
@@ -360,14 +377,16 @@ impl OverlayApp {
         win_w: f32,
         active_win_h: f32,
     ) {
-        let modal_w = (win_w - 20.0).max(340.0);
-        let modal_h = (active_win_h - 16.0).max(180.0);
+        let modal_w = (win_w - 12.0).clamp(240.0, win_w.max(240.0));
+        let modal_h = (active_win_h - 12.0).clamp(140.0, active_win_h.max(140.0));
         egui::Window::new("settings_modal")
             .title_bar(false)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .fixed_size(egui::vec2(modal_w, modal_h))
+            .max_size(egui::vec2(win_w, active_win_h))
+            .constrain(true)
             .frame(
                 egui::Frame::new()
                     .fill(theme.modal_bg)
@@ -551,7 +570,7 @@ impl OverlayApp {
                                 let is_keybinds_active = self.settings_tab == SettingsTab::Keybindings;
                                 let tab_keybinds = ui.selectable_label(
                                     is_keybinds_active,
-                                    egui::RichText::new("⌨ Raccourcis")
+                                    egui::RichText::new(t!("ui.settings_tab_keybindings"))
                                         .size(12.0)
                                         .color(if is_keybinds_active { theme.accent } else { theme.text_secondary })
                                         .strong(),
@@ -570,7 +589,7 @@ impl OverlayApp {
                                 let is_home_active = self.settings_tab == SettingsTab::HomeAutomation;
                                 let tab_home = ui.selectable_label(
                                     is_home_active,
-                                    egui::RichText::new("🏠 Domotique")
+                                    egui::RichText::new(t!("ui.settings_tab_home"))
                                         .size(12.0)
                                         .color(if is_home_active { theme.accent } else { theme.text_secondary })
                                         .strong(),
@@ -597,10 +616,11 @@ impl OverlayApp {
                 ui.separator();
                 ui.add_space(4.0);
 
-                let max_scroll_h = (modal_h - 58.0).max(150.0);
-                egui::ScrollArea::vertical()
+                let max_scroll_h = (modal_h - 52.0).max(80.0);
+                egui::ScrollArea::both()
                     .id_salt("settings_modal_scroll")
                     .auto_shrink([false, false])
+                    .max_width(modal_w - 16.0)
                     .max_height(max_scroll_h)
                     .show(ui, |ui| {
                         match self.settings_tab {
@@ -1142,13 +1162,13 @@ impl OverlayApp {
                                             for &profile in VoiceProfile::ALL {
                                                 let is_selected = self.voice_gender == profile;
                                                 let (icon, label) = match profile {
-                                                    VoiceProfile::Denise => ("👩", "Denise"),
-                                                    VoiceProfile::Henri => ("👨", "Henri"),
-                                                    VoiceProfile::Hortense => ("🎙️", "Hortense"),
-                                                    VoiceProfile::Paul => ("🎩", "Paul"),
-                                                    VoiceProfile::Sylvie => ("🍁", "Sylvie"),
-                                                    VoiceProfile::Jean => ("⚡", "Jean"),
-                                                    VoiceProfile::Clone => ("🧬", "Clonée"),
+                                                    VoiceProfile::Denise => ("👩", t!("voice.profile_denise").to_string()),
+                                                    VoiceProfile::Henri => ("👨", t!("voice.profile_henri").to_string()),
+                                                    VoiceProfile::Hortense => ("🎙️", t!("voice.profile_hortense").to_string()),
+                                                    VoiceProfile::Paul => ("🎩", t!("voice.profile_paul").to_string()),
+                                                    VoiceProfile::Sylvie => ("🍁", t!("voice.profile_sylvie").to_string()),
+                                                    VoiceProfile::Jean => ("⚡", t!("voice.profile_jean").to_string()),
+                                                    VoiceProfile::Clone => ("🧬", "Clonée".to_string()),
                                                 };
                                                 let btn_text = format!("{icon} {label}");
                                                 let resp = ui.selectable_label(is_selected, btn_text);
@@ -1624,10 +1644,10 @@ impl OverlayApp {
                                                 let (icon, label) = match profile {
                                                     VoiceProfile::Denise => ("👩", t!("voice.profile_denise").to_string()),
                                                     VoiceProfile::Henri => ("👨", t!("voice.profile_henri").to_string()),
-                                                    VoiceProfile::Hortense => ("🎙️", "Hortense".to_string()),
-                                                    VoiceProfile::Paul => ("🎩", "Paul".to_string()),
-                                                    VoiceProfile::Sylvie => ("🍁", "Sylvie (CA)".to_string()),
-                                                    VoiceProfile::Jean => ("⚡", "Jean".to_string()),
+                                                    VoiceProfile::Hortense => ("🎙️", t!("voice.profile_hortense").to_string()),
+                                                    VoiceProfile::Paul => ("🎩", t!("voice.profile_paul").to_string()),
+                                                    VoiceProfile::Sylvie => ("🍁", t!("voice.profile_sylvie").to_string()),
+                                                    VoiceProfile::Jean => ("⚡", t!("voice.profile_jean").to_string()),
                                                     VoiceProfile::Clone => {
                                                         let g = if self.voice_clone_gender == "male" { t!("voice.gender_male") } else { t!("voice.gender_female") };
                                                         ("🧬", t!("voice.profile_clone", gender = g).to_string())
@@ -2343,6 +2363,7 @@ impl OverlayApp {
                                 ui.add_space(8.0);
                                 ui.separator();
                                 ui.add_space(6.0);
+
                                 ui.horizontal(|ui| {
                                     let close_lang_btn = ui.button(t!("ui.btn_close"));
                                     if make_widget_accessible_and_activated(ui, &close_lang_btn, theme.accent) {
@@ -2577,7 +2598,7 @@ impl OverlayApp {
                                     .corner_radius(egui::CornerRadius::same(8))
                                     .inner_margin(egui::Margin::symmetric(10, 8))
                                     .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
+                                        ui.horizontal_wrapped(|ui| {
                                             ui.label(egui::RichText::new("⌨ Clavier Virtuel Adapté").size(12.0).color(theme.accent).strong());
                                             let is_kbd_open = self.is_keyboard_open();
                                             let status_str = if is_kbd_open { "● Actif & Connecté" } else { "○ En veille" };
@@ -2614,7 +2635,7 @@ impl OverlayApp {
                                         let is_running = crate::keyboard_hook::is_companion_server_running();
                                         let clients = crate::keyboard_hook::COMPANION_CLIENTS_COUNT.load(Ordering::Relaxed);
 
-                                        ui.horizontal(|ui| {
+                                        ui.horizontal_wrapped(|ui| {
                                             ui.label(egui::RichText::new("📱 Contacteur Déporté sans fil (Wi-Fi / Smartphone / ESP32)").size(12.0).color(egui::Color32::from_rgb(0, 230, 118)).strong());
                                             let status_str = if is_running && clients > 0 {
                                                 format!("● Connecté ({} client{})", clients, if clients > 1 { "s" } else { "" })
@@ -2630,7 +2651,8 @@ impl OverlayApp {
                                         ui.label(egui::RichText::new("Transforme n'importe quel smartphone, tablette ou microcontrôleur ESP32 à bas coût en contacteur unique sans fil avec retour haptique.").size(10.5).color(theme.text_secondary));
                                         ui.add_space(4.0);
 
-                                        ui.horizontal(|ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
                                             ui.label(egui::RichText::new("Lien WebApp Mobile :").size(11.0).color(Color32::WHITE).strong());
                                             ui.label(egui::RichText::new(&companion_url).size(11.5).color(theme.accent).underline());
 
@@ -2646,7 +2668,8 @@ impl OverlayApp {
                                         });
 
                                         ui.add_space(4.0);
-                                        ui.horizontal(|ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
                                             ui.label(egui::RichText::new(format!("Port UDP pour ESP32 / Pédales matérielles : {}", crate::keyboard_hook::COMPANION_UDP_PORT)).size(10.5).color(theme.text_secondary));
                                             let test_switch_btn = ui.small_button("🎯 Tester Clic Contacteur");
                                             if make_widget_accessible_and_activated(ui, &test_switch_btn, theme.accent) {
@@ -2682,14 +2705,21 @@ impl OverlayApp {
                                     .corner_radius(egui::CornerRadius::same(8))
                                     .inner_margin(egui::Margin::symmetric(10, 8))
                                     .show(ui, |ui| {
-                                        let bindings: [(&str, &std::sync::atomic::AtomicU32, &'static str); 4] = [
+                                        let bindings: [(&str, &std::sync::atomic::AtomicU32, &str); 11] = [
                                             ("🎯 Mode Survol / Contacteur :", &crate::keyboard_hook::KEY_BIND_SWITCH, "KEY_BIND_SWITCH"),
                                             ("🎙 Dictée Vocale :", &crate::keyboard_hook::KEY_BIND_DICTATION, "KEY_BIND_DICTATION"),
                                             ("🗣 Profil Vocal (TTS) :", &crate::keyboard_hook::KEY_BIND_VOICE, "KEY_BIND_VOICE"),
                                             ("🗑 Effacer Contexte :", &crate::keyboard_hook::KEY_BIND_CLEAR, "KEY_BIND_CLEAR"),
+                                            ("🔇 Coupure Vocale / Stop TTS :", &crate::keyboard_hook::KEY_BIND_STOP_SPEECH, "KEY_BIND_STOP_SPEECH"),
+                                            ("🛑 Arrêt d'Urgence :", &crate::keyboard_hook::KEY_BIND_EMERGENCY, "KEY_BIND_EMERGENCY"),
+                                            ("👁 Clic Regard (Eye-Tracking) :", &crate::keyboard_hook::KEY_BIND_GAZE_CLICK, "KEY_BIND_GAZE_CLICK"),
+                                            ("🔘 Validation Contacteur :", &crate::keyboard_hook::KEY_BIND_SELECT, "KEY_BIND_SELECT"),
+                                            ("⏭ Suivant (Navigation) :", &crate::keyboard_hook::KEY_BIND_NEXT, "KEY_BIND_NEXT"),
+                                            ("⏮ Précédent (Navigation) :", &crate::keyboard_hook::KEY_BIND_PREV, "KEY_BIND_PREV"),
+                                            ("↩ Retour (Navigation) :", &crate::keyboard_hook::KEY_BIND_BACK, "KEY_BIND_BACK"),
                                         ];
 
-                                        let listening_var = crate::keyboard_hook::REBIND_LISTENING_TARGET.lock().ok().and_then(|g| *g);
+                                        let listening_var = crate::keyboard_hook::REBIND_LISTENING_TARGET.lock().ok().and_then(|g| g.clone());
                                         if listening_var.is_some() {
                                             ctx.request_repaint();
                                         }
@@ -2698,19 +2728,25 @@ impl OverlayApp {
                                         let mut captured_vk: Option<u32> = None;
                                         let mut cancel_capture = false;
                                         if listening_var.is_some() {
+                                            let hook_mods = crate::keyboard_hook::get_currently_pressed_modifiers();
                                             ctx.input(|i| {
+                                                let mut egui_mods = 0u32;
+                                                if i.modifiers.ctrl || i.modifiers.command || i.modifiers.mac_cmd { egui_mods |= crate::keyboard_hook::MOD_CTRL; }
+                                                if i.modifiers.alt { egui_mods |= crate::keyboard_hook::MOD_ALT; }
+                                                if i.modifiers.shift { egui_mods |= crate::keyboard_hook::MOD_SHIFT; }
+                                                let current_mods = hook_mods | egui_mods;
                                                 for ev in &i.events {
                                                     match ev {
                                                         egui::Event::Key { key, pressed: true, .. } => {
-                                                            if *key == egui::Key::Escape {
+                                                            if *key == egui::Key::Escape && current_mods == 0 {
                                                                 cancel_capture = true;
-                                                            } else if let Some(vk) = crate::keyboard_hook::egui_key_to_vk(*key) {
-                                                                captured_vk = Some(vk);
+                                                            } else if let Some(base_vk) = crate::keyboard_hook::egui_key_to_vk(*key) {
+                                                                captured_vk = Some((base_vk & crate::keyboard_hook::VK_KEY_MASK) | current_mods);
                                                             }
                                                         }
                                                         egui::Event::Text(ref text) => {
-                                                            if let Some(vk) = crate::keyboard_hook::azerty_char_to_vk(text) {
-                                                                captured_vk = Some(vk);
+                                                            if let Some(base_vk) = crate::keyboard_hook::azerty_char_to_vk(text) {
+                                                                captured_vk = Some((base_vk & crate::keyboard_hook::VK_KEY_MASK) | current_mods);
                                                             }
                                                         }
                                                         _ => {}
@@ -2727,30 +2763,30 @@ impl OverlayApp {
                                         } else if let Some(vk) = captured_vk {
                                             if let Ok(mut lock) = crate::keyboard_hook::REBIND_LISTENING_TARGET.lock() {
                                                 if let Some(target_var) = lock.take() {
-                                                    match target_var {
-                                                        "KEY_BIND_SWITCH" => crate::keyboard_hook::KEY_BIND_SWITCH.store(vk, Ordering::Relaxed),
-                                                        "KEY_BIND_DICTATION" => crate::keyboard_hook::KEY_BIND_DICTATION.store(vk, Ordering::Relaxed),
-                                                        "KEY_BIND_VOICE" => crate::keyboard_hook::KEY_BIND_VOICE.store(vk, Ordering::Relaxed),
-                                                        "KEY_BIND_CLEAR" => crate::keyboard_hook::KEY_BIND_CLEAR.store(vk, Ordering::Relaxed),
-                                                        _ => {}
-                                                    }
-                                                    let _ = write_env_var_to_file(".env", target_var, &vk.to_string());
-                                                    std::env::set_var(target_var, vk.to_string());
+                                                    apply_rebound_key(&target_var, vk);
                                                     play_earcon(Earcon::Success);
                                                 }
                                             }
                                         }
 
                                         for (label, atomic_key, env_var) in bindings {
-                                            ui.horizontal(|ui| {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
                                                 ui.label(egui::RichText::new(label).size(11.0).color(theme.text_primary));
                                                 let cur_val = atomic_key.load(Ordering::Relaxed);
-                                                let is_listening_this = listening_var == Some(env_var);
+                                                let is_listening_this = listening_var.as_deref() == Some(env_var);
 
                                                 if is_listening_this {
                                                     let pulse = ((ui.input(|i| i.time) * 4.0).sin().abs() * 0.4 + 0.6) as f32;
+                                                    let live_mods = crate::keyboard_hook::get_currently_pressed_modifiers();
+                                                    let mod_labels = crate::keyboard_hook::modifiers_to_labels(live_mods);
+                                                    let prompt_text = if !mod_labels.is_empty() {
+                                                        format!("🔴 {} + ... (Échap pour annuler)", mod_labels.join(" + "))
+                                                    } else {
+                                                        "🔴 Appuyez sur la touche... (Échap pour annuler)".to_string()
+                                                    };
                                                     let listen_btn = ui.button(
-                                                        egui::RichText::new("🔴 Appuyez sur une touche... (Échap pour annuler)")
+                                                        egui::RichText::new(prompt_text)
                                                             .size(11.0)
                                                             .strong()
                                                             .color(egui::Color32::from_rgb((255.0 * pulse) as u8, 80, 80)),
@@ -2762,6 +2798,7 @@ impl OverlayApp {
                                                         play_earcon(Earcon::Navigation);
                                                     }
                                                 } else {
+                                                    let base_vk = cur_val & crate::keyboard_hook::VK_KEY_MASK;
                                                     let key_name = crate::keyboard_hook::vk_to_label(cur_val);
                                                     let btn_text = format!("⌨ {key_name}");
                                                     let rebind_btn = ui.button(
@@ -2769,30 +2806,51 @@ impl OverlayApp {
                                                             .size(11.0)
                                                             .strong()
                                                             .color(theme.accent),
-                                                    ).on_hover_text("Cliquez pour écouter et mapper n'importe quelle touche du clavier");
+                                                    ).on_hover_text("Cliquez pour écouter et mapper n'importe quelle combinaison de touches (avec Ctrl, Alt, Shift)");
 
                                                     if make_widget_accessible_and_activated(ui, &rebind_btn, theme.accent) {
                                                         if let Ok(mut lock) = crate::keyboard_hook::REBIND_LISTENING_TARGET.lock() {
-                                                            *lock = Some(env_var);
+                                                            *lock = Some(env_var.to_string());
                                                         }
                                                         play_earcon(Earcon::Navigation);
                                                     }
 
-                                                    let mut selected_val = cur_val;
+                                                    let mut selected_base_vk = base_vk;
                                                     let combo_id = format!("combo_rebind_{}", env_var);
                                                     egui::ComboBox::from_id_salt(combo_id)
                                                         .selected_text("▾")
                                                         .width(40.0)
                                                         .show_ui(ui, |ui| {
                                                             for &(vk_code, k_label) in crate::keyboard_hook::AVAILABLE_REBIND_KEYS {
-                                                                if ui.selectable_value(&mut selected_val, vk_code, k_label).clicked() {
-                                                                    atomic_key.store(vk_code, Ordering::Relaxed);
-                                                                    let _ = write_env_var_to_file(".env", env_var, &vk_code.to_string());
-                                                                    std::env::set_var(env_var, vk_code.to_string());
+                                                                if ui.selectable_value(&mut selected_base_vk, vk_code, k_label).clicked() {
+                                                                    let new_full = (vk_code & crate::keyboard_hook::VK_KEY_MASK) | (cur_val & !crate::keyboard_hook::VK_KEY_MASK);
+                                                                    apply_rebound_key(env_var, new_full);
                                                                     play_earcon(Earcon::Success);
                                                                 }
                                                             }
                                                         });
+
+                                                    // Modificateurs configurables indépendamment
+                                                    let mut ctrl_on = (cur_val & crate::keyboard_hook::MOD_CTRL) != 0;
+                                                    let mut alt_on = (cur_val & crate::keyboard_hook::MOD_ALT) != 0;
+                                                    let mut shift_on = (cur_val & crate::keyboard_hook::MOD_SHIFT) != 0;
+                                                    let mut win_on = (cur_val & crate::keyboard_hook::MOD_WIN) != 0;
+                                                    let mut mod_changed = false;
+
+                                                    if ui.checkbox(&mut ctrl_on, "Ctrl").changed() { mod_changed = true; }
+                                                    if ui.checkbox(&mut alt_on, "Alt").changed() { mod_changed = true; }
+                                                    if ui.checkbox(&mut shift_on, "Shift").changed() { mod_changed = true; }
+                                                    if ui.checkbox(&mut win_on, "Win").changed() { mod_changed = true; }
+
+                                                    if mod_changed {
+                                                        let mut new_val = base_vk;
+                                                        if ctrl_on { new_val |= crate::keyboard_hook::MOD_CTRL; }
+                                                        if alt_on { new_val |= crate::keyboard_hook::MOD_ALT; }
+                                                        if shift_on { new_val |= crate::keyboard_hook::MOD_SHIFT; }
+                                                        if win_on { new_val |= crate::keyboard_hook::MOD_WIN; }
+                                                        apply_rebound_key(env_var, new_val);
+                                                        play_earcon(Earcon::Success);
+                                                    }
                                                 }
                                             });
                                             ui.add_space(2.0);
@@ -2802,20 +2860,193 @@ impl OverlayApp {
                                         ui.horizontal(|ui| {
                                             let reset_keys_btn = ui.small_button("↺ Rétablir les touches par défaut");
                                             if make_widget_accessible_and_activated(ui, &reset_keys_btn, theme.accent) {
-                                                crate::keyboard_hook::KEY_BIND_SWITCH.store(0x76, Ordering::Relaxed);
-                                                crate::keyboard_hook::KEY_BIND_DICTATION.store(0x77, Ordering::Relaxed);
-                                                crate::keyboard_hook::KEY_BIND_VOICE.store(0x78, Ordering::Relaxed);
-                                                crate::keyboard_hook::KEY_BIND_CLEAR.store(0x73, Ordering::Relaxed);
-                                                let _ = write_env_var_to_file(".env", "KEY_BIND_SWITCH", "118");
-                                                let _ = write_env_var_to_file(".env", "KEY_BIND_DICTATION", "119");
-                                                let _ = write_env_var_to_file(".env", "KEY_BIND_VOICE", "120");
-                                                let _ = write_env_var_to_file(".env", "KEY_BIND_CLEAR", "115");
+                                                let default_bindings: [(&str, u32); 11] = [
+                                                    ("KEY_BIND_SWITCH", 0x76),         // F7
+                                                    ("KEY_BIND_DICTATION", 0x77),      // F8
+                                                    ("KEY_BIND_VOICE", 0x78),          // F9
+                                                    ("KEY_BIND_CLEAR", 0x73),          // F4
+                                                    ("KEY_BIND_STOP_SPEECH", 0x13),    // Pause / Break
+                                                    ("KEY_BIND_EMERGENCY", 0x1B),      // Échap
+                                                    ("KEY_BIND_GAZE_CLICK", 0x0D),     // Entrée
+                                                    ("KEY_BIND_SELECT", 0x20),         // Espace
+                                                    ("KEY_BIND_NEXT", 0x27),           // Flèche Droite
+                                                    ("KEY_BIND_PREV", 0x25),           // Flèche Gauche
+                                                    ("KEY_BIND_BACK", 0x08),           // Retour arrière
+                                                ];
+                                                for (env_var, def_vk) in default_bindings {
+                                                    apply_rebound_key(env_var, def_vk);
+                                                }
                                                 if let Ok(mut lock) = crate::keyboard_hook::REBIND_LISTENING_TARGET.lock() {
                                                     *lock = None;
                                                 }
                                                 play_earcon(Earcon::Success);
                                             }
                                         });
+                                    });
+
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(6.0);
+
+                                // 3. Section Remappage Universel de Touches (Key Remapper)
+                                ui.label(egui::RichText::new("🔀 Remappeur Universel de Touches (Key Remapper)").size(12.0).color(egui::Color32::WHITE).strong());
+                                ui.add_space(2.0);
+                                ui.label(egui::RichText::new("Redirigez n'importe quelle touche physique (ex: touche inutile ou difficile d'accès) vers une autre touche ou combinaison.").size(10.5).color(theme.text_secondary));
+                                ui.add_space(4.0);
+
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        // Sélecteur d'ajout d'une nouvelle règle de remappage
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                                            ui.label(egui::RichText::new("Touche source (physique) :").size(11.0).color(Color32::WHITE));
+                                            let mut source_vk = ui.data_mut(|d| d.get_temp::<u32>(egui::Id::NULL.with("new_remap_from_vk"))).unwrap_or(0x74); // F5 par défaut
+                                            egui::ComboBox::from_id_salt("combo_remap_source")
+                                                .selected_text(crate::keyboard_hook::vk_to_label(source_vk))
+                                                .width(100.0)
+                                                .show_ui(ui, |ui| {
+                                                    for &(vk, label) in crate::keyboard_hook::AVAILABLE_REBIND_KEYS {
+                                                        ui.selectable_value(&mut source_vk, vk, label);
+                                                    }
+                                                });
+                                            ui.data_mut(|d| d.insert_temp(egui::Id::NULL.with("new_remap_from_vk"), source_vk));
+
+                                            ui.label(egui::RichText::new("➔ Destination :").size(11.0).color(Color32::WHITE));
+                                            let mut dest_vk = ui.data_mut(|d| d.get_temp::<u32>(egui::Id::NULL.with("new_remap_to_vk"))).unwrap_or(0x20); // Espace par défaut
+                                            let mut dest_ctrl = ui.data_mut(|d| d.get_temp::<bool>(egui::Id::NULL.with("new_remap_to_ctrl"))).unwrap_or(false);
+                                            let mut dest_alt = ui.data_mut(|d| d.get_temp::<bool>(egui::Id::NULL.with("new_remap_to_alt"))).unwrap_or(false);
+                                            let mut dest_shift = ui.data_mut(|d| d.get_temp::<bool>(egui::Id::NULL.with("new_remap_to_shift"))).unwrap_or(false);
+                                            let mut dest_win = ui.data_mut(|d| d.get_temp::<bool>(egui::Id::NULL.with("new_remap_to_win"))).unwrap_or(false);
+
+                                            let base_dest = dest_vk & crate::keyboard_hook::VK_KEY_MASK;
+                                            let mut selected_base = base_dest;
+                                            egui::ComboBox::from_id_salt("combo_remap_dest")
+                                                .selected_text(crate::keyboard_hook::vk_to_label(base_dest))
+                                                .width(100.0)
+                                                .show_ui(ui, |ui| {
+                                                    for &(vk, label) in crate::keyboard_hook::AVAILABLE_REBIND_KEYS {
+                                                        ui.selectable_value(&mut selected_base, vk, label);
+                                                    }
+                                                });
+
+                                            if ui.checkbox(&mut dest_ctrl, "Ctrl").changed() {
+                                                ui.data_mut(|d| d.insert_temp(egui::Id::NULL.with("new_remap_to_ctrl"), dest_ctrl));
+                                            }
+                                            if ui.checkbox(&mut dest_alt, "Alt").changed() {
+                                                ui.data_mut(|d| d.insert_temp(egui::Id::NULL.with("new_remap_to_alt"), dest_alt));
+                                            }
+                                            if ui.checkbox(&mut dest_shift, "Shift").changed() {
+                                                ui.data_mut(|d| d.insert_temp(egui::Id::NULL.with("new_remap_to_shift"), dest_shift));
+                                            }
+                                            if ui.checkbox(&mut dest_win, "Win").changed() {
+                                                ui.data_mut(|d| d.insert_temp(egui::Id::NULL.with("new_remap_to_win"), dest_win));
+                                            }
+
+                                            let mut final_dest = selected_base;
+                                            if dest_ctrl { final_dest |= crate::keyboard_hook::MOD_CTRL; }
+                                            if dest_alt { final_dest |= crate::keyboard_hook::MOD_ALT; }
+                                            if dest_shift { final_dest |= crate::keyboard_hook::MOD_SHIFT; }
+                                            if dest_win { final_dest |= crate::keyboard_hook::MOD_WIN; }
+                                            ui.data_mut(|d| d.insert_temp(egui::Id::NULL.with("new_remap_to_vk"), final_dest));
+
+                                            let add_btn = ui.button(egui::RichText::new("➕ Ajouter").strong().color(theme.accent));
+                                            if add_btn.clicked() || make_widget_accessible_and_activated(ui, &add_btn, theme.accent) {
+                                                let mut remaps = match crate::keyboard_hook::CUSTOM_KEY_REMAPS.lock() {
+                                                    Ok(guard) => guard,
+                                                    Err(poisoned) => poisoned.into_inner(),
+                                                };
+                                                remaps.retain(|r| r.from_key != source_vk);
+                                                remaps.push(CustomKeyRemap {
+                                                    from_key: source_vk,
+                                                    to_key: final_dest,
+                                                    enabled: true,
+                                                });
+                                                let from_name = crate::keyboard_hook::vk_to_label(source_vk);
+                                                let to_name = crate::keyboard_hook::vk_to_label(final_dest);
+                                                match save_custom_key_remaps(&remaps) {
+                                                    Ok(()) => println!("[KeyRemaps] Remappage ajouté : {from_name} ➔ {to_name}"),
+                                                    Err(e) => eprintln!("[KeyRemaps] Erreur sauvegarde remappage : {e}"),
+                                                }
+                                                play_earcon(Earcon::Success);
+                                            }
+                                        });
+
+                                        ui.add_space(4.0);
+                                        ui.separator();
+                                        ui.add_space(4.0);
+
+                                        // Liste des règles actives
+                                        let mut remaps = match crate::keyboard_hook::CUSTOM_KEY_REMAPS.lock() {
+                                            Ok(guard) => guard,
+                                            Err(poisoned) => poisoned.into_inner(),
+                                        };
+                                        if remaps.is_empty() {
+                                            ui.label(egui::RichText::new("Aucune redirection de touche personnalisée active.").size(10.5).italics().color(theme.text_secondary));
+                                        } else {
+                                            let mut remap_to_remove = None;
+                                            let mut remap_changed = false;
+
+                                            for (idx, remap) in remaps.iter_mut().enumerate() {
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
+                                                    let mut is_on = remap.enabled;
+                                                    if ui.checkbox(&mut is_on, "").changed() {
+                                                        remap.enabled = is_on;
+                                                        remap_changed = true;
+                                                    }
+
+                                                    let from_label = crate::keyboard_hook::vk_to_label(remap.from_key);
+                                                    let to_label = crate::keyboard_hook::vk_to_label(remap.to_key);
+
+                                                    let text_color = if remap.enabled { theme.accent } else { theme.text_secondary };
+                                                    ui.label(egui::RichText::new(format!("⌨ {from_label}")).size(11.0).strong().color(text_color));
+                                                    ui.label(egui::RichText::new("➔").size(10.5).color(theme.text_secondary));
+                                                    ui.label(egui::RichText::new(format!("🎯 {to_label}")).size(11.0).strong().color(Color32::WHITE));
+
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        let del_btn = ui.small_button("🗑").on_hover_text("Supprimer cette redirection");
+                                                        if del_btn.clicked() || make_widget_accessible_and_activated(ui, &del_btn, theme.accent) {
+                                                            remap_to_remove = Some(idx);
+                                                        }
+                                                    });
+                                                });
+                                                ui.add_space(2.0);
+                                            }
+
+                                            if let Some(del_idx) = remap_to_remove {
+                                                let removed = remaps.remove(del_idx);
+                                                let from_name = crate::keyboard_hook::vk_to_label(removed.from_key);
+                                                let to_name = crate::keyboard_hook::vk_to_label(removed.to_key);
+                                                match save_custom_key_remaps(&remaps) {
+                                                    Ok(()) => println!("[KeyRemaps] Remappage supprimé : {from_name} ➔ {to_name}"),
+                                                    Err(e) => eprintln!("[KeyRemaps] Erreur sauvegarde suppression : {e}"),
+                                                }
+                                                play_earcon(Earcon::Success);
+                                            } else if remap_changed {
+                                                match save_custom_key_remaps(&remaps) {
+                                                    Ok(()) => println!("[KeyRemaps] Statut du remappage mis à jour"),
+                                                    Err(e) => eprintln!("[KeyRemaps] Erreur sauvegarde statut : {e}"),
+                                                }
+                                                play_earcon(Earcon::Success);
+                                            }
+                                        }
+
+                                        if !remaps.is_empty() {
+                                            ui.add_space(4.0);
+                                            let clear_all_btn = ui.small_button("🗑 Effacer toutes les redirections");
+                                            if clear_all_btn.clicked() || make_widget_accessible_and_activated(ui, &clear_all_btn, theme.accent) {
+                                                remaps.clear();
+                                                match save_custom_key_remaps(&remaps) {
+                                                    Ok(()) => println!("[KeyRemaps] Toutes les redirections ont été effacées"),
+                                                    Err(e) => eprintln!("[KeyRemaps] Erreur sauvegarde effacement total : {e}"),
+                                                }
+                                                play_earcon(Earcon::Success);
+                                            }
+                                        }
                                     });
 
                                 ui.add_space(8.0);
@@ -2940,6 +3171,29 @@ impl OverlayApp {
                                                         play_earcon(Earcon::Error);
                                                     }
                                                 }
+                                            }
+                                        });
+
+                                        ui.add_space(8.0);
+                                        ui.separator();
+                                        ui.add_space(4.0);
+                                        ui.label(egui::RichText::new("🏥 Scénarios médicaux combinés (1 geste) :").size(11.0).color(Color32::WHITE).strong());
+                                        ui.add_space(3.0);
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                                            let sleep_btn = ui.button("🌙 Tester Mode Sommeil")
+                                                .on_hover_text("Incline le lit à plat, ferme les volets, éteint les lumières, coupe le son et verrouille l'écran");
+                                            if make_widget_accessible_and_activated(ui, &sleep_btn, theme.accent) {
+                                                let res = crate::home_automation::execute_medical_scene("sleep");
+                                                self.hass_status_feedback = Some(res);
+                                                play_earcon(Earcon::Success);
+                                            }
+                                            let meal_btn = ui.button("🥣 Tester Mode Repas / Travail")
+                                                .on_hover_text("Relève la tête de lit, allume l'éclairage de travail, ouvre les volets et centre la fenêtre active");
+                                            if make_widget_accessible_and_activated(ui, &meal_btn, theme.accent) {
+                                                let res = crate::home_automation::execute_medical_scene("meal_work");
+                                                self.hass_status_feedback = Some(res);
+                                                play_earcon(Earcon::Success);
                                             }
                                         });
                                     });

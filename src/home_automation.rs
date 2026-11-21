@@ -4,6 +4,11 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use rust_i18n::t;
 
+#[cfg(windows)]
+use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
+#[cfg(not(windows))]
+use crate::automation::VIRTUAL_KEY;
+
 use crate::fs_util::{read_env_var_from_file, write_env_var_to_file};
 
 /// Entité Home Assistant résumée
@@ -676,6 +681,169 @@ pub fn call_home_control_multi(
         let norm_d = normalize_ha_domain(domain);
         let norm_s = normalize_ha_service(service);
         call_home_assistant_service(norm_d, norm_s, entity_id, data)
+    }
+}
+
+/// Verrouille la session du système d'exploitation de manière sécurisée
+pub fn lock_workstation_os() {
+    #[cfg(windows)]
+    unsafe {
+        extern "system" {
+            fn LockWorkStation() -> windows::Win32::Foundation::BOOL;
+        }
+        let _ = LockWorkStation();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("pmset").arg("displaysleepnow").status();
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("loginctl").args(["lock-session"]).status()
+            .or_else(|_| std::process::Command::new("xdg-screensaver").arg("lock").status());
+    }
+}
+
+/// Coupe l'ensemble des flux audio et multimédia système
+pub fn mute_all_audio_os() {
+    #[cfg(windows)]
+    {
+        const VK_MEDIA_STOP: VIRTUAL_KEY = VIRTUAL_KEY(0xB2);
+        const VK_VOLUME_MUTE: VIRTUAL_KEY = VIRTUAL_KEY(0xAD);
+        crate::automation::send_hotkey(&[], VK_MEDIA_STOP);
+        crate::automation::send_hotkey(&[], VK_VOLUME_MUTE);
+        unsafe {
+            let _ = crate::ui::mute_other_audio_sessions();
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", "set volume output muted true"])
+            .spawn();
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("pactl")
+            .args(["set-sink-mute", "@DEFAULT_SINK@", "1"])
+            .spawn();
+    }
+}
+
+/// Centre la fenêtre d'écriture ou l'éditeur actif pour une ergonomie optimale
+pub fn center_writing_window_os() {
+    #[cfg(windows)]
+    {
+        let user_windows = crate::window_util::list_user_windows();
+        let target_hwnd = crate::window_util::get_active_or_best_window(&user_windows);
+        if let Some(hwnd) = target_hwnd {
+            let wa = crate::window_util::get_desktop_work_area();
+            let wa_w = wa.right - wa.left;
+            let wa_h = wa.bottom - wa.top;
+            let target_w = (wa_w * 7) / 10;
+            let target_h = (wa_h * 8) / 10;
+            let x = wa.left + (wa_w - target_w) / 2;
+            let y = wa.top + (wa_h - target_h) / 2;
+            crate::window_util::apply_window_rect(hwnd, x, y, target_w, target_h);
+            crate::automation::force_foreground_window(hwnd);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let user_windows = crate::window_util::list_user_windows();
+        if let Some(target) = crate::window_util::get_active_or_best_window(&user_windows) {
+            crate::window_util::apply_window_rect(&target, 150, 100, 1100, 750);
+            crate::automation::force_foreground_window(&target);
+        }
+    }
+}
+
+/// Exécute le scénario Mode Sommeil
+pub fn execute_sleep_scene() -> String {
+    println!("[Home Automation Scene] 🌙 Déclenchement du Mode Sommeil...");
+
+    // 1. Inclinaison à plat du lit médicalisé (via HASS ou télégramme KNX)
+    let bed_flat_ent = std::env::var("HASS_BED_FLAT_ENTITY").ok()
+        .or_else(|| read_env_var_from_file(".env", "HASS_BED_FLAT_ENTITY"))
+        .or_else(|| std::env::var("HASS_BED_ENTITY").ok())
+        .unwrap_or_else(|| "switch.lit_medicalise_plat".to_string());
+    let _ = call_home_control_multi(None, "switch", "turn_on", Some(&bed_flat_ent), Some("lit_plat"), None);
+
+    // 2. Fermeture des volets roulants
+    let cover_ent = std::env::var("HASS_COVERS_ENTITY").ok()
+        .or_else(|| read_env_var_from_file(".env", "HASS_COVERS_ENTITY"))
+        .unwrap_or_else(|| "cover.chambre".to_string());
+    let _ = call_home_control_multi(None, "cover", "close_cover", Some(&cover_ent), Some("volets"), None);
+
+    // 3. Extinction des lumières
+    let light_ent = std::env::var("HASS_LIGHTS_ENTITY").ok()
+        .or_else(|| read_env_var_from_file(".env", "HASS_LIGHTS_ENTITY"))
+        .unwrap_or_else(|| "light.chambre".to_string());
+    let _ = call_home_control_multi(None, "light", "turn_off", Some(&light_ent), Some("lumieres"), None);
+
+    // 4. Coupure audio complète
+    mute_all_audio_os();
+
+    // 5. Verrouillage de la session
+    lock_workstation_os();
+
+    "🌙 Mode Sommeil activé : Lit médicalisé incliné à plat, volets fermés, lumières éteintes, audio mis en sourdine et écran verrouillé.".to_string()
+}
+
+/// Exécute le scénario Mode Repas / Travail
+pub fn execute_meal_work_scene() -> String {
+    println!("[Home Automation Scene] 🥣 Déclenchement du Mode Repas / Travail...");
+
+    // 1. Relèvement de la tête de lit médicalisé
+    let bed_head_ent = std::env::var("HASS_BED_HEAD_ENTITY").ok()
+        .or_else(|| read_env_var_from_file(".env", "HASS_BED_HEAD_ENTITY"))
+        .unwrap_or_else(|| "switch.lit_medicalise_tete".to_string());
+    let _ = call_home_control_multi(None, "switch", "turn_on", Some(&bed_head_ent), Some("lit_tete"), None);
+
+    // 2. Éclairage adapté de travail / lecture (85% de luminosité)
+    let light_ent = std::env::var("HASS_LIGHTS_ENTITY").ok()
+        .or_else(|| read_env_var_from_file(".env", "HASS_LIGHTS_ENTITY"))
+        .unwrap_or_else(|| "light.chambre".to_string());
+    let light_data = serde_json::json!({ "brightness_pct": 85 });
+    let _ = call_home_control_multi(None, "light", "turn_on", Some(&light_ent), Some("lumieres"), Some(&light_data));
+
+    // 3. Ouverture des volets
+    let cover_ent = std::env::var("HASS_COVERS_ENTITY").ok()
+        .or_else(|| read_env_var_from_file(".env", "HASS_COVERS_ENTITY"))
+        .unwrap_or_else(|| "cover.chambre".to_string());
+    let _ = call_home_control_multi(None, "cover", "open_cover", Some(&cover_ent), Some("volets"), None);
+
+    // 4. Centrage ergonomique de la fenêtre d'écriture / de travail
+    center_writing_window_os();
+
+    "🥣 Mode Repas / Travail activé : Tête de lit relevée, éclairage de travail allumé, volets ouverts et fenêtre centrée à l'écran.".to_string()
+}
+
+/// Exécute le scénario Mode Détente
+pub fn execute_relax_scene() -> String {
+    println!("[Home Automation Scene] 🛋️ Déclenchement du Mode Détente...");
+
+    // Éclairage tamisé à 30%
+    let light_ent = std::env::var("HASS_LIGHTS_ENTITY").ok()
+        .or_else(|| read_env_var_from_file(".env", "HASS_LIGHTS_ENTITY"))
+        .unwrap_or_else(|| "light.chambre".to_string());
+    let light_data = serde_json::json!({ "brightness_pct": 30 });
+    let _ = call_home_control_multi(None, "light", "turn_on", Some(&light_ent), Some("lumieres"), Some(&light_data));
+
+    "🛋️ Mode Détente activé : Position de repos inclinée et éclairage tamisé à 30%.".to_string()
+}
+
+/// Point d'entrée pour exécuter une macro-scène domotique et médicale
+pub fn execute_medical_scene(scene_name: &str) -> String {
+    let s = scene_name.trim().to_lowercase();
+    if s.contains("sleep") || s.contains("sommeil") || s.contains("nuit") || s.contains("coucher") || s.contains("dormir") {
+        execute_sleep_scene()
+    } else if s.contains("meal") || s.contains("work") || s.contains("repas") || s.contains("travail") || s.contains("bureau") || s.contains("redress") {
+        execute_meal_work_scene()
+    } else if s.contains("relax") || s.contains("detente") || s.contains("détente") || s.contains("repos") {
+        execute_relax_scene()
+    } else {
+        format!("Scénario médical inconnu : '{scene_name}'. Scénarios reconnus : 'sleep' (sommeil), 'meal_work' (repas/travail), 'relax' (détente).")
     }
 }
 

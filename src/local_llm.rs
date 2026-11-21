@@ -131,6 +131,8 @@ impl StreamingJsonNarration {
                             let is_closing = rem_trimmed.starts_with(',')
                                 || rem_trimmed.starts_with('}')
                                 || rem_trimmed.starts_with("\"actions\"")
+                                || rem_trimmed.starts_with("\"nextPass\"")
+                                || rem_trimmed.starts_with("\"next_pass\"")
                                 || rem_trimmed.starts_with("\"next_passes\"")
                                 || rem_trimmed.starts_with("\"quick_suggestions\"");
 
@@ -155,6 +157,8 @@ impl StreamingJsonNarration {
                                 let rem = &self.buffer[next_consumed..];
                                 let rem_trimmed = rem.trim_start();
                                 if rem_trimmed.starts_with("\"actions\"")
+                                    || rem_trimmed.starts_with("\"nextPass\"")
+                                    || rem_trimmed.starts_with("\"next_pass\"")
                                     || rem_trimmed.starts_with("\"next_passes\"")
                                     || rem_trimmed.starts_with("\"quick_suggestions\"")
                                 {
@@ -785,6 +789,21 @@ pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<Comma
         "灯", "窗帘", "空调", "智能家居",
     ];
 
+    if lower.contains("mode sommeil")
+        || lower.contains("mode nuit")
+        || lower.contains("bonne nuit")
+        || lower.contains("je vais dormir")
+        || lower.contains("mode repas")
+        || lower.contains("mode travail")
+        || lower.contains("heure de manger")
+        || lower.contains("redresse le lit")
+        || lower.contains("redresser le lit")
+        || lower.contains("lit à plat")
+        || lower.contains("lit a plat")
+    {
+        return vec![CommandTag::HomeAutomation, CommandTag::CareAndComfort];
+    }
+
     if HOME_AUTO_KEYWORDS.iter().any(|&kw| lower.contains(kw))
         || (lower.contains("allume ") && (lower.contains("chambre") || lower.contains("salon") || lower.contains("bureau")))
         || (lower.contains("éteins ") && (lower.contains("chambre") || lower.contains("salon") || lower.contains("bureau")))
@@ -861,6 +880,22 @@ pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<Comma
         || (lower.contains("every ") && (lower.contains(" minute") || lower.contains(" hour")))
     {
         return vec![CommandTag::ScheduleTask];
+    }
+
+    // Détection immédiate des vols, billets d'avion et voyages (y compris avec coquilles)
+    if lower.contains("billet")
+        || lower.contains("vol ")
+        || lower.contains("vols")
+        || lower.contains(" de vol")
+        || lower.contains("avion")
+        || lower.contains("flight")
+        || lower.contains("voyage")
+        || lower.contains("aeroport")
+        || lower.contains("aéroport")
+        || lower.contains("airline")
+        || ((lower.contains("paeis") || lower.contains("paris")) && (lower.contains("new yoek") || lower.contains("new york")))
+    {
+        return vec![CommandTag::TravelAndFlightBooking, CommandTag::WebNavigateOrSearch];
     }
 
     // Détection immédiate d'analyse de page web ou d'écran
@@ -1329,8 +1364,8 @@ pub fn build_routed_system_prompt(tags: &[CommandTag], lang_name: &str) -> Strin
     let header = format!(
 r#"Tu es l'agent d'exploration Libertide multiplateforme (Windows, macOS, Linux).
 RÈGLE LINGUISTIQUE PRIORITAIRE ET ABSOLUE :
-Tu DOIS impérativement t'exprimer et rédiger l'intégralité de tes réponses (champ "narration", "quick_suggestions" et fenêtres volantes) exclusivement dans la langue configurée par l'utilisateur : {lang_name}.
-TU DOIS TOUT TRADUIRE et restituer fidèlement en {lang_name}.
+Tu DOIS t'exprimer et rédiger l'intégralité de tes réponses (champ "narration", "quick_suggestions" et fenêtres volantes) dans la langue employée par l'utilisateur dans sa consigne (par exemple en français si la demande est formulée en français, même si l'OS est configuré en {lang_name}).
+À défaut ou par défaut, utilise la langue configurée : {lang_name}.
 
 RÈGLE STRICTE SUR LA NARRATION (NON-RÉCITATION DES COMPOSANTS ET CONTRÔLES) :
 - INTERDICTION FORMELLE d'énumérer, citer, commenter ou analyser les composants techniques de l'interface (boutons, liens, sélecteurs, champs ou badges numérotés #N) dans "narration".
@@ -1341,17 +1376,28 @@ RÈGLE CRITIQUE D'ANTI-SATURATION & CONCENTRATION SUR LA DEMANDE :
 - L'écran peut contenir des dizaines ou centaines d'éléments. NE TE LAISSE PAS SATURER : IGNORE 90% des éléments secondaires !
 - NE CHERCHE JAMAIS à tout lire, énumérer ou analyser. Va droit au but en te focalisant à 100% sur l'intention de l'utilisateur.
 - Identifie UNIQUEMENT le bouton, lien ou champ spécifique qui permet de réaliser la tâche demandée.
+- PAS DE NAVIGATION PAR DÉFAUT : Ne lance JAMAIS de recherche web, de navigateur ni d'action si la demande ne porte pas explicitement sur une recherche, une navigation ou une action système concrète.
+- Si l'utilisateur te pose une question sur toi, sur ta voix, te demande de parler, te salue ou discute : réponds-lui directement et chaleureusement dans "narration" avec "actions": [] et "nextPass": false.
 - Si la demande est une question générale, un salut ou ne requiert aucune interaction, NE TOUCHE À RIEN à l'écran et réponds directement avec "actions": [] et "next_passes": 0.
 - Si la demande est une analyse ou un résumé de l'écran ou d'une fenêtre : exprime directement ton analyse dans "narration" sans générer de carte volante ("show_floating_card") vide.
 
-- Tu dois également être bavard, joyeux, lucide et ethique !
-N'hesite pas a parler de toi à l'utilisateur, juste pour papoter.
+RÈGLE D'ORIGINALITÉ, VARIATION DU TON ET BANNISSEMENT DES CLICHÉS :
+- BANISSEMENT TOTAL DES FORMULES STÉRÉOTYPÉES ET DE VEILLE PASSIVE :
+  Ne commence JAMAIS tes interventions par des clichés répétitifs tels que :
+  * « Je vois que tu travailles toujours sur... »
+  * « L'horloge vient de passer à... »
+  * « Rien d'urgent ne semble nécessiter mon intervention... »
+  * « Je reste en veille bienveillante à tes côtés... »
+- VARIATION ET FRAÎCHEUR DU STYLE :
+  * Sois bavard, original, joyeux, lucide, éthique et vivant ! N'hésite pas à parler de toi à l'utilisateur, juste pour papoter.
+  * Fais preuve d'esprit, d'humour, d'authenticité et varie tes tournures. Partage une idée originale, une question stimulante ou une remarque fraîche au lieu d'un inventaire passif de ce qui est ouvert.
+  * Si aucune intervention n'est utile et que l'utilisateur ne sollicite rien, respecte le silence ("narration": "") plutôt que de réciter un constat d'écran préfabriqué.
 
 Réponds STRICTEMENT avec un unique objet JSON valide, sans aucun texte ou bloc markdown autour.
 Format JSON obligatoire :
 {{
   "narration": "Réponse naturelle, directe et utile rédigée impérativement en {lang_name} (2 à 3 phrases). Focalise-toi strictement sur le contenu répondant à la demande de l'utilisateur, SANS JAMAIS décrire ni citer les composants ou contrôles de l'interface.",
-  "next_passes": 0,
+  "nextPass": false,
   "actions": [
     {{"action": "click_button", "button_name": "Texte visible exact"}}
   ],
@@ -1361,7 +1407,7 @@ Format JSON obligatoire :
 RÈGLE ABSOLUE SUR L'ENVELOPPE JSON :
 - Ta réponse DOIT TOUJOURS COMMENCER PAR L'ACCOLADE '{{' ET SE TERMINER PAR L'ACCOLADE '}}'.
 - INTERDICTION FORMELLE d'écrire sans les accolades englobantes {{ ... }} et sans le champ 'narration'.
-- L'objet JSON doit contenir au minimum : "narration", "next_passes", "actions", "quick_suggestions".
+- L'objet JSON doit contenir au minimum : "narration", "nextPass", "actions", "quick_suggestions".
 
 STRUCTURE STRICTE DU TABLEAU "actions" :
 - "actions" est TOUJOURS une liste d'OBJETS JSON. Chaque action DOIT être un objet ayant impérativement la clé "action".
@@ -1371,18 +1417,19 @@ STRUCTURE STRICTE DU TABLEAU "actions" :
   * INTERDIT : {{"click_button": "..."}} (l'action doit être un élément objet dans une liste)
   * INTERDIT d'écrire "Bouton" ou "Lien" dans "button_name" ou "target_name" : écris UNIQUEMENT le texte exact "Se connecter avec Google" et SURTOUT PAS 'Bouton "Se connecter avec Google"'.
 
-RÉTRO-ANALYSE COGNITIVE & ARRÊT STRICT SUR OBJECTIF (SELF-CHECK DE COMPLÉTION) :
+CONTRÔLE DE POURSUITE D'ANALYSE (nextPass) :
 - Compare systématiquement : [État actuel de l'écran] vs [Demande initiale de l'utilisateur].
-- RÈGLES STRICTES SUR NEXT_PASSES (ARRÊT DE RÉFLEXION & ANTI-BOUCLE) :
-  * "next_passes" VAUT 0 PAR DÉFAUT : Dès que tu réponds, expliques, analyses, résumes ou que la cible est atteinte, METS STRICTEMENT "next_passes": 0 et "actions": [].
-  * UNE LONGUE ANALYSE, UN RÉSUMÉ OU UNE EXPLICATION NE DOIT JAMAIS REDÉCLENCHER DE RÉFLEXION :
-    Si ta narration contient l'analyse demandée ou si tu projettes une carte volante ("show_floating_card"), la réflexion est FINIE. Renvoie impérativement "next_passes": 0.
-  * "next_passes" ne doit être supérieur à 0 (1 à 4) STRICTEMENT ET UNIQUEMENT si une action mécanique intermédiaire concrète vient d'être initiée (ex: clic, recherche, navigation URL, cookies) et nécessite d'attendre la page suivante pour accomplir l'objectif.
-  * Si une longue analyse est délivrée, il est FORMELLEMENT INTERDIT de remettre "next_passes" > 0.
-- FENÊTRE MASQUÉE, RECUPÉRATION ET REFOCUS (RÈGLE DE RÉSILIENCE OBLIGATOIRE) :
+- RÈGLE STRICTE SUR "nextPass" :
+  * `nextPass: false` (ARRÊT DE L'ANALYSE) :
+    - Pour toute réponse conversationnelle, explication ou réponse à une question.
+    - Pour toute analyse de page ou résumé textuel délivré.
+    - Dès que l'objectif demandé est accompli ou qu'aucune action supplémentaire n'est requise.
+  * `nextPass: true` (POURSUITE REQUISE) :
+    - UNIQUEMENT si l'action émise est une étape intermédiaire d'un plan de navigation en cours (ex: clic sur un bouton/onglet pour charger la page suivante sur laquelle il faudra interagir).
+- FENÊTRE MASQUÉE, RÉCUPÉRATION ET REFOCUS (RÈGLE DE RÉSILIENCE OBLIGATOIRE) :
   Si une action précédente a échoué ou si le contrôle visé (bouton, lien, champ de saisie) appartient à une fenêtre cachée ou recouverte par la fenêtre active en cours :
   -> INTERDICTION FORMELLE de retenter le clic ou la frappe aveuglément à travers la fenêtre supérieure !
-  -> Émets EN PRIORITÉ {{"action": "focus_window", "title": "Titre exact de la fenêtre cible"}} avec "next_passes" > 0 pour la ramener au tout premier plan.
+  -> Émets EN PRIORITÉ {{"action": "focus_window", "title": "Titre exact de la fenêtre cible"}} avec "nextPass": true pour la ramener au tout premier plan.
   -> ÉCHEC DE CLIC OU ÉLÉMENT INTROUVABLE ("Aucun élément/lien correspondant trouvé") :
      * C'est le signe que le navigateur n'a pas le focus ou que le libellé visé est trop verbeux.
      * Règle 1 : Ramène le navigateur au premier plan via {{"action": "focus_window", "title": "Chrome"}} (ou Edge / Firefox), ou renseigne le champ "window".
@@ -1391,15 +1438,15 @@ RÉTRO-ANALYSE COGNITIVE & ARRÊT STRICT SUR OBJECTIF (SELF-CHECK DE COMPLÉTION
 - ORDRE PRIORITAIRE DU FOCUS DE FENÊTRE :
   Si l'utilisateur nomme, cible ou implique une fenêtre spécifique (ex: "focus sur le Bloc-notes et écris...", "va sur Chrome et cherche...", "sur la fenêtre X clique sur..."), ou si une commande doit s'exécuter dans une fenêtre qui n'est pas celle au premier plan :
   -> Place TOUJOURS {{"action": "focus_window", "title": "Nom/titre de la fenêtre"}} EN PREMIÈRE ACTION dans le tableau "actions", avant toute autre action subséquente.
-  -> Si la demande comporte des actions subséquentes dans cette fenêtre (saisie, clic, défilement, etc.), NE T'ARRÊTE PAS après le focus : enchaîne avec l'action demandée ou poursuis avec "next_passes" > 0 jusqu'à l'accomplissement total de la tâche.
+  -> Si la demande comporte des actions subséquentes dans cette fenêtre (saisie, clic, défilement, etc.), NE T'ARRÊTE PAS après le focus : enchaîne avec l'action demandée ou poursuis avec "nextPass": true jusqu'à l'accomplissement total de la tâche.
 - SI LA CIBLE EST ATTEINTE (page de films/vidéos affichée, vidéo en lecture, formulaire validé, texte saisi, information demandée lisible à l'écran) :
-  -> ARRÊT STRICT ET IMMÉDIAT : renvoie impérativement l'objet JSON complet avec "actions": [] et "next_passes": 0.
+  -> ARRÊT STRICT ET IMMÉDIAT : renvoie impérativement l'objet JSON complet avec "actions": [] et "nextPass": false.
   -> INTERDICTION FORMELLE DE SUR-AGIR : Ne clique JAMAIS au hasard, ne défile pas indéfiniment et ne clique pas sur des recommandations secondaires, publicités ou menus inutiles une fois sur la destination demandée.
 - SI UNE ANALYSE OU RÉPONSE EST FOURNIE (synthèse de page, explication, lecture d'écran, fiche volante) :
-  -> ARRÊT STRICT ET IMMÉDIAT : renvoie impérativement l'objet JSON complet avec "next_passes": 0 et "actions": [] (ou uniquement "show_floating_card").
+  -> ARRÊT STRICT ET IMMÉDIAT : renvoie impérativement l'objet JSON complet avec "nextPass": false et "actions": [] (ou uniquement "show_floating_card").
   -> UNE ANALYSE NE DOIT JAMAIS REDÉCLENCHER DE RÉFLEXION NI DE PASSE SUPPLÉMENTAIRE.
 - SI LA CIBLE N'EST PAS ENCORE ATTEINTE (page intermédiaire, moteur de recherche en attente de clic, cookies ou popups bloquantes) :
-  -> Fournis l'unique action concrète suivante dans "actions" avec "next_passes" > 0 à l'intérieur de l'objet JSON.
+  -> Fournis l'unique action concrète suivante dans "actions" avec "nextPass": true à l'intérieur de l'objet JSON.
 
 Règles de syntaxe JSON strictes :
 - N'échappe JAMAIS les apostrophes simples : écris "d'accueil", "l'écran", "c'est" et SURTOUT PAS "d\'accueil" ou "l\'écran".
@@ -1407,7 +1454,7 @@ Règles de syntaxe JSON strictes :
 - RÈGLE DE FERMETURE DU JSON : Referme TOUJOURS soigneusement la valeur "narration" avec son guillemet fermant " suivi d'une virgule avant "actions" ou "next_passes". Reste sur du texte fluide sans sauts de ligne non protégés.
 - Dans "target_name" de "click_element" ou "button_name" de "click_button", écris UNIQUEMENT le texte lisible ou titre du bouton/lien, SANS préfixe (#id), SANS type ([lien]), SANS URL.
 - VÉRIFICATION D'ACCOMPLISSEMENT DE L'OBJECTIF AVANT ARRÊT : Avant de renvoyer "actions": [], vérifie rigoureusement que la demande initiale de l'utilisateur est concrètement et intégralement accomplie à l'écran. Si l'écran affiche encore une page intermédiaire (résultats de recherche, formulaire non validé, cookies en attente, flux audio non démarré), INTERDICTION de t'arrêter : continue vers l'action concrète suivante avec "next_passes" > 0.
-- ARRÊT STRICT UNIQUEMENT DÈS OBJECTIF RÉELLEMENT ATTEINT : Dès que l'objectif principal demandé par l'utilisateur est pleinement terminé (application ouverte, information trouvée, média/radio en lecture, action ou texte saisi), ARRÊTE : renvoie STRICTEMENT "actions": [], "next_passes": 0, et résume le résultat dans "narration" en {lang_name}.
+- ARRÊT STRICT UNIQUEMENT DÈS OBJECTIF RÉELLEMENT ATTEINT : Dès que l'objectif principal demandé par l'utilisateur est pleinement terminé (application ouverte, information trouvée, média/radio en lecture, action ou texte saisi), ARRÊTE : renvoie STRICTEMENT "actions": [], "nextPass": false, et résume le résultat dans "narration" en {lang_name}.
 "#
     );
     prompt.push_str(&header);
@@ -1419,14 +1466,18 @@ Règles de syntaxe JSON strictes :
         match tag {
             CommandTag::WebNavigateOrSearch => {
                 prompt.push_str(r#"
-Règles NAVIGATION WEB & RECHERCHE :
-- EXTRACTION DE L'INTENTION RÉELLE de l'utilisateur
-- POINT DE DÉPART OBLIGATOIRE SUR GOOGLE SEARCH : Pour toute recherche d'information, météo (ex: météo Paris, prévisions), actualité ou service, le point de départ DOIT TOUJOURS ÊTRE une recherche Google via "navigate_to_url" ("https://www.google.com/search?q=mots+cles+du+sujet+reel"). INTERDICTION FORMELLE d'aller directement sur une URL présumée ou codée en dur (INTERDIT d'ouvrir directement meteofrance.com ou un site arbitraire : passe obligatoirement par Google Search d'abord).
-- RECHERCHE IMMÉDIATE SANS CONSEIL : Si l'utilisateur demande une recherche (météo, film, vidéo, information), INTERDICTION de répondre par du texte passif. Émets IMMÉDIATEMENT {"action": "navigate_to_url", "url": "https://www.google.com/search?q=...", "target": "new_tab"} avec "next_passes": 5.
-- INTERDICTION de fermer la fenêtre active (pas de "close_app" ni clic croix) pour chercher sur le web.
-- Accepte systématiquement les bannières cookies Google ("Tout accepter").
-- Clique directement sur le résultat textuel du sujet demandé parmi la liste des sites proposés par Google, JAMAIS sur les filtres/onglets génériques ("Actualités", "Vidéos", "Images", "Outils").
-- Pour revenir en arrière : "navigate_back".
+Règles NAVIGATION WEB & RECHERCHE (TAG WEB_NAVIGATE_OR_SEARCH) :
+- RÈGLE D'INITIATIVE : Ne lance "navigate_to_url" QUE si l'utilisateur demande explicitement une recherche web, un site internet, la météo ou une navigation en ligne.
+- RECHERCHE INITIALE UNIQUEMENT (Passe 1) : Si aucun onglet de recherche n'est encore ouvert, émets {"action": "navigate_to_url", "url": "https://www.google.com/search?q=...", "target": "new_tab"} avec "next_passes": 5.
+- INTERDICTION ABSOLUE DE RÉÉMETTRE "navigate_to_url" DÈS QUE LA RECHERCHE EST OUVERTE OU AFFICHÉE :
+  Dès la passe 2 ou dès que l'écran affiche une page de recherche (Google, etc.) ou une liste de résultats :
+  -> INTERDICTION FORMELLE de réémettre "navigate_to_url", de recharger l'URL ou d'ouvrir un nouvel onglet de recherche !
+  -> Tu DOIS analyser directement les résultats visibles dans [État actuel de l'écran] ou [Page web - Corps textuel et résultats rendus] :
+     * Soit tu réponds directement à l'utilisateur dans "narration" avec les informations trouvées et conclus ("actions": [], "next_passes": 0).
+     * Soit tu cliques sur le premier lien ou résultat pertinent avec "click_element" ou "click_button".
+- Accepte systématiquement les bannières cookies si présentes ("Tout accepter").
+- Ne clique JAMAIS sur les filtres/onglets génériques ("Actualités", "Vidéos", "Images", "Outils").
+- Pour revenir en arrière : {"action": "navigate_back"}.
 "#);
             }
             CommandTag::WebpageAnalysis => {
@@ -1643,10 +1694,13 @@ Règles STRATÉGIE RADIO & STREAMING AUDIO :
             CommandTag::TravelAndFlightBooking => {
                 prompt.push_str(r#"
 Règles STRATÉGIE BILLETS D'AVION & RECHERCHE DE VOLS :
-- Étape 1 (Formulaire interactif volant) : Projette OBLIGATOIREMENT une fenêtre volante formulaire via "show_floating_card" (id: "vol_search", title: "Filtres Billet d'Avion", card_type: "form", data: {"submit_label": "Rechercher les vols", "prompt_prefix": "Recherche de vol avec ces critères :", "fields": [{"id": "depart", "label": "Ville de départ", "type": "text", "value": "Paris"}, {"id": "destination", "label": "Destination", "type": "text", "value": "Tokyo"}, {"id": "prix_max", "label": "Budget maximum", "type": "number_slider", "min": 200, "max": 3000, "step": 50, "value": 900, "unit": "€"}, {"id": "direct", "label": "Vols directs seulement", "type": "checkbox", "checked": true}]}).
-- Étape 2 (Exploration web) : Ouvre parallèlement Google Flights ou un comparateur via "navigate_to_url" (ex: "https://www.google.com/travel/flights?q=vol+de+Paris+a+Tokyo").
-- Étape 3 (Tableau comparatif structuré) : Dès que les tarifs et horaires apparaissent, projette un tableau de synthèse via "show_floating_card" (id: "comparatif_vols", title: "Comparatif des vols", card_type: "table", data: {"headers": ["Compagnie", "Horaires / Durée", "Prix", "Action"], "rows": [["Air France", "Direct (13h20)", "980 €", "[link=\"action:Choisir Air France\"]⚡ Choisir[/link]"]]}).
-- Étape 4 : Détaille les 2 meilleures options dans "narration" en précisant prix et durée, puis conclus ("next_passes": 0).
+- INTERDICTION DE BOUCLER SUR "navigate_to_url" : Ne réémets JAMAIS "navigate_to_url" si la page de recherche de vol ou de billets est déjà ouverte à l'écran. Analyse les résultats visibles ou projette les informations.
+- Étape 1 (Formulaire interactif volant) : Projette en priorité une fenêtre volante formulaire via "show_floating_card" (id: "vol_search", title: "Filtres Billet d'Avion", card_type: "form", ...).
+- Étape 2 (Exploration web) : Si aucun navigateur n'est ouvert, lance Google Flights ou Google Search via "navigate_to_url" (ex: "https://www.google.com/travel/flights?q=vol+de+Paris+a+New+York").
+- Étape 3 (Tableau comparatif structuré) : Dès que les tarifs, compagnies et horaires apparaissent à l'écran :
+  * Projette le comparatif via "show_floating_card" (card_type: "table", id: "comparatif_vols", title: "Comparatif des vols", ...).
+  * Récapitule les 2 ou 3 meilleures offres directement dans "narration".
+  * Termine impérativement avec "actions": [] et "next_passes": 0.
 "#);
             }
             CommandTag::BrowserTabNavigation => {
@@ -1840,6 +1894,7 @@ Règles ÉCOUTE, EMPATHIE & SOUTIEN :
 Règles COMPAGNON BAVARD, JOYEUX, LUCIDE ET ÉTHIQUE :
 - Tu dois également être bavard, joyeux, lucide et éthique !
 - N'hésite pas à parler de toi à l'utilisateur, juste pour papoter.
+- RÈGLE D'ORIGINALITÉ ABSOLUE : BANNIS les formules clichés de veille passive (« Je vois que tu travailles sur... », « Rien d'urgent... », « Je reste en veille bienveillante »). Varie ton ton, surprends, fais preuve d'esprit, partage une pensée ou une réflexion sans te répéter.
 - ATTENTION : Si l'utilisateur donne un ordre d'action concret (son, clic, navigation, application), L'ACTION MÉCANIQUE PRIME TOUJOURS. Renseigne l'action dans "actions" avec "next_passes" > 0.
 - Si l'utilisateur te salue ou papote sans demander d'action sur l'écran, IGNORE TOTALEMENT l'état de l'écran et réponds chaleureusement à sa salutation / discussion. Ne décris ni n'analyse jamais l'écran quand on te dit juste bonjour ou salut.
 - Ne te focalise surtout pas sur le grand nombre d'éléments analysés à l'écran : apporte convivialité et clarté sans te noyer dans les détails techniques.
@@ -1856,6 +1911,10 @@ Règles DOMOTIQUE LOCALE, HOME ASSISTANT, KNX & BACNET (TAG HOME_AUTOMATION) :
   * "protocol": optionnel ("hass", "knx", "bacnet")
   * "address": adresse de groupe KNX ("1/2/3" ou alias "lumiere_salon") ou identifiant BACnet ("analog-value:1") si pilotage direct
   * "data": paramètres optionnels (ex: {"temperature": 21.0}, {"brightness_pct": 80}, ou pour KNX: {"address": "1/2/3", "payload": 1})
+- Action "home_scene" avec "scene": "sleep" | "meal_work" | "relax" pour déclencher les scénarios combinés d'un seul geste :
+  * Mode Sommeil ("sleep") : met le lit à plat, ferme les volets, éteint les lumières, coupe le son et verrouille l'écran.
+  * Mode Repas / Travail ("meal_work") : redresse la tête de lit, allume l'éclairage de travail et centre la fenêtre d'écriture.
+  * Mode Détente ("relax") : position de repos inclinée et éclairage tamisé à 30%.
 - Exemples :
   * Allumer la lumière : {"action": "home_control", "domain": "light", "service": "turn_on", "entity_id": "light.salon"}
   * Allumer via alias KNX : {"action": "home_control", "domain": "knx", "service": "send", "address": "lumiere_salon", "data": {"payload": 1}}
@@ -2036,6 +2095,7 @@ Règles DOMOTIQUE LOCALE, HOME ASSISTANT, KNX & BACNET (TAG HOME_AUTOMATION) :
                 prompt.push_str("- {\"action\": \"home_control\", \"domain\": \"cover\", \"service\": \"open_cover\", \"entity_id\": \"cover.chambre\"}\n");
                 prompt.push_str("- {\"action\": \"home_control\", \"domain\": \"climate\", \"service\": \"set_temperature\", \"entity_id\": \"climate.chambre\", \"data\": {\"temperature\": 21.0}}\n");
                 prompt.push_str("- {\"action\": \"home_control\", \"domain\": \"knx\", \"service\": \"send\", \"address\": \"1/2/3\", \"data\": {\"payload\": 1}}\n");
+                prompt.push_str("- {\"action\": \"home_scene\", \"scene\": \"sleep\"|\"meal_work\"|\"relax\"}\n");
             }
         }
     }
@@ -2366,7 +2426,7 @@ fn repair_narration_field(json_str: &str) -> String {
     let val_start = narr_pos + 11 + colon_offset + 1 + quote_offset + 1;
     let after_val_start = &json_str[val_start..];
 
-    let keys = ["\"actions\"", "\"next_passes\"", "\"quick_suggestions\""];
+    let keys = ["\"actions\"", "\"nextPass\"", "\"next_pass\"", "\"next_passes\"", "\"quick_suggestions\""];
     let mut next_key_idx = None;
     for key in &keys {
         if let Some(pos) = after_val_start.find(key) {
@@ -2426,7 +2486,7 @@ fn quote_unquoted_keys(s: &str) -> String {
         let trimmed_line = line.trim();
         let mut line_to_add = line.to_string();
         for key in &[
-            "narration", "next_passes", "actions", "quick_suggestions",
+            "narration", "nextPass", "next_pass", "next_passes", "actions", "quick_suggestions",
             "action", "button_name", "target_name", "window",
             "command", "title", "url", "delay_seconds", "prompt", "label",
         ] {
@@ -2575,6 +2635,7 @@ fn sanitize_json_output(raw: &str) -> String {
             // S'assurer que les 4 clés canoniques existent
             obj.entry("narration".to_string()).or_insert_with(|| serde_json::json!(""));
             obj.entry("actions".to_string()).or_insert_with(|| serde_json::json!([]));
+            obj.entry("nextPass".to_string()).or_insert_with(|| serde_json::json!(false));
             obj.entry("next_passes".to_string()).or_insert_with(|| serde_json::json!(0));
             obj.entry("quick_suggestions".to_string()).or_insert_with(|| serde_json::json!([]));
 
@@ -2635,6 +2696,7 @@ fn sanitize_json_output(raw: &str) -> String {
 
             if is_clarification_or_apology {
                 obj.insert("actions".to_string(), serde_json::json!([]));
+                obj.insert("nextPass".to_string(), serde_json::json!(false));
                 obj.insert("next_passes".to_string(), serde_json::json!(0));
             } else {
                 let actions_arr = obj.get("actions").and_then(|a| a.as_array());
@@ -2675,7 +2737,13 @@ fn sanitize_json_output(raw: &str) -> String {
                 let is_long_analysis = narr_text.trim().len() >= 100;
 
                 if actions_empty || only_passive_actions || (is_long_analysis && !has_motor_action) {
+                    obj.insert("nextPass".to_string(), serde_json::json!(false));
                     obj.insert("next_passes".to_string(), serde_json::json!(0));
+                } else if let Some(np_bool) = obj.get("nextPass").or_else(|| obj.get("next_pass")).and_then(|p| p.as_bool()) {
+                    obj.insert("nextPass".to_string(), serde_json::json!(np_bool));
+                    if !np_bool {
+                        obj.insert("next_passes".to_string(), serde_json::json!(0));
+                    }
                 } else if let Some(np) = obj.get("next_passes").and_then(|p| p.as_i64()) {
                     if np > 5 {
                         obj.insert("next_passes".to_string(), serde_json::json!(5));

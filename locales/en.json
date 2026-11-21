@@ -33,8 +33,8 @@
     "scheduled_tasks_cancelled": "All scheduled tasks have been cancelled.",
     "scheduled_tasks_cancelled_count": "All scheduled tasks have been cancelled (%{count} cancelled).",
     "subtitles_enabled": "Live subtitles activated (%{source}).",
-    "subtitles_disabled": "Live subtitles disabled."
-    ,"window_name_announced": "Window %{name}."
+    "subtitles_disabled": "Live subtitles disabled.",
+    "window_name_announced": "Window %{name}."
   },
   "roles": {
     "button": "button",
@@ -48,7 +48,8 @@
     "checkbox": "checkbox",
     "combobox": "drop-down list",
     "slider": "slider",
-    "media": "media player"
+    "media": "media player",
+    "vlm": "visual element (AI)"
   },
   "commands": {
     "disable_dictation": "Disable dictation",
@@ -80,6 +81,10 @@
     "stop_subtitles": "Stop subtitles",
     "subtitles_title": "Live subtitles",
     "subtitles_system_audio": "System audio",
+    "subtitles_source_label": "Source:",
+    "subtitles_source_all": "All (System audio)",
+    "subtitles_source_mic": "Microphone (Voice)",
+    "subtitles_source_tooltip": "Select audio source for subtitles (specific application or All system)",
     "start_subtitles_keywords": "live subtitles,subtitles,subtitle,closed captions,captions,caption,live transcription,audio transcription,enable subtitles,start subtitles,turn on subtitles,show subtitles",
     "stop_subtitles_keywords": "stop subtitles,disable subtitles,turn off subtitles,hide subtitles,close subtitles,cancel subtitles,stop captions,disable captions,stop live subtitles",
     "analyze_screen_prompt": "Analyze the screen and summarize what the current window is doing."
@@ -127,6 +132,10 @@
     "btn_mic": "Mic",
     "btn_mic_stop": "Stop",
     "btn_mic_tooltip": "Microphone (r): Enable or mute speech recognition",
+    "btn_subtitles": "Subtitles",
+    "btn_subtitles_active": "Active",
+    "btn_subtitles_tooltip": "Subtitles: Enable live transcription",
+    "btn_subtitles_active_tooltip": "Subtitles: Disable live transcription",
     "btn_dictation": "Dictation",
     "btn_dictation_active": "Active",
     "btn_dictation_tooltip": "Dictation: Direct speech-to-text into your apps (Esc to exit)",
@@ -210,6 +219,8 @@
     "settings_tab_language": "🌐 Language",
     "settings_tab_devices": "🎙️ Devices",
     "settings_tab_macros": "⚡ Macros",
+    "settings_tab_keybindings": "⌨ Shortcuts",
+    "settings_tab_home": "🏠 Smart Home",
     "api_key_label": "API Key (%{env}):",
     "provider_enabled_checkbox": "Provider enabled",
     "btn_set_primary_provider": "★ Set as primary active",
@@ -299,6 +310,10 @@
     "active_narrator": "Active narrator voice",
     "profile_denise": "Denise (Female)",
     "profile_henri": "Henri (Male)",
+    "profile_hortense": "Hortense (Studio)",
+    "profile_paul": "Paul (Calm)",
+    "profile_sylvie": "Sylvie (Canadian)",
+    "profile_jean": "Jean (Dynamic)",
     "profile_clone": "Cloned Voice (%{gender})",
     "test_title": "Test voice",
     "test_hint": "Audio test sentence...",

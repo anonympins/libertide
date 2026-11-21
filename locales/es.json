@@ -33,8 +33,8 @@
     "scheduled_tasks_cancelled": "Todos los comandos diferidos han sido cancelados.",
     "scheduled_tasks_cancelled_count": "Todos los comandos diferidos han sido cancelados (%{count} cancelado(s)).",
     "subtitles_enabled": "Subtítulos en directo activados (%{source}).",
-    "subtitles_disabled": "Subtítulos en directo desactivados."
-    ,"window_name_announced": "Ventana %{name}."
+    "subtitles_disabled": "Subtítulos en directo desactivados.",
+    "window_name_announced": "Ventana %{name}."
   },
   "roles": {
     "button": "botón",
@@ -48,7 +48,8 @@
     "checkbox": "casilla de verificación",
     "combobox": "lista desplegable",
     "slider": "control deslizante",
-    "media": "reproductor multimedia"
+    "media": "reproductor multimedia",
+    "vlm": "elemento visual (IA)"
   },
   "commands": {
     "disable_dictation": "Desactivar dictado",
@@ -80,6 +81,10 @@
     "stop_subtitles": "Detener subtítulos",
     "subtitles_title": "Subtítulos en directo",
     "subtitles_system_audio": "Audio del sistema",
+    "subtitles_source_label": "Fuente:",
+    "subtitles_source_all": "Todos (Audio del sistema)",
+    "subtitles_source_mic": "Micrófono (Voz)",
+    "subtitles_source_tooltip": "Seleccionar fuente de audio para subtítulos (aplicación específica o Todo el sistema)",
     "start_subtitles_keywords": "subtitulos en directo,subtítulos en directo,subtitulos,subtítulos,subtitulo,subtítulo,transcripcion en vivo,transcripcion en directo,activar subtitulos,activar subtítulos,iniciar subtitulos,poner subtitulos,mostrar subtitulos",
     "stop_subtitles_keywords": "detener subtitulos,detener subtítulos,desactivar subtitulos,desactivar subtítulos,parar subtitulos,quitar subtitulos,cerrar subtitulos,stop subtitulos",
     "analyze_screen_prompt": "Analiza la pantalla y resume lo que hace la ventana actual."
@@ -127,6 +132,10 @@
     "btn_mic": "Micro",
     "btn_mic_stop": "Parar",
     "btn_mic_tooltip": "Micrófono (r): Activar o silenciar la escucha vocal",
+    "btn_subtitles": "Subtítulos",
+    "btn_subtitles_active": "Activo",
+    "btn_subtitles_tooltip": "Subtítulos: Activar transcripción en directo",
+    "btn_subtitles_active_tooltip": "Subtítulos: Desactivar transcripción en directo",
     "btn_dictation": "Dictado",
     "btn_dictation_active": "Activo",
     "btn_dictation_tooltip": "Dictado: Entrada de voz directa en sus aplicaciones (Esc para salir)",
@@ -210,6 +219,8 @@
     "settings_tab_language": "🌐 Idioma",
     "settings_tab_devices": "🎙️ Dispositivos",
     "settings_tab_macros": "⚡ Macros",
+    "settings_tab_keybindings": "⌨ Atajos",
+    "settings_tab_home": "🏠 Domótica",
     "api_key_label": "Clave API (%{env}):",
     "provider_enabled_checkbox": "Proveedor activado",
     "btn_set_primary_provider": "★ Establecer como activo principal",
@@ -299,6 +310,10 @@
     "active_narrator": "Voz activa del narrador",
     "profile_denise": "Denise (Femenina)",
     "profile_henri": "Henri (Masculina)",
+    "profile_hortense": "Hortense (Estudio)",
+    "profile_paul": "Paul (Tranquilo)",
+    "profile_sylvie": "Sylvie (Canadiense)",
+    "profile_jean": "Jean (Dinámico)",
     "profile_clone": "Voz clonada (%{gender})",
     "test_title": "Probar la voz",
     "test_hint": "Frase de prueba de audio...",

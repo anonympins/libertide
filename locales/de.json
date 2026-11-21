@@ -33,8 +33,8 @@
     "scheduled_tasks_cancelled": "Alle verzögerten Befehle wurden abgebrochen.",
     "scheduled_tasks_cancelled_count": "Alle verzögerten Befehle wurden abgebrochen (%{count} abgebrochen).",
     "subtitles_enabled": "Live-Untertitel aktiviert (%{source}).",
-    "subtitles_disabled": "Live-Untertitel deaktiviert."
-    ,"window_name_announced": "Fenster %{name}."
+    "subtitles_disabled": "Live-Untertitel deaktiviert.",
+    "window_name_announced": "Fenster %{name}."
   },
   "roles": {
     "button": "Schaltfläche",
@@ -48,7 +48,8 @@
     "checkbox": "Kontrollkästchen",
     "combobox": "Dropdown-Liste",
     "slider": "Schieberegler",
-    "media": "Mediaplayer"
+    "media": "Mediaplayer",
+    "vlm": "visuelles Element (KI)"
   },
   "commands": {
     "disable_dictation": "Diktat deaktivieren",
@@ -80,6 +81,10 @@
     "stop_subtitles": "Untertitel stoppen",
     "subtitles_title": "Live-Untertitel",
     "subtitles_system_audio": "System-Audio",
+    "subtitles_source_label": "Quelle:",
+    "subtitles_source_all": "Alle (System-Audio)",
+    "subtitles_source_mic": "Mikrofon (Stimme)",
+    "subtitles_source_tooltip": "Audioquelle für Untertitel auswählen (bestimmte Anwendung oder gesamtes System)",
     "start_subtitles_keywords": "live-untertitel,live untertitel,untertitel,untertitelung,transkription,audio-transkription,untertitel aktivieren,untertitel starten,untertitel einschalten,untertitel anzeigen",
     "stop_subtitles_keywords": "untertitel stoppen,untertitel deaktivieren,untertitel ausschalten,untertitel beenden,untertitel schließen,stop untertitel",
     "analyze_screen_prompt": "Den Bildschirm analysieren und das aktive Fenster zusammenfassen."
@@ -127,6 +132,10 @@
     "btn_mic": "Mikrofon",
     "btn_mic_stop": "Stopp",
     "btn_mic_tooltip": "Mikrofon (r): Spracherkennung ein- oder stummschalten",
+    "btn_subtitles": "Untertitel",
+    "btn_subtitles_active": "Aktiv",
+    "btn_subtitles_tooltip": "Untertitel: Live-Transkription aktivieren",
+    "btn_subtitles_active_tooltip": "Untertitel: Live-Transkription deaktivieren",
     "btn_dictation": "Diktat",
     "btn_dictation_active": "Aktiv",
     "btn_dictation_tooltip": "Diktat: Direkte Spracheingabe in Ihre Apps (Esc zum Beenden)",
@@ -210,6 +219,8 @@
     "settings_tab_language": "🌐 Sprache",
     "settings_tab_devices": "🎙️ Geräte",
     "settings_tab_macros": "⚡ Makros",
+    "settings_tab_keybindings": "⌨ Tastaturkürzel",
+    "settings_tab_home": "🏠 Hausautomation",
     "api_key_label": "API-Schlüssel (%{env}):",
     "provider_enabled_checkbox": "Anbieter aktiviert",
     "btn_set_primary_provider": "★ Als primär aktiv festlegen",
@@ -299,6 +310,10 @@
     "active_narrator": "Aktive Sprecherstimme",
     "profile_denise": "Denise (Weiblich)",
     "profile_henri": "Henri (Männlich)",
+    "profile_hortense": "Hortense (Studio)",
+    "profile_paul": "Paul (Ruhig)",
+    "profile_sylvie": "Sylvie (Kanadisch)",
+    "profile_jean": "Jean (Dynamisch)",
     "profile_clone": "Geklonte Stimme (%{gender})",
     "test_title": "Stimme testen",
     "test_hint": "Audio-Testsatz...",
@@ -368,8 +383,8 @@
     "bpm": "BPM:",
     "wah_filter": "Wah / Filter:",
     "pitch": "Pitch:"
-  }
-  ,"keyboard": {
+  },
+  "keyboard": {
     "title": "⌨️ Barrierefreie virtuelle Tastatur",
     "card_summary": "Barrierefreie virtuelle Tastatur mit Scanning und Blicksteuerung",
     "open_btn_tooltip": "Öffnet die barrierefreie virtuelle Tastatur mit Scanning und Blicksteuerung.",

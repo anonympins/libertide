@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use eframe::egui;
 use eframe::egui::text::LayoutJob;
 use eframe::egui::TextFormat;
@@ -7,6 +9,8 @@ use crate::clipboard::set_clipboard_text;
 use crate::{apply_dwell_to_response, DwellState};
 use crate::{play_earcon, Earcon};
 use crate::theme::ThemeColors;
+
+static CARD_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenCardSummary {
@@ -195,6 +199,18 @@ pub enum FloatingContentType {
     VirtualKeyboard,
 }
 
+/// Garantit que chaque champ d'un formulaire dispose d'un ID valide et unique
+fn sanitize_form_fields(fields: &mut [FormField]) {
+    let mut seen_ids = HashSet::new();
+    for (idx, field) in fields.iter_mut().enumerate() {
+        if field.id.trim().is_empty() || seen_ids.contains(&field.id) {
+            let suffix = if field.id.trim().is_empty() { "field".to_string() } else { field.id.clone() };
+            field.id = format!("{}_{idx}", suffix);
+        }
+        seen_ids.insert(field.id.clone());
+    }
+}
+
 fn default_submit_label() -> String {
     "🔍 Lancer la recherche".to_string()
 }
@@ -257,10 +273,12 @@ impl FloatingCard {
         data: &serde_json::Value,
     ) -> Self {
         let clean_id = id.unwrap_or_else(|| {
-            format!("card_{}", std::time::SystemTime::now()
+            let count = CARD_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let micros = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_millis())
+                .as_micros();
+            format!("card_{micros}_{count}")
         });
 
         let content = match card_type.to_lowercase().as_str() {
@@ -316,7 +334,10 @@ impl FloatingCard {
                 FloatingContentType::Stats { items }
             }
             "form" | "search_form" | "filter" | "filters" | "search" => {
-                if let Ok(form_data) = serde_json::from_value::<FloatingContentType>(data.clone()) {
+                if let Ok(mut form_data) = serde_json::from_value::<FloatingContentType>(data.clone()) {
+                    if let FloatingContentType::Form { ref mut fields, .. } = form_data {
+                        sanitize_form_fields(fields);
+                    }
                     form_data
                 } else {
                     let mut fields = Vec::new();
@@ -404,6 +425,7 @@ impl FloatingCard {
                             }
                         }
                     }
+                    sanitize_form_fields(&mut fields);
                     FloatingContentType::Form { fields, submit_label, prompt_prefix }
                 }
             }
@@ -529,7 +551,12 @@ impl FloatingCard {
                 speech.push_str(&format!("Interactions possibles : vous pouvez modifier ces critères puis cliquer sur le bouton {} pour lancer la requête.", submit_label));
             }
             FloatingContentType::Subtitles { text, target_window, history } => {
-                let target = target_window.as_deref().unwrap_or("la sortie audio");
+                let all_sources = t!("commands.subtitles_source_all").to_string();
+                let target = if crate::audio::is_all_sources_target(target_window.as_deref()) {
+                    &all_sources
+                } else {
+                    target_window.as_deref().unwrap_or(&all_sources)
+                };
                 speech.push_str(&format!("Sous-titres en direct de {target}. "));
                 if !history.is_empty() {
                     let recent: Vec<&str> = history.iter().rev().take(3).map(|s| s.as_str()).collect();
@@ -591,8 +618,13 @@ impl FloatingCard {
         ctx.show_viewport_immediate(viewport_id, builder, |vp_ctx, _class| {
             vp_ctx.request_repaint();
             vp_ctx.set_zoom_factor(ctx.zoom_factor());
+            let is_subtitles = matches!(self.content, FloatingContentType::Subtitles { .. });
             if vp_ctx.input(|i| i.viewport().close_requested()) {
                 self.open = false;
+                if is_subtitles {
+                    stop_live_subtitles();
+                    crate::audio::stop_live_subtitles();
+                }
             }
 
             let is_maximized = vp_ctx.input(|i| i.viewport().maximized.unwrap_or(false));
@@ -709,6 +741,10 @@ impl FloatingCard {
                             let close_id = ui.make_persistent_id(format!("dwell_close_card_{}", self.id));
                             if apply_dwell_to_response(ui, dwell_state, close_id, &close_btn) {
                                 self.open = false;
+                                if is_subtitles {
+                                    stop_live_subtitles();
+                                    crate::audio::stop_live_subtitles();
+                                }
                             }
 
                             let max_icon = if is_maximized { "⧉" } else { "□" };
@@ -865,104 +901,110 @@ impl FloatingCard {
                                     let mut form_submitted = false;
 
                                     ui.vertical(|ui| {
-                                        for field in fields.iter_mut() {
-                                            ui.add_space(3.0);
-                                            match &mut field.field_type {
-                                                FormFieldType::Checkbox { checked } => {
-                                                    let resp = ui.checkbox(
-                                                        checked,
-                                                        egui::RichText::new(&field.label)
-                                                            .size(12.5)
-                                                            .color(theme.text_primary),
-                                                    );
-                                                    resp.on_hover_text(format!("Activer/Désactiver : {}", field.label));
-                                                }
-                                                FormFieldType::Text { placeholder, value } => {
-                                                    ui.label(
-                                                        egui::RichText::new(&field.label)
-                                                            .size(11.5)
-                                                            .color(theme.accent)
-                                                            .strong(),
-                                                    );
-                                                    ui.add_space(1.0);
-                                                    let field_input_id = egui::Id::NULL.with(format!("form_field_{}_{}", card_id, field.id));
-                                                    crate::overlay::render_accessible_input(
-                                                        ui,
-                                                        field_input_id,
-                                                        value,
-                                                        placeholder.as_str(),
-                                                        false,
-                                                        Some(ui.available_width()),
-                                                        None,
-                                                        false,
-                                                        theme,
-                                                    );
-                                                }
-                                                FormFieldType::NumberSlider { min, max, step, value, unit } => {
-                                                    ui.horizontal(|ui| {
+                                        for (f_idx, field) in fields.iter_mut().enumerate() {
+                                            ui.push_id((f_idx, &field.id), |ui| {
+                                                ui.add_space(3.0);
+                                                match &mut field.field_type {
+                                                    FormFieldType::Checkbox { checked } => {
+                                                        let resp = ui.checkbox(
+                                                            checked,
+                                                            egui::RichText::new(&field.label)
+                                                                .size(12.5)
+                                                                .color(theme.text_primary),
+                                                        );
+                                                        resp.on_hover_text(format!("Activer/Désactiver : {}", field.label));
+                                                    }
+                                                    FormFieldType::Text { placeholder, value } => {
                                                         ui.label(
                                                             egui::RichText::new(&field.label)
                                                                 .size(11.5)
                                                                 .color(theme.accent)
                                                                 .strong(),
                                                         );
-                                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                            let display_val = if unit.is_empty() {
-                                                                format!("{:.0}", *value)
-                                                            } else {
-                                                                format!("{:.0} {}", *value, unit)
-                                                            };
+                                                        ui.add_space(1.0);
+                                                        let field_input_id = ui.make_persistent_id(format!("input_{card_id}_{f_idx}_{}", field.id));
+                                                        crate::overlay::render_accessible_input(
+                                                            ui,
+                                                            field_input_id,
+                                                            value,
+                                                            placeholder.as_str(),
+                                                            false,
+                                                            Some(ui.available_width()),
+                                                            None,
+                                                            false,
+                                                            theme,
+                                                        );
+                                                    }
+                                                    FormFieldType::NumberSlider { min, max, step, value, unit } => {
+                                                        ui.horizontal(|ui| {
                                                             ui.label(
-                                                                egui::RichText::new(display_val)
-                                                                    .size(12.0)
-                                                                    .color(theme.text_user)
+                                                                egui::RichText::new(&field.label)
+                                                                    .size(11.5)
+                                                                    .color(theme.accent)
                                                                     .strong(),
                                                             );
+                                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                                let display_val = if unit.is_empty() {
+                                                                    format!("{:.0}", *value)
+                                                                } else {
+                                                                    format!("{:.0} {}", *value, unit)
+                                                                };
+                                                                ui.label(
+                                                                    egui::RichText::new(display_val)
+                                                                        .size(12.0)
+                                                                        .color(theme.text_user)
+                                                                        .strong(),
+                                                                );
+                                                            });
                                                         });
-                                                    });
-                                                    ui.add_space(1.0);
-                                                    let mut slider = egui::Slider::new(value, *min..=*max)
-                                                        .show_value(false);
-                                                    if let Some(s) = step {
-                                                        slider = slider.step_by(*s);
+                                                        ui.add_space(1.0);
+                                                        let mut slider = egui::Slider::new(value, *min..=*max)
+                                                            .show_value(false);
+                                                        if let Some(s) = step {
+                                                            slider = slider.step_by(*s);
+                                                        }
+                                                        ui.add_sized([ui.available_width(), 20.0], slider);
                                                     }
-                                                    ui.add_sized([ui.available_width(), 20.0], slider);
-                                                }
-                                                FormFieldType::Select { options, selected } => {
-                                                    ui.label(
-                                                        egui::RichText::new(&field.label)
-                                                            .size(11.5)
-                                                            .color(theme.accent)
-                                                            .strong(),
-                                                    );
-                                                    ui.add_space(1.0);
-                                                    let combo_id = format!("combo_{card_id}_{}", field.id);
-                                                    egui::ComboBox::from_id_salt(combo_id)
-                                                        .selected_text(selected.as_str())
-                                                        .width(ui.available_width().max(120.0))
-                                                        .show_ui(ui, |ui| {
-                                                            for opt in options {
-                                                                ui.selectable_value(selected, opt.clone(), opt.as_str());
+                                                    FormFieldType::Select { options, selected } => {
+                                                        ui.label(
+                                                            egui::RichText::new(&field.label)
+                                                                .size(11.5)
+                                                                .color(theme.accent)
+                                                                .strong(),
+                                                        );
+                                                        ui.add_space(1.0);
+                                                        let combo_id = format!("combo_{card_id}_{f_idx}_{}", field.id);
+                                                        egui::ComboBox::from_id_salt(combo_id)
+                                                            .selected_text(selected.as_str())
+                                                            .width(ui.available_width().max(120.0))
+                                                            .show_ui(ui, |ui| {
+                                                                for (opt_idx, opt) in options.iter().enumerate() {
+                                                                    ui.push_id(opt_idx, |ui| {
+                                                                        ui.selectable_value(selected, opt.clone(), opt.as_str());
+                                                                    });
+                                                                }
+                                                            });
+                                                    }
+                                                    FormFieldType::Radio { options, selected } => {
+                                                        ui.label(
+                                                            egui::RichText::new(&field.label)
+                                                                .size(11.5)
+                                                                .color(theme.accent)
+                                                                .strong(),
+                                                        );
+                                                        ui.add_space(2.0);
+                                                        ui.horizontal_wrapped(|ui| {
+                                                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
+                                                            for (opt_idx, opt) in options.iter().enumerate() {
+                                                                ui.push_id(opt_idx, |ui| {
+                                                                    ui.radio_value(selected, opt.clone(), opt.as_str());
+                                                                });
                                                             }
                                                         });
+                                                    }
                                                 }
-                                                FormFieldType::Radio { options, selected } => {
-                                                    ui.label(
-                                                        egui::RichText::new(&field.label)
-                                                            .size(11.5)
-                                                            .color(theme.accent)
-                                                            .strong(),
-                                                    );
-                                                    ui.add_space(2.0);
-                                                    ui.horizontal_wrapped(|ui| {
-                                                        ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
-                                                        for opt in options {
-                                                            ui.radio_value(selected, opt.clone(), opt.as_str());
-                                                        }
-                                                    });
-                                                }
-                                            }
-                                            ui.add_space(4.0);
+                                                ui.add_space(4.0);
+                                            });
                                         }
 
                                         ui.add_space(6.0);
@@ -1052,11 +1094,109 @@ impl FloatingCard {
                                             ui.label(egui::RichText::new("EN DIRECT").size(11.0).color(dot_color).strong());
 
                                             let live_target = crate::audio::LIVE_SUBTITLES_TARGET.lock().ok().and_then(|g| g.clone());
-                                            if target_window.is_none() && live_target.is_some() {
-                                                *target_window = live_target.clone();
+                                            let mut is_diar = crate::audio::is_live_subtitles_diarization();
+                                            let mut is_trans = crate::audio::is_live_subtitles_translate();
+
+                                            ui.add_space(6.0);
+                                            let diar_btn = ui.selectable_label(
+                                                is_diar,
+                                                egui::RichText::new("👥 Locuteurs").size(10.5),
+                                            ).on_hover_text("Diarisation : séparer et colorer les différents interlocuteurs");
+                                            if diar_btn.clicked() {
+                                                crate::audio::set_live_subtitles_diarization(!is_diar);
                                             }
-                                            let target_label = target_window.as_deref().or(live_target.as_deref()).unwrap_or("Sortie audio (Loopback)");
-                                            ui.label(egui::RichText::new(format!("— Source : {target_label}")).size(11.0).color(theme.text_secondary));
+
+                                            let trans_btn = ui.selectable_label(
+                                                is_trans,
+                                                egui::RichText::new("🌐 Traduction").size(10.5),
+                                            ).on_hover_text("Traduire instantanément la parole étrangère");
+                                            if trans_btn.clicked() {
+                                                crate::audio::set_live_subtitles_translate(!is_trans);
+                                            }
+
+                                            // Sélecteur de source de sous-titres (Tous / Fenêtres applicatives / Micro)
+                                            let all_sources_label = t!("commands.subtitles_source_all").to_string();
+                                            let mic_label = t!("commands.subtitles_source_mic").to_string();
+                                            let source_prefix = t!("commands.subtitles_source_label").to_string();
+                                            let is_all = crate::audio::is_all_sources_target(target_window.as_deref());
+                                            let is_mic = target_window.as_deref().map_or(false, |s| {
+                                                let low = s.to_lowercase();
+                                                low.contains("micro") || low == "mic"
+                                            });
+
+                                            let current_display = if is_all {
+                                                all_sources_label.clone()
+                                            } else if is_mic {
+                                                mic_label.clone()
+                                            } else {
+                                                target_window.as_deref().unwrap_or(&all_sources_label).to_string()
+                                            };
+
+                                            ui.add_space(4.0);
+                                            ui.label(egui::RichText::new(&source_prefix).size(10.5).color(theme.text_secondary));
+
+                                            let user_wins = crate::window_util::list_user_windows();
+                                            let mut open_windows: Vec<String> = user_wins
+                                                .into_iter()
+                                                .map(|(_, title)| title.trim().to_string())
+                                                .filter(|t| !t.is_empty() && !t.to_lowercase().contains("libertide") && t != "Program Manager")
+                                                .collect();
+                                            open_windows.dedup();
+
+                                            let mut selected_source = current_display.clone();
+                                            let mut source_changed = false;
+
+                                            let display_truncated = if current_display.chars().count() > 22 {
+                                                let mut s: String = current_display.chars().take(20).collect();
+                                                s.push('…');
+                                                s
+                                            } else {
+                                                current_display.clone()
+                                            };
+
+                                            let combo_id = format!("subtitles_source_combo_{}", self.id);
+                                            egui::ComboBox::from_id_salt(combo_id)
+                                                .selected_text(egui::RichText::new(display_truncated).size(10.5).color(theme.accent).strong())
+                                                .width(140.0)
+                                                .show_ui(ui, |ui| {
+                                                    if ui.selectable_value(&mut selected_source, all_sources_label.clone(), format!("🌐 {all_sources_label}")).clicked() {
+                                                        source_changed = true;
+                                                    }
+                                                    ui.separator();
+                                                    for win in &open_windows {
+                                                        let item_label = if win.chars().count() > 34 {
+                                                            let mut s: String = win.chars().take(31).collect();
+                                                            s.push('…');
+                                                            s
+                                                        } else {
+                                                            win.clone()
+                                                        };
+                                                        if ui.selectable_value(&mut selected_source, win.clone(), format!("🪟 {item_label}")).clicked() {
+                                                            source_changed = true;
+                                                        }
+                                                    }
+                                                    ui.separator();
+                                                    if ui.selectable_value(&mut selected_source, mic_label.clone(), format!("🎙️ {mic_label}")).clicked() {
+                                                        source_changed = true;
+                                                    }
+                                                });
+
+                                            if source_changed {
+                                                if selected_source == all_sources_label {
+                                                    *target_window = None;
+                                                    crate::audio::set_live_subtitles_target(None);
+                                                    self.title = t!("commands.subtitles_title").to_string();
+                                                } else if selected_source == mic_label {
+                                                    *target_window = Some("Microphone".to_string());
+                                                    crate::audio::set_live_subtitles_target(Some("Microphone".to_string()));
+                                                    self.title = format!("{} ({})", t!("commands.subtitles_title"), mic_label);
+                                                } else {
+                                                    *target_window = Some(selected_source.clone());
+                                                    crate::audio::set_live_subtitles_target(Some(selected_source.clone()));
+                                                    self.title = selected_source.clone();
+                                                }
+                                                play_earcon(Earcon::Success);
+                                            }
 
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 let stop_btn = ui.add(
@@ -1142,22 +1282,46 @@ impl FloatingCard {
                                                     .stick_to_bottom(true)
                                                     .auto_shrink([false, false])
                                                     .show(ui, |ui| {
+                                                        let format_sub_line = |text: &str| -> (egui::Color32, String) {
+                                                            if text.starts_with("[Locuteur 1]") {
+                                                                (egui::Color32::from_rgb(0, 229, 255), text.to_string())
+                                                            } else if text.starts_with("[Locuteur 2]") {
+                                                                (egui::Color32::from_rgb(255, 102, 204), text.to_string())
+                                                            } else if text.starts_with("[Locuteur 3]") {
+                                                                (egui::Color32::from_rgb(255, 214, 0), text.to_string())
+                                                            } else if text.starts_with("[Locuteur 4]") {
+                                                                (egui::Color32::from_rgb(0, 230, 118), text.to_string())
+                                                            } else if text.contains("🌐") {
+                                                                (egui::Color32::from_rgb(180, 220, 255), text.to_string())
+                                                            } else {
+                                                                (egui::Color32::from_rgb(160, 175, 195), text.to_string())
+                                                            }
+                                                        };
+
                                                         // Lignes passées
                                                         for past in all_history.iter().rev().take(6).rev() {
+                                                            let (color, content) = format_sub_line(past);
+                                                            let past_color = egui::Color32::from_rgba_unmultiplied(
+                                                                color.r(),
+                                                                color.g(),
+                                                                color.b(),
+                                                                160,
+                                                            );
                                                             ui.label(
-                                                                egui::RichText::new(past)
+                                                                egui::RichText::new(content)
                                                                     .size(13.5)
-                                                                    .color(egui::Color32::from_rgb(140, 155, 175)),
+                                                                    .color(past_color),
                                                             );
                                                             ui.add_space(2.0);
                                                         }
 
                                                         // Ligne active courante
                                                         if !active_text.is_empty() {
+                                                            let (color, content) = format_sub_line(&active_text);
                                                             ui.label(
-                                                                egui::RichText::new(&active_text)
+                                                                egui::RichText::new(content)
                                                                     .size(18.5)
-                                                                    .color(egui::Color32::from_rgb(255, 240, 140))
+                                                                    .color(if color == egui::Color32::from_rgb(160, 175, 195) { egui::Color32::from_rgb(255, 240, 140) } else { color })
                                                                     .strong(),
                                                             );
                                                         } else if all_history.is_empty() {

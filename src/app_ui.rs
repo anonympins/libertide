@@ -159,24 +159,29 @@ impl OverlayApp {
                 AgentEvent::StatusChanged(new_status) => {
                     if self.status != AgentStatus::EmergencyStopped || new_status == AgentStatus::EmergencyStopped {
                         let prev_status = self.status;
-                        self.status = new_status;
+                        let has_pending_twitch = self.active_tab == ActiveTab::Chat && !self.pending_twitch_speech.is_empty();
+                        if !has_pending_twitch {
+                            self.status = new_status;
+                        }
                         if new_status == AgentStatus::Listening {
                             self.is_recording = true;
                         } else if new_status == AgentStatus::Idle {
                             self.is_recording = false;
-                            if !self.mic_manually_disabled
-                                && (self.dictation_mode
-                                || (prev_status == AgentStatus::Thinking && self.continuous_mode)
-                                || (prev_status == AgentStatus::Speaking && self.continuous_mode))
-                                && !crate::audio::is_live_subtitles_active()
-                                && self.whisper_ready
-                                && !self.show_api_key_modal
-                                && !self.voice_is_recording_sample
-                                && self.status != AgentStatus::EmergencyStopped
-                                && (!self.is_hidden || self.switch_access_mode)
-                                && !AGENT_BUSY.load(Ordering::SeqCst)
-                            {
-                                self.start_recording(ctx, false);
+                            if !has_pending_twitch {
+                                if !self.mic_manually_disabled
+                                    && (self.dictation_mode
+                                    || (prev_status == AgentStatus::Thinking && self.continuous_mode)
+                                    || (prev_status == AgentStatus::Speaking && self.continuous_mode))
+                                    && !crate::audio::is_live_subtitles_active()
+                                    && self.whisper_ready
+                                    && !self.show_api_key_modal
+                                    && !self.voice_is_recording_sample
+                                    && self.status != AgentStatus::EmergencyStopped
+                                    && (!self.is_hidden || self.switch_access_mode)
+                                    && !AGENT_BUSY.load(Ordering::SeqCst)
+                                {
+                                    self.start_recording(ctx, false);
+                                }
                             }
                         }
                     }
@@ -348,7 +353,7 @@ impl OverlayApp {
                 }
                 AgentEvent::TtsFinished => {
                     if self.active_tab == ActiveTab::Chat {
-                        if let Some(recent_speech) = self.pending_twitch_speech.take() {
+                        if let Some(recent_speech) = self.pending_twitch_speech.pop_front() {
                             self.status = AgentStatus::Speaking;
                             let _ = self.tts_sender.send(TtsCommand::Speak(recent_speech));
                             continue;
@@ -391,10 +396,13 @@ impl OverlayApp {
                     self.auto_scroll_to_bottom = true;
                     if self.active_tab == ActiveTab::Chat {
                         let speech = format!("{} : {}", twitch_msg.author, twitch_msg.text);
-                        if self.status == AgentStatus::Speaking {
-                            self.pending_twitch_speech = Some(speech);
+                        if self.status == AgentStatus::Speaking || !self.pending_twitch_speech.is_empty() {
+                            const MAX_PENDING_TWITCH: usize = 30;
+                            if self.pending_twitch_speech.len() >= MAX_PENDING_TWITCH {
+                                self.pending_twitch_speech.pop_front();
+                            }
+                            self.pending_twitch_speech.push_back(speech);
                         } else {
-                            self.pending_twitch_speech = None;
                             self.status = AgentStatus::Speaking;
                             let _ = self.tts_sender.send(TtsCommand::Speak(speech));
                         }
@@ -422,7 +430,7 @@ impl OverlayApp {
                     }
                 }
                 AgentEvent::SwitchTab(tab) => {
-                    self.pending_twitch_speech = None;
+                    self.pending_twitch_speech.clear();
                     self.stop_speaking();
                     self.active_tab = tab;
                 }
@@ -526,29 +534,15 @@ impl OverlayApp {
                     }
                 }
                 AgentEvent::LiveSubtitleUpdate { text, spectrum } => {
+                    if !crate::audio::is_live_subtitles_active() {
+                        continue;
+                    }
                     floating_window::update_live_subtitles(text, spectrum);
-                    let mut found_sub_card = false;
                     for card in &self.floating_cards {
                         if matches!(card.content, FloatingContentType::Subtitles { .. }) {
-                            found_sub_card = true;
                             let vp_id = egui::ViewportId::from_hash_of(&card.id);
                             ctx.request_repaint_of(vp_id);
                         }
-                    }
-                    if !found_sub_card {
-                        let card = FloatingCard::new(
-                            "live_subtitles",
-                            t!("commands.subtitles_title").to_string(),
-                            FloatingContentType::Subtitles {
-                                text: String::new(),
-                                target_window: None,
-                                history: Vec::new(),
-                            },
-                        );
-                        let vp_id = egui::ViewportId::from_hash_of(&card.id);
-                        self.floating_cards.push(card);
-                        update_open_floating_cards(&self.floating_cards);
-                        ctx.request_repaint_of(vp_id);
                     }
                 }
                 AgentEvent::LiveSubtitlesClosed => {
@@ -846,6 +840,47 @@ impl OverlayApp {
             let msg = "Clavier virtuel ouvert.".to_string();
             self.chat_history.push(ChatEntry { role: ChatRole::Agent, text: msg.clone(), timestamp: current_time_str(), quick_suggestions: Vec::new(), screen_size_kb: None });
             let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+            return;
+        }
+
+        if norm_prompt == "mode sommeil" || norm_prompt == "mode nuit" || norm_prompt == "bonne nuit" || norm_prompt == "active le mode sommeil" {
+            let res = crate::home_automation::execute_medical_scene("sleep");
+            play_earcon(Earcon::Success);
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::User,
+                text: prompt,
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Mode repas / travail".to_string())],
+                screen_size_kb: None,
+            });
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: res.clone(),
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Mode repas / travail".to_string())],
+                screen_size_kb: None,
+            });
+            let _ = self.tts_sender.send(TtsCommand::Speak(res));
+            return;
+        }
+        if norm_prompt == "mode repas" || norm_prompt == "mode travail" || norm_prompt == "active le mode repas" || norm_prompt == "active le mode travail" {
+            let res = crate::home_automation::execute_medical_scene("meal_work");
+            play_earcon(Earcon::Success);
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::User,
+                text: prompt,
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Mode sommeil".to_string())],
+                screen_size_kb: None,
+            });
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: res.clone(),
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Mode sommeil".to_string())],
+                screen_size_kb: None,
+            });
+            let _ = self.tts_sender.send(TtsCommand::Speak(res));
             return;
         }
 
@@ -1211,6 +1246,11 @@ impl OverlayApp {
                 ctx.request_repaint();
             }
         }
+        if hook_events.contains(&SwitchKeyEvent::StopSpeech) {
+            self.stop_speaking();
+            play_earcon(Earcon::Success);
+            ctx.request_repaint();
+        }
         if (egui_f8 || hook_events.contains(&SwitchKeyEvent::ToggleDictation))
             && self.last_switch_input.elapsed() >= Duration::from_millis(200)
         {
@@ -1407,8 +1447,21 @@ impl OverlayApp {
                     if !self.switch_access_mode {
                         self.numbered_targets = result.targets.clone();
                     } else {
-                        let (_, fb_zones) = build_fallback_navigation_zones("", &result.targets);
+                        let (summary, fb_zones) = build_fallback_navigation_zones("", &result.targets);
                         self.switch_zones = fb_zones;
+                        self.window_analysis_cache.insert(result.hwnd, CachedWindowAnalysis {
+                            summary,
+                            zones: self.switch_zones.clone(),
+                        });
+
+                        if !result.targets.is_empty() {
+                            let _ = self.command_sender.send(AgentCommand::AnalyzeNavigationZones {
+                                window_id: result.hwnd,
+                                window_title: String::new(),
+                                targets: result.targets.clone(),
+                                context_meta: None,
+                            });
+                        }
 
                         if self.switch_step == SwitchAccessStep::Elements {
                             if let Some(z_idx) = self.switch_active_zone_index {
@@ -2118,8 +2171,9 @@ impl OverlayApp {
                     let avatar_rect = egui::Rect::from_center_size(avatar_pos, egui::vec2(32.0, 32.0));
                     let avatar_resp = ui.interact(avatar_rect, ui.scope_id().with("avatar_interact"), egui::Sense::click());
                     let layer_id = ui.layer_id();
+                    let stop_speech_key = crate::keyboard_hook::vk_to_label(crate::keyboard_hook::KEY_BIND_STOP_SPEECH.load(Ordering::Relaxed));
                     let avatar_label = if self.status == AgentStatus::Speaking {
-                        t!("ui.avatar_mute_tooltip").to_string()
+                        format!("{} [{}]", t!("ui.avatar_mute_tooltip"), stop_speech_key)
                     } else {
                         format!("Avatar Libertide ({:?})", self.status)
                     };
@@ -2146,7 +2200,7 @@ impl OverlayApp {
                         if avatar_resp.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
-                        if avatar_resp.on_hover_text(t!("ui.avatar_mute_tooltip")).clicked() || is_avatar_key_hit {
+                        if avatar_resp.on_hover_text(format!("{} [{}]", t!("ui.avatar_mute_tooltip"), stop_speech_key)).clicked() || is_avatar_key_hit {
                             self.stop_speaking();
                         }
                     }
@@ -2228,14 +2282,15 @@ impl OverlayApp {
                                     if badge_resp.hovered() {
                                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                     }
-                                    if badge_resp.on_hover_text(t!("ui.avatar_mute_tooltip")).clicked() {
+                                    if badge_resp.on_hover_text(format!("{} [{}]", t!("ui.avatar_mute_tooltip"), stop_speech_key)).clicked() {
                                         self.stop_speaking();
                                     }
                                 } else if self.switch_access_mode {
                                     if badge_resp.hovered() {
                                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                     }
-                                    if badge_resp.on_hover_text(t!("ui.badge_disable_hover_tooltip")).clicked() {
+                                    let switch_key = crate::keyboard_hook::vk_to_label(crate::keyboard_hook::KEY_BIND_SWITCH.load(Ordering::Relaxed));
+                                    if badge_resp.on_hover_text(format!("{} [{}]", t!("ui.badge_disable_hover_tooltip"), switch_key)).clicked() {
                                         self.toggle_switch_access_mode(Some(false));
                                     }
                                 } else {
@@ -2416,11 +2471,12 @@ impl OverlayApp {
                                 // 1. Analyser
                                 let analyze_id = ui.make_persistent_id("dwell_btn_analyze");
                                 let analyze_prog = self.dwell_state.get_progress(analyze_id);
+                                let analyze_tooltip = format!("{} [Entrée]", t!("ui.btn_analyze_tooltip"));
                                 let analyze_resp = render_accessible_icon_button(
                                     ui,
                                     "🔍",
                                     &t!("ui.btn_analyze"),
-                                    &t!("ui.btn_analyze_tooltip"),
+                                    &analyze_tooltip,
                                     false,
                                     analyze_prog,
                                     Some(egui::Color32::from_rgb(0, 140, 220)),
@@ -2455,11 +2511,17 @@ impl OverlayApp {
                                 } else {
                                     ("🎙", t!("ui.btn_mic").to_string(), None)
                                 };
+                                let mic_raw_tip = t!("ui.btn_mic_tooltip").to_string();
+                                let mic_tooltip = if mic_raw_tip.contains("[R]") || mic_raw_tip.contains("(R)") {
+                                    mic_raw_tip
+                                } else {
+                                    format!("{mic_raw_tip} [R]")
+                                };
                                 let mic_resp = render_accessible_icon_button(
                                     ui,
                                     mic_icon,
                                     &mic_sub,
-                                    &t!("ui.btn_mic_tooltip"),
+                                    &mic_tooltip,
                                     self.is_recording,
                                     mic_prog,
                                     mic_color,
@@ -2477,17 +2539,72 @@ impl OverlayApp {
                                     self.toggle_recording(ui.ctx());
                                 }
 
+                                // 2b. Sous-titres en direct (toujours présent et actif)
+                                let sub_id = ui.make_persistent_id("dwell_btn_subtitles");
+                                let sub_prog = self.dwell_state.get_progress(sub_id);
+                                let is_sub_on = self.is_subtitles_open();
+                                let (sub_sub, sub_tooltip) = if is_sub_on {
+                                    (
+                                        t!("ui.btn_subtitles_active").to_string(),
+                                        t!("ui.btn_subtitles_active_tooltip").to_string(),
+                                    )
+                                } else {
+                                    (
+                                        t!("ui.btn_subtitles").to_string(),
+                                        t!("ui.btn_subtitles_tooltip").to_string(),
+                                    )
+                                };
+                                let sub_sub_display = if sub_sub == "ui.btn_subtitles_active" {
+                                    "Actifs".to_string()
+                                } else if sub_sub == "ui.btn_subtitles" {
+                                    "S-Titres".to_string()
+                                } else {
+                                    sub_sub
+                                };
+                                let sub_tooltip_display = if sub_tooltip == "ui.btn_subtitles_tooltip" || sub_tooltip == "ui.btn_subtitles_active_tooltip" {
+                                    t!("commands.subtitles_title").to_string()
+                                } else {
+                                    sub_tooltip
+                                };
+                                let sub_resp = render_accessible_icon_button(
+                                    ui,
+                                    "💬",
+                                    &sub_sub_display,
+                                    &sub_tooltip_display,
+                                    is_sub_on,
+                                    sub_prog,
+                                    Some(egui::Color32::from_rgb(0, 200, 150)),
+                                    Some(egui::Color32::from_rgb(0, 230, 175)),
+                                );
+                                let (sub_dwell, _) = self.dwell_state.update(sub_id, sub_resp.hovered());
+                                let is_sub_key = sub_resp.has_focus() && ui.input(|i| {
+                                    i.events.iter().any(|ev| match ev {
+                                        egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                        egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                        _ => false,
+                                    })
+                                });
+                                if sub_resp.clicked() || sub_dwell || is_sub_key {
+                                    if is_sub_on {
+                                        self.stop_live_subtitles();
+                                    } else {
+                                        self.start_live_subtitles(None);
+                                    }
+                                }
+
                                 // 3. Eye-Tracking
-                                if crate::eyetracking::is_eyetracking_model_installed() {
+                                if self.should_show_eye_tracking_button() {
                                     let eye_id = ui.make_persistent_id("dwell_btn_eyetracking");
                                     let eye_prog = self.dwell_state.get_progress(eye_id);
                                     let is_eye_on = crate::eyetracking::is_eye_tracking_enabled();
                                     let eye_sub = if is_eye_on { t!("ui.btn_eyetracking_active").to_string() } else { t!("ui.btn_eyetracking").to_string() };
+                                    let gaze_key = crate::keyboard_hook::vk_to_label(crate::keyboard_hook::KEY_BIND_GAZE_CLICK.load(Ordering::Relaxed));
+                                    let eye_tooltip = format!("{} [Clic: {}]", t!("ui.btn_eyetracking_tooltip"), gaze_key);
                                     let eye_resp = render_accessible_icon_button(
                                         ui,
                                         "👁",
                                         &eye_sub,
-                                        &t!("ui.btn_eyetracking_tooltip"),
+                                        &eye_tooltip,
                                         is_eye_on,
                                         eye_prog,
                                         Some(egui::Color32::from_rgb(0, 229, 255)),
@@ -2584,29 +2701,33 @@ impl OverlayApp {
                                 }
 
                                 // 6. Survol / Switch Access
-                                let switch_id = ui.make_persistent_id("dwell_btn_switch");
-                                let switch_prog = self.dwell_state.get_progress(switch_id);
-                                let switch_sub = if self.switch_access_mode { t!("ui.btn_hover_active").to_string() } else { t!("ui.btn_hover").to_string() };
-                                let switch_resp = render_accessible_icon_button(
-                                    ui,
-                                    "🎯",
-                                    &switch_sub,
-                                    &t!("ui.btn_hover_tooltip"),
-                                    self.switch_access_mode,
-                                    switch_prog,
-                                    Some(egui::Color32::from_rgb(235, 115, 0)),
-                                    None,
-                                );
-                                let (switch_dwell, _) = self.dwell_state.update(switch_id, switch_resp.hovered());
-                                let is_switch_key = switch_resp.has_focus() && ui.input(|i| {
-                                    i.events.iter().any(|ev| match ev {
-                                        egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
-                                        egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
-                                        _ => false,
-                                    })
-                                });
-                                if switch_resp.clicked() || switch_dwell || is_switch_key {
-                                    self.toggle_switch_access_mode(None);
+                                if self.should_show_hover_mode_button() {
+                                    let switch_id = ui.make_persistent_id("dwell_btn_switch");
+                                    let switch_prog = self.dwell_state.get_progress(switch_id);
+                                    let switch_sub = if self.switch_access_mode { t!("ui.btn_hover_active").to_string() } else { t!("ui.btn_hover").to_string() };
+                                    let switch_key = crate::keyboard_hook::vk_to_label(crate::keyboard_hook::KEY_BIND_SWITCH.load(Ordering::Relaxed));
+                                    let switch_tooltip = format!("{} [{}]", t!("ui.btn_hover_tooltip"), switch_key);
+                                    let switch_resp = render_accessible_icon_button(
+                                        ui,
+                                        "🎯",
+                                        &switch_sub,
+                                        &switch_tooltip,
+                                        self.switch_access_mode,
+                                        switch_prog,
+                                        Some(egui::Color32::from_rgb(235, 115, 0)),
+                                        None,
+                                    );
+                                    let (switch_dwell, _) = self.dwell_state.update(switch_id, switch_resp.hovered());
+                                    let is_switch_key = switch_resp.has_focus() && ui.input(|i| {
+                                        i.events.iter().any(|ev| match ev {
+                                            egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                            egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                            _ => false,
+                                        })
+                                    });
+                                    if switch_resp.clicked() || switch_dwell || is_switch_key {
+                                        self.toggle_switch_access_mode(None);
+                                    }
                                 }
 
                                 // 7. Réglages
@@ -2644,11 +2765,13 @@ impl OverlayApp {
                                 // 8. Effacer
                                 let clear_id = ui.make_persistent_id("dwell_btn_clear");
                                 let clear_prog = self.dwell_state.get_progress(clear_id);
+                                let clear_key = crate::keyboard_hook::vk_to_label(crate::keyboard_hook::KEY_BIND_CLEAR.load(Ordering::Relaxed));
+                                let clear_tooltip = format!("{} [{}]", t!("ui.btn_clear_tooltip"), clear_key);
                                 let clear_resp = render_accessible_icon_button(
                                     ui,
                                     "🗑",
                                     &t!("ui.btn_clear"),
-                                    &t!("ui.btn_clear_tooltip"),
+                                    &clear_tooltip,
                                     false,
                                     clear_prog,
                                     None,
@@ -2705,6 +2828,49 @@ impl OverlayApp {
             return;
         } else if is_stop_subtitles_command(&norm_prompt) {
             self.stop_live_subtitles();
+            return;
+        }
+
+        if norm_prompt == "mode sommeil" || norm_prompt == "mode nuit" || norm_prompt == "bonne nuit" || norm_prompt == "active le mode sommeil" {
+            let res = crate::home_automation::execute_medical_scene("sleep");
+            play_earcon(Earcon::Success);
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::User,
+                text: prompt,
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Mode repas / travail".to_string())],
+                screen_size_kb: None,
+            });
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: res.clone(),
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Mode repas / travail".to_string())],
+                screen_size_kb: None,
+            });
+            let _ = self.tts_sender.send(TtsCommand::Speak(res));
+            self.status = AgentStatus::Idle;
+            return;
+        }
+        if norm_prompt == "mode repas" || norm_prompt == "mode travail" || norm_prompt == "active le mode repas" || norm_prompt == "active le mode travail" {
+            let res = crate::home_automation::execute_medical_scene("meal_work");
+            play_earcon(Earcon::Success);
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::User,
+                text: prompt,
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Mode sommeil".to_string())],
+                screen_size_kb: None,
+            });
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: res.clone(),
+                timestamp: current_time_str(),
+                quick_suggestions: vec![QuickSuggestionItem::Text("Mode sommeil".to_string())],
+                screen_size_kb: None,
+            });
+            let _ = self.tts_sender.send(TtsCommand::Speak(res));
+            self.status = AgentStatus::Idle;
             return;
         }
 
@@ -2955,7 +3121,8 @@ impl OverlayApp {
                                                     .small()
                                                     .corner_radius(egui::CornerRadius::same(6)),
                                             );
-                                            if stop_btn.on_hover_text(t!("ui.avatar_mute_tooltip")).clicked() {
+                                            let stop_key = crate::keyboard_hook::vk_to_label(crate::keyboard_hook::KEY_BIND_STOP_SPEECH.load(Ordering::Relaxed));
+                                            if stop_btn.on_hover_text(format!("{} [{}]", t!("ui.avatar_mute_tooltip"), stop_key)).clicked() {
                                                 request_stop_speaking = true;
                                             }
                                         }
