@@ -49,7 +49,6 @@ use audio::spawn_audio_worker;
 use floating_window::{update_open_floating_cards, FloatingCard, FloatingContentType};
 use automation::*;
 use fs_util::*;
-use intent::*;
 use theme::{AppTheme, SettingsTab};
 use tts::spawn_tts_worker;
 use twitch::spawn_twitch_worker;

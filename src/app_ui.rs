@@ -3,10 +3,9 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use rust_i18n::t;
 
-use crate::audio;
 use crate::automation::*;
 use crate::clipboard::*;
-use crate::floating_window::{self, update_open_floating_cards, FloatingCard, FloatingContentType};
+use crate::floating_window::{self, update_open_floating_cards, FloatingContentType};
 use crate::fs_util::*;
 use crate::intent::*;
 use crate::keyboard_hook::*;
@@ -16,7 +15,6 @@ use crate::overlay::play_earcon_spatial;
 use crate::theme::{AppTheme, SettingsTab, ThemeColors};
 use crate::tts::{sanitize_for_tts, TtsCommand};
 use crate::types::*;
-use crate::ui;
 use crate::window_util::*;
 use crate::OverlayApp;
 

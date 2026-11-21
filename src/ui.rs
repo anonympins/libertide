@@ -1656,6 +1656,85 @@ pub unsafe fn mute_other_audio_sessions() -> usize {
     muted_count
 }
 
+#[cfg(windows)]
+pub fn is_external_audio_playing() -> bool {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        let device: IMMDevice = match enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia) {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+        let session_mgr: IAudioSessionManager2 = match device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        let session_enumerator = match session_mgr.GetSessionEnumerator() {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        let count = session_enumerator.GetCount().unwrap_or(0);
+        let my_pid = std::process::id();
+
+        for i in 0..count {
+            let Ok(session_control) = session_enumerator.GetSession(i) else {
+                continue;
+            };
+            let session_pid = session_control
+                .cast::<IAudioSessionControl2>()
+                .ok()
+                .and_then(|c2| c2.GetProcessId().ok())
+                .unwrap_or(0);
+
+            if session_pid != my_pid {
+                // AudioSessionState: Inactive = 0, Active = 1, Expired = 2
+                if let Ok(state) = session_control.GetState() {
+                    if state.0 == 1 {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+#[cfg(not(windows))]
+pub fn is_external_audio_playing() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // Vérification via CoreAudio / pmset si un flux multimédia empêche la mise en veille
+        if let Ok(output) = std::process::Command::new("pmset").args(["-g", "assertions"]).output() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            if s.contains("PreventUserIdleDisplaySleep") || s.contains("coreaudiod") {
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        // Vérification de flux PulseAudio / PipeWire en lecture
+        if let Ok(output) = std::process::Command::new("pactl").args(["list", "sink-inputs"]).output() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            if s.contains("state: RUNNING") || s.contains("Corked: no") {
+                return true;
+            }
+        }
+        // Vérification MPRIS (navigateurs, VLC, Spotify)
+        if let Ok(output) = std::process::Command::new("playerctl").args(["status"]).output() {
+            let s = String::from_utf8_lossy(&output.stdout).to_lowercase();
+            if s.contains("playing") {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 #[cfg(not(windows))]
 pub unsafe fn mute_other_audio_sessions() -> usize {
     #[cfg(target_os = "macos")]

@@ -509,6 +509,15 @@ pub async fn call_llm_prompt(
         });
     }
 
+    let is_proactive_or_surveillance = user_instruction.starts_with("[COMPAGNON PROACTIF")
+        || trigger == PromptTrigger::Surveillance;
+    if is_proactive_or_surveillance {
+        if crate::ui::is_external_audio_playing() || crate::window_util::is_foreground_window_fullscreen() {
+            println!("[Agent] Audio externe ou film plein écran en cours : silence préservé pour ne pas déranger.");
+            return;
+        }
+    }
+
     let mut max_agent_passes = TARGET_REASONING_PASSES.load(Ordering::SeqCst).clamp(1, 15);
     let mut has_spoken = false;
     let mut pass = 1;
@@ -1539,8 +1548,19 @@ pub fn spawn_agent_backend(
                         });
                     }
                     AgentCommand::PeriodicScreenCheck => {
+                        let cur_config = resolve_llm_config();
+                        let allow_remote = crate::scheduler::PROACTIVE_ALLOW_REMOTE.load(Ordering::Relaxed);
+
+                        // Règle d'or : ne pas gaspiller de tokens sur les LLMs distants en tâche de fond
+                        if cur_config.provider != LlmProvider::Local && !allow_remote {
+                            continue;
+                        }
+
+                        // Ne pas réveiller l'IA si un film ou de la musique tourne
+                        if crate::ui::is_external_audio_playing() || crate::window_util::is_foreground_window_fullscreen() {
+                            continue;
+                        }
                         if IS_EMERGENCY_STOPPED.load(Ordering::SeqCst)
-                            || bg_llm_config.provider == LlmProvider::Local
                         {
                             continue;
                         }
@@ -1563,6 +1583,9 @@ pub fn spawn_agent_backend(
 
                         current_task = Some(tokio::spawn(async move {
                             if is_request_cancelled(request_id) { return; }
+                            if crate::ui::is_external_audio_playing() || crate::window_util::is_foreground_window_fullscreen() {
+                                return;
+                            }
                             let current_summary = tokio::task::spawn_blocking(|| {
                                 summarize_screen_state(None, false)
                             }).await.unwrap_or_default();
