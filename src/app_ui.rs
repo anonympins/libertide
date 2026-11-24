@@ -4,6 +4,7 @@ use eframe::egui;
 use rust_i18n::t;
 
 use crate::automation::*;
+use crate::automation::VIRTUAL_KEY;
 use crate::clipboard::*;
 use crate::floating_window::{self, update_open_floating_cards, FloatingContentType};
 use crate::fs_util::*;

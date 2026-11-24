@@ -31,11 +31,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WH_KEYBOARD_LL, WH_MOUSE_LL, WM_QUIT,
 };
 
-#[cfg(not(windows))]
-#[allow(non_camel_case_types)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct VIRTUAL_KEY(pub u16);
-
 // --- Suivi d'état des modificateurs clavier (Windows) ---
 #[cfg(windows)]
 pub static TRACKED_CTRL: AtomicBool = AtomicBool::new(false);
