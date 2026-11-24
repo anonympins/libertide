@@ -268,11 +268,26 @@ pub fn expand_aac_symbols_with_llm(symbols: &[AacPictogram], lang: &str, clear_a
         );
         let user_prompt = format!("Pictogrammes : [{sequence_str}]\nPhrase reformulée :");
 
-        // Tentative sur le moteur local Llama/Qwen s'il est initialisé
-        let result = if crate::local_llm::find_local_llama_model_file().is_some() {
-            crate::local_llm::LocalLlamaEngine::generate_local_text(&format!("{}\n{}", system_prompt, user_prompt), 60)
+        let config = crate::overlay::resolve_llm_config();
+
+        // Tentative sur le moteur local Llama/Qwen s'il est configuré
+        let result = if config.provider == crate::types::LlmProvider::Local {
+            // Utiliser le moteur de prédiction du clavier (Qwen 0.5B) s'il est chargé
+            if let Ok(engine_guard) = LLM_PREDICTOR_ENGINE.lock() {
+                if let Some(engine) = engine_guard.as_ref() {
+                    let formatted_prompt = format!(
+                        "<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n"
+                    );
+                    // Utilise la génération rapide du petit modèle, qui est optimisée.
+                    engine.generate_fast(&formatted_prompt, 60)
+                } else {
+                    // Si le moteur du clavier n'est pas prêt, essayer le moteur principal de l'agent (comportement original)
+                    crate::local_llm::LocalLlamaEngine::generate_local_text(&format!("{}\n{}", system_prompt, user_prompt), 60)
+                }
+            } else {
+                Err("Le mutex du moteur de prédiction du clavier est empoisonné.".to_string())
+            }
         } else {
-            let config = crate::overlay::resolve_llm_config();
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
             match rt {
                 Ok(runtime) => runtime.block_on(async {
