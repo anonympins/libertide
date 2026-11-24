@@ -2500,6 +2500,7 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
         return "Actions interrompues par une nouvelle consigne.".to_string();
     }
     let mut feedback = Vec::new();
+    let mut click_executed_in_batch = false;
     for action in actions {
         if is_request_cancelled(request_id) {
             feedback.push("Séquence d'actions interrompue par une nouvelle consigne.".to_string());
@@ -2540,12 +2541,84 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 feedback.push("Recherche système locale ouverte.".to_string());
             }
             AgentAction::OpenSearchBrowser => {
-                focus_browser_address_bar("");
-                feedback.push("Barre d'adresse / recherche navigateur sélectionnée.".to_string());
+                let user_wins = list_user_windows();
+                if let Some(target_id) = find_best_browser_window(&user_wins, None) {
+                    force_foreground_window(&target_id);
+                    focus_browser_address_bar(&target_id);
+                    feedback.push("Barre d'adresse / recherche navigateur sélectionnée.".to_string());
+                } else {
+                    let _ = launch_browser_new_window("https://www.google.com");
+                    feedback.push("Navigateur ouvert pour recherche web.".to_string());
+                }
             }
             AgentAction::CloseApp { name } => {
                 let _ = std::process::Command::new("pkill").arg("-f").arg(name).spawn();
                 feedback.push(format!("Signal de fermeture envoyé à '{}'.", name));
+            }
+            AgentAction::ArrangeWindow { title, position } => {
+                let pos = position.to_lowercase();
+                let p = pos.trim();
+                // Dimensions génériques de travail (1920x1080 par défaut sous X11/macOS)
+                let (sw, sh) = (1920, 1080);
+                let (x, y, w, h) = match p {
+                    "left" | "left_half" | "gauche" => (0, 0, sw / 2, sh),
+                    "right" | "right_half" | "droite" => (sw / 2, 0, sw / 2, sh),
+                    "top" | "top_half" | "haut" => (0, 0, sw, sh / 2),
+                    "bottom" | "bottom_half" | "bas" => (0, sh / 2, sw, sh / 2),
+                    "center" | "centre" => (sw * 3 / 20, sh / 10, sw * 7 / 10, sh * 4 / 5),
+                    _ => (0, 0, sw, sh),
+                };
+                apply_window_rect(title, x, y, w, h);
+                feedback.push(format!("Fenêtre '{}' agencée en '{}'.", title, position));
+            }
+            AgentAction::TileWindows { layout, windows } => {
+                let layout_mode = layout.as_deref().unwrap_or("split_horizontal");
+                let count = windows.len().max(1) as i32;
+                let (sw, sh) = (1920, 1080);
+                if layout_mode.contains("vertical") {
+                    let h = sh / count;
+                    for (idx, win) in windows.iter().enumerate() {
+                        apply_window_rect(win, 0, idx as i32 * h, sw, h);
+                    }
+                } else {
+                    let w = sw / count;
+                    for (idx, win) in windows.iter().enumerate() {
+                        apply_window_rect(win, idx as i32 * w, 0, w, sh);
+                    }
+                }
+                feedback.push(format!("Disposition en mosaïque ({layout_mode}) appliquée sur {} fenêtre(s).", count));
+            }
+            AgentAction::SelectTextBetween { from, to, .. } => {
+                // Recherche textuelle universelle (Ctrl+F)
+                send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x46));
+                std::thread::sleep(Duration::from_millis(100));
+                set_clipboard_text(from);
+                send_paste();
+                std::thread::sleep(Duration::from_millis(60));
+                send_hotkey(&[], VIRTUAL_KEY(0x0D));
+                std::thread::sleep(Duration::from_millis(40));
+                send_hotkey(&[], VIRTUAL_KEY(0x1B));
+                feedback.push(format!("Sélection de texte demandée entre \"{from}\" et \"{to}\"."));
+            }
+            AgentAction::NextNumberedChunk => {
+                feedback.push("Affichage des 50 badges suivants.".to_string());
+            }
+            AgentAction::PreviousNumberedChunk => {
+                feedback.push("Affichage des 50 badges précédents.".to_string());
+            }
+            AgentAction::ActivateImmersion { apps, urls, .. } => {
+                IS_IMMERSION_ACTIVE.store(true, Ordering::SeqCst);
+                for app in apps {
+                    let _ = std::process::Command::new(app).spawn();
+                }
+                for url in urls {
+                    open_browser_smart(url);
+                }
+                feedback.push("Mode immersion activé.".to_string());
+            }
+            AgentAction::DeactivateImmersion => {
+                IS_IMMERSION_ACTIVE.store(false, Ordering::SeqCst);
+                feedback.push("Mode immersion désactivé.".to_string());
             }
             AgentAction::OpenBrowser { url } => {
                 let url_str = format_url_for_navigation(url.as_deref().unwrap_or(""));
@@ -2559,9 +2632,29 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 focus_browser_address_bar("");
                 feedback.push("Barre d'adresse sélectionnée (Ctrl+L).".to_string());
             }
-            AgentAction::NavigateToUrl { url, .. } => {
+            AgentAction::NavigateToUrl { url, target, new_window, .. } => {
                 let formatted = format_url_for_navigation(url);
-                open_browser_smart(&formatted);
+                let t_lower = target.as_deref().unwrap_or("").to_lowercase();
+                let force_new = new_window.unwrap_or(false)
+                    || t_lower == "new_window"
+                    || t_lower == "nouvelle_fenetre";
+
+                if force_new {
+                    let _ = launch_browser_new_window(&formatted);
+                } else {
+                    let user_wins = list_user_windows();
+                    if let Some(target_id) = find_best_browser_window(&user_wins, None) {
+                        force_foreground_window(&target_id);
+                        open_browser_new_tab(&target_id, &formatted);
+                    } else {
+                        open_browser_smart(&formatted);
+                    }
+                }
+                if let Ok(mut hist) = ACTION_HISTORY.lock() {
+                    hist.push_undo(UndoOperation::CloseTab {
+                        target_hwnd: None,
+                    });
+                }
                 feedback.push(format!("Navigation vers '{}'.", formatted));
             }
             AgentAction::WriteText { text, press_enter, .. } => {
@@ -2638,9 +2731,15 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
             AgentAction::CursorMove { command } => {
                 let cmd_lower = command.to_lowercase();
                 match cmd_lower.as_str() {
-                    "newline" | "a_la_ligne" | "enter" => {
+                    "newline" | "a_la_ligne" | "ligne_suivante" | "enter" => {
                         send_hotkey(&[], VIRTUAL_KEY(0x0D));
                         feedback.push("Curseur : à la ligne.".to_string());
+                    }
+                    "new_paragraph" | "nouveau_paragraphe" => {
+                        send_hotkey(&[], VIRTUAL_KEY(0x0D));
+                        std::thread::sleep(Duration::from_millis(25));
+                        send_hotkey(&[], VIRTUAL_KEY(0x0D));
+                        feedback.push("Curseur : nouveau paragraphe.".to_string());
                     }
                     "left" | "gauche" => {
                         send_hotkey(&[], VIRTUAL_KEY(0x25));
@@ -2649,6 +2748,56 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     "right" | "droite" => {
                         send_hotkey(&[], VIRTUAL_KEY(0x27));
                         feedback.push("Curseur : vers la droite.".to_string());
+                    }
+                    "up" | "haut" => {
+                        send_hotkey(&[], VIRTUAL_KEY(0x26));
+                        feedback.push("Curseur : vers le haut.".to_string());
+                    }
+                    "down" | "bas" => {
+                        send_hotkey(&[], VIRTUAL_KEY(0x28));
+                        feedback.push("Curseur : vers le bas.".to_string());
+                    }
+                    "line_start" | "debut_ligne" => {
+                        send_hotkey(&[], VIRTUAL_KEY(0x24));
+                        feedback.push("Curseur : début de ligne.".to_string());
+                    }
+                    "line_end" | "fin_ligne" => {
+                        send_hotkey(&[], VIRTUAL_KEY(0x23));
+                        feedback.push("Curseur : fin de ligne.".to_string());
+                    }
+                    "doc_start" | "debut_doc" => {
+                        send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x24));
+                        feedback.push("Curseur : début du document.".to_string());
+                    }
+                    "doc_end" | "fin_doc" => {
+                        send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x23));
+                        feedback.push("Curseur : fin du document.".to_string());
+                    }
+                    "backspace" | "efface" | "supprime" => {
+                        send_hotkey(&[], VIRTUAL_KEY(0x08));
+                        feedback.push("Effacement caractère précédent.".to_string());
+                    }
+                    "delete_word" | "efface_mot" => {
+                        send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x08));
+                        feedback.push("Effacement du mot précédent.".to_string());
+                    }
+                    "delete_line" | "efface_ligne" => {
+                        send_hotkey(&[VIRTUAL_KEY(0x10)], VIRTUAL_KEY(0x24));
+                        std::thread::sleep(Duration::from_millis(20));
+                        send_hotkey(&[], VIRTUAL_KEY(0x08));
+                        feedback.push("Effacement de la ligne.".to_string());
+                    }
+                    "select_all" | "tout_selectionner" => {
+                        send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x41));
+                        feedback.push("Tout sélectionner.".to_string());
+                    }
+                    "space" | "espace" => {
+                        send_hotkey(&[], VIRTUAL_KEY(0x20));
+                        feedback.push("Espace inséré.".to_string());
+                    }
+                    "tab" | "tabulation" => {
+                        send_hotkey(&[], VIRTUAL_KEY(0x09));
+                        feedback.push("Tabulation.".to_string());
                     }
                     _ => {
                         feedback.push(format!("Commande curseur '{command}' appliquée."));
@@ -2720,6 +2869,10 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 feedback.push(format!("Mode de ciblage par numéros {desc}."));
             }
             AgentAction::ClickNumberedTarget { index } => {
+                if click_executed_in_batch {
+                    continue;
+                }
+                click_executed_in_batch = true;
                 let targets = collect_numbered_targets_for_active_window();
                 if let Some(matched) = targets.iter().find(|t| t.index == *index) {
                     click_element(matched.click_x, matched.click_y, None, None);
@@ -2729,6 +2882,11 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 }
             }
             AgentAction::ClickElement { target_name, .. } => {
+                if click_executed_in_batch {
+                    feedback.push(format!("Clic sur '{}' différé.", target_name));
+                    continue;
+                }
+                click_executed_in_batch = true;
                 let cleaned_name = sanitize_target_name(target_name);
                 let effective_target = if !cleaned_name.is_empty() { cleaned_name.as_str() } else { target_name.as_str() };
                 let target_num_opt = target_name
@@ -2755,6 +2913,11 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                 }
             }
             AgentAction::ClickButton { button_name, .. } => {
+                if click_executed_in_batch {
+                    feedback.push(format!("Clic sur bouton '{}' différé.", button_name));
+                    continue;
+                }
+                click_executed_in_batch = true;
                 let cleaned_name = sanitize_target_name(button_name);
                 let effective_btn = if !cleaned_name.is_empty() { cleaned_name.as_str() } else { button_name.as_str() };
                 let target_num_opt = button_name
@@ -2852,6 +3015,43 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                     }
                     "browser_forward" | "navigate_forward" | "forward" => {
                         send_hotkey(&[VIRTUAL_KEY(0x12)], VIRTUAL_KEY(0x27));
+                    }
+                    "select_all" => {
+                        send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x41));
+                    }
+                    "find_in_page" => {
+                        send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x46));
+                    }
+                    "lock_screen" => {
+                        crate::home_automation::lock_workstation_os();
+                    }
+                    "file_explorer" => {
+                        let _ = crate::fs_util::open_path_with_default_app(".");
+                    }
+                    "task_manager" => {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("open").args(["-a", "Activity Monitor"]).spawn();
+                        #[cfg(not(target_os = "macos"))]
+                        let _ = std::process::Command::new("sh").arg("-c").arg("gnome-system-monitor || xfce4-taskmanager || ksysguard || xterm -e htop &").spawn();
+                    }
+                    "sound_settings" => {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("open").arg("/System/Library/PreferencePanes/Sound.prefPane").spawn();
+                        #[cfg(not(target_os = "macos"))]
+                        let _ = std::process::Command::new("sh").arg("-c").arg("pavucontrol || gnome-control-center sound &").spawn();
+                    }
+                    "emoji_panel" => {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to key code 49 using {control down, command down}"]).status();
+                    }
+                    "minimize_all" => {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("osascript").args(["-e", "tell application \"System Events\" to set visible of every process whose visible is true to false"]).status();
+                        #[cfg(not(target_os = "macos"))]
+                        let _ = std::process::Command::new("sh").arg("-c").arg("xdotool key super+d || wmctrl -k on").spawn();
+                    }
+                    "mute_volume" | "volume_mute" | "mute_sound" => {
+                        let _ = execute_system_actions(&[AgentAction::SetVolume { command: "mute".to_string() }], 0);
                     }
                     other => {
                         let _ = try_send_key_combination(other);
@@ -2974,6 +3174,15 @@ pub fn execute_system_actions(actions: &[AgentAction], request_id: u64) -> Strin
                             .args(["set-sink-volume", "@DEFAULT_SINK@", "+10%"])
                             .spawn();
                         feedback.push("Volume augmenté.".to_string());
+                    }
+                    "min" | "minimum" | "zero" => {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("osascript").args(["-e", "set volume output volume 0"]).spawn();
+                        #[cfg(not(target_os = "macos"))]
+                        let _ = std::process::Command::new("pactl")
+                            .args(["set-sink-volume", "@DEFAULT_SINK@", "0%"])
+                            .spawn();
+                        feedback.push("Volume mis au minimum.".to_string());
                     }
                     _ => {
                         #[cfg(target_os = "macos")]

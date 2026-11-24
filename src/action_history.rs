@@ -102,9 +102,24 @@ pub fn execute_undo_operation(op: UndoOperation) -> (String, Option<UndoOperatio
                     ("Fenêtre cible déjà fermée ou introuvable.".to_string(), None)
                 }
             }
-            #[cfg(not(windows))]
+            #[cfg(target_os = "macos")]
             {
-                let _ = raw_hwnd;
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", "tell application \"System Events\" to tell (first process whose frontmost is true) to close window 1"])
+                    .status();
+                ("Fenêtre fermée.".to_string(), None)
+            }
+            #[cfg(all(not(windows), not(target_os = "macos")))]
+            {
+                let id_str = format!("0x{:x}", raw_hwnd);
+                let _ = std::process::Command::new("wmctrl")
+                    .args(["-i", "-c", &id_str])
+                    .status()
+                    .or_else(|_| {
+                        std::process::Command::new("xdotool")
+                            .args(["windowclose", &raw_hwnd.to_string()])
+                            .status()
+                    });
                 ("Fenêtre fermée.".to_string(), None)
             }
         }

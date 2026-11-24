@@ -49,6 +49,10 @@ windows = { version = "0.58.0", features = [
 [profile.dev.package."*"]
 opt-level = 3
 
+[profile.dev]
+# Réduit la taille gigantesque du fichier .pdb généré par MSVC link.exe
+debug = 1
+
 [profile.release]
 opt-level = 3
 strip = true

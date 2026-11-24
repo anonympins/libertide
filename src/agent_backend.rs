@@ -1683,7 +1683,7 @@ pub fn spawn_agent_backend(
                             #[cfg(windows)]
                             send_hotkey(&[windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x11)], windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x5A));
                             #[cfg(not(windows))]
-                            let _ = std::process::Command::new("xdotool").args(["key", "ctrl+z"]).status();
+                            send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x5A));
                             t!("commands.last_action_undone").to_string()
                         };
                         let _ = event_tx.send(AgentEvent::ReplaceNarration {

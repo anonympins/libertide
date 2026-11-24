@@ -81,21 +81,23 @@ pub fn get_power_status() -> String {
     }
 
     #[cfg(not(target_os = "macos"))]
-    let base_path = std::path::Path::new("/sys/class/power_supply");
-    if let Ok(entries) = std::fs::read_dir(base_path) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if fname.starts_with("BAT") {
-                let capacity = std::fs::read_to_string(p.join("capacity"))
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-                let status = std::fs::read_to_string(p.join("status"))
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-                return format!("Batterie: {}% ({})", capacity, status);
+    {
+        let base_path = std::path::Path::new("/sys/class/power_supply");
+        if let Ok(entries) = std::fs::read_dir(base_path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if fname.starts_with("BAT") {
+                    let capacity = std::fs::read_to_string(p.join("capacity"))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    let status = std::fs::read_to_string(p.join("status"))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    return format!("Batterie: {}% ({})", capacity, status);
+                }
             }
         }
     }
@@ -164,15 +166,21 @@ pub fn get_memory_info() -> String {
 /// Agrège l'ensemble des capteurs environnementaux en un rapport textuel pour l'IA
 pub fn gather_environmental_sensors() -> String {
     let datetime = current_datetime_full_str();
-    let username = std::env::var("USERNAME").unwrap_or_else(|_| "Utilisateur".to_string());
-    let computer_name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".to_string());
+    let username = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "Utilisateur".to_string());
+    let computer_name = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .or_else(|_| std::env::var("HOST"))
+        .unwrap_or_else(|_| "PC".to_string());
     let cpus = std::thread::available_parallelism().map_or(1, |p| p.get());
     let os_arch = std::env::consts::ARCH;
     let os_name = std::env::consts::OS;
     let power = get_power_status();
     let ram = get_memory_info();
 
-    let user_profile = std::env::var("USERPROFILE").unwrap_or_default();
+    let user_profile = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME")).unwrap_or_default();
     let desktop = PathBuf::from(&user_profile).join("Desktop");
     let downloads = PathBuf::from(&user_profile).join("Downloads");
     let current_dir = std::env::current_dir().unwrap_or_default();

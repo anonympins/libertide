@@ -1605,6 +1605,8 @@ pub fn restore_if_iconic(target: impl AsWindowTarget) {
 #[cfg(windows)]
 static LAST_TXT_HWND: Mutex<Option<isize>> = Mutex::new(None);
 pub static LAST_EXTERNAL_HWND: Mutex<Option<isize>> = Mutex::new(None);
+#[cfg(not(windows))]
+pub static LAST_EXTERNAL_TARGET_UNIX: Mutex<Option<String>> = Mutex::new(None);
 pub static LAST_FOCUSED_CHILD_HWND: Mutex<Option<isize>> = Mutex::new(None);
 pub static LAST_FOCUSED_RECT: Mutex<Option<[i32; 4]>> = Mutex::new(None);
 
@@ -1765,6 +1767,11 @@ pub fn update_last_external_focus() {
                 }
             }
         }
+        if let Some(act) = crate::window_util::get_active_macos_window() {
+            if let Ok(mut lock) = LAST_EXTERNAL_TARGET_UNIX.lock() {
+                *lock = Some(act);
+            }
+        }
     }
 }
 
@@ -1774,6 +1781,11 @@ pub fn update_last_external_focus() {
     if let Some(focused) = elements.into_iter().find(|e| !e.value.is_empty() || e.role.contains("text") || e.role.contains("entry")) {
         if let Ok(mut rlock) = LAST_FOCUSED_RECT.lock() {
             *rlock = Some([focused.x, focused.y, focused.x + focused.width, focused.y + focused.height]);
+        }
+    }
+    if let Some(act_id) = crate::window_util::get_active_x11_window() {
+        if let Ok(mut lock) = LAST_EXTERNAL_TARGET_UNIX.lock() {
+            *lock = Some(act_id);
         }
     }
 }
@@ -1856,13 +1868,21 @@ pub fn release_modifier_keys() {
 }
 
 #[cfg(not(windows))]
-pub fn restore_external_focus_target(_target: Option<()>) -> bool {
+pub fn restore_external_focus_target(target: Option<&str>) -> bool {
+    let target_str = target.map(|s| s.to_string()).or_else(|| {
+        LAST_EXTERNAL_TARGET_UNIX.lock().ok().and_then(|g| g.clone())
+    });
+    if let Some(t) = target_str {
+        if !t.is_empty() {
+            return force_foreground_window(&t);
+        }
+    }
     false
 }
 
 #[cfg(not(windows))]
 pub fn restore_external_focus() -> bool {
-    false
+    restore_external_focus_target(None)
 }
 
 

@@ -1310,6 +1310,7 @@ pub fn find_best_input_element<'a>(elements: &'a [UiaElementInfo], target: &str)
     elements
         .iter()
         .filter(|e| e.is_edit_or_textarea || e.is_input)
+        .filter(|e| !e.name.is_empty())
         .max_by_key(|e| {
             let name_lower = e.name.to_lowercase();
             let mut score = 0usize;
@@ -1325,6 +1326,7 @@ pub fn find_best_input_element<'a>(elements: &'a [UiaElementInfo], target: &str)
             }
             score
         })
+        .filter(|e| e.name.to_lowercase().contains(&target.to_lowercase()) || target_words.iter().any(|w| e.name.to_lowercase().contains(w)))
 }
 
 #[cfg(windows)]
@@ -1967,6 +1969,7 @@ pub fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Op
             }
             score
         })
+        .filter(|e| e.name.to_lowercase().contains(&target_clean) || target_words.iter().any(|w| e.name.to_lowercase().contains(w)))
 }
 
 #[cfg(windows)]
@@ -2043,6 +2046,7 @@ pub fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str
             }
             score
         })
+        .filter(|e| e.is_button || e.name.to_lowercase().contains(&target_clean) || target_words.iter().any(|w| e.name.to_lowercase().contains(w)))
 }
 
 #[cfg(windows)]
@@ -2940,4 +2944,25 @@ pub fn cycle_user_window(
     restore_if_iconic(target_hwnd);
 
     Some(target_hwnd)
+}
+
+/// Fait défiler les fenêtres de manière cyclique sous macOS et Linux
+#[cfg(not(windows))]
+pub fn cycle_user_window(
+    user_windows: &[(String, String)],
+    current_target: Option<&str>,
+    direction: i32,
+) -> Option<String> {
+    if user_windows.is_empty() {
+        return None;
+    }
+    let cur_idx = current_target
+        .and_then(|cur| user_windows.iter().position(|(id, _)| id == cur))
+        .unwrap_or(0);
+    let len = user_windows.len() as i32;
+    let next_idx = ((cur_idx as i32 + direction).rem_euclid(len)) as usize;
+    let (target_id, _) = &user_windows[next_idx];
+    force_foreground_window(target_id);
+    restore_if_iconic(target_id);
+    Some(target_id.clone())
 }

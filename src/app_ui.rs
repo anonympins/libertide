@@ -810,6 +810,30 @@ impl OverlayApp {
             }
             return;
         }
+        if norm_prompt.contains("voix russe") || norm_prompt.contains("en russe") || norm_prompt == "russe" {
+            play_earcon(Earcon::Success);
+            self.set_voice_gender(VoiceProfile::Russian);
+            if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                self.start_recording(ctx, false);
+            }
+            return;
+        }
+        if norm_prompt.contains("voix chinoise") || norm_prompt.contains("en chinois") || norm_prompt == "chinois" {
+            play_earcon(Earcon::Success);
+            self.set_voice_gender(VoiceProfile::Chinese);
+            if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                self.start_recording(ctx, false);
+            }
+            return;
+        }
+        if norm_prompt.contains("voix japonaise") || norm_prompt.contains("en japonais") || norm_prompt == "japonais" {
+            play_earcon(Earcon::Success);
+            self.set_voice_gender(VoiceProfile::Japanese);
+            if self.continuous_mode && self.status != AgentStatus::EmergencyStopped {
+                self.start_recording(ctx, false);
+            }
+            return;
+        }
 
         if norm_prompt.contains("boite a rythme")
             || norm_prompt.contains("boîte à rythme")
@@ -1051,7 +1075,7 @@ impl OverlayApp {
                 #[cfg(windows)]
                 send_hotkey(&[windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x11)], windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x5A));
                 #[cfg(not(windows))]
-                let _ = std::process::Command::new("xdotool").args(["key", "ctrl+z"]).status();
+                send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x5A));
                 t!("commands.last_action_undone").to_string()
             };
             play_earcon(Earcon::Success);
@@ -2939,7 +2963,7 @@ impl OverlayApp {
                 #[cfg(windows)]
                 send_hotkey(&[windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x11)], windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0x5A));
                 #[cfg(not(windows))]
-                let _ = std::process::Command::new("xdotool").args(["key", "ctrl+z"]).status();
+                send_hotkey(&[VIRTUAL_KEY(0x11)], VIRTUAL_KEY(0x5A));
                 t!("commands.last_action_undone").to_string()
             };
             play_earcon(Earcon::Success);

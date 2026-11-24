@@ -634,6 +634,9 @@ impl OverlayApp {
             VoiceProfile::Paul => t!("speech.voice_paul").to_string(),
             VoiceProfile::Sylvie => t!("speech.voice_sylvie").to_string(),
             VoiceProfile::Jean => t!("speech.voice_jean").to_string(),
+            VoiceProfile::Chinese => "Voix chinoise configurée.".to_string(),
+            VoiceProfile::Russian => "Voix russe configurée.".to_string(),
+            VoiceProfile::Japanese => "Voix japonaise configurée.".to_string(),
             VoiceProfile::Clone => t!("speech.voice_clone").to_string(),
         };
         self.chat_history.push(ChatEntry {
@@ -1069,7 +1072,9 @@ impl eframe::App for OverlayApp {
             !overlay.0.is_null() && fg == overlay
         };
         #[cfg(not(windows))]
-        let is_libertide_fg = true;
+        let is_libertide_fg = ctx.input(|i| {
+            i.viewport().focused.unwrap_or(true)
+        });
 
         let is_egui_text_focused = !self.is_hidden
             && is_libertide_fg

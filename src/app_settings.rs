@@ -1185,6 +1185,9 @@ impl OverlayApp {
                                                     VoiceProfile::Paul => ("🎩", t!("voice.profile_paul").to_string()),
                                                     VoiceProfile::Sylvie => ("🍁", t!("voice.profile_sylvie").to_string()),
                                                     VoiceProfile::Jean => ("⚡", t!("voice.profile_jean").to_string()),
+                                                    VoiceProfile::Chinese => ("🇨🇳", "Chinois".to_string()),
+                                                    VoiceProfile::Russian => ("🇷🇺", "Russe".to_string()),
+                                                    VoiceProfile::Japanese => ("🇯🇵", "Japonais".to_string()),
                                                     VoiceProfile::Clone => ("🧬", "Clonée".to_string()),
                                                 };
                                                 let btn_text = format!("{icon} {label}");
@@ -1665,6 +1668,9 @@ impl OverlayApp {
                                                     VoiceProfile::Paul => ("🎩", t!("voice.profile_paul").to_string()),
                                                     VoiceProfile::Sylvie => ("🍁", t!("voice.profile_sylvie").to_string()),
                                                     VoiceProfile::Jean => ("⚡", t!("voice.profile_jean").to_string()),
+                                                    VoiceProfile::Chinese => ("🇨🇳", "Chinois".to_string()),
+                                                    VoiceProfile::Russian => ("🇷🇺", "Russe".to_string()),
+                                                    VoiceProfile::Japanese => ("🇯🇵", "Japonais".to_string()),
                                                     VoiceProfile::Clone => {
                                                         let g = if self.voice_clone_gender == "male" { t!("voice.gender_male") } else { t!("voice.gender_female") };
                                                         ("🧬", t!("voice.profile_clone", gender = g).to_string())

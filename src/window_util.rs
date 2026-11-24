@@ -1060,6 +1060,51 @@ pub fn get_desktop_work_area() -> RECT {
     RECT { left: 0, top: 0, right: screen_w, bottom: screen_h }
 }
 
+/// Récupère les dimensions physiques réelles de l'écran principal de façon portable
+pub fn get_desktop_screen_dimensions() -> (f32, f32) {
+    #[cfg(windows)]
+    {
+        let wa = get_desktop_work_area();
+        ((wa.right - wa.left).max(800) as f32, (wa.bottom - wa.top).max(600) as f32)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("system_profiler").arg("SPDisplaysDataType").output() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            for line in s.lines() {
+                if line.contains("Resolution:") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if let (Some(w_idx), Some(h_idx)) = (parts.iter().position(|&p| p == "x").map(|i| i - 1), parts.iter().position(|&p| p == "x").map(|i| i + 1)) {
+                        if let (Ok(w), Ok(h)) = (parts[w_idx].parse::<f32>(), parts[h_idx].parse::<f32>()) {
+                            return (w.max(800.0), h.max(600.0));
+                        }
+                    }
+                }
+            }
+        }
+        (1920.0, 1080.0)
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        if let Ok(output) = std::process::Command::new("xdpyinfo").output() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            for line in s.lines() {
+                if line.contains("dimensions:") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if let Some(dim) = parts.get(1) {
+                        if let Some((w_str, h_str)) = dim.split_once('x') {
+                            if let (Ok(w), Ok(h)) = (w_str.parse::<f32>(), h_str.parse::<f32>()) {
+                                return (w.max(800.0), h.max(600.0));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (1920.0, 1080.0)
+    }
+}
+
 /// Récupère la position absolue du curseur de la souris à l'écran (en pixels physiques)
 #[cfg(windows)]
 pub fn get_global_cursor_pos() -> Option<(i32, i32)> {

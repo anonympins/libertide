@@ -2401,6 +2401,26 @@ pub fn install_switch_keyboard_hook() {
                             trigger_repaint();
                         }
                     }
+                    rdev::EventType::Wheel { .. } => {
+                        if is_switch_on {
+                            crate::window_util::clear_screen_numbered_badges();
+                            trigger_repaint();
+                        }
+                    }
+                    rdev::EventType::ButtonPress(btn) => {
+                        match btn {
+                            rdev::Button::Middle => {
+                                inject_switch_event(SwitchKeyEvent::StopSpeech);
+                            }
+                            rdev::Button::Unknown(4) => {
+                                inject_switch_event(SwitchKeyEvent::ToggleDictation);
+                            }
+                            rdev::Button::Unknown(5) => {
+                                inject_switch_event(SwitchKeyEvent::ToggleSwitch);
+                            }
+                            _ => {}
+                        }
+                    }
                     _ => {}
                 }
             };

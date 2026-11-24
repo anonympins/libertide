@@ -3804,16 +3804,7 @@ pub fn start_wmf_camera_worker() {
 /// Mesure de repli réactive basée sur le curseur système pour permettre le test et calibrage sans webcam
 fn poll_mouse_fallback_sample() {
     if let Some(pt) = get_physical_cursor_pos() {
-        #[cfg(windows)]
-        let (screen_w, screen_h) = unsafe {
-            use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
-            (
-                GetSystemMetrics(SM_CXSCREEN).max(800) as f32,
-                GetSystemMetrics(SM_CYSCREEN).max(600) as f32,
-            )
-        };
-        #[cfg(not(windows))]
-        let (screen_w, screen_h) = (1920.0f32, 1080.0f32);
+        let (screen_w, screen_h) = crate::window_util::get_desktop_screen_dimensions();
 
         let norm_x = (((pt.0 as f32 / screen_w) - 0.5) * 2.0).clamp(-1.0, 1.0);
         let norm_y = (((pt.1 as f32 / screen_h) - 0.5) * 2.0).clamp(-1.0, 1.0);

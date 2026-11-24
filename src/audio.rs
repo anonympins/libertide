@@ -1673,9 +1673,9 @@ fn run_live_subtitles_loop(
                 let name = device.to_string();
                     let lower_name = name.to_lowercase();
                     #[cfg(target_os = "linux")]
-                    let is_match = lower_name.contains(".monitor");
+                    let is_match = lower_name.contains("monitor");
                     #[cfg(target_os = "macos")]
-                    let is_match = lower_name.contains("blackhole") || lower_name.contains("soundflower");
+                    let is_match = lower_name.contains("blackhole") || lower_name.contains("soundflower") || lower_name.contains("loopback");
 
                     if is_match {
                         println!("[Audio] Périphérique de loopback détecté : {}", name);
