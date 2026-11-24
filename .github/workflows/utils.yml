@@ -1,0 +1,37 @@
+name: Badge Generator
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  badge-generator:
+    name: Generate LoC Badge
+    runs-on: ubuntu-latest
+    # Ajout des permissions nécessaires pour que l'action puisse écrire sur la branche gh-pages
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Make Code Badge
+        uses: shadowmoose/GHA-LoC-Badge@1.0.0
+        id: badge
+        with:
+          debug: true
+          directory: ./
+          badge: ./public/badge.svg
+          patterns: '*.js'  # Patterns in the format of a '.gitignore' file, separated by pipes.
+          ignore: 'node_modules'
+
+      - name: Deploy badge to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Le dossier qui contient notre badge à déployer
+          publish_dir: ./public
+          # Le message du commit sur la branche gh-pages
+          commit_message: "chore: update LoC badge"

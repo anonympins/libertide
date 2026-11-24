@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 use crate::audio_player::AudioPlayer;
 use crate::{get_system_locale_language, parse_llm_response_text, send_llm_chat_completion};
 use crate::automation::*;
-use crate::clipboard::*;
 use crate::fs_util::{read_env_var_from_file, write_env_var_to_file};
 use crate::theme::ThemeColors;
 use crate::types::*;
@@ -2286,7 +2285,7 @@ Réponds STRICTEMENT en JSON :
         content: prompt_content,
     }];
 
-    let response = send_llm_chat_completion(client, config, &sys_prompt, &messages, 0.3, 1200).await;
+    let response = send_llm_chat_completion(client, config, &sys_prompt, &messages, 0.3, 1200, true).await;
 
     if let Ok(res) = response {
         if res.status().is_success() {

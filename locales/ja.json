@@ -396,7 +396,24 @@
     "btn_speak": "🗣️ 発声",
     "btn_chat": "💬 チャット",
     "btn_insert": "✍️ 挿入",
-    "btn_clear": "🗑️ 消去"
+    "btn_clear": "🗑️ 消去",
+    "switch_to_aac": "💬 AAC絵文字グリッド (ARASAAC)"
+  },
+  "aac": {
+    "placeholder": "下の絵文字を選択してメッセージを作成...",
+    "remove_pictogram_tooltip": "クリックしてこの絵文字を削除",
+    "expand_ai": "✨ 文章を作成 (AI)",
+    "speak_direct": "🗣️ 直接話す",
+    "clear_all": "🗑️ 全て消去",
+    "switch_to_alphabetical": "⌨️ アルファベットキーボード",
+    "btn_clear_last": "⌫\n最後を削除",
+    "btn_validate_speak": "✅\n確定して発声",
+    "btn_back_categories": "⬅️\nカテゴリに戻る",
+    "category_subject": "👤 人物 / 主語",
+    "category_verb": "⚡ 行動 / 動詞",
+    "category_object": "📦 物 / 要求",
+    "category_feeling": "💖 感情 / 感覚",
+    "category_social": "💬 社会的 / 応答"
   }
   ,"eyetracking": {
     "title": "👁️ 視線操作 (標準Webカメラ Eye-Tracking)",
@@ -460,7 +477,7 @@
     "locked_in": "視線入力,アイトラッキング,視線,tobii,瞬き,als",
     "tremor_filter": "手の震え,痙縮,けいれん,パーキンソン,運動失調",
     "sensory_calm": "感覚過敏,うるさい,パニック,自閉症,落ち着く",
-    "aac_symbols": "絵カード,ピクトグラム,aac,失語症,非言語",
+    "aac_symbols": "絵カード,ピクトグラム,aac,失語症,非言語,コミュニケーションボード,絵で話す,シンボル,arasaac,拡大代替コミュニケーション",
     "volume_control": "音量,大きく,小さく,音量上げて,音量下げて",
     "mute_audio": "ミュート,消音,静かに,音を消して",
     "audio_settings": "オーディオ,ヘッドホン,スピーカー,音声設定",

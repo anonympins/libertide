@@ -298,6 +298,41 @@ pub fn is_window_visible_on_screen(hwnd: HWND) -> bool {
     w > 10 && h > 10
 }
 
+/// Indique si la fenêtre au premier plan est en plein écran complet (visionnage de film, YouTube, Netflix, jeu)
+#[cfg(windows)]
+pub fn is_foreground_window_fullscreen() -> bool {
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.0.is_null() || is_window_hung(fg) {
+        return false;
+    }
+    let (pid, _) = get_window_process_info(fg);
+    if pid == std::process::id() {
+        return false;
+    }
+    let mut r = RECT::default();
+    if unsafe { GetWindowRect(fg, &mut r).is_ok() } {
+        let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+        let sh = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+        let win_w = r.right - r.left;
+        let win_h = r.bottom - r.top;
+        return r.left <= 0 && r.top <= 0 && win_w >= sw && win_h >= sh;
+    }
+    false
+}
+
+#[cfg(not(windows))]
+pub fn is_foreground_window_fullscreen() -> bool {
+    if let Some(rect) = get_active_window_rect() {
+        let mon_w = 1920;
+        let mon_h = 1080;
+        let w = rect[2] - rect[0];
+        let h = rect[3] - rect[1];
+        rect[0] <= 0 && rect[1] <= 0 && w >= mon_w && h >= mon_h
+    } else {
+        false
+    }
+}
+
 #[cfg(not(windows))]
 pub fn is_window_visible_on_screen(_target: impl std::fmt::Display) -> bool {
     true
@@ -1023,6 +1058,51 @@ pub fn get_desktop_work_area() -> RECT {
     let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN).max(800) };
     let screen_h = unsafe { (GetSystemMetrics(SM_CYSCREEN) - 48).max(600) };
     RECT { left: 0, top: 0, right: screen_w, bottom: screen_h }
+}
+
+/// Récupère les dimensions physiques réelles de l'écran principal de façon portable
+pub fn get_desktop_screen_dimensions() -> (f32, f32) {
+    #[cfg(windows)]
+    {
+        let wa = get_desktop_work_area();
+        ((wa.right - wa.left).max(800) as f32, (wa.bottom - wa.top).max(600) as f32)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("system_profiler").arg("SPDisplaysDataType").output() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            for line in s.lines() {
+                if line.contains("Resolution:") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if let (Some(w_idx), Some(h_idx)) = (parts.iter().position(|&p| p == "x").map(|i| i - 1), parts.iter().position(|&p| p == "x").map(|i| i + 1)) {
+                        if let (Ok(w), Ok(h)) = (parts[w_idx].parse::<f32>(), parts[h_idx].parse::<f32>()) {
+                            return (w.max(800.0), h.max(600.0));
+                        }
+                    }
+                }
+            }
+        }
+        (1920.0, 1080.0)
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        if let Ok(output) = std::process::Command::new("xdpyinfo").output() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            for line in s.lines() {
+                if line.contains("dimensions:") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if let Some(dim) = parts.get(1) {
+                        if let Some((w_str, h_str)) = dim.split_once('x') {
+                            if let (Ok(w), Ok(h)) = (w_str.parse::<f32>(), h_str.parse::<f32>()) {
+                                return (w.max(800.0), h.max(600.0));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (1920.0, 1080.0)
+    }
 }
 
 /// Récupère la position absolue du curseur de la souris à l'écran (en pixels physiques)

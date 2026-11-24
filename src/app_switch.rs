@@ -264,6 +264,7 @@ impl OverlayApp {
             if target.role == "champ de saisie" || target.role == "zone de texte" {
                 IS_EXTERNAL_TEXT_INPUT_FOCUSED.store(true, Ordering::SeqCst);
                 self.dictation_mode = true;
+                self.dictation_origin_target = Some(target.clone());
                 IS_DICTATION_ACTIVE.store(true, Ordering::SeqCst);
                 self.continuous_mode = true;
                 if let Ok(mut guard) = LAST_FOCUSED_RECT.lock() {

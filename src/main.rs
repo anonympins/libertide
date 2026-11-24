@@ -49,7 +49,6 @@ use audio::spawn_audio_worker;
 use floating_window::{update_open_floating_cards, FloatingCard, FloatingContentType};
 use automation::*;
 use fs_util::*;
-use intent::*;
 use theme::{AppTheme, SettingsTab};
 use tts::spawn_tts_worker;
 use twitch::spawn_twitch_worker;
@@ -135,6 +134,7 @@ pub struct OverlayApp {
     switch_auto_scroll: bool,
     switch_focus_index: usize,
     switch_last_tick: Instant,
+    dictation_origin_target: Option<NumberedElementTarget>,
 
     // Mode survol : Détection du pointeur, anti-rebond & hiérarchie vocale
     hover_last_cursor_pos: Option<(i32, i32)>,
@@ -454,6 +454,7 @@ impl OverlayApp {
             switch_auto_scroll,
             switch_focus_index: 0,
             switch_last_tick: Instant::now(),
+            dictation_origin_target: None,
 
             hover_last_cursor_pos: None,
             hover_cursor_still_since: Instant::now(),
@@ -576,6 +577,7 @@ impl OverlayApp {
     pub fn open_keyboard_card(&mut self) {
         let title = t!("keyboard.title").to_string();
         let card = FloatingCard::new("virtual_keyboard", title, FloatingContentType::VirtualKeyboard);
+        crate::virtual_keyboard::reset_keyboard_scan();
         if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == "virtual_keyboard") {
             existing.open = true;
         } else {
@@ -587,6 +589,18 @@ impl OverlayApp {
 
     pub fn is_keyboard_open(&self) -> bool {
         self.floating_cards.iter().any(|c| c.id == "virtual_keyboard" && c.open)
+    }
+
+    pub fn open_aac_card(&mut self) {
+        let title = "💬 Communication CAA (ARASAAC)".to_string();
+        let card = FloatingCard::new("caa_board", title, FloatingContentType::AacBoard);
+        if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == "caa_board") {
+            existing.open = true;
+        } else {
+            self.floating_cards.push(card);
+        }
+        update_open_floating_cards(&self.floating_cards);
+        play_earcon(Earcon::Success);
     }
 
     pub fn is_subtitles_open(&self) -> bool {
@@ -632,6 +646,9 @@ impl OverlayApp {
             VoiceProfile::Paul => t!("speech.voice_paul").to_string(),
             VoiceProfile::Sylvie => t!("speech.voice_sylvie").to_string(),
             VoiceProfile::Jean => t!("speech.voice_jean").to_string(),
+            VoiceProfile::Chinese => "Voix chinoise configurée.".to_string(),
+            VoiceProfile::Russian => "Voix russe configurée.".to_string(),
+            VoiceProfile::Japanese => "Voix japonaise configurée.".to_string(),
             VoiceProfile::Clone => t!("speech.voice_clone").to_string(),
         };
         self.chat_history.push(ChatEntry {
@@ -769,6 +786,14 @@ impl OverlayApp {
         let _ = self.tts_sender.send(TtsCommand::Stop);
         restore_external_focus();
         let msg = t!("speech.dictation_enabled").to_string();
+        let announcement = if self.switch_access_mode && self.dictation_origin_target.is_some() {
+            let target_name = self.dictation_origin_target.as_ref().map(|t| t.name.as_str()).unwrap_or("");
+            let on_target = t!("speech.dictation_on_field", field = target_name).to_string();
+            format!("{msg}. {on_target}")
+        } else {
+            msg.clone()
+        };
+
         self.chat_history.push(ChatEntry {
             role: ChatRole::Agent,
             text: msg.clone(),
@@ -779,10 +804,10 @@ impl OverlayApp {
             ],
             screen_size_kb: None,
         });
-        let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+        let _ = self.tts_sender.send(TtsCommand::Speak(announcement));
     }
 
-    fn exit_dictation_mode(&mut self) {
+    pub fn exit_dictation_mode(&mut self) {
         self.dictation_mode = false;
         self.continuous_mode = false;
         self.mic_manually_disabled = true;
@@ -804,6 +829,22 @@ impl OverlayApp {
             screen_size_kb: None,
         });
         let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+
+        // Revenir à l'élément de contrôle actif qui a initié la dictée en mode survol
+        if self.switch_access_mode {
+            if let Some(target) = self.dictation_origin_target.take() {
+                let target_clone = target.clone();
+                if let Some(pos) = self.numbered_targets.iter().position(|t| t.index == target_clone.index) {
+                    self.switch_focus_index = pos;
+                }
+                self.narrate_numbered_target(&target_clone);
+                #[cfg(windows)]
+                draw_screen_control_border(target_clone.rect, false);
+            }
+            self.sync_switch_access_overlays();
+        } else {
+            self.dictation_origin_target = None;
+        }
     }
 
     pub fn toggle_switch_access_mode(&mut self, force_state: Option<bool>) {
@@ -1043,7 +1084,9 @@ impl eframe::App for OverlayApp {
             !overlay.0.is_null() && fg == overlay
         };
         #[cfg(not(windows))]
-        let is_libertide_fg = true;
+        let is_libertide_fg = ctx.input(|i| {
+            i.viewport().focused.unwrap_or(true)
+        });
 
         let is_egui_text_focused = !self.is_hidden
             && is_libertide_fg

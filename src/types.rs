@@ -380,6 +380,9 @@ pub enum VoiceProfile {
     Paul,
     Sylvie,
     Jean,
+    Chinese,
+    Russian,
+    Japanese,
     Clone,
 }
 
@@ -396,6 +399,9 @@ impl VoiceProfile {
         Self::Paul,
         Self::Sylvie,
         Self::Jean,
+        Self::Chinese,
+        Self::Russian,
+        Self::Japanese,
         Self::Clone,
     ];
 
@@ -407,6 +413,9 @@ impl VoiceProfile {
             Self::Paul => "Paul (Masculin posé)",
             Self::Sylvie => "Sylvie (Féminine canadienne)",
             Self::Jean => "Jean (Masculin dynamique)",
+            Self::Chinese => "中文 / Chinese (Huihui / Xiaoxiao)",
+            Self::Russian => "Русский / Russian (Irina / Pavel)",
+            Self::Japanese => "日本語 / Japanese (Haruka / Ayumi)",
             Self::Clone => "Voix clonée (XTTS / Local HTTP)",
         }
     }
@@ -419,6 +428,9 @@ impl VoiceProfile {
             Self::Paul => Self::Sylvie,
             Self::Sylvie => Self::Jean,
             Self::Jean => Self::Denise,
+            Self::Chinese => Self::Russian,
+            Self::Russian => Self::Japanese,
+            Self::Japanese => Self::Denise,
             Self::Clone => Self::Denise,
         }
     }
@@ -431,6 +443,9 @@ impl VoiceProfile {
             Self::Paul => "paul",
             Self::Sylvie => "sylvie",
             Self::Jean => "jean",
+            Self::Chinese => "zh",
+            Self::Russian => "ru",
+            Self::Japanese => "ja",
             Self::Clone => "clone",
         }
     }
@@ -443,6 +458,9 @@ impl VoiceProfile {
             "paul" => Some(Self::Paul),
             "sylvie" => Some(Self::Sylvie),
             "jean" => Some(Self::Jean),
+            "zh" | "chinese" | "chinois" => Some(Self::Chinese),
+            "ru" | "russian" | "russe" => Some(Self::Russian),
+            "ja" | "japanese" | "japonais" => Some(Self::Japanese),
             "clone" | "cloned" | "xtts" | "f5" | "custom" => Some(Self::Clone),
             _ => None,
         }
@@ -456,6 +474,9 @@ impl VoiceProfile {
             Self::Paul => "fr-FR-AlainNeural",
             Self::Sylvie => "fr-CA-SylvieNeural",
             Self::Jean => "fr-FR-JeanNeural",
+            Self::Chinese => "zh-CN-XiaoxiaoNeural",
+            Self::Russian => "ru-RU-SvetlanaNeural",
+            Self::Japanese => "ja-JP-NanamiNeural",
             Self::Clone => "fr-FR-DeniseNeural",
         }
     }

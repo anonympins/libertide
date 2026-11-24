@@ -75,6 +75,604 @@ static LLM_PREDICTOR_ENGINE: Mutex<Option<crate::local_llm::LocalLlamaEngine>> =
 static LLM_REQUEST_TX: Mutex<Option<StdSender<(String, String)>>> = Mutex::new(None);
 static ASYNC_PREDICTIONS_CACHE: Mutex<Option<(String, Vec<String>)>> = Mutex::new(None);
 
+// ============================================================================
+// Grille CAA / Pictogrammes ARASAAC & Code Couleur de Fitzgerald
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FitzgeraldCategory {
+    /// Personnes, pronoms, sujets -> Jaune (#FFD600)
+    Subject,
+    /// Actions, verbes -> Vert (#00E676)
+    Verb,
+    /// Objets, besoins concrets -> Bleu (#00B0FF)
+    Object,
+    /// Douleurs, sensations, sentiments -> Rose / Magenta (#FF4081)
+    Feeling,
+    /// Mots de liaison, réponses sociales -> Orange / Blanc (#FF9100)
+    Social,
+}
+
+impl FitzgeraldCategory {
+    pub fn display_name(&self) -> String {
+        let key = match self {
+            Self::Subject => "aac.category_subject",
+            Self::Verb => "aac.category_verb",
+            Self::Object => "aac.category_object",
+            Self::Feeling => "aac.category_feeling",
+            Self::Social => "aac.category_social",
+        };
+        t!(key).to_string()
+    }
+
+    pub fn bg_color(&self) -> egui::Color32 {
+        match self {
+            Self::Subject => egui::Color32::from_rgb(255, 214, 0),
+            Self::Verb => egui::Color32::from_rgb(0, 230, 118),
+            Self::Object => egui::Color32::from_rgb(0, 176, 255),
+            Self::Feeling => egui::Color32::from_rgb(255, 64, 129),
+            Self::Social => egui::Color32::from_rgb(255, 145, 0),
+        }
+    }
+
+    pub fn text_color(&self) -> egui::Color32 {
+        match self {
+            Self::Subject => egui::Color32::BLACK,
+            Self::Verb => egui::Color32::BLACK,
+            Self::Object => egui::Color32::BLACK,
+            Self::Feeling => egui::Color32::WHITE,
+            Self::Social => egui::Color32::BLACK,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AacPictogram {
+    pub label: &'static str,
+    pub icon: &'static str,
+    pub category: FitzgeraldCategory,
+}
+
+pub const ARASAAC_PICTOGRAMS: &[AacPictogram] = &[
+    // --- 1. Sujets / Pronoms (Jaune) ---
+    AacPictogram { label: "Moi / Je", icon: "🙋‍♂️", category: FitzgeraldCategory::Subject },
+    AacPictogram { label: "Tu / Toi", icon: "👉", category: FitzgeraldCategory::Subject },
+    AacPictogram { label: "Aidant", icon: "🧑‍⚕️", category: FitzgeraldCategory::Subject },
+    AacPictogram { label: "Médecin", icon: "👨‍⚕️", category: FitzgeraldCategory::Subject },
+    AacPictogram { label: "Famille", icon: "👨‍👩‍👧", category: FitzgeraldCategory::Subject },
+    AacPictogram { label: "Nous", icon: "👥", category: FitzgeraldCategory::Subject },
+
+    // --- 2. Actions / Verbes (Vert) ---
+    AacPictogram { label: "Vouloir", icon: "🤲", category: FitzgeraldCategory::Verb },
+    AacPictogram { label: "Avoir", icon: "✊", category: FitzgeraldCategory::Verb },
+    AacPictogram { label: "Boire", icon: "🥤", category: FitzgeraldCategory::Verb },
+    AacPictogram { label: "Manger", icon: "🍽️", category: FitzgeraldCategory::Verb },
+    AacPictogram { label: "Aider", icon: "🤝", category: FitzgeraldCategory::Verb },
+    AacPictogram { label: "Dormir", icon: "😴", category: FitzgeraldCategory::Verb },
+    AacPictogram { label: "Respirer", icon: "🫁", category: FitzgeraldCategory::Verb },
+    AacPictogram { label: "Tourner", icon: "🔄", category: FitzgeraldCategory::Verb },
+    AacPictogram { label: "Arrêter", icon: "🛑", category: FitzgeraldCategory::Verb },
+    AacPictogram { label: "Aller", icon: "🚶", category: FitzgeraldCategory::Verb },
+
+    // --- 3. Objets / Besoins (Bleu) ---
+    AacPictogram { label: "Eau", icon: "💧", category: FitzgeraldCategory::Object },
+    AacPictogram { label: "Chaud", icon: "☕", category: FitzgeraldCategory::Object },
+    AacPictogram { label: "Médicament", icon: "💊", category: FitzgeraldCategory::Object },
+    AacPictogram { label: "Lit", icon: "🛏️", category: FitzgeraldCategory::Object },
+    AacPictogram { label: "Fauteuil", icon: "🦼", category: FitzgeraldCategory::Object },
+    AacPictogram { label: "Toilettes", icon: "🚽", category: FitzgeraldCategory::Object },
+    AacPictogram { label: "Couverture", icon: "🧣", category: FitzgeraldCategory::Object },
+    AacPictogram { label: "Téléphone", icon: "📱", category: FitzgeraldCategory::Object },
+    AacPictogram { label: "Musique", icon: "🎵", category: FitzgeraldCategory::Object },
+    AacPictogram { label: "Lumière", icon: "💡", category: FitzgeraldCategory::Object },
+
+    // --- 4. Sentiments / Sensations (Rose) ---
+    AacPictogram { label: "Mal / Douleur", icon: "😣", category: FitzgeraldCategory::Feeling },
+    AacPictogram { label: "Soif", icon: "🥛", category: FitzgeraldCategory::Feeling },
+    AacPictogram { label: "Faim", icon: "🍲", category: FitzgeraldCategory::Feeling },
+    AacPictogram { label: "Froid", icon: "🥶", category: FitzgeraldCategory::Feeling },
+    AacPictogram { label: "Chaleur", icon: "🥵", category: FitzgeraldCategory::Feeling },
+    AacPictogram { label: "Fatigué", icon: "🥱", category: FitzgeraldCategory::Feeling },
+    AacPictogram { label: "Peur / Inquiet", icon: "😨", category: FitzgeraldCategory::Feeling },
+    AacPictogram { label: "Bien / Content", icon: "😊", category: FitzgeraldCategory::Feeling },
+
+    // --- 5. Social / Réponses (Orange) ---
+    AacPictogram { label: "Oui", icon: "✅", category: FitzgeraldCategory::Social },
+    AacPictogram { label: "Non", icon: "❌", category: FitzgeraldCategory::Social },
+    AacPictogram { label: "Merci", icon: "🙏", category: FitzgeraldCategory::Social },
+    AacPictogram { label: "S'il vous plaît", icon: "🙇", category: FitzgeraldCategory::Social },
+    AacPictogram { label: "Urgent", icon: "🚨", category: FitzgeraldCategory::Social },
+    AacPictogram { label: "Maintenant", icon: "⏱️", category: FitzgeraldCategory::Social },
+];
+
+#[derive(Clone, Debug)]
+pub struct AacBoardState {
+    pub selected_symbols: Vec<AacPictogram>,
+    pub active_category: Option<FitzgeraldCategory>,
+    pub expanded_sentence: Option<String>,
+    pub is_expanding: bool,
+    pub scanning_enabled: bool,
+    pub scan_cat_index: usize,
+    pub scan_item_index: usize,
+    pub scan_in_items: bool,
+    pub last_scan_tick: Instant,
+    pub scan_interval: Duration,
+}
+
+impl Default for AacBoardState {
+    fn default() -> Self {
+        Self {
+            selected_symbols: Vec::new(),
+            active_category: None,
+            expanded_sentence: None,
+            is_expanding: false,
+            scanning_enabled: true,
+            scan_cat_index: 0,
+            scan_item_index: 0,
+            scan_in_items: false,
+            last_scan_tick: Instant::now(),
+            scan_interval: Duration::from_millis(1400),
+        }
+    }
+}
+
+static AAC_BOARD_STATE: Mutex<Option<AacBoardState>> = Mutex::new(None);
+static AAC_EXPANSION_RX: Mutex<Option<StdReceiver<(String, bool)>>> = Mutex::new(None);
+
+/// Moteur d'expansion générative (LLM 0.5B / 1.5B ou modèle distant)
+pub fn expand_aac_symbols_with_llm(symbols: &[AacPictogram], lang: &str, clear_after: bool) {
+    if symbols.is_empty() {
+        return;
+    }
+
+    let (tx, rx) = channel();
+    if let Ok(mut lock) = AAC_EXPANSION_RX.lock() {
+        *lock = Some(rx);
+    }
+
+    let symbol_labels: Vec<&str> = symbols.iter().map(|s| s.label).collect();
+    let sequence_str = symbol_labels.join(" + ");
+    let lang_str = lang.to_string();
+
+    std::thread::spawn(move || {
+        // 1. Essai déterministe ultra-rapide (règles de formulation courantes)
+        let fast_expansion = match sequence_str.to_lowercase().as_str() {
+            s if s.contains("moi") && s.contains("boire") && s.contains("chaud") => {
+                Some("Pourrais-je avoir une boisson chaude s'il vous plaît ?".to_string())
+            }
+            s if s.contains("moi") && s.contains("boire") && s.contains("eau") => {
+                Some("J'ai soif, puis-je avoir un verre d'eau s'il vous plaît ?".to_string())
+            }
+            s if s.contains("moi") && s.contains("dormir") => {
+                Some("Je suis fatigué, j'aimerais dormir maintenant.".to_string())
+            }
+            s if s.contains("moi") && s.contains("mal") => {
+                Some("J'ai mal, pourriez-vous m'aider s'il vous plaît ?".to_string())
+            }
+            s if s.contains("aidant") && s.contains("urgent") => {
+                Some("J'ai besoin de l'aide de mon soignant en urgence.".to_string())
+            }
+            _ => None,
+        };
+
+        if let Some(phrase) = fast_expansion {
+            let _ = tx.send((phrase, clear_after));
+            return;
+        }
+
+        // 2. Appel au modèle de langage pour l'expansion générative
+        let system_prompt = format!(
+            "Tu es un interprète expert de Communication Alternative et Améliorée (CAA). Ton rôle est de prendre une séquence de mots-clés issus de pictogrammes et de la transformer en une phrase complète et naturelle qui exprime l'intention ou l'état d'être de la personne.\n\
+             Recolle les mots suivants et formule la phrase la plus probable, polie et fluide en {lang_str}, prête à être prononcée oralement par une personne non-verbale.\n\
+             N'ajoute aucune explication ni guillemets, écris uniquement la phrase finale complète."
+        );
+        let user_prompt = format!("Pictogrammes : [{sequence_str}]\nPhrase reformulée :");
+
+        let config = crate::overlay::resolve_llm_config();
+
+        // Tentative sur le moteur local Llama/Qwen s'il est configuré
+        let result = if config.provider == crate::types::LlmProvider::Local {
+            // Utiliser le moteur de prédiction du clavier (Qwen 0.5B) s'il est chargé
+            if let Ok(engine_guard) = LLM_PREDICTOR_ENGINE.lock() {
+                if let Some(engine) = engine_guard.as_ref() {
+                    let formatted_prompt = format!(
+                        "<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n"
+                    );
+                    // Utilise la génération rapide du petit modèle, qui est optimisée.
+                    engine.generate_fast(&formatted_prompt, 60)
+                } else {
+                    // Si le moteur du clavier n'est pas prêt, essayer le moteur principal de l'agent (comportement original)
+                    crate::local_llm::LocalLlamaEngine::generate_local_text(&format!("{}\n{}", system_prompt, user_prompt), 60)
+                }
+            } else {
+                Err("Le mutex du moteur de prédiction du clavier est empoisonné.".to_string())
+            }
+        } else {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+            match rt {
+                Ok(runtime) => runtime.block_on(async {
+                    let client = reqwest::Client::builder().timeout(Duration::from_secs(6)).build().map_err(|e| e.to_string())?;
+                    let msgs = vec![crate::types::ChatMessage { role: "user".to_string(), content: user_prompt.clone() }];
+                    let resp = crate::agent_backend::send_llm_chat_completion(&client, &config, &system_prompt, &msgs, 0.4, 60, false).await.map_err(|e| e.to_string())?;
+                    crate::agent_backend::parse_llm_response_text(resp, config.provider).await
+                }),
+                Err(e) => Err(e.to_string()),
+            }
+        };
+
+        let final_text = match result {
+            Ok(text) if !text.trim().is_empty() => {
+                let clean = text.trim().trim_matches(['"', '\'', '`', '«', '»']).trim();
+                if !clean.is_empty() {
+                    clean.to_string()
+                } else {
+                    format!("{}. S'il vous plaît.", symbol_labels.join(" "))
+                }
+            }
+            Ok(empty_text) => {
+                eprintln!("[AAC Expansion] Réponse LLM vide ou blanche reçue: '{}'. Repli sur la concaténation.", empty_text);
+                format!("{}. S'il vous plaît.", symbol_labels.join(" "))
+            }
+            Err(e) => {
+                eprintln!("[AAC Expansion] Erreur LLM lors de l'expansion de symboles : {e}. Repli sur la concaténation.");
+                // Repli direct par concaténation soignée
+                format!("{}. S'il vous plaît.", symbol_labels.join(" "))
+            }
+        };
+
+        let _ = tx.send((final_text, clear_after));
+    });
+}
+
+pub fn get_categories_ordered() -> &'static [FitzgeraldCategory] {
+    &[
+        FitzgeraldCategory::Subject,
+        FitzgeraldCategory::Verb,
+        FitzgeraldCategory::Object,
+        FitzgeraldCategory::Feeling,
+        FitzgeraldCategory::Social,
+    ]
+}
+
+pub fn get_pictograms_by_category(cat: FitzgeraldCategory) -> Vec<AacPictogram> {
+    ARASAAC_PICTOGRAMS.iter().filter(|p| p.category == cat).cloned().collect()
+}
+
+pub fn render_aac_board_view(
+    ui: &mut egui::Ui,
+    dwell_state: &mut DwellState,
+    theme: &ThemeColors,
+) -> Option<FloatingCardOutput> {
+    let mut state = {
+        let mut guard = AAC_BOARD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            *guard = Some(AacBoardState::default());
+        }
+        guard.as_ref().cloned().unwrap()
+    };
+
+    let mut output_event = None;
+    let now = Instant::now();
+    let categories = get_categories_ordered();
+    let active_cat = state.active_category.unwrap_or(categories[state.scan_cat_index % categories.len()]);
+    let items_in_cat = get_pictograms_by_category(active_cat);
+
+    // Réception asynchrone de l'expansion générative
+    if let Ok(mut rx_guard) = AAC_EXPANSION_RX.lock() {
+        if let Some(ref rx) = *rx_guard {
+            if let Ok((expanded, should_clear)) = rx.try_recv() {
+                state.expanded_sentence = Some(expanded.clone());
+                state.is_expanding = false;
+                play_earcon(Earcon::Success);
+                output_event = Some(FloatingCardOutput::Speak(expanded));
+                if should_clear {
+                    state.selected_symbols.clear();
+                    state.expanded_sentence = None;
+                    state.scan_in_items = false;
+                }
+                *rx_guard = None;
+            }
+        }
+    }
+
+    // Balayage automatique (Auto-Scan) pour contacteur unique
+    if state.scanning_enabled && now.duration_since(state.last_scan_tick) >= state.scan_interval {
+        state.last_scan_tick = now;
+        if !state.scan_in_items {
+            state.scan_cat_index = (state.scan_cat_index + 1) % categories.len();
+        } else {
+            // Le nombre d'éléments à balayer est : pictogrammes + "effacer" + "valider" + "retour"
+            let count = items_in_cat.len() + 3;
+            state.scan_item_index = (state.scan_item_index + 1) % count;
+        }
+        ui.ctx().request_repaint();
+    }
+
+    // Entrée contacteur (Espace ou Entrée)
+    let switch_hit = ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
+    if switch_hit {
+        state.last_scan_tick = now;
+        if !state.scan_in_items {
+            state.scan_in_items = true;
+            state.scan_item_index = 0;
+            play_earcon(Earcon::Navigation);
+        } else {
+            let idx = state.scan_item_index;
+            let items_count = items_in_cat.len();
+
+            if idx < items_count {
+                // Un pictogramme a été sélectionné
+                if let Some(item) = items_in_cat.get(idx) {
+                    state.selected_symbols.push(item.clone());
+                    play_earcon(Earcon::Success);
+                    // Amélioration accessibilité : sauter directement sur "Valider"
+                    state.scan_item_index = items_count;
+                }
+            } else if idx == items_count {
+                // "Valider et Parler" a été sélectionné
+                if !state.selected_symbols.is_empty() {
+                    if let Some(ref expanded) = state.expanded_sentence {
+                        output_event = Some(FloatingCardOutput::Speak(expanded.clone()));
+                        state.selected_symbols.clear();
+                        state.expanded_sentence = None;
+                        state.scan_in_items = false;
+                        play_earcon(Earcon::Success);
+                    } else {
+                        state.is_expanding = true;
+                        let cur_lang = get_active_app_language();
+                        expand_aac_symbols_with_llm(&state.selected_symbols, &cur_lang, true);
+                    }
+                }
+            } else if idx == items_count + 1 {
+                // "Effacer dernier" a été sélectionné
+                if state.selected_symbols.pop().is_some() {
+                    state.expanded_sentence = None;
+                    play_earcon(Earcon::Navigation);
+                }
+            } else { // idx == items_count + 2
+                // "Retour" a été sélectionné
+                state.scan_in_items = false;
+                state.scan_item_index = 0;
+                play_earcon(Earcon::Navigation);
+            }
+        }
+    }
+
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        state.scan_in_items = false;
+        play_earcon(Earcon::Navigation);
+    }
+
+    // 1. Bandeau supérieur : Phrase composée en pictogrammes
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(14, 16, 22))
+        .stroke(egui::Stroke::new(1.2, theme.accent))
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                if state.selected_symbols.is_empty() { ui.label(egui::RichText::new(t!("aac.placeholder")).italics().size(13.0).color(theme.text_secondary)); }
+ else {
+                    for (idx, sym) in state.selected_symbols.iter().enumerate() {
+                        let tag = egui::Button::new(
+                            egui::RichText::new(format!("{} {}", sym.icon, sym.label))
+                                .size(12.0)
+                                .color(sym.category.text_color())
+                                .strong(),
+                        )
+                        .fill(sym.category.bg_color())
+                        .corner_radius(egui::CornerRadius::same(6));
+                        if ui.add(tag).on_hover_text(t!("aac.remove_pictogram_tooltip")).clicked() {
+                            state.selected_symbols.remove(idx);
+                            play_earcon(Earcon::Navigation);
+                            break;
+                        }
+                    }
+                }
+            });
+        });
+
+    if let Some(ref expanded) = state.expanded_sentence {
+        ui.add_space(3.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("✨").size(14.0));
+            ui.label(egui::RichText::new(format!("« {expanded} »")).size(14.0).strong().color(egui::Color32::from_rgb(255, 230, 120)));
+        });
+    }
+
+    ui.add_space(4.0);
+
+    // 2. Boutons d'action (Oraliser, Expansion IA, Effacer, Basculer Clavier)
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+
+        // Bouton Expansion IA
+        let ai_expand_btn = egui::Button::new(
+            egui::RichText::new(t!("aac.expand_ai"))
+                .size(12.0)
+                .color(theme.control_bg)
+                .strong(),
+        )
+        .fill(theme.accent)
+        .corner_radius(egui::CornerRadius::same(6));
+        let ai_id = ui.make_persistent_id("dwell_aac_ai_expand");
+        let ai_resp = ui.add_enabled(!state.selected_symbols.is_empty(), ai_expand_btn);
+        if (ai_resp.clicked() || apply_dwell_to_response(ui, dwell_state, ai_id, &ai_resp)) && !state.selected_symbols.is_empty() {
+            state.is_expanding = true;
+            let cur_lang = get_active_app_language();
+            expand_aac_symbols_with_llm(&state.selected_symbols, &cur_lang, false);
+            play_earcon(Earcon::Navigation);
+        }
+
+        // Bouton Parler direct
+        let speak_btn = ui.button(egui::RichText::new(t!("aac.speak_direct")).size(12.0).strong());
+        let spk_id = ui.make_persistent_id("dwell_aac_speak_raw");
+        if (speak_btn.clicked() || apply_dwell_to_response(ui, dwell_state, spk_id, &speak_btn)) && !state.selected_symbols.is_empty() {
+            let raw_text = state.selected_symbols.iter().map(|s| s.label).collect::<Vec<_>>().join(", ");
+            output_event = Some(FloatingCardOutput::Speak(raw_text));
+            play_earcon(Earcon::Success);
+        }
+
+        // Effacer
+        let clear_btn = ui.button(t!("aac.clear_all"));
+        let clr_id = ui.make_persistent_id("dwell_aac_clear");
+        if clear_btn.clicked() || apply_dwell_to_response(ui, dwell_state, clr_id, &clear_btn) {
+            state.selected_symbols.clear();
+            state.expanded_sentence = None;
+            play_earcon(Earcon::MicClose);
+        }
+
+        // Bascule vers le clavier virtuel alphabétique
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let kbd_btn = ui.button(egui::RichText::new(t!("aac.switch_to_alphabetical")).size(11.5).color(theme.text_secondary));
+            let kbd_id = ui.make_persistent_id("dwell_aac_to_alphabet");
+            if kbd_btn.clicked() || apply_dwell_to_response(ui, dwell_state, kbd_id, &kbd_btn) {
+                output_event = Some(FloatingCardOutput::Prompt("clavier virtuel".to_string()));
+            }
+        });
+    });
+
+    ui.add_space(4.0);
+    ui.separator();
+    ui.add_space(4.0);
+
+    // 3. Onglets de Catégories Fitzgerald (Jaune, Vert, Bleu, Rose, Orange)
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        for (cat_idx, &cat) in categories.iter().enumerate() {
+            let is_selected = state.active_category == Some(cat) || (state.active_category.is_none() && state.scan_cat_index == cat_idx);
+            let is_scanned_cat = state.scanning_enabled && !state.scan_in_items && state.scan_cat_index == cat_idx;
+
+            let btn = egui::Button::new(
+                egui::RichText::new(cat.display_name())
+                    .size(12.0)
+                    .color(if is_selected { cat.text_color() } else { egui::Color32::WHITE })
+                    .strong(),
+            )
+            .fill(if is_selected { cat.bg_color() } else { theme.control_bg })
+            .stroke(egui::Stroke::new(if is_scanned_cat { 3.0 } else { 1.0 }, if is_scanned_cat { egui::Color32::WHITE } else { theme.border }))
+            .corner_radius(egui::CornerRadius::same(8));
+
+            let resp = ui.add(btn);
+            let cat_dwell_id = ui.make_persistent_id(format!("dwell_aac_cat_{cat_idx}"));
+            if resp.clicked() || apply_dwell_to_response(ui, dwell_state, cat_dwell_id, &resp) {
+                state.active_category = Some(cat);
+                state.scan_cat_index = cat_idx;
+                state.scan_in_items = false;
+                play_earcon(Earcon::Navigation);
+            }
+        }
+    });
+
+    ui.add_space(6.0);
+
+    // 4. Grille de pictogrammes
+    let grid_id = ui.id().with("aac_pictogram_grid");
+    egui::ScrollArea::vertical().id_salt(grid_id).show(ui, |ui| {
+        egui::Grid::new(grid_id.with("inner_grid"))
+            .num_columns(5)
+            .spacing([6.0, 6.0])
+            .show(ui, |ui| {
+                for (item_idx, item) in items_in_cat.iter().enumerate() {
+                    if item_idx > 0 && item_idx % 5 == 0 {
+                        ui.end_row();
+                    }
+
+                    let is_scanned_item = state.scanning_enabled && state.scan_in_items && state.scan_item_index == item_idx;
+                    let item_id = ui.make_persistent_id(format!("dwell_aac_item_{item_idx}"));
+
+                    let picto_btn = egui::Button::new(
+                        egui::RichText::new(format!("{}\n{}", item.icon, item.label))
+                            .size(14.0)
+                            .color(item.category.text_color())
+                            .strong(),
+                    )
+                    .min_size(egui::vec2(110.0, 70.0))
+                    .wrap()
+                    .fill(item.category.bg_color())
+                    .stroke(egui::Stroke::new(if is_scanned_item { 3.5 } else { 1.5 }, if is_scanned_item { egui::Color32::WHITE } else { egui::Color32::from_rgba_unmultiplied(0, 0, 0, 80) }))
+                    .corner_radius(egui::CornerRadius::same(10));
+
+                    let resp = ui.add(picto_btn);
+                    if resp.clicked() || apply_dwell_to_response(ui, dwell_state, item_id, &resp) {
+                        state.selected_symbols.push(item.clone());
+                        play_earcon(Earcon::Success);
+                        // Amélioration accessibilité : sauter directement sur "Valider"
+                        state.scan_item_index = items_in_cat.len();
+                    }
+                }
+
+                // --- Boutons d'action à la fin de la catégorie ---
+
+                // 1. Bouton "Valider et Parler"
+                let speak_idx = items_in_cat.len();
+                if speak_idx > 0 && speak_idx % 5 == 0 { ui.end_row(); }
+                let is_scanned_speak = state.scanning_enabled && state.scan_in_items && state.scan_item_index == speak_idx;
+                let speak_id = ui.make_persistent_id("dwell_aac_item_speak_validate");
+                let speak_btn = egui::Button::new(egui::RichText::new(t!("aac.btn_validate_speak")).size(13.0).strong())
+                    .min_size(egui::vec2(110.0, 70.0)).wrap().fill(theme.control_bg)
+                    .stroke(egui::Stroke::new(if is_scanned_speak { 3.5 } else { 1.5 }, if is_scanned_speak { egui::Color32::from_rgb(0, 230, 118) } else { theme.border }))
+                    .corner_radius(egui::CornerRadius::same(10));
+
+                let speak_resp = ui.add_enabled(!state.selected_symbols.is_empty(), speak_btn);
+                if (speak_resp.clicked() || apply_dwell_to_response(ui, dwell_state, speak_id, &speak_resp)) && !state.selected_symbols.is_empty() {
+                    if let Some(ref expanded) = state.expanded_sentence {
+                        output_event = Some(FloatingCardOutput::Speak(expanded.clone()));
+                        state.selected_symbols.clear();
+                        state.expanded_sentence = None;
+                        state.scan_in_items = false;
+                        play_earcon(Earcon::Success);
+                    } else {
+                        state.is_expanding = true;
+                        let cur_lang = get_active_app_language();
+                        expand_aac_symbols_with_llm(&state.selected_symbols, &cur_lang, true);
+                    }
+                }
+
+                // 2. Bouton "Effacer dernier" (Backspace)
+                let clear_last_idx = items_in_cat.len() + 1;
+                if clear_last_idx > 0 && clear_last_idx % 5 == 0 { ui.end_row(); }
+                let is_scanned_clear = state.scanning_enabled && state.scan_in_items && state.scan_item_index == clear_last_idx;
+                let clear_id = ui.make_persistent_id("dwell_aac_item_clear_last");let clear_btn = egui::Button::new(egui::RichText::new(t!("aac.btn_clear_last")).size(13.0).strong())
+                    .min_size(egui::vec2(110.0, 70.0)).wrap().fill(theme.control_bg)
+                    .stroke(egui::Stroke::new(if is_scanned_clear { 3.5 } else { 1.5 }, if is_scanned_clear { egui::Color32::WHITE } else { theme.border }))
+                    .corner_radius(egui::CornerRadius::same(10));
+
+                let clear_resp = ui.add_enabled(!state.selected_symbols.is_empty(), clear_btn);
+                if (clear_resp.clicked() || apply_dwell_to_response(ui, dwell_state, clear_id, &clear_resp)) && !state.selected_symbols.is_empty() {
+                    if state.selected_symbols.pop().is_some() {
+                        state.expanded_sentence = None;
+                        play_earcon(Earcon::Navigation);
+                    }
+                }
+
+                // 3. Bouton "Retour"
+                let back_idx = items_in_cat.len() + 2;
+                if back_idx > 0 && back_idx % 5 == 0 { ui.end_row(); }
+                let is_scanned_back = state.scanning_enabled && state.scan_in_items && state.scan_item_index == back_idx;
+                let back_id = ui.make_persistent_id("dwell_aac_item_back");
+                let back_btn = egui::Button::new(egui::RichText::new(t!("aac.btn_back_categories")).size(13.0).strong())
+                    .min_size(egui::vec2(110.0, 70.0)).wrap().fill(theme.control_bg)
+                    .stroke(egui::Stroke::new(if is_scanned_back { 3.5 } else { 1.5 }, if is_scanned_back { egui::Color32::WHITE } else { theme.border }))
+                    .corner_radius(egui::CornerRadius::same(10));
+
+                let back_resp = ui.add(back_btn);
+                if back_resp.clicked() || apply_dwell_to_response(ui, dwell_state, back_id, &back_resp) {
+                    state.scan_in_items = false;
+                    state.scan_item_index = 0;
+                    play_earcon(Earcon::Navigation);
+                }
+            });
+    });
+
+    if let Ok(mut guard) = AAC_BOARD_STATE.lock() {
+        *guard = Some(state);
+    }
+
+    output_event
+}
+
 pub fn get_keyboard_model_path() -> PathBuf {
     if let Ok(p) = std::env::var("KEYBOARD_MODEL_PATH") {
         let pb = PathBuf::from(p.trim());
@@ -348,6 +946,18 @@ impl Default for VirtualKeyboardState {
 }
 
 static KEYBOARD_STATE: Mutex<Option<VirtualKeyboardState>> = Mutex::new(None);
+
+pub fn reset_keyboard_scan() {
+    let mut guard = KEYBOARD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref mut state) = *guard {
+        state.scan_stage = ScanningStage::Row;
+        state.current_row = 0;
+        state.current_col = 0;
+        state.last_scan_tick = Instant::now();
+    } else {
+        *guard = Some(VirtualKeyboardState::default());
+    }
+}
 
 fn get_letter_rows(lang: &str) -> &'static [&'static [&'static str]] {
     match lang {
@@ -864,7 +1474,7 @@ pub fn render_keyboard_view(
         .fill(egui::Color32::from_rgb(12, 14, 18))
         .stroke(egui::Stroke::new(1.2, theme.accent))
         .corner_radius(egui::CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(12, 10))
+        .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let placeholder = t!("keyboard.placeholder").to_string();
@@ -878,11 +1488,11 @@ pub fn render_keyboard_view(
                 } else {
                     egui::Color32::WHITE
                 };
-                ui.label(egui::RichText::new(display_text).size(18.0).color(color).strong());
+                ui.label(egui::RichText::new(display_text).size(17.0).color(color).strong());
             });
         });
 
-    ui.add_space(6.0);
+    ui.add_space(3.0);
 
     // 2. Rangée des prédictions de mots
     let is_row_0_active = state.scanning_enabled && state.current_row == 0;
@@ -908,15 +1518,15 @@ pub fn render_keyboard_view(
         }
     });
 
-    ui.add_space(6.0);
+    ui.add_space(3.0);
     ui.separator();
-    ui.add_space(4.0);
+    ui.add_space(3.0);
 
     // 3. Grille des lettres (rangées adaptées à la langue)
     let total_w = ui.available_width();
     let max_cols_in_grid = letter_rows.iter().map(|r| r.len()).max().unwrap_or(8);
-    let key_w = ((total_w - (max_cols_in_grid as f32 - 1.0) * 6.0) / max_cols_in_grid as f32).max(28.0);
-    let key_h = 38.0;
+    let key_w = ((total_w - (max_cols_in_grid as f32 - 1.0) * 5.0) / max_cols_in_grid as f32).max(28.0);
+    let key_h = 34.0;
 
     for (r_idx, row) in letter_rows.iter().enumerate() {
         let row_num = r_idx + 1;
@@ -924,7 +1534,7 @@ pub fn render_keyboard_view(
         let is_row_highlight = is_current_row && state.scan_stage == ScanningStage::Row;
 
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.spacing_mut().item_spacing.x = 5.0;
             for (c_idx, &letter) in row.iter().enumerate() {
                 let is_key_highlight = is_current_row && state.scan_stage == ScanningStage::Key && state.current_col == c_idx;
 
@@ -959,19 +1569,26 @@ pub fn render_keyboard_view(
                 }
             }
         });
-        ui.add_space(4.0);
+        ui.add_space(3.0);
     }
 
-    ui.add_space(4.0);
     ui.separator();
-    ui.add_space(6.0);
+    ui.add_space(3.0);
+
+    // Bouton de bascule vers la grille de pictogrammes CAA
+    ui.horizontal(|ui| {
+        let aac_switch_btn = ui.button(egui::RichText::new(t!("keyboard.switch_to_aac")).size(11.5).color(theme.accent).strong());
+        if aac_switch_btn.clicked() {
+            output_event = Some(FloatingCardOutput::Prompt("mode caa".to_string()));
+        }
+    });
 
     // 4. Rangée des actions (Espace, Effacer, Parler, Tchat, Insérer, Vider) localisée
     let is_actions_row = state.scanning_enabled && state.current_row == (total_rows - 1);
     let is_action_row_selected = is_actions_row && state.scan_stage == ScanningStage::Row;
 
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.spacing_mut().item_spacing.x = 5.0;
 
         let actions: [(String, usize); 6] = [
             (t!("keyboard.btn_space").to_string(), 0),
@@ -1002,11 +1619,11 @@ pub fn render_keyboard_view(
                 theme.text_primary
             };
 
-            let btn = egui::Button::new(egui::RichText::new(label.as_str()).size(13.0).color(txt_col).strong())
+            let btn = egui::Button::new(egui::RichText::new(label.as_str()).size(12.5).color(txt_col).strong())
                 .fill(bg)
                 .stroke(egui::Stroke::new(if is_action_key { 2.5 } else { 1.0 }, theme.border))
                 .corner_radius(egui::CornerRadius::same(6))
-                .min_size(egui::vec2(68.0, 34.0));
+                .min_size(egui::vec2(66.0, 32.0));
 
             let resp = ui.add(btn);
             let act_dwell_id = ui.make_persistent_id(format!("dwell_act_{col_idx}"));
@@ -1058,7 +1675,7 @@ pub fn render_keyboard_view(
         }
     });
 
-    ui.add_space(4.0);
+    ui.add_space(3.0);
     ui.horizontal(|ui| {
         ui.checkbox(&mut state.scanning_enabled, t!("keyboard.auto_scan"));
         let mut ms = state.scan_interval.as_millis() as u64;

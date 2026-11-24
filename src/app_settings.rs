@@ -3,7 +3,6 @@ use rust_i18n::t;
 use std::time::{Duration, Instant};
 use eframe::egui;
 use eframe::egui::Color32;
-use egui::TextBuffer;
 use crate::clipboard::{
     get_clipboard_text, get_plain_clipboard_text
 };
@@ -135,6 +134,8 @@ impl OverlayApp {
                             &messages,
                             0.7,
                             80,
+
+                            false
                         ).await.map_err(|e| e.to_string())?;
                         crate::agent_backend::parse_llm_response_text(resp, config.provider).await
                     }),
@@ -686,6 +687,23 @@ impl OverlayApp {
                                 });
                                 ui.add_space(4.0);
 
+                                // Option de contrôle des tokens distants en arrière-plan
+                                let mut allow_remote_proactive = crate::scheduler::PROACTIVE_ALLOW_REMOTE.load(Ordering::Relaxed);
+                                let label_color = if allow_remote_proactive { theme.accent } else { theme.text_secondary };
+                                if ui.checkbox(
+                                    &mut allow_remote_proactive,
+                                    egui::RichText::new("Autoriser les réveils spontanés sur les LLMs distants (consomme des tokens)")
+                                        .size(11.0)
+                                        .color(label_color),
+                                ).on_hover_text("Par défaut désactivé : les réveils en arrière-plan (compagnon proactif, vérification d'écran) sont réservés au modèle local gratuit pour ne pas consommer vos crédits d'API distants.").changed() {
+                                    crate::scheduler::PROACTIVE_ALLOW_REMOTE.store(allow_remote_proactive, Ordering::SeqCst);
+                                    let val_str = if allow_remote_proactive { "true" } else { "false" };
+                                    let _ = write_env_var_to_file(".env", "PROACTIVE_ALLOW_REMOTE", val_str);
+                                    std::env::set_var("PROACTIVE_ALLOW_REMOTE", val_str);
+                                    play_earcon(Earcon::Success);
+                                }
+                                ui.add_space(4.0);
+
                                 if self.selected_provider_modal == LlmProvider::Local {
                                     let active_preset = local_llm::get_active_preset();
                                     egui::Frame::new()
@@ -1168,6 +1186,9 @@ impl OverlayApp {
                                                     VoiceProfile::Paul => ("🎩", t!("voice.profile_paul").to_string()),
                                                     VoiceProfile::Sylvie => ("🍁", t!("voice.profile_sylvie").to_string()),
                                                     VoiceProfile::Jean => ("⚡", t!("voice.profile_jean").to_string()),
+                                                    VoiceProfile::Chinese => ("🇨🇳", "Chinois".to_string()),
+                                                    VoiceProfile::Russian => ("🇷🇺", "Russe".to_string()),
+                                                    VoiceProfile::Japanese => ("🇯🇵", "Japonais".to_string()),
                                                     VoiceProfile::Clone => ("🧬", "Clonée".to_string()),
                                                 };
                                                 let btn_text = format!("{icon} {label}");
@@ -1648,6 +1669,9 @@ impl OverlayApp {
                                                     VoiceProfile::Paul => ("🎩", t!("voice.profile_paul").to_string()),
                                                     VoiceProfile::Sylvie => ("🍁", t!("voice.profile_sylvie").to_string()),
                                                     VoiceProfile::Jean => ("⚡", t!("voice.profile_jean").to_string()),
+                                                    VoiceProfile::Chinese => ("🇨🇳", "Chinois".to_string()),
+                                                    VoiceProfile::Russian => ("🇷🇺", "Russe".to_string()),
+                                                    VoiceProfile::Japanese => ("🇯🇵", "Japonais".to_string()),
                                                     VoiceProfile::Clone => {
                                                         let g = if self.voice_clone_gender == "male" { t!("voice.gender_male") } else { t!("voice.gender_female") };
                                                         ("🧬", t!("voice.profile_clone", gender = g).to_string())

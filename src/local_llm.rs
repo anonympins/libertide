@@ -811,6 +811,20 @@ pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<Comma
         return vec![CommandTag::HomeAutomation, CommandTag::CareAndComfort];
     }
 
+    // Détection immédiate Communication Alternative et Augmentée (CAA) / ARASAAC
+    if lower.contains("caa")
+        || lower.contains("pictogramme")
+        || lower.contains("pictogrammes")
+        || lower.contains("arasaac")
+        || lower.contains("symbolstix")
+        || lower.contains("tableau de communication")
+        || lower.contains("grille de communication")
+        || lower.contains("non verbal")
+        || lower.contains("non-verbal")
+    {
+        return vec![CommandTag::AacSymbolCommunication, CommandTag::FloatingCardOrForm];
+    }
+
     if lower.contains("twitch")
         || lower.contains("streamer")
         || lower.contains("stream twitch")
@@ -1813,7 +1827,7 @@ Règles SANCTUAIRE SENSORIEL & CALME COGNITIF (AUTISME / TSA / SURCHARGE SENSORI
 Règles COMMUNICATION ALTERNATIVE & AMÉLIORÉE (CAA / APHASIE / NON-VERBAL / PICTOGRAMMES) :
 - Pour les personnes aphasiques (post-AVC), dysphasiques ou non-verbales s'exprimant par mots-clés bruts, pictogrammes ou symboles simples.
 - Règle 1 (Expansion syntaxique naturelle) : Si la demande est télégraphique (ex: 'eau soif', 'froid dehors', 'maman venir'), reformule-la en une phrase complète, polie et bienveillante pour l'entourage ("J'ai soif, pourrais-je avoir un verre d'eau s'il vous plaît ?").
-- Règle 2 (Tableau de communication dynamique) : Projette systématiquement une carte volante avec pictogrammes cliquables ou emojis via "show_floating_card" (card_type: "table" ou "markdown", id: "caa_board", title: "Tableau d'expression rapide").
+- Règle 2 (Tableau de communication dynamique) : Projette systématiquement la grille de pictogrammes ARASAAC avec code couleur de Fitzgerald via l'action {"action": "show_floating_card", "id": "caa_board", "title": "💬 Grille de Communication CAA (ARASAAC)", "card_type": "aac", "data": {}}.
 - Règle 3 (Porte-voix instantané) : La narration sert de porte-voix pour que l'ordinateur parle à la place de la personne auprès des soignants et de la famille.
 "#);
             }
@@ -2076,7 +2090,7 @@ Règles DOMOTIQUE LOCALE, HOME ASSISTANT, KNX & BACNET (TAG HOME_AUTOMATION) :
                 prompt.push_str("- {\"action\": \"navigate_back\"}\n");
             }
             CommandTag::AacSymbolCommunication => {
-                prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"caa_board\", \"title\": \"Tableau pictogrammes\", \"card_type\": \"markdown\", \"data\": {\"text\": \"...\"}}\n");
+                prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"caa_board\", \"title\": \"💬 Grille de Communication CAA (ARASAAC)\", \"card_type\": \"aac\", \"data\": {}}\n");
             }
             CommandTag::VitalCareAndCaregiverAlert => {
                 prompt.push_str("- {\"action\": \"show_floating_card\", \"id\": \"caregiver_alert\", \"title\": \"🚨 APPEL SOIGNANT\", \"card_type\": \"stats\", \"data\": {...}}\n");

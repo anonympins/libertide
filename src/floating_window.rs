@@ -96,6 +96,9 @@ pub fn update_open_floating_cards(cards: &[FloatingCard]) {
                     FloatingContentType::VirtualKeyboard => {
                         ("virtual_keyboard", t!("keyboard.card_summary").to_string())
                     }
+                    FloatingContentType::AacBoard => {
+                        ("aac_board", "Tableau de communication CAA (ARASAAC / Fitzgerald)".to_string())
+                    }
                     FloatingContentType::Form { fields, .. } => {
                         let f_summary = fields.iter().map(|f| f.label.clone()).collect::<Vec<_>>().join(", ");
                         ("form", format!("Fields: {}", f_summary))
@@ -197,6 +200,7 @@ pub enum FloatingContentType {
     },
     Instrument,
     VirtualKeyboard,
+    AacBoard,
 }
 
 /// Garantit que chaque champ d'un formulaire dispose d'un ID valide et unique
@@ -444,6 +448,9 @@ impl FloatingCard {
             "virtual_keyboard" | "keyboard" | "clavier" => {
                 FloatingContentType::VirtualKeyboard
             }
+            "aac" | "caa" | "arasaac" | "pictograms" | "pictogrammes" => {
+                FloatingContentType::AacBoard
+            }
             _ => {
                 let text = if let Some(s) = data.as_str() {
                     s.to_string()
@@ -573,16 +580,19 @@ impl FloatingCard {
             FloatingContentType::VirtualKeyboard => {
                 speech.push_str(&t!("keyboard.speech_description"));
             }
+            FloatingContentType::AacBoard => {
+                speech.push_str("Tableau de communication alternative et augmentée CAA basé sur les pictogrammes ARASAAC et la grammaire de Fitzgerald.");
+            }
         }
         speech
     }
 
     pub fn show(&mut self, ctx: &egui::Context, dwell_state: &mut DwellState, theme: &ThemeColors) -> Option<FloatingCardOutput> {
+        let viewport_id = egui::ViewportId::from_hash_of(&self.id);
         if !self.open {
+            ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Close);
             return None;
         }
-
-        let viewport_id = egui::ViewportId::from_hash_of(&self.id);
         let icon_prefix = match &self.content {
             FloatingContentType::Form { .. } => "📝",
             FloatingContentType::Table { .. } => "📊",
@@ -591,6 +601,7 @@ impl FloatingCard {
             FloatingContentType::Subtitles { .. } => "🎙️",
             FloatingContentType::Instrument => "🎵",
             FloatingContentType::VirtualKeyboard => "⌨️",
+            FloatingContentType::AacBoard => "💬",
         };
         let viewport_title = format!("{icon_prefix} {}", self.title);
 
@@ -600,8 +611,14 @@ impl FloatingCard {
             FloatingContentType::Markdown { .. } => [560.0, 380.0],
             FloatingContentType::Table { .. } => [580.0, 340.0],
             FloatingContentType::Instrument => [640.0, 420.0],
-            FloatingContentType::VirtualKeyboard => [660.0, 360.0],
+            FloatingContentType::VirtualKeyboard => [660.0, 324.0],
+            FloatingContentType::AacBoard => [680.0, 440.0],
             _ => [480.0, 280.0],
+        };
+
+        let min_inner_size = match &self.content {
+            FloatingContentType::VirtualKeyboard => [520.0, 316.0],
+            _ => [320.0, 180.0],
         };
 
         let builder = egui::ViewportBuilder::default()
@@ -610,7 +627,7 @@ impl FloatingCard {
             .with_decorations(false)
             .with_always_on_top()
             .with_inner_size(default_size)
-            .with_min_inner_size([320.0, 180.0])
+            .with_min_inner_size(min_inner_size)
             .with_resizable(true);
 
         let mut requested_output = None;
@@ -621,6 +638,7 @@ impl FloatingCard {
             let is_subtitles = matches!(self.content, FloatingContentType::Subtitles { .. });
             if vp_ctx.input(|i| i.viewport().close_requested()) {
                 self.open = false;
+                vp_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 if is_subtitles {
                     stop_live_subtitles();
                     crate::audio::stop_live_subtitles();
@@ -629,17 +647,19 @@ impl FloatingCard {
 
             let is_maximized = vp_ctx.input(|i| i.viewport().maximized.unwrap_or(false));
 
+            let is_keyboard = matches!(self.content, FloatingContentType::VirtualKeyboard | FloatingContentType::AacBoard);
             let is_subtitles = matches!(self.content, FloatingContentType::Subtitles { .. });
             let bg_fill = if is_subtitles {
                 egui::Color32::from_rgb(8, 8, 12)
             } else {
                 theme.modal_bg
             };
+            let frame_margin = if is_keyboard { egui::Margin::symmetric(10, 6) } else { egui::Margin::symmetric(12, 10) };
             let panel_frame = egui::Frame::new()
                 .fill(bg_fill)
                 .stroke(egui::Stroke::new(1.2, theme.border))
                 .corner_radius(egui::CornerRadius::same(12))
-                .inner_margin(egui::Margin::symmetric(12, 10));
+                .inner_margin(frame_margin);
 
             egui::CentralPanel::default()
                 .frame(panel_frame)
@@ -741,6 +761,7 @@ impl FloatingCard {
                             let close_id = ui.make_persistent_id(format!("dwell_close_card_{}", self.id));
                             if apply_dwell_to_response(ui, dwell_state, close_id, &close_btn) {
                                 self.open = false;
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                                 if is_subtitles {
                                     stop_live_subtitles();
                                     crate::audio::stop_live_subtitles();
@@ -772,9 +793,10 @@ impl FloatingCard {
                     let card_title = self.title.clone();
                     let mut close_window = false;
 
+                    let shrink_y = matches!(self.content, FloatingContentType::VirtualKeyboard | FloatingContentType::AacBoard);
                     egui::ScrollArea::vertical()
                         .id_salt(format!("card_scroll_vert_{card_id}"))
-                        .auto_shrink([false, false])
+                        .auto_shrink([false, shrink_y])
                         .show(ui, |ui| {
                             handle_drag_to_scroll(ui, false, true);
                             match &mut self.content {
@@ -1344,6 +1366,11 @@ impl FloatingCard {
                                         requested_output = Some(out);
                                     }
                                 }
+                                FloatingContentType::AacBoard => {
+                                    if let Some(out) = crate::virtual_keyboard::render_aac_board_view(ui, dwell_state, theme) {
+                                        requested_output = Some(out);
+                                    }
+                                }
                             }
                         });
 
@@ -1395,10 +1422,15 @@ impl FloatingCard {
 
                     if close_window {
                         self.open = false;
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
         });
-        ctx.request_repaint_of(viewport_id);
+        if self.open {
+            ctx.request_repaint_of(viewport_id);
+        } else {
+            ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Close);
+        }
 
         requested_output
     }

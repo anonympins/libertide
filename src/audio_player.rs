@@ -210,13 +210,7 @@ impl AudioPlayer {
                 }
                 let converted = if let Some((cx, cy)) = spatial_coords {
                     // Spatialisation 3D binaurale de la source mono vers les canaux stéréo
-                    #[cfg(windows)]
-                    let (scr_w, scr_h) = {
-                        let wa = crate::window_util::get_desktop_work_area();
-                        ((wa.right - wa.left).max(800) as f32, (wa.bottom - wa.top).max(600) as f32)
-                    };
-                    #[cfg(not(windows))]
-                    let (scr_w, scr_h) = (1920.0f32, 1080.0f32);
+                    let (scr_w, scr_h) = crate::window_util::get_desktop_screen_dimensions();
 
                     let stereo_samples = spatialize_mono_to_stereo(&raw_samples, src_rate, cx, cy, scr_w, scr_h);
                     if channels == 2 {

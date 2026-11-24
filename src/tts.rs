@@ -138,7 +138,8 @@ pub fn split_into_sentences(text: &str) -> Vec<String> {
         let c = chars[i];
         current.push(c);
 
-        let is_sentence_ender = c == '.' || c == '!' || c == '?' || c == ';' || c == ':';
+        let is_cjk_ender = c == '。' || c == '！' || c == '？' || c == '；';
+        let is_sentence_ender = c == '.' || c == '!' || c == '?' || c == ';' || c == ':' || is_cjk_ender;
         if is_sentence_ender {
             // Vérification si c'est un point décimal (ex: 3.5 ou 1.0)
             let is_decimal = c == '.'
@@ -166,7 +167,7 @@ pub fn split_into_sentences(text: &str) -> Vec<String> {
                 false
             };
 
-            let next_is_space_or_end = i + 1 >= len || chars[i + 1].is_whitespace();
+            let next_is_space_or_end = i + 1 >= len || chars[i + 1].is_whitespace() || is_cjk_ender;
 
             if !is_decimal && !is_index_prefix && !is_abbreviation && next_is_space_or_end {
                 while i + 1 < len && (chars[i + 1] == '.' || chars[i + 1] == '!' || chars[i + 1] == '?') {
@@ -231,22 +232,25 @@ unsafe fn find_and_apply_voice(
         fn CoTaskMemFree(pv: *const std::ffi::c_void);
     }
 
-    let (preferred_names, is_female): (&[&str], bool) = match profile {
-        VoiceGender::Denise => (&["denise", "hortense", "julie"], true),
-        VoiceGender::Henri => (&["henri", "paul", "claude"], false),
-        VoiceGender::Hortense => (&["hortense", "denise", "julie"], true),
-        VoiceGender::Paul => (&["paul", "henri", "claude"], false),
-        VoiceGender::Sylvie => (&["sylvie", "harmonie", "denise"], true),
-        VoiceGender::Jean => (&["jean", "mathieu", "henri", "paul"], false),
+    let (preferred_names, is_female, target_lang): (&[&str], bool, &str) = match profile {
+        VoiceGender::Denise => (&["denise", "hortense", "julie"], true, "fr"),
+        VoiceGender::Henri => (&["henri", "paul", "claude"], false, "fr"),
+        VoiceGender::Hortense => (&["hortense", "denise", "julie"], true, "fr"),
+        VoiceGender::Paul => (&["paul", "henri", "claude"], false, "fr"),
+        VoiceGender::Sylvie => (&["sylvie", "harmonie", "denise"], true, "fr"),
+        VoiceGender::Jean => (&["jean", "mathieu", "henri", "paul"], false, "fr"),
+        VoiceGender::Chinese => (&["huihui", "yaoyao", "kangkang", "xiaoxiao", "hanhan"], true, "zh"),
+        VoiceGender::Russian => (&["irina", "pavel", "ekaterina"], true, "ru"),
+        VoiceGender::Japanese => (&["haruka", "ayumi", "ichiro", "sayaka"], true, "ja"),
         VoiceGender::Clone => {
             let is_male = std::env::var("VOICE_CLONE_GENDER")
                 .ok()
                 .or_else(|| read_env_var_from_file(".env", "VOICE_CLONE_GENDER"))
                 .map_or(false, |g| g.trim().eq_ignore_ascii_case("male") || g.trim().eq_ignore_ascii_case("homme"));
             if is_male {
-                (&["henri", "paul", "claude"], false)
+                (&["henri", "paul", "claude"], false, "fr")
             } else {
-                (&["denise", "hortense", "julie"], true)
+                (&["denise", "hortense", "julie"], true, "fr")
             }
         }
     };
@@ -301,16 +305,29 @@ unsafe fn find_and_apply_voice(
 
             let id_lower = id_str.to_lowercase();
 
-            let is_french = token_matches_attributes(&token, w!("Language=40c"))
-                || token_matches_attributes(&token, w!("Language=c0c"))
-                || id_lower.contains("fr-fr")
-                || id_lower.contains("frfr")
-                || id_lower.contains("fr-ca")
-                || id_lower.contains("frca")
-                || id_lower.contains("_40c")
-                || id_lower.contains("-40c");
+            let lang_match = match target_lang {
+                "zh" => token_matches_attributes(&token, w!("Language=804"))
+                    || token_matches_attributes(&token, w!("Language=404"))
+                    || id_lower.contains("zh-cn")
+                    || id_lower.contains("zh-tw")
+                    || id_lower.contains("chinese"),
+                "ru" => token_matches_attributes(&token, w!("Language=419"))
+                    || id_lower.contains("ru-ru")
+                    || id_lower.contains("russian"),
+                "ja" => token_matches_attributes(&token, w!("Language=411"))
+                    || id_lower.contains("ja-jp")
+                    || id_lower.contains("japanese"),
+                _ => token_matches_attributes(&token, w!("Language=40c"))
+                    || token_matches_attributes(&token, w!("Language=c0c"))
+                    || id_lower.contains("fr-fr")
+                    || id_lower.contains("frfr")
+                    || id_lower.contains("fr-ca")
+                    || id_lower.contains("frca")
+                    || id_lower.contains("_40c")
+                    || id_lower.contains("-40c"),
+            };
 
-            if !is_french {
+            if !lang_match {
                 continue;
             }
 
@@ -630,6 +647,20 @@ pub fn find_espeak_ng_data(base_dir: &Path) -> Option<PathBuf> {
         if is_valid_espeak_dir(&p_direct) {
             return Some(p_direct);
         }
+        for sibling_name in &["female", "male", "ru", "zh", "ja"] {
+            let sib_dir = parent.join(sibling_name).join("espeak-ng-data");
+            if is_valid_espeak_dir(&sib_dir) {
+                return Some(sib_dir);
+            }
+            if let Ok(entries) = std::fs::read_dir(parent.join(sibling_name)) {
+                for entry in entries.flatten() {
+                    let sub = entry.path().join("espeak-ng-data");
+                    if is_valid_espeak_dir(&sub) {
+                        return Some(sub);
+                    }
+                }
+            }
+        }
     }
     let fallback = Path::new("models").join("voice-clone").join("espeak-ng-data");
     if is_valid_espeak_dir(&fallback) {
@@ -719,9 +750,23 @@ pub fn ensure_voice_clone_model_for_gender(model_dir: &Path, gender: &str) -> Re
 
     let _ = std::fs::create_dir_all(model_dir);
     let is_male = gender.eq_ignore_ascii_case("male") || gender.eq_ignore_ascii_case("homme");
+    let is_ru = gender == "ru" || gender == "russian" || gender == "russe";
+    let is_zh = gender == "zh" || gender == "chinese" || gender == "chinois";
+    let is_ja = gender == "ja" || gender == "japanese" || gender == "japonais";
+
+    let lang_display = if is_ru {
+        "russe (Irina)"
+    } else if is_zh {
+        "chinois (Huayan)"
+    } else if is_ja {
+        "japonais"
+    } else if is_male {
+        "homme (Tom)"
+    } else {
+        "femme (Siwis)"
+    };
     println!(
-        "[TTS Clone] Modèle local ({}) manquant dans '{}' : initialisation du téléchargement...",
-        if is_male { "homme" } else { "femme" },
+        "[TTS Native] Modèle local ({lang_display}) manquant dans '{}' : initialisation du téléchargement...",
         model_dir.display()
     );
 
@@ -741,6 +786,20 @@ pub fn ensure_voice_clone_model_for_gender(model_dir: &Path, gender: &str) -> Re
 
     let candidate_urls: Vec<String> = if let Some(u) = custom_url {
         vec![u]
+    } else if is_ru {
+        vec![
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-ru_RU-irina-medium.tar.bz2".to_string(),
+            "https://huggingface.co/csukuangfj/vits-piper-ru_RU-irina-medium/resolve/main/vits-piper-ru_RU-irina-medium.tar.bz2".to_string(),
+        ]
+    } else if is_zh {
+        vec![
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-zh_CN-huayan-medium.tar.bz2".to_string(),
+            "https://huggingface.co/csukuangfj/vits-piper-zh_CN-huayan-medium/resolve/main/vits-piper-zh_CN-huayan-medium.tar.bz2".to_string(),
+        ]
+    } else if is_ja {
+        vec![
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-ja_JP-*-medium.tar.bz2".to_string(),
+        ]
     } else if is_male {
         vec![
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-fr_FR-tom-medium.tar.bz2".to_string(),
@@ -816,7 +875,13 @@ pub fn ensure_voice_clone_model_for_gender(model_dir: &Path, gender: &str) -> Re
 
     if !downloaded {
         println!("[TTS Clone] Téléchargement direct des fichiers séparés (model.onnx + tokens.txt)...");
-        let (onnx_url, tokens_url) = if is_male {
+        let (onnx_url, tokens_url) = if is_ru {
+            ("https://huggingface.co/csukuangfj/vits-piper-ru_RU-irina-medium/resolve/main/ru_RU-irina-medium.onnx",
+             "https://huggingface.co/csukuangfj/vits-piper-ru_RU-irina-medium/resolve/main/tokens.txt")
+        } else if is_zh {
+            ("https://huggingface.co/csukuangfj/vits-piper-zh_CN-huayan-medium/resolve/main/zh_CN-huayan-medium.onnx",
+             "https://huggingface.co/csukuangfj/vits-piper-zh_CN-huayan-medium/resolve/main/tokens.txt")
+        } else if is_male {
             ("https://huggingface.co/csukuangfj/vits-piper-fr_FR-tom-medium/resolve/main/fr_FR-tom-medium.onnx",
              "https://huggingface.co/csukuangfj/vits-piper-fr_FR-tom-medium/resolve/main/tokens.txt")
         } else {
@@ -1019,10 +1084,12 @@ impl NativeVoiceCloneBackend {
 
     pub fn new_with_gender(gender: &str) -> Option<Self> {
         let player = AudioPlayer::new().ok()?;
-        let clean_gender = if gender.eq_ignore_ascii_case("male") || gender.eq_ignore_ascii_case("homme") {
-            "male".to_string()
-        } else {
-            "female".to_string()
+        let clean_gender = match gender.to_lowercase().as_str() {
+            "ru" | "russian" | "russe" => "ru".to_string(),
+            "zh" | "chinese" | "chinois" => "zh".to_string(),
+            "ja" | "japanese" | "japonais" => "ja".to_string(),
+            g if g.eq_ignore_ascii_case("male") || g.eq_ignore_ascii_case("homme") => "male".to_string(),
+            _ => "female".to_string(),
         };
         let model_dir = PathBuf::from("models").join("voice-clone").join(&clean_gender);
 
@@ -1059,10 +1126,12 @@ impl NativeVoiceCloneBackend {
     }
 
     pub fn set_gender_str(&mut self, gender: &str) {
-        let clean = if gender.eq_ignore_ascii_case("male") || gender.eq_ignore_ascii_case("homme") {
-            "male".to_string()
-        } else {
-            "female".to_string()
+        let clean = match gender.to_lowercase().as_str() {
+            "ru" | "russian" | "russe" => "ru".to_string(),
+            "zh" | "chinese" | "chinois" => "zh".to_string(),
+            "ja" | "japanese" | "japonais" => "ja".to_string(),
+            g if g.eq_ignore_ascii_case("male") || g.eq_ignore_ascii_case("homme") => "male".to_string(),
+            _ => "female".to_string(),
         };
         if self.gender != clean {
             self.gender = clean;
@@ -1106,7 +1175,7 @@ impl NativeVoiceCloneBackend {
         }
 
         // Repli si le modèle ONNX n'est pas encore téléchargé dans models/voice-clone/
-        Err("Moteur de synthèse vocale Piper VITS non initialisé dans models/voice-clone/.".to_string())
+        Err(format!("Moteur de synthèse vocale Piper VITS ({}) non initialisé dans models/voice-clone/{}.", self.gender, self.gender))
     }
 
     pub fn stop(&self) {
@@ -1766,6 +1835,9 @@ impl SystemTtsBackend for UnixTtsBackend {
             let macos_voice = match self.current_gender {
                 VoiceGender::Denise | VoiceGender::Hortense | VoiceGender::Sylvie => "Amelie",
                 VoiceGender::Henri | VoiceGender::Paul | VoiceGender::Jean => "Thomas",
+                VoiceGender::Chinese => "Tingting",
+                VoiceGender::Russian => "Milena",
+                VoiceGender::Japanese => "Kyoko",
                 VoiceGender::Clone => if is_clone_male { "Thomas" } else { "Amelie" },
             };
             std::process::Command::new("say")
@@ -1784,6 +1856,9 @@ impl SystemTtsBackend for UnixTtsBackend {
                 VoiceGender::Paul => ("male2", "fr+m1"),
                 VoiceGender::Sylvie => ("female3", "fr-ca+f2"),
                 VoiceGender::Jean => ("male3", "fr+m3"),
+                VoiceGender::Chinese => ("female1", "zh"),
+                VoiceGender::Russian => ("female1", "ru"),
+                VoiceGender::Japanese => ("female1", "ja"),
                 VoiceGender::Clone => if is_clone_male { ("male1", "fr+m2") } else { ("female1", "fr+f2") },
             };
 
@@ -1857,15 +1932,20 @@ impl SystemTtsBackend for UnixTtsBackend {
 impl SystemTtsBackend for CompositeTtsBackend {
     fn set_gender(&mut self, gender: VoiceGender) {
         self.current_gender = gender;
-        let is_male = match gender {
-            VoiceGender::Henri | VoiceGender::Paul | VoiceGender::Jean => true,
-            VoiceGender::Denise | VoiceGender::Hortense | VoiceGender::Sylvie => false,
-            VoiceGender::Clone => get_voice_clone_gender() == "male",
+        let target_gender = match gender {
+            VoiceGender::Russian => "ru",
+            VoiceGender::Chinese => "zh",
+            VoiceGender::Japanese => "ja",
+            VoiceGender::Henri | VoiceGender::Paul | VoiceGender::Jean => "male",
+            VoiceGender::Denise | VoiceGender::Hortense | VoiceGender::Sylvie => "female",
+            VoiceGender::Clone => if get_voice_clone_gender() == "male" { "male" } else { "female" },
         };
-        let target_gender = if is_male { "male" } else { "female" };
 
         if gender == VoiceGender::Clone && self.clone_backend.is_none() {
             self.clone_backend = HttpVoiceCloneBackend::new();
+        }
+        if self.native_clone_backend.is_none() {
+            self.native_clone_backend = NativeVoiceCloneBackend::new_with_gender(target_gender);
         }
         if let Some(ref mut nat) = self.native_clone_backend {
             nat.set_gender_str(target_gender);
@@ -1904,10 +1984,15 @@ impl SystemTtsBackend for CompositeTtsBackend {
         let force_system = backend_pref == "system" || backend_pref == "sapi" || backend_pref == "say" || backend_pref == "espeak";
         let force_native = backend_pref == "clone" || backend_pref == "sherpa" || backend_pref == "piper" || backend_pref == "native" || backend_pref == "http";
 
+        let is_multilingual = matches!(
+            self.current_gender,
+            VoiceGender::Russian | VoiceGender::Chinese | VoiceGender::Japanese
+        );
+
         #[cfg(not(windows))]
         let prefer_native = !force_system;
         #[cfg(windows)]
-        let prefer_native = force_native || self.current_gender == VoiceGender::Clone;
+        let prefer_native = force_native || is_multilingual || self.current_gender == VoiceGender::Clone;
 
         if (self.current_gender == VoiceGender::Clone || prefer_native) && !force_system {
             // 1. Essai en priorité absolue du moteur de clonage appliquant l'échantillon vocal
@@ -1926,20 +2011,25 @@ impl SystemTtsBackend for CompositeTtsBackend {
             }
 
             // 2. Moteur local natif Sherpa-ONNX / Piper VITS (pur Rust)
-            let is_male = match self.current_gender {
-                VoiceGender::Henri | VoiceGender::Paul | VoiceGender::Jean => true,
-                VoiceGender::Denise | VoiceGender::Hortense | VoiceGender::Sylvie => false,
-                VoiceGender::Clone => get_voice_clone_gender() == "male",
+            let target_gender = match self.current_gender {
+                VoiceGender::Russian => "ru",
+                VoiceGender::Chinese => "zh",
+                VoiceGender::Japanese => "ja",
+                VoiceGender::Henri | VoiceGender::Paul | VoiceGender::Jean => "male",
+                VoiceGender::Denise | VoiceGender::Hortense | VoiceGender::Sylvie => "female",
+                VoiceGender::Clone => if get_voice_clone_gender() == "male" { "male" } else { "female" },
             };
-            let target_gender = if is_male { "male" } else { "female" };
 
             if self.native_clone_backend.is_none() {
                 self.native_clone_backend = NativeVoiceCloneBackend::new_with_gender(target_gender);
             }
             if let Some(ref mut nat) = self.native_clone_backend {
                 nat.set_gender_str(target_gender);
-                if let Ok(interrupted) = nat.speak_sentence(sentence, rx, pending_cmd, sentence_queue) {
-                    return interrupted;
+                match nat.speak_sentence(sentence, rx, pending_cmd, sentence_queue) {
+                    Ok(interrupted) => return interrupted,
+                    Err(err) => {
+                        eprintln!("[TTS Native] Repli sur le backend système ({err})");
+                    }
                 }
             }
         }
@@ -1966,24 +2056,24 @@ pub fn spawn_tts_worker(event_tx: StdSender<AgentEvent>, initial_voice: VoiceGen
         let system_backend = UnixTtsBackend::new(current_gender);
 
         let is_clone_active = current_gender == VoiceGender::Clone
+            || matches!(current_gender, VoiceGender::Russian | VoiceGender::Chinese | VoiceGender::Japanese)
             || std::env::var("TTS_BACKEND").map_or(false, |b| {
                 let s = b.to_lowercase();
                 s == "clone" || s == "sherpa" || s == "piper" || s == "native"
             });
 
-        #[cfg(not(windows))]
         let init_native_backend = true;
-        #[cfg(windows)]
-        let init_native_backend = is_clone_active;
 
-        let is_male = match current_gender {
-            VoiceGender::Henri | VoiceGender::Paul | VoiceGender::Jean => true,
-            VoiceGender::Denise | VoiceGender::Hortense | VoiceGender::Sylvie => false,
-            VoiceGender::Clone => get_voice_clone_gender() == "male",
+        let initial_gender_str = match current_gender {
+            VoiceGender::Russian => "ru",
+            VoiceGender::Chinese => "zh",
+            VoiceGender::Japanese => "ja",
+            VoiceGender::Henri | VoiceGender::Paul | VoiceGender::Jean => "male",
+            VoiceGender::Denise | VoiceGender::Hortense | VoiceGender::Sylvie => "female",
+            VoiceGender::Clone => if get_voice_clone_gender() == "male" { "male" } else { "female" },
         };
-        let initial_gender_str = if is_male { "male" } else { "female" };
 
-        let clone_backend = if is_clone_active { HttpVoiceCloneBackend::new() } else { None };
+        let clone_backend = if current_gender == VoiceGender::Clone { HttpVoiceCloneBackend::new() } else { None };
         let native_clone_backend = if init_native_backend {
             NativeVoiceCloneBackend::new_with_gender(initial_gender_str)
         } else {

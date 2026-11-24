@@ -1310,6 +1310,7 @@ pub fn find_best_input_element<'a>(elements: &'a [UiaElementInfo], target: &str)
     elements
         .iter()
         .filter(|e| e.is_edit_or_textarea || e.is_input)
+        .filter(|e| !e.name.is_empty())
         .max_by_key(|e| {
             let name_lower = e.name.to_lowercase();
             let mut score = 0usize;
@@ -1325,6 +1326,7 @@ pub fn find_best_input_element<'a>(elements: &'a [UiaElementInfo], target: &str)
             }
             score
         })
+        .filter(|e| e.name.to_lowercase().contains(&target.to_lowercase()) || target_words.iter().any(|w| e.name.to_lowercase().contains(w)))
 }
 
 #[cfg(windows)]
@@ -1656,6 +1658,85 @@ pub unsafe fn mute_other_audio_sessions() -> usize {
     muted_count
 }
 
+#[cfg(windows)]
+pub fn is_external_audio_playing() -> bool {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        let device: IMMDevice = match enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia) {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+        let session_mgr: IAudioSessionManager2 = match device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        let session_enumerator = match session_mgr.GetSessionEnumerator() {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        let count = session_enumerator.GetCount().unwrap_or(0);
+        let my_pid = std::process::id();
+
+        for i in 0..count {
+            let Ok(session_control) = session_enumerator.GetSession(i) else {
+                continue;
+            };
+            let session_pid = session_control
+                .cast::<IAudioSessionControl2>()
+                .ok()
+                .and_then(|c2| c2.GetProcessId().ok())
+                .unwrap_or(0);
+
+            if session_pid != my_pid {
+                // AudioSessionState: Inactive = 0, Active = 1, Expired = 2
+                if let Ok(state) = session_control.GetState() {
+                    if state.0 == 1 {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+#[cfg(not(windows))]
+pub fn is_external_audio_playing() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // Vérification via CoreAudio / pmset si un flux multimédia empêche la mise en veille
+        if let Ok(output) = std::process::Command::new("pmset").args(["-g", "assertions"]).output() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            if s.contains("PreventUserIdleDisplaySleep") || s.contains("coreaudiod") {
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        // Vérification de flux PulseAudio / PipeWire en lecture
+        if let Ok(output) = std::process::Command::new("pactl").args(["list", "sink-inputs"]).output() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            if s.contains("state: RUNNING") || s.contains("Corked: no") {
+                return true;
+            }
+        }
+        // Vérification MPRIS (navigateurs, VLC, Spotify)
+        if let Ok(output) = std::process::Command::new("playerctl").args(["status"]).output() {
+            let s = String::from_utf8_lossy(&output.stdout).to_lowercase();
+            if s.contains("playing") {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 #[cfg(not(windows))]
 pub unsafe fn mute_other_audio_sessions() -> usize {
     #[cfg(target_os = "macos")]
@@ -1876,18 +1957,25 @@ pub fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Op
         .max_by_key(|e| {
             let name_lower = e.name.to_lowercase();
             let mut score = 0usize;
+            let role_bonus = if e.is_button || e.is_link { 30 } else { 0 };
+            score += role_bonus;
             if name_lower == target_clean {
-                score += 100;
+                score += 200;
             } else if name_lower.contains(&target_clean) {
-                score += 50;
+                score += 80;
             }
             for w in &target_words {
                 if name_lower.contains(w) {
+                    score += 20;
+                }
+                let dist = crate::pattern::damerau_levenshtein_distance(w, &name_lower);
+                if dist <= 2 && w.len() >= 4 {
                     score += 10;
                 }
             }
             score
         })
+        .filter(|e| e.name.to_lowercase().contains(&target_clean) || target_words.iter().any(|w| e.name.to_lowercase().contains(w)))
 }
 
 #[cfg(windows)]
@@ -1964,6 +2052,7 @@ pub fn find_best_button_element<'a>(elements: &'a [UiaElementInfo], target: &str
             }
             score
         })
+        .filter(|e| e.is_button || e.name.to_lowercase().contains(&target_clean) || target_words.iter().any(|w| e.name.to_lowercase().contains(w)))
 }
 
 #[cfg(windows)]
@@ -2861,4 +2950,25 @@ pub fn cycle_user_window(
     restore_if_iconic(target_hwnd);
 
     Some(target_hwnd)
+}
+
+/// Fait défiler les fenêtres de manière cyclique sous macOS et Linux
+#[cfg(not(windows))]
+pub fn cycle_user_window(
+    user_windows: &[(String, String)],
+    current_target: Option<&str>,
+    direction: i32,
+) -> Option<String> {
+    if user_windows.is_empty() {
+        return None;
+    }
+    let cur_idx = current_target
+        .and_then(|cur| user_windows.iter().position(|(id, _)| id == cur))
+        .unwrap_or(0);
+    let len = user_windows.len() as i32;
+    let next_idx = ((cur_idx as i32 + direction).rem_euclid(len)) as usize;
+    let (target_id, _) = &user_windows[next_idx];
+    force_foreground_window(target_id);
+    restore_if_iconic(target_id);
+    Some(target_id.clone())
 }

@@ -3,6 +3,46 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.8.9] - 2026-11-24
+
+### 💬🧩 AAC Pictogram Communication Board & Generative LLM Expansion (`virtual_keyboard.rs`, `floating_window.rs`, `main.rs`, `app_ui.rs`)
+- **ARASAAC Pictograms with Fitzgerald Color Coding (`FitzgeraldCategory`, `ARASAAC_PICTOGRAMS`)**:
+  - Integrated an Augmentative and Alternative Communication (AAC) board based on international ARASAAC pictograms organized by Fitzgerald Key syntax categories (Subjects/Pronouns: Yellow, Verbs/Actions: Green, Objects/Needs: Blue, Feelings/Sensations: Pink, Social/Responses: Orange).
+  - Color-coded high-contrast cards with intuitive iconography and accessible text labels.
+- **Generative LLM Sentence Expansion (`expand_aac_symbols_with_llm`)**:
+  - Generative syntax reconstitution engine transforming selected sequences of pictographic symbols into fluent, polite, full natural sentences in the user's active locale.
+  - Dual pipeline: instant deterministic rule lookup for high-frequency daily care needs ("thirsty", "cold", "caregiver help", "medicine") coupled with generative projection powered by local Qwen 2.5 0.5B / remote models.
+- **Motor Accessibility & Single-Switch Auto-Scanning (`AacBoardState`, `render_aac_board_view`)**:
+  - Two-stage hierarchical auto-scanning (Category tabs ➔ Pictogram cells) optimized for single-switch users and eye-gaze navigators with customizable dwell durations.
+  - Quick-switch button enabling seamless transition between the AAC pictogram board and the alphabetical predictive virtual keyboard.
+
+### 🎙️👁️ Spoken Validation & Accessible Voice Dictation for Visually Impaired Users (`agent_backend.rs`, `main.rs`)
+- **Real-Time Auditory Dictation Feedback (`DICTATION_SYSTEM_INSTRUCTIONS`)**:
+  - Enforced mandatory voice verification in dictation system prompts: every speech segment recognized and injected into target applications is confirmed aloud by the TTS narrator (*"Écrit : <retranscribed text>"*), giving blind and low-vision users acoustic confirmation of what was typed.
+  - Context-aware target naming announcing the active input field upon dictation start.
+
+### 🛡️💰 Spontaneous Awakening & Token Budget Protection (`scheduler.rs`, `app_settings.rs`)
+- **Remote Cloud LLM Awakening Guard (`PROACTIVE_ALLOW_REMOTE`)**:
+  - Added a dedicated setting and `.env` flag (`PROACTIVE_ALLOW_REMOTE`) preventing background autonomous proactive check-ins and periodic screen surveillance passes from consuming paid cloud tokens.
+  - Background autonomous thoughts are reserved for 100% offline local SLM engines (Qwen / Llama) by default, protecting user API credits unless explicitly toggled in Settings.
+
+### 🐧🍎 Linux & macOS Automation Parity (`automation.rs`, `ui.rs`, `screen_summary.rs`)
+- **Cross-Platform Accessibility Bridge Consolidation**:
+  - Enhanced native element extraction and window hierarchy inspection across macOS (`AXUIElement`, `CGEvent`) and Linux (`zbus` D-Bus AT-SPI2, `wmctrl`, `xdotool`/`ydotool`).
+  - Unified active window bounding rectangle calculations and reliable foreground window isolation.
+
+### ⌨️ Virtual Keyboard Refinements (`virtual_keyboard.rs`)
+- **Scanning & Buffer Merging Fixes (`apply_prediction_to_buffer`)**:
+- Fixed prediction buffer overlap resolution and capitalization handling during continuous auto-scanning.
+- Improved switch navigation responsiveness across virtual keyboard row transitions and action buttons.
+
+### 🔍 Readability & Clean Screen Summaries (`screen_summary.rs`, `agent_backend.rs`)
+- **Compact Feature Formatting (`format_compact_window_elements`, `compute_screen_diff`)**:
+  - Optimized UI element serialization for local and remote models, eliminating redundant DOM containers and noisy structural noise.
+  - Cleaner screen diffs emphasizing interactive features, input forms, and dynamic page changes.
+
+---
+
 ## [0.8.8] - 2026-11-21
 
 ### ⌨️🧠 Semantic Word Prediction & 0.5B SLM Auto-Completion (`virtual_keyboard.rs`, `floating_window.rs`, `main.rs`)
