@@ -5,7 +5,7 @@ use crate::automation::{
 };
 use crate::fs_util::find_file_in_workspace;
 #[cfg(target_os = "macos")]
-use crate::automation::{query_macos_ax_elements, MacosAxElementRaw};
+use crate::automation::{get_active_field_content, query_macos_ax_elements, MacosAxElementRaw};
 #[cfg(all(not(windows), not(target_os = "macos")))]
 use crate::automation::{query_atspi_elements, AtspiElementRaw};
 use crate::types::QuickSuggestionItem;
