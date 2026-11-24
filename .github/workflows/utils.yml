@@ -24,8 +24,8 @@ jobs:
           debug: true
           directory: ./
           badge: ./public/badge.svg
-          patterns: '*.js'  # Patterns in the format of a '.gitignore' file, separated by pipes.
-          ignore: 'node_modules'
+          patterns: '*.rs|*.toml'  # Patterns in the format of a '.gitignore' file, separated by pipes.
+          ignore: 'node_modules|target'
 
       - name: Deploy badge to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
