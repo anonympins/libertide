@@ -396,7 +396,24 @@
     "btn_speak": "🗣️ 朗读",
     "btn_chat": "💬 对话",
     "btn_insert": "✍️ 插入",
-    "btn_clear": "🗑️ 清空"
+    "btn_clear": "🗑️ 清空",
+    "switch_to_aac": "💬 AAC 象形图网格 (ARASAAC)"
+  },
+  "aac": {
+    "placeholder": "在下方选择象形图以组成消息...",
+    "remove_pictogram_tooltip": "点击移除此象形图",
+    "expand_ai": "✨ 智能组句 (AI)",
+    "speak_direct": "🗣️ 直接朗读",
+    "clear_all": "🗑️ 全部清空",
+    "switch_to_alphabetical": "⌨️ 字母键盘",
+    "btn_clear_last": "⌫\n删除上一个",
+    "btn_validate_speak": "✅\n确认并朗读",
+    "btn_back_categories": "⬅️\n返回分类",
+    "category_subject": "👤 人物 / 主语",
+    "category_verb": "⚡ 动作 / 动词",
+    "category_object": "📦 物品 / 需求",
+    "category_feeling": "💖 情感 / 感觉",
+    "category_social": "💬 社交 / 回应"
   }
   ,"eyetracking": {
     "title": "👁️ 眼动控制 (普通摄像头 Eye-Tracking)",
@@ -460,7 +477,7 @@
     "locked_in": "眼动追踪,视线,tobii,眨眼,渐冻症",
     "tremor_filter": "颤抖,痉挛,帕金森,共济失调",
     "sensory_calm": "感官过载,太吵了,恐慌,自闭症,安静",
-    "aac_symbols": "象形图,图卡,aac,失语症,非言语",
+    "aac_symbols": "象形图,图卡,aac,失语症,非语言,沟通板,图片沟通,符号,arasaac,辅助沟通系统",
     "volume_control": "音量,大声点,小声点,提高音量,降低音量",
     "mute_audio": "静音,关闭声音,消音",
     "audio_settings": "音频,耳机,扬声器,声音设置",

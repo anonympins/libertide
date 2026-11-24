@@ -1,4 +1,4 @@
-use crate::html_util::{decode_html_entities, extract_attribute, sanitize_html_to_markdown};
+use crate::html_util::{decode_html_entities, extract_attribute};
 #[cfg(all(not(windows), not(target_os = "macos")))]
 use crate::automation::is_wayland_session;
 
@@ -490,7 +490,7 @@ pub fn set_clipboard_text(text: &str) -> bool {
     clipboard_platform::set_text(text)
 }
 
-pub use clipboard_platform::{get_advanced_text, get_plain_text, get_text, set_text};
+pub use clipboard_platform::{get_plain_text, set_text};
 
 pub fn html_to_advanced_markdown(html: &str) -> String {
     let mut result = String::with_capacity(html.len());

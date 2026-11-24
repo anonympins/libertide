@@ -1957,13 +1957,19 @@ pub fn find_best_element<'a>(elements: &'a [UiaElementInfo], target: &str) -> Op
         .max_by_key(|e| {
             let name_lower = e.name.to_lowercase();
             let mut score = 0usize;
+            let role_bonus = if e.is_button || e.is_link { 30 } else { 0 };
+            score += role_bonus;
             if name_lower == target_clean {
-                score += 100;
+                score += 200;
             } else if name_lower.contains(&target_clean) {
-                score += 50;
+                score += 80;
             }
             for w in &target_words {
                 if name_lower.contains(w) {
+                    score += 20;
+                }
+                let dist = crate::pattern::damerau_levenshtein_distance(w, &name_lower);
+                if dist <= 2 && w.len() >= 4 {
                     score += 10;
                 }
             }

@@ -396,7 +396,24 @@
     "btn_speak": "🗣️ Parla",
     "btn_chat": "💬 Chat",
     "btn_insert": "✍️ Inserisci",
-    "btn_clear": "🗑️ Svuota"
+    "btn_clear": "🗑️ Svuota",
+    "switch_to_aac": "💬 Griglia Pittogrammi CAA (ARASAAC)"
+  },
+  "aac": {
+    "placeholder": "Seleziona i pittogrammi qui sotto per comporre un messaggio...",
+    "remove_pictogram_tooltip": "Clicca per rimuovere questo pittogramma",
+    "expand_ai": "✨ Formula frase (IA)",
+    "speak_direct": "🗣️ Parla diretto",
+    "clear_all": "🗑️ Svuota",
+    "switch_to_alphabetical": "⌨️ Tastiera Alfabetica",
+    "btn_clear_last": "⌫\nCancella ultimo",
+    "btn_validate_speak": "✅\nConvalida e Parla",
+    "btn_back_categories": "⬅️\nTorna alle categorie",
+    "category_subject": "👤 Persone / Soggetti",
+    "category_verb": "⚡ Azioni / Verbi",
+    "category_object": "📦 Oggetti / Bisogni",
+    "category_feeling": "💖 Sentimenti / Sensazioni",
+    "category_social": "💬 Sociale / Risposte"
   }
   ,"eyetracking": {
     "title": "👁️ Controllo oculare (Eye-Tracking tramite webcam standard)",
@@ -460,7 +477,7 @@
     "locked_in": "controllo oculare,eye tracking,sguardo,tobii,locked-in,lampeggio,sla",
     "tremor_filter": "tremore,tremori,spasticita,spasmo,parkinson,atassia",
     "sensory_calm": "sovraccarico sensoriale,troppo rumore,panico,autismo,calma",
-    "aac_symbols": "pittogramma,pittogrammi,caa,afasia,non verbale",
+    "aac_symbols": "pittogramma,pittogrammi,caa,afasia,non verbale,tabella di comunicazione,comunicare con immagini,simboli,arasaac,comunicazione aumentativa alternativa",
     "volume_control": "volume,piu alto,più alto,piu basso,più basso,alza il volume,abbassa il volume",
     "mute_audio": "muto,silenzioso,silenzio,disattiva audio",
     "audio_settings": "audio,cuffie,altoparlante,suono",

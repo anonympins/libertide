@@ -591,6 +591,18 @@ impl OverlayApp {
         self.floating_cards.iter().any(|c| c.id == "virtual_keyboard" && c.open)
     }
 
+    pub fn open_aac_card(&mut self) {
+        let title = "💬 Communication CAA (ARASAAC)".to_string();
+        let card = FloatingCard::new("caa_board", title, FloatingContentType::AacBoard);
+        if let Some(existing) = self.floating_cards.iter_mut().find(|c| c.id == "caa_board") {
+            existing.open = true;
+        } else {
+            self.floating_cards.push(card);
+        }
+        update_open_floating_cards(&self.floating_cards);
+        play_earcon(Earcon::Success);
+    }
+
     pub fn is_subtitles_open(&self) -> bool {
         crate::audio::is_live_subtitles_active()
             && self.floating_cards.iter().any(|c| matches!(c.content, FloatingContentType::Subtitles { .. }) && c.open)

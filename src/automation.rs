@@ -1,6 +1,6 @@
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 pub use crate::scheduler::*;
@@ -11,18 +11,17 @@ use crate::get_window_title;
 
 pub use crate::action_history::*;
 use crate::fs_util::{
-    create_temp_note_file, find_executable_in_path, find_file_in_workspace,
+    create_temp_note_file, find_executable_in_path,
     open_path_with_default_app,
 };
 
 use crate::keyboard_hook::{
-    SWITCH_HOOK_ENABLED, IS_EXTERNAL_TEXT_INPUT_FOCUSED, SWITCH_KEY_QUEUE,SWITCH_LONG_PRESS_MS
+    SWITCH_HOOK_ENABLED, IS_EXTERNAL_TEXT_INPUT_FOCUSED,
 };
 #[cfg(not(windows))]
 use crate::ocr::HWND;
 #[cfg(not(windows))]
 use crate::screen_summary::summarize_screen_state;
-use crate::types::{AgentAction, QuickSuggestionItem};
 pub use crate::types::{NavigationZone, NumberedElementTarget};
 use crate::window_util::*;
 
@@ -53,12 +52,11 @@ pub(crate) use windows::Win32::UI::Input::KeyboardAndMouse::{
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow,
-    DispatchMessageW, FindWindowW, GetForegroundWindow, GetMessageW, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, MSG, PostThreadMessageW,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, HHOOK, WM_QUIT,
+    FindWindowW, GetForegroundWindow, GetWindowRect,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
     GetGUIThreadInfo, GUITHREADINFO,
-    PostMessageW, SendMessageW, SetForegroundWindow, ShowWindow,
-    SW_RESTORE, WM_CLOSE,
+    SendMessageW, SetForegroundWindow, ShowWindow,
+    SW_RESTORE,
 };
 
 #[cfg(windows)]
@@ -822,7 +820,8 @@ pub fn spawn_targets_worker(
 /// Déclenche l'affichage immédiat des badges OCR dès l'arrivée sur la fenêtre,
 /// puis enrichit l'affichage en tâche de fond avec Qwen VLM.
 #[cfg(windows)]
-pub fn trigger_window_scan_async(hwnd: HWND) {
+pub fn
+trigger_window_scan_async(hwnd: HWND) {
     if hwnd.0.is_null() || is_window_hung(hwnd) {
         return;
     }

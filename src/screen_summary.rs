@@ -1,8 +1,7 @@
 use std::sync::Mutex;
-use std::time::Duration;
 
 use crate::automation::{
-    get_active_field_content, read_terminal_window_content, truncate_with_notice, LAST_EXTERNAL_HWND,
+    read_terminal_window_content, truncate_with_notice, LAST_EXTERNAL_HWND,
 };
 use crate::fs_util::find_file_in_workspace;
 #[cfg(target_os = "macos")]
@@ -13,9 +12,7 @@ use crate::types::QuickSuggestionItem;
 use crate::window_util::*;
 
 #[cfg(windows)]
-use windows::core::{w, Interface};
-#[cfg(windows)]
-use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, RECT};
 #[cfg(windows)]
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,

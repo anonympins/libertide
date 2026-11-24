@@ -193,6 +193,7 @@ pub async fn send_llm_chat_completion(
     messages_history: &[ChatMessage],
     temperature: f32,
     max_tokens: u32,
+    force_json: bool,
 ) -> Result<reqwest::Response, reqwest::Error> {
     if config.provider == LlmProvider::Anthropic {
         let mut anthropic_messages: Vec<ChatMessage> = Vec::new();
@@ -251,13 +252,13 @@ pub async fn send_llm_chat_completion(
         }
         messages.extend_from_slice(messages_history);
 
-        let response_format = match config.provider {
-            LlmProvider::DeepSeek | LlmProvider::OpenAI | LlmProvider::Mistral | LlmProvider::Groq => {
-                Some(ChatResponseFormat {
-                    r#type: "json_object".to_string(),
-                })
+        let response_format = if force_json {
+            match config.provider {
+                LlmProvider::DeepSeek | LlmProvider::OpenAI | LlmProvider::Mistral | LlmProvider::Groq => Some(ChatResponseFormat { r#type: "json_object".to_string() }),
+                _ => None,
             }
-            _ => None,
+        } else {
+            None
         };
 
         let req_payload = DeepSeekChatRequest {
@@ -361,6 +362,7 @@ pub async fn compact_history_if_needed(
         &messages_to_condense,
         0.2,
         400,
+        false
     ).await;
 
     *last_call_time = Some(Instant::now());
@@ -664,6 +666,7 @@ pub async fn call_llm_prompt(
                 &hist_snapshot,
                 temperature,
                 max_tokens,
+                false
             ).await;
 
             match response {

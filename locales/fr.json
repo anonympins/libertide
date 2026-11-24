@@ -389,7 +389,24 @@
     "btn_speak": "🗣️ Parler",
     "btn_chat": "💬 Tchat",
     "btn_insert": "✍️ Insérer",
-    "btn_clear": "🗑️ Vider"
+    "btn_clear": "🗑️ Vider",
+    "switch_to_aac": "💬 Grille de Pictogrammes CAA (ARASAAC)"
+  },
+  "aac": {
+    "placeholder": "Sélectionnez des pictogrammes ci-dessous pour composer un message...",
+    "remove_pictogram_tooltip": "Cliquer pour retirer ce pictogramme",
+    "expand_ai": "✨ Formuler en phrase (IA)",
+    "speak_direct": "🗣️ Parler direct",
+    "clear_all": "🗑️ Vider",
+    "switch_to_alphabetical": "⌨️ Clavier Alphabétique",
+    "btn_clear_last": "⌫\nEffacer dernier",
+    "btn_validate_speak": "✅\nValider et Parler",
+    "btn_back_categories": "⬅️\nRetour catégories",
+    "category_subject": "👤 Personnes / Sujets",
+    "category_verb": "⚡ Actions / Verbes",
+    "category_object": "📦 Objets / Besoins",
+    "category_feeling": "💖 Sentiments / Douleurs",
+    "category_social": "💬 Social / Réponses"
   }
   ,"eyetracking": {
     "title": "👁️ Contrôle oculaire (Eye-Tracking webcam standard)",
@@ -453,7 +470,7 @@
     "locked_in": "commande oculaire,eye tracking,eyetracker,regard,tobii,locked-in,locked in,clignement,cillement,sla,poursuite oculaire",
     "tremor_filter": "tremblement,tremblements,spasticité,spasticite,spasme,spasmes,parkinson,ataxie,dystonie,chorée,choree,clics involontaires",
     "sensory_calm": "surcharge sensorielle,trop de bruit,panique,autisme,autiste,tsa,hypersensibilité,hypersensibilite,éblouissement,eblouissement,calme l'écran",
-    "aac_symbols": "pictogramme,pictogrammes,caa,aac,aphasie,aphasique,non verbal,non-verbal,tableau de communication,porte-voix,aide à parler",
+    "aac_symbols": "pictogramme,pictogrammes,caa,aac,aphasie,aphasique,non verbal,non-verbal,tableau de communication,porte-voix,aide à parler,communiquer par images,symboles,arasaac,communication alternative améliorée",
     "volume_control": "volume,plus fort,moins fort,baisse,monte le son",
     "mute_audio": "coupe le son,muet,mute,sourdine,silence",
     "audio_settings": "audio,casque,haut-parleur",

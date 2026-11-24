@@ -396,7 +396,24 @@
     "btn_speak": "🗣️ Sprechen",
     "btn_chat": "💬 Chat",
     "btn_insert": "✍️ Einfügen",
-    "btn_clear": "🗑️ Leeren"
+    "btn_clear": "🗑️ Leeren",
+    "switch_to_aac": "💬 Piktogramm-Raster UK (ARASAAC)"
+  },
+  "aac": {
+    "placeholder": "Wählen Sie unten Piktogramme aus, um eine Nachricht zu erstellen...",
+    "remove_pictogram_tooltip": "Klicken, um dieses Piktogramm zu entfernen",
+    "expand_ai": "✨ Satz formulieren (KI)",
+    "speak_direct": "🗣️ Direkt sprechen",
+    "clear_all": "🗑️ Leeren",
+    "switch_to_alphabetical": "⌨️ Alphabetische Tastatur",
+    "btn_clear_last": "⌫\nLetztes löschen",
+    "btn_validate_speak": "✅\nBestätigen & Sprechen",
+    "btn_back_categories": "⬅️\nZurück zu Kategorien",
+    "category_subject": "👤 Personen / Subjekte",
+    "category_verb": "⚡ Aktionen / Verben",
+    "category_object": "📦 Objekte / Bedürfnisse",
+    "category_feeling": "💖 Gefühle / Empfindungen",
+    "category_social": "💬 Soziales / Antworten"
   }
   ,"eyetracking": {
     "title": "👁️ Blicksteuerung (Standard-Webcam Eye-Tracking)",
@@ -460,7 +477,7 @@
     "locked_in": "augensteuerung,eye tracking,blick,tobii,locked-in,blinzeln,als",
     "tremor_filter": "zittern,spastik,spasmus,parkinson,ataxie",
     "sensory_calm": "reizüberflutung,zu laut,panik,autismus,beruhigen",
-    "aac_symbols": "piktogramm,piktogramme,uk,aphasie,symbol",
+    "aac_symbols": "piktogramm,piktogramme,uk,aphasie,symbol,kommunikationstafel,bildkommunikation,symbole,arasaac,unterstützte kommunikation",
     "volume_control": "lautstärke,lauter,leiser,ton lauter,ton leiser",
     "mute_audio": "stumm,stummschalten,ton aus,stille",
     "audio_settings": "audio,kopfhörer,lautsprecher,sound",

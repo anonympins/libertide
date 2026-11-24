@@ -4,8 +4,6 @@ use eframe::egui;
 use rust_i18n::t;
 
 use crate::automation::*;
-use crate::automation::VIRTUAL_KEY;
-use crate::clipboard::*;
 use crate::floating_window::{self, update_open_floating_cards, FloatingContentType};
 use crate::fs_util::*;
 use crate::intent::*;
@@ -868,6 +866,20 @@ impl OverlayApp {
         {
             self.open_keyboard_card();
             let msg = "Clavier virtuel ouvert.".to_string();
+            self.chat_history.push(ChatEntry { role: ChatRole::Agent, text: msg.clone(), timestamp: current_time_str(), quick_suggestions: Vec::new(), screen_size_kb: None });
+            let _ = self.tts_sender.send(TtsCommand::Speak(msg));
+            return;
+        }
+        if norm_prompt.contains("tableau caa")
+            || norm_prompt.contains("grille caa")
+            || norm_prompt.contains("pictogramme")
+            || norm_prompt.contains("arasaac")
+            || norm_prompt.contains("mode caa")
+            || norm_prompt.contains("communication caa")
+            || norm_prompt.contains("tableau de communication")
+        {
+            self.open_aac_card();
+            let msg = "Tableau de communication CAA ouvert.".to_string();
             self.chat_history.push(ChatEntry { role: ChatRole::Agent, text: msg.clone(), timestamp: current_time_str(), quick_suggestions: Vec::new(), screen_size_kb: None });
             let _ = self.tts_sender.send(TtsCommand::Speak(msg));
             return;

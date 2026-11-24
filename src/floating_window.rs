@@ -96,6 +96,9 @@ pub fn update_open_floating_cards(cards: &[FloatingCard]) {
                     FloatingContentType::VirtualKeyboard => {
                         ("virtual_keyboard", t!("keyboard.card_summary").to_string())
                     }
+                    FloatingContentType::AacBoard => {
+                        ("aac_board", "Tableau de communication CAA (ARASAAC / Fitzgerald)".to_string())
+                    }
                     FloatingContentType::Form { fields, .. } => {
                         let f_summary = fields.iter().map(|f| f.label.clone()).collect::<Vec<_>>().join(", ");
                         ("form", format!("Fields: {}", f_summary))
@@ -197,6 +200,7 @@ pub enum FloatingContentType {
     },
     Instrument,
     VirtualKeyboard,
+    AacBoard,
 }
 
 /// Garantit que chaque champ d'un formulaire dispose d'un ID valide et unique
@@ -444,6 +448,9 @@ impl FloatingCard {
             "virtual_keyboard" | "keyboard" | "clavier" => {
                 FloatingContentType::VirtualKeyboard
             }
+            "aac" | "caa" | "arasaac" | "pictograms" | "pictogrammes" => {
+                FloatingContentType::AacBoard
+            }
             _ => {
                 let text = if let Some(s) = data.as_str() {
                     s.to_string()
@@ -573,6 +580,9 @@ impl FloatingCard {
             FloatingContentType::VirtualKeyboard => {
                 speech.push_str(&t!("keyboard.speech_description"));
             }
+            FloatingContentType::AacBoard => {
+                speech.push_str("Tableau de communication alternative et augmentée CAA basé sur les pictogrammes ARASAAC et la grammaire de Fitzgerald.");
+            }
         }
         speech
     }
@@ -591,6 +601,7 @@ impl FloatingCard {
             FloatingContentType::Subtitles { .. } => "🎙️",
             FloatingContentType::Instrument => "🎵",
             FloatingContentType::VirtualKeyboard => "⌨️",
+            FloatingContentType::AacBoard => "💬",
         };
         let viewport_title = format!("{icon_prefix} {}", self.title);
 
@@ -601,6 +612,7 @@ impl FloatingCard {
             FloatingContentType::Table { .. } => [580.0, 340.0],
             FloatingContentType::Instrument => [640.0, 420.0],
             FloatingContentType::VirtualKeyboard => [660.0, 324.0],
+            FloatingContentType::AacBoard => [680.0, 440.0],
             _ => [480.0, 280.0],
         };
 
@@ -635,7 +647,7 @@ impl FloatingCard {
 
             let is_maximized = vp_ctx.input(|i| i.viewport().maximized.unwrap_or(false));
 
-            let is_keyboard = matches!(self.content, FloatingContentType::VirtualKeyboard);
+            let is_keyboard = matches!(self.content, FloatingContentType::VirtualKeyboard | FloatingContentType::AacBoard);
             let is_subtitles = matches!(self.content, FloatingContentType::Subtitles { .. });
             let bg_fill = if is_subtitles {
                 egui::Color32::from_rgb(8, 8, 12)
@@ -781,7 +793,7 @@ impl FloatingCard {
                     let card_title = self.title.clone();
                     let mut close_window = false;
 
-                    let shrink_y = matches!(self.content, FloatingContentType::VirtualKeyboard);
+                    let shrink_y = matches!(self.content, FloatingContentType::VirtualKeyboard | FloatingContentType::AacBoard);
                     egui::ScrollArea::vertical()
                         .id_salt(format!("card_scroll_vert_{card_id}"))
                         .auto_shrink([false, shrink_y])
@@ -1351,6 +1363,11 @@ impl FloatingCard {
                                 }
                                 FloatingContentType::VirtualKeyboard => {
                                     if let Some(out) = crate::virtual_keyboard::render_keyboard_view(ui, dwell_state, theme) {
+                                        requested_output = Some(out);
+                                    }
+                                }
+                                FloatingContentType::AacBoard => {
+                                    if let Some(out) = crate::virtual_keyboard::render_aac_board_view(ui, dwell_state, theme) {
                                         requested_output = Some(out);
                                     }
                                 }

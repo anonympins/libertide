@@ -3,7 +3,6 @@ use rust_i18n::t;
 use std::time::{Duration, Instant};
 use eframe::egui;
 use eframe::egui::Color32;
-use egui::TextBuffer;
 use crate::clipboard::{
     get_clipboard_text, get_plain_clipboard_text
 };
@@ -135,6 +134,8 @@ impl OverlayApp {
                             &messages,
                             0.7,
                             80,
+
+                            false
                         ).await.map_err(|e| e.to_string())?;
                         crate::agent_backend::parse_llm_response_text(resp, config.provider).await
                     }),
