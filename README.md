@@ -46,101 +46,62 @@ For millions of people, these ordinary interactions become an exhausting hurdle,
 
 Libertide runs as a **transparent, unobtrusive assistive overlay** displayed above your existing desktop apps (Word, web browsers, emails, file explorers). It combines several core innovations:
 
-### 1. 🎯 Stabilized Hover & Click-by-Number Targeting
-Eliminates precision aiming fatigue and accidental clicks caused by tremors:
-- **High-Visibility Gold Badges**: When Hover / Target mode is engaged, prominent high-contrast numbered badges are placed directly over buttons, links, inputs, and tabs.
-- **Anti-Tremor Stabilization (Dwell & Pause)**: Move the pointer near any target. Once still for 200&nbsp;ms, Libertide locks on, outlines the element in contrasting cyan or orange, and reads its name and purpose aloud.
-- **Effortless Direct Activation**:
-  - **Keypad / Numpad**: Type the badge number directly. A 900&nbsp;ms debounce automatically confirms and clicks, or press `Enter`/`Space` immediately.
-  - **Voice**: Speak the badge number (*"3"*, *"twelve"*, or *"click 5"*).
-  - **Pointer Dwell**: Keep the pointer still over the target to auto-trigger (configurable 0–2500&nbsp;ms dwell delay).
-- **Stable Badge Reconciliation**: An intelligent reconciliation engine preserves badge numbers across dynamic screen updates and small scrolling adjustments, preventing confusing badge renumbering.
+### 1. 🎯 Shake-Free Aiming & Clicking (Numbered Badges & Stabilizer)
+- **For Everyone:** No need for millimeter-level accuracy on tiny buttons! Large golden numbered badges appear over every clickable element. Simply speak the badge number (*"click 4"*), type the number on your keyboard, or dwell over it briefly to trigger a click.
+- **For Caregivers & Occupational Therapists:** Eliminates dysmetria and physical strain for individuals with intention tremors, ataxia, or Parkinson's disease. Features an anti-tremor stabilizer (configurable dwell timer from 0 to 2500 ms with debounce filtering) and dynamic badge reconciliation to prevent disruptive renumbering while scrolling.
 
-### 2. 👁️ Zero-Hardware Webcam & Hardware Eye Tracking
-Navigate and target interactively with your gaze:
-- **100% Local Neural Webcam Tracking (L2CS-Net)**: Runs an embedded ultra-lightweight ONNX neural model (~2.6 MB) on any standard RGB laptop or desktop webcam. Calculates 3D gaze pitch/yaw in real time without external servers.
-- **Universal Hardware Tracker Bridge**: Native client support for high-precision hardware eye trackers via **OpenGaze TCP (port 4242)** (Tobii Eye Tracker bridge, GazePoint GP3, Pupil Labs) and **OpenTrack UDP (port 4242)**.
-- **Sub-Pixel One Euro (1€) Anti-Jitter Filter**: Suppresses natural ocular micro-tremors and involuntary saccades while preserving instant, zero-latency response on intentional gaze shifts.
-- **Semantic Magnetic Snapping**: The gaze cursor is automatically and smoothly attracted to nearby buttons, links, inputs, and badges with temporal hysteresis, preventing gaze jitter between adjacent targets.
-- **Relative Continuous Joystick Mode**: Direct linear cursor glide based on the user's relative gaze angle, eliminating the fatigue of chasing the pointer across wide screens.
-- **Fast Calibration & Instant Tare**: 9-point smooth pursuit / grid calibration or instant 1-point center gaze tare and camera pitch compensation directly from the overlay.
+### 2. 👁️ Full Gaze Control (Webcam AI Eye-Tracking & Dedicated Hardware)
+- **For Everyone:** Your gaze becomes a magic mouse! Look at a button, and the cursor is magnetically attracted to it.
+- **For Caregivers & Occupational Therapists:** Complete solution for tetraplegia, locked-in syndrome (ALS), or advanced muscular dystrophies:
+  - **No Costly Hardware Needed:** Works with a standard computer webcam powered by an embedded local neural network (L2CS-Net ONNX, ~2.6 MB).
+  - **Medical Hardware Compatible:** Connects directly via universal OpenGaze (TCP 4242) and OpenTrack (UDP 4242) protocols for Tobii bars, GazePoint GP3, or Pupil Labs.
+  - **Physiological Filtering:** Employs a *1€ (One Euro)* filter to smooth involuntary nystagmus and micro-saccades, paired with selective hysteresis magnetism to lock onto targets without erratic jumps.
 
-### 3. 🔘 Hierarchical Single-Switch Access & Wireless Companion Gateway
-Designed for users with single-movement abilities (micro-switch, puff-and-sip, single switch, or spacebar):
-- **Cascading 3-Step Navigation**: Window Level ➔ Region/Zone Level ➔ Individual Control Level.
-- **Semantic Summaries**: As each window or zone is selected, Libertide synthesizes what is inside so you know where you are without hunting visually.
-- **Single-Button Control**: Short press selects/advances; long press (>1.1&nbsp;s) goes back or exits.
-- **Wireless Smartphone / ESP32 Switch Gateway**: Built-in zero-setup companion server (**HTTP/WebSocket port 8765**, **UDP port 8766**) turning any smartphone, tablet, or inexpensive ESP32 microcontroller into a wireless adaptive switch with instant haptic feedback.
-- **Custom Hardware Rebinding**: Fully customize switch and accessibility triggers (`KEY_BIND_SWITCH`, `KEY_BIND_DICTATION`, `KEY_BIND_VOICE`, `KEY_BIND_CLEAR`) to any physical keyboard key or trackball button directly from the interface.
+### 3. 🔘 Universal 1-Button Access (Single-Switch & Wireless Gateway)
+- **For Everyone:** A single physical movement controls everything! A short press moves forward, while a long press steps back.
+- **For Caregivers & Occupational Therapists:** Designed for individuals with minimal residual motor capability (*sip-and-puff* breath switches, eye blinks, muscle twitches, mechanical micro-switches).
+  - **Hierarchical Pyramidal Scanning:** Window ➔ Region ➔ Individual Button, with synthetic speech feedback for each zone to prevent visual exploration fatigue.
+  - **Free Wireless Gateway:** Instantly turns any smartphone, tablet, or inexpensive ESP32 board into a dedicated remote switch (local WebSocket/HTTP/UDP server) featuring haptic vibration feedback.
 
-### 4. ⌨️ Accessible Virtual Keyboard with Predictive Text
-- **Integrated Adaptive On-Screen Keyboard**: Designed for single-switch scanning, dwell gaze, and hover access.
-- **Row / Column Auto-Scanning**: Sequential row highlighting with single-switch validation and automatic fallback.
-- **Multilingual Predictive Dictionary**: Dynamic high-frequency word suggestions in 9 languages (*Français, English, Deutsch, Español, Italiano, Português, Русский, 日本語, 中文*).
-- **Direct Actions**: Instant text-to-speech voicing (*"Speak"*), direct LLM prompting (*"Chat"*), external window paste (*"Insert"*), and clipboard export.
+### 4. ⌨️ Accessible Virtual Keyboard & AAC Communication
+- **For Everyone:** An on-screen keyboard that predicts words before you finish typing, reading your sentences aloud.
+- **For Caregivers & Speech Therapists:** Accessible virtual keyboard supporting automatic scanning (row/column auto-scan), eye gaze, or single-switch control. Includes multilingual predictive dictionaries (9 languages) and an AAC (Augmentative and Alternative Communication) module to instantly voice essential daily needs at home or in hospital environments.
 
-### 5. 🎙️ Private Local Dictation, Autonomous Agent & GUI Vision Grounding
-- **100% On-Device Dictation (Whisper)**: Speak letters, emails, or code naturally. Real-time speech transcription runs locally via `whisper.cpp`—voice data never leaves your computer.
-- **100% Offline Local LLM Engine (`llama-cpp-2` & GGUF)**: Run reasoning entirely on-device with zero network latency, zero API costs, and absolute data confidentiality. Includes native Windows **GPU hardware acceleration (Vulkan)** with automatic graceful fallback to multi-threaded CPU inference.
-  - **Integrated Quantized Presets (`Q4_K_M`)**:
-    - **Qwen 2.5 1.5B Instruct** (~986 MB) : High precision in French and multilingual instruction-following (default).
-    - **Llama 3.2 1B Instruct** (~770 MB) : Ultra-lightweight and responsive for modest hardware configurations.
-    - **Llama 3.2 3B Instruct** (~2.0 GB) : Extended contextual reasoning and instruction-following.
-    - **Qwen 2.5 3B Instruct** (~1.9 GB) : Multi-turn structured action reasoning.
-    - **Qwen 2.5 7B Instruct** (~4.7 GB) : Deep autonomous planning and complex DOM manipulation.
-    - **Meta-Llama 3.1 8B Instruct** (~4.9 GB) : State-of-the-art accuracy and instruction fidelity.
-  - **Visual GUI Grounding with Qwen2-VL**: Embedded neural grounding (`Qwen2-VL-2B` & `Qwen2.5-VL-7B`) detecting unlabeled icons, canvas elements, and custom widgets lacking native accessibility tags.
-  - **Real-Time Streaming TTS**: Stream-parses JSON output token-by-token to narrate responses immediately without waiting for inference completion.
-- **Autonomous Multi-Pass Reasoning**: Powered by leading cloud LLMs (DeepSeek, Claude, GPT-4o, Mistral, Groq, GLM) or the local offline models, Libertide plans and chains multi-step actions across iterative reasoning passes.
-- **Native Voice Cloning Engine (Sherpa-ONNX / Piper VITS)**: Pure Rust local neural speech synthesis with one-click voice sample enrollment ("Click & Record"), automatic Whisper transcription, and external HTTP server support (XTTS-v2 / Kokoro).
-- **Safety, Occlusion Resilience & Undo Stack**: Every simulated interaction is recorded in an undo stack. If target elements reside on an occluded or background window, blind clicking is prevented and native foreground focus (`focus_window`) is issued automatically. Say *"Undo"* or press `Escape` to rollback.
+### 5. 🎙️ 100% Private Voice Dictation & AI Companion (Zero Cloud)
+- **For Everyone:** Dictate emails, assignments, or documents effortlessly. Ask questions to your computer, and it responds with empathy and clarity.
+- **For Caregivers & Healthcare Institutions:** **Strict medical confidentiality (GDPR / Medical privacy)**:
+  - Continuous speech dictation (Whisper) and local language models (Llama 3, Qwen 2.5) run **entirely offline on your machine**; no voice recordings or health-related data ever leave the device.
+  - On-device vision AI (Qwen2-VL) can interpret legacy enterprise software, HTML5 canvas elements, or custom controls lacking accessibility labels.
+  - Safety safeguards: instant emergency stop via the `Escape` key or the voice command *"Stop"*.
 
-### 6. 🏠 Local Smart Home, KNX & BACnet/IP Automation
-Direct, cloud-free physical autonomy for users with severe mobility limitations:
-- **Home Assistant Integration**: Ultra-fast bidirectional control via local WebSocket (`/api/websocket`) and REST API fallback.
-- **Direct KNXnet/IP Routing**: Native UDP telegram broadcasting (`cEMI L_Data.ind`) on multicast `224.0.23.12:3671` or dedicated router IP without external bridges.
-- **BACnet/IP Support**: Direct building management (GTB/GTC) setpoint writing.
-- **Assistive Control**: Control lighting, motorized window shutters and blinds, room thermostat/climate, hospital and medical bed inclination (`switch.lit_medicalise_tete`), and smart power plugs using voice or gaze.
+### 6. 🏠 Bedroom Autonomy & Smart Home (Hospital Bed, Lights, Blinds)
+- **For Everyone:** Control your room using your voice or gaze: turn off lights, close blinds, or adjust the thermostat without moving.
+- **For Caregivers & Occupational Therapists:** Substantially lowers caregiver reliance for routine comfort tasks:
+  - **Controls motorized hospital beds** (*backrest elevation, flat inclination*) and patient room surroundings.
+  - Direct local communication without Internet dependency: compatible with Home Assistant (WebSocket), KNXnet/IP gateways (native UDP cEMI telegrams), and hospital building automation systems (BACnet/IP).
+  - 1-Click Care Presets: *Sleep Mode* (bed laid flat, blinds closed, lights off, session locked) and *Meal/Work Mode*.
 
-### 7. 🪟 Interactive Floating Cards & Live Subtitles
-Complex information is extracted and projected into accessible floating window cards:
-- **Live Subtitles & Real-Time Audio Loopback**: Transcribe system audio, streams (Twitch, YouTube, meetings) directly into an accessible floating window with an animated 16-band audio spectrum visualizer, history log, and instant clipboard export.
-- **Interactive Forms**: Flight searches, hotel finders, and filter tools rendered with high-contrast sliders, dropdowns, and checkboxes.
-- **Comparison Tables**: Sortable product, travel, or specification tables with one-click copy and actionable links (`[link="action:..."]`).
-- **Markdown Syntheses**: Clean article and document summaries with interactive action buttons.
-- **Webpage Content Analysis (`WebpageAnalysis`)**: Direct extraction and summarization of the active webpage's DOM body projected cleanly into floating cards.
+### 7. 🪟 Simplified Floating Cards & Real-Time Live Subtitles
+- **For Everyone:** Dense online content (long articles, schedules, weather) is transformed into clean summary cards in large typography. Videos and virtual meetings are captioned in real time.
+- **For Caregivers & Speech Therapists:** Relieves cognitive load for patients with brain injuries, post-stroke conditions, or attention deficit disorders (ADHD). Loopback audio capture instantly transcribes spoken audio for deaf and hard-of-hearing users with an accompanying audio spectrum visualizer.
 
-### 8. ⏰ Advanced Scheduler, Timers & Proactive Companion
-- **Recurring Cron & Delay Scheduling**: Set natural one-time reminders (*"Remind me in 15 minutes"*) or recurring cron jobs (`@hourly`, `every 30m`, `*/15 * * * *`).
-- **Active Timers Dashboard**: Visual progress bars, real-time countdown clocks, and quick-cancel buttons with Click & Dwell support directly inside the Assistance panel.
-- **Ethical Proactive Companion**: Periodic background check-ins (~22 minutes with natural timing jitter) cycling through posture/hydration advice (`CareAndComfort`), curiosities (`KnowledgeAndQuestions`), empathy (`EmotionalSupportAndEmpathy`), and ambient music (`RadioAndMusicStream`). Automatically suspends when the user is typing, dictating, or in emergency mode.
+### 8. ⏰ Health Reminders, Timers & Proactive Wellness
+- **For Everyone:** Simply say: *"Remind me to drink a glass of water in 20 minutes"* or *"Timer 5 minutes"*.
+- **For Caregivers:** Programmable medication and hydration schedule manager (one-time natural language reminders or recurring `@hourly` crons). Background wellness companion that suggests posture adjustments, hydration, and muscle relaxation without interrupting active typing.
 
-### 9. 🎵 Accessible Musical Instrument & Rhythm Toy
-- **Adaptive 8-Pad Synth & Drum Machine**: Built-in sound synthesis engine (Kick, Snare, Hi-Hat, Clap, Bass, Synths, Zen Bells, 8-Bit Retro) playable via single-switch scanning, dwell hover, or keyboard.
-- **Expressive Modulation**: Morphing pitch-bend and auto-wah filters with 4/4 rhythmic quantization to prevent accidental machine-gun triggers.
+### 9. 🎵 Accessible Music & Anti-Spasticity Drum Machine
+- **For Everyone:** Create music, drum grooves, and playful synthesizer tones using a single switch or your gaze.
+- **For Occupational Therapists & Music Therapists:** Motor rehabilitation and leisure engagement tool. The 8 sound pads are quantized to a 4/4 rhythm with a morphing filter that prevents accidental burst triggers caused by spasticity or tremors.
 
-### 10. 📺 Twitch Live Stream State & Interactive Chat
-- **Live Metadata & Viewer Counter**: Real-time stream detection showing live status, viewer count with a logarithmic activity color gradient (mint, cyan, amber, coral, magenta), and current broadcast titles.
-- **One-Click Stream Joining**: Direct *"🌐 Join on Twitch"* action in the active chat header to watch broadcasts in your default browser.
+### 10. 🛡️ Friction Shield & Payment Transaction Safeguard
+- **For Everyone:** Libertide automatically bypasses intrusive cookie banners so you can browse peacefully.
+- **For Families & Legal Guardians:** Impenetrable financial shield: the assistant can help assemble an online shopping cart, but **strictly halts execution before any payment or checkout page**, requiring manual verification and explicit consent from the user or caregiver.
 
-### 11. 🛡️ Removal of Web Obstacles & Transaction Safety
-- **Automatic Barrier Dismissal**: Automatically detects and dismisses invasive cookie consent banners and push notification prompts.
-- **Protected Payment Guardrail**: The agent can search products, compare prices, and manage shopping carts, but **strictly stops before checkout/payment screens**, requiring explicit user confirmation.
-
-- **Zero Accessibility Dead-Ends**: Works seamlessly on legacy software, Java Swing apps, canvas elements, games, or remote desktops where OS accessibility APIs (UIA, AX, AT-SPI) lack metadata.
-- **Instant Actionability**: An embedded high-speed OCR engine detects textual and button areas, assigning them clickable badges and hover narrations.
-
-### 12. 🎨 Visual Comfort & Custom Accessibility Themes (WCAG AAA)
-The interface adapts dynamically to your eyesight:
-- **Dynamic Zoom**: Say *"Zoom in"*, *"Enlarge text"*, or use UI buttons to scale from 70% to 250%.
-- **Multilingual Accessibility**: Toggle effortlessly between French, English, or Automatic System Language via settings or by voice (*"Passer en anglais"*, *"Passer en français"*).
-- **Specialized Profiles**:
-  - *High-Contrast Yellow & Black* (WCAG AAA for low vision and macular degeneration).
-  - *High-Contrast White & Black* (crisp, glare-free pure monochrome).
-  - *Soft Amber* (blue-light reduction for photophobia and chronic headaches).
-  - *Colorblind Friendly* (cobalt blue and gold contrast optimized for deuteranopia and protanopia).
-  - *Cyber Cyan, Mint Emerald & Neon Purple*.
-- **3D Spatial Binaural Earcons**: Audio cues (mic status, navigation clicks, emergency stops) are spatialized in real time across the stereo field according to their physical (X, Y) location on screen using Interaural Time & Level Differences (ITD/ILD) and pinna elevation filtering.
+### 11. 🎨 High-Visibility Visual Comfort (WCAG AAA Compliance)
+- **For Everyone:** Scale your display up to 250% by voice (*"Zoom in"*) and select the color palette that is gentlest on your eyes.
+- **For Ophthalmologists & Orthoptists:** Compliant with the most rigorous accessibility standards:
+  - Profiles tailored to eye conditions: *High-Visibility Yellow & Black* (AMD, low vision), *Soft Amber* (photophobia, chronic headaches), *High Contrast Glare-Free*, and color blindness profiles (protanopia, deuteranopia).
+  - **Binaural 3D Audio:** Acoustic feedback originates spatially from the exact screen coordinates of the targeted control, reinforcing auditory spatial orientation.
 
 ---
 
@@ -169,11 +130,11 @@ The interface adapts dynamically to your eyesight:
 - **With gaze or mouse**: Point at the target area: Libertide outlines it and speaks the button label (*"Close window"*, *"Search"*), executing upon dwell timer expiration or single switch tap.
 
 ### 🏠 5. Controlling your home and medical bed hands-free
-- Say *"Allume la lumière du salon"* or *"Incline le lit médicalisé"*:
+- Say *"Turn on the living room light"* or *"Tilt the medical bed"*:
   ➔ Libertide dispatches the command locally over WebSocket or direct KNX UDP without passing through cloud services.
 
 ### ⌨️ 6. Writing with the adaptive virtual keyboard
-- Say *"Clavier virtuel"* or press the keyboard button:
+- Say *"Virtual keyboard"* (or *"Clavier virtuel"*) or press the keyboard button:
   ➔ An accessible on-screen keyboard opens with auto-scanning, multilingual word prediction, and single-click voicing or document injection.
 
 ### 🪟 7. Organizing your workspace
@@ -182,20 +143,20 @@ The interface adapts dynamically to your eyesight:
 - *"Mute sound"* / *"Louder"*.
 
 ### 📺 8. Live video and audio subtitles
-- Say *"Active les sous-titres"* / *"Start subtitles"*:
+- Say *"Start subtitles"* / *"Stop subtitles"*:
   ➔ Libertide captures system audio output in loopback and displays real-time subtitles in a high-contrast floating card accompanied by a live 16-band spectrum equalizer.
 
 ### ⏱️ 9. Reminders and deferred commands
 - *"Remind me to take my medication in 30 minutes"*
 - *"In 10 minutes close the browser"*
-- *"Rappelle-moi de boire de l'eau toutes les heures"* / *"Every 30m"*
+- *"Remind me to drink water every hour"* / *"Every 30m"*
 
 ### 📺 10. Twitch streams & Live Chat
-- *"Ouvre le chat Twitch de kamet0"*
+- *"Open Twitch chat for kamet0"*
 - Look at live status, viewer count and stream title, or click *"🌐 Join on Twitch"* to watch.
 
 ### 🌿 11. Proactive Companion wellness thoughts
-- Say *"Active les pensées"* / *"Désactive les pensées"* to toggle gentle periodic wellness and posture check-ins.
+- Say *"Enable thoughts"* / *"Disable thoughts"* to toggle gentle periodic wellness and posture check-ins.
 
 ---
 
@@ -244,7 +205,7 @@ To process natural language commands, configure your preferred LLM provider:
      - *Llama 3.2 3B Instruct* (~2.0 GB)
      - *Qwen 2.5 7B Instruct* (~4.7 GB)
      - *Meta-Llama 3.1 8B Instruct* (~4.9 GB)  
-     Click **⬇ Télécharger** to download the model with real-time speed/progress monitoring and resume support.
+     Click **⬇ Download** to download the model with real-time speed/progress monitoring and resume support.
 
 *(On the first speech-recognition session, the lightweight local Whisper model downloads automatically in the background).*
 
@@ -292,19 +253,19 @@ Libertide understands English, French, and most modern languages:
 | Category | What you can say out loud |
 | :--- | :--- |
 | **Interface Control** | *"Hide"* • *"Show up"* • *"Emergency stop"* • *"Stop"* |
-| **Eye Tracking & Gaze** | *"Active le snapping"* • *"Désactive le snapping"* • *"Tare"* • *"Mode continu"* |
-| **Virtual Keyboard** | *"Clavier virtuel"* • *"Ouvre le clavier"* • *"Mode clavier"* |
-| **Home Automation** | *"Allume la lumière"* • *"Éteins le salon"* • *"Ouvre les volets"* • *"Règle le chauffage à 21 degrés"* • *"Relève le lit"* |
-| **Instrument & Rhythm** | *"Boîte à rythme"* • *"Mode musique"* • *"Lance la musique"* |
-| **Window Focus** | *"Focus Chrome"* • *"Mets le bloc-notes au premier plan"* • *"Passe sur VS Code"* |
-| **Live Subtitles** | *"Active les sous-titres"* • *"Arrête les sous-titres"* • *"Start subtitles"* • *"Stop subtitles"* |
+| **Eye Tracking & Gaze** | *"Enable snapping"* • *"Disable snapping"* • *"Tare / Calibrate"* • *"Continuous mode"* |
+| **Virtual Keyboard** | *"Virtual keyboard"* • *"Open keyboard"* • *"Keyboard mode"* |
+| **Home Automation** | *"Turn on the light"* • *"Turn off living room"* • *"Open blinds"* • *"Set heating to 21 degrees"* • *"Raise the bed"* |
+| **Instrument & Rhythm** | *"Drum machine"* • *"Music mode"* • *"Play music"* |
+| **Window Focus** | *"Focus Chrome"* • *"Bring Notepad to front"* • *"Switch to VS Code"* |
+| **Live Subtitles** | *"Start subtitles"* • *"Stop subtitles"* • *"Active les sous-titres"* |
 | **Pointing & Clicking Help** | *"Hover mode"* • *"Numbers"* / *"Badges"* • *"Click 3"* • *"Switch mode"* |
-| **Display & Themes** | *"Zoom in"* • *"Zoom out"* • *"Reset zoom"* • *"High contrast"* • *"Next theme"* • *"Passer en anglais / français / allemand / espagnol"* |
+| **Display & Themes** | *"Zoom in"* • *"Zoom out"* • *"Reset zoom"* • *"High contrast"* • *"Next theme"* • *"Switch to English / French / German / Spanish"* |
 | **Dictation & Writing** | *"Dictation mode"* • *"New line"* • *"Delete word"* • *"Stop dictation"* |
-| **Reading & Summaries** | *"Summarize this page"* • *"Analyse la page"* • *"What is this video about?"* • *"Read this text"* |
+| **Reading & Summaries** | *"Summarize this page"* • *"Analyze page"* • *"What is this video about?"* • *"Read this text"* |
 | **Workspace & Comfort** | *"Tile windows side by side"* • *"Mute sound"* • *"Close tab"* |
-| **Reminders & Cron** | *"Remind me to take my medicine in 20 minutes"* • *"Rappelle-moi toutes les heures"* • *"Minuteur 5 minutes"* • *"Annule les rappels"* |
-| **Proactive Wellness** | *"Active les pensées"* • *"Désactive les pensées"* |
+| **Reminders & Cron** | *"Remind me to take my medicine in 20 minutes"* • *"Remind me every hour"* • *"Timer 5 minutes"* • *"Cancel reminders"* |
+| **Proactive Wellness** | *"Enable thoughts"* • *"Disable thoughts"* |
 
 ---
 
