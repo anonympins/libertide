@@ -215,6 +215,13 @@ impl OverlayApp {
                 }
             }
 
+            if let Some(wid) = target.window_id {
+                if self.is_libertide_window_id(wid) {
+                    self.handle_libertide_target_action(&target);
+                    return;
+                }
+            }
+
             self.numbered_targets.clear();
             self.switch_zones.clear();
             self.switch_active_zone_index = None;
@@ -329,8 +336,228 @@ impl OverlayApp {
         }
     }
 
+    pub fn switch_to_libertide_window(&mut self) {
+        self.is_hidden = false;
+        self.hover_had_lost_focus = false;
+        clear_screen_numbered_badges();
+        self.switch_step = SwitchAccessStep::Zones;
+        self.switch_focus_index = 0;
+        self.switch_last_tick = Instant::now() + Duration::from_millis(1500);
+
+        let overlay_id = self.get_libertide_window_id();
+        self.switch_active_window_id = Some(overlay_id);
+        self.numbered_last_hwnd = Some(overlay_id);
+
+        if let Some(pos) = self.switch_windows.iter().position(|w| w.id == overlay_id) {
+            self.switch_focus_index = pos;
+        }
+
+        self.setup_libertide_navigation_zones();
+
+        #[cfg(windows)]
+        {
+            let hwnd = windows::Win32::Foundation::HWND(overlay_id as _);
+            if !hwnd.0.is_null() {
+                force_foreground_window(hwnd);
+                restore_if_iconic(hwnd);
+            }
+        }
+
+        self.display_zones_overlay("Fenêtre Libertide sélectionnée.");
+    }
+
+    pub fn setup_libertide_navigation_zones(&mut self) {
+        let overlay_id = self.get_libertide_window_id();
+        let (win_x, win_y, win_w, win_h) = {
+            let p = self.window_pos.unwrap_or(eframe::egui::pos2(100.0, 100.0));
+            (p.x as i32, p.y as i32, self.current_win_w as i32, self.current_win_h as i32)
+        };
+
+        let control_h: i32 = if !self.input_suggestions.is_empty() { 174 } else { 148 };
+        let control_top = win_y + win_h - control_h;
+
+        // Zone 1 : Commandes & Actions (Dock)
+        let z1_rect = [win_x + 4, control_top, win_x + win_w - 4, win_y + win_h - 4];
+        let mut z1_targets = Vec::new();
+
+        let btn_y = control_top + 40;
+        let btn_labels = [
+            ("Analyser l'écran (🔍)", "bouton"),
+            ("Microphone (🎙)", "bouton"),
+            ("Sous-titres en direct (💬)", "bouton"),
+            ("Joindre un fichier (📎)", "bouton"),
+            ("Mode Survol (🎯)", "bouton"),
+            ("Réglages (⚙)", "bouton"),
+            ("Effacer le contexte (🗑)", "bouton"),
+        ];
+
+        let start_x = win_x + 16;
+        for (i, &(name, role)) in btn_labels.iter().enumerate() {
+            let bx = start_x + (i as i32 * 54);
+            z1_targets.push(NumberedElementTarget {
+                index: i + 1,
+                click_x: bx + 24,
+                click_y: btn_y + 24,
+                rect: [bx, btn_y, bx + 50, btn_y + 50],
+                name: name.to_string(),
+                role: role.to_string(),
+                shortcut: String::new(),
+                value: String::new(),
+                window_id: Some(overlay_id),
+            });
+        }
+
+        let input_y = control_top + 8;
+        z1_targets.push(NumberedElementTarget {
+            index: z1_targets.len() + 1,
+            click_x: win_x + win_w / 2,
+            click_y: input_y + 14,
+            rect: [win_x + 16, input_y, win_x + win_w - 60, input_y + 28],
+            name: "Zone de saisie / Prompt".to_string(),
+            role: "champ de saisie".to_string(),
+            shortcut: "Entrée".to_string(),
+            value: self.input_text.clone(),
+            window_id: Some(overlay_id),
+        });
+
+        let zone1 = NavigationZone {
+            title: "Commandes & Actions".to_string(),
+            description: "Dock de contrôle Libertide (micro, saisie, outils)".to_string(),
+            click_x: win_x + win_w / 2,
+            click_y: control_top + control_h / 2,
+            rect: z1_rect,
+            targets: z1_targets,
+        };
+
+        // Zone 2 : Discussion & Navigation
+        let z2_rect = [win_x + 4, win_y + 4, win_x + win_w - 4, control_top - 4];
+        let mut z2_targets = Vec::new();
+
+        z2_targets.push(NumberedElementTarget {
+            index: 1,
+            click_x: win_x + 45,
+            click_y: win_y + 18,
+            rect: [win_x + 12, win_y + 6, win_x + 90, win_y + 30],
+            name: "Onglet Assistance".to_string(),
+            role: "onglet".to_string(),
+            shortcut: String::new(),
+            value: String::new(),
+            window_id: Some(overlay_id),
+        });
+        z2_targets.push(NumberedElementTarget {
+            index: 2,
+            click_x: win_x + 140,
+            click_y: win_y + 18,
+            rect: [win_x + 95, win_y + 6, win_x + 195, win_y + 30],
+            name: "Onglet Chat Twitch".to_string(),
+            role: "onglet".to_string(),
+            shortcut: String::new(),
+            value: String::new(),
+            window_id: Some(overlay_id),
+        });
+
+        if let Some(last_msg) = self.chat_history.last() {
+            let msg_preview = last_msg.text.chars().take(80).collect::<String>();
+            z2_targets.push(NumberedElementTarget {
+                index: 3,
+                click_x: win_x + win_w / 2,
+                click_y: win_y + 60,
+                rect: [win_x + 12, win_y + 36, win_x + win_w - 12, (control_top - 10).max(win_y + 70)],
+                name: format!("Lecture du message : {msg_preview}"),
+                role: "lecture textuelle".to_string(),
+                shortcut: String::new(),
+                value: last_msg.text.clone(),
+                window_id: Some(overlay_id),
+            });
+        }
+
+        let zone2 = NavigationZone {
+            title: "Discussion & Réponses".to_string(),
+            description: "Historique et messages de l'assistant".to_string(),
+            click_x: win_x + win_w / 2,
+            click_y: win_y + (control_top - win_y) / 2,
+            rect: z2_rect,
+            targets: z2_targets,
+        };
+
+        self.switch_zones = vec![zone1, zone2];
+    }
+
+    pub fn handle_libertide_target_action(&mut self, target: &NumberedElementTarget) {
+        let lower = target.name.to_lowercase();
+        if lower.contains("micro") {
+            if self.is_recording {
+                self.stop_recording();
+            } else {
+                self.mic_manually_disabled = false;
+                self.start_recording(None, true);
+            }
+        } else if lower.contains("analyser") {
+            self.submit_prompt(t!("commands.analyze_screen_prompt").to_string());
+        } else if lower.contains("sous-titres") {
+            if self.is_subtitles_open() {
+                self.stop_live_subtitles();
+            } else {
+                self.start_live_subtitles(None);
+            }
+        } else if lower.contains("fichier") {
+            if self.file_picker_rx.is_none() {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.file_picker_rx = Some(rx);
+                std::thread::spawn(move || {
+                    let res = crate::fs_util::pick_file_dialog();
+                    let _ = tx.send(res);
+                });
+                play_earcon(Earcon::Navigation);
+            }
+        } else if lower.contains("survol") {
+            self.toggle_switch_access_mode(None);
+        } else if lower.contains("réglages") || lower.contains("reglages") {
+            self.settings_tab = crate::theme::SettingsTab::LlmProvider;
+            self.show_api_key_modal = true;
+            self.sync_modal_inputs_for_provider(self.llm_config.provider);
+            self.api_key_error = None;
+        } else if lower.contains("effacer") {
+            let _ = self.command_sender.send(AgentCommand::ClearHistory);
+            self.chat_history.clear();
+            self.window_analysis_cache.clear();
+            self.chat_history.push(ChatEntry {
+                role: ChatRole::Agent,
+                text: t!("commands.context_cleared").to_string(),
+                timestamp: current_time_str(),
+                quick_suggestions: Vec::new(),
+                screen_size_kb: None,
+            });
+            self.live_transcript.clear();
+            self.stop_speaking();
+        } else if lower.contains("assistance") {
+            self.active_tab = ActiveTab::Assistance;
+        } else if lower.contains("twitch") {
+            self.active_tab = ActiveTab::Chat;
+        } else if lower.contains("saisie") || lower.contains("prompt") {
+            self.enter_dictation_mode();
+        } else if lower.contains("lecture") {
+            if let Some(last_msg) = self.chat_history.last() {
+                let speech = crate::tts::sanitize_for_tts(&last_msg.text);
+                if !speech.trim().is_empty() {
+                    self.status = AgentStatus::Speaking;
+                    let _ = self.tts_sender.send(TtsCommand::Speak(speech));
+                }
+            }
+        } else {
+            ui::click_element(target.click_x, target.click_y, None, None);
+        }
+        play_earcon_spatial(Earcon::Success, target.click_x, target.click_y);
+    }
+
     /// Transitionne de l'étape fenêtre vers l'étape des Chunks de badges / Zones
     pub fn transition_to_zones_for_window(&mut self, window_id: isize, win_title: &str) {
+        if self.is_libertide_window_id(window_id) {
+            self.switch_to_libertide_window();
+            return;
+        }
+
+        self.is_hidden = true;
         self.numbered_targets.clear();
         self.switch_zones.clear();
         self.switch_active_zone_index = None;

@@ -145,6 +145,8 @@ pub struct OverlayApp {
     hover_last_announced_zone: Option<String>,
     hover_controls_speech_enabled: bool,
     hover_physical_mouse_moved: bool,
+    hover_start_time: Instant,
+    hover_had_lost_focus: bool,
 
     // Canaux de communication asynchrones
     event_sender: StdSender<AgentEvent>,
@@ -466,6 +468,8 @@ impl OverlayApp {
             hover_last_announced_zone: None,
             hover_controls_speech_enabled: false,
             hover_physical_mouse_moved: false,
+            hover_start_time: Instant::now(),
+            hover_had_lost_focus: false,
 
             event_sender,
             event_receiver,
@@ -535,6 +539,32 @@ impl OverlayApp {
         app
     }
 
+    pub fn get_libertide_window_id(&self) -> isize {
+        #[cfg(windows)]
+        {
+            let overlay = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::FindWindowW(
+                    None,
+                    windows::core::w!("Libertide overlay"),
+                )
+                .unwrap_or(windows::Win32::Foundation::HWND(std::ptr::null_mut()))
+            };
+            if !overlay.0.is_null() {
+                overlay.0 as isize
+            } else {
+                -999
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            -999
+        }
+    }
+
+    pub fn is_libertide_window_id(&self, id: isize) -> bool {
+        id == self.get_libertide_window_id() || id == -999
+    }
+
     pub fn is_single_switch_mode(&self) -> bool {
         self.switch_auto_scroll
             || self.active_disability_presets.contains(&DisabilityPreset::MotorSwitch)
@@ -558,7 +588,6 @@ impl OverlayApp {
             || crate::eyetracking::get_eye_tracker_source() != crate::eyetracking::EyeTrackerSource::WebcamNeural
             || crate::eyetracking::is_eye_tracking_enabled())
             && (self.has_motor_disability()
-                || self.active_disability_presets.contains(&DisabilityPreset::Cognitive)
                 || crate::eyetracking::is_eye_tracking_enabled())
     }
 
@@ -876,46 +905,67 @@ impl OverlayApp {
             self.hover_last_announced_zone = None;
             self.hover_controls_speech_enabled = false;
             self.hover_physical_mouse_moved = false;
+            self.hover_start_time = Instant::now();
+            self.hover_had_lost_focus = false;
             play_earcon(Earcon::Success);
 
             if !self.switch_windows.is_empty() {
                 #[cfg(windows)]
                 let active_idx = {
                     let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
-                    self.switch_windows.iter().position(|w| w.id == fg.0 as isize)
+                    let overlay = unsafe { windows::Win32::UI::WindowsAndMessaging::FindWindowW(None, windows::core::w!("Libertide overlay")).unwrap_or(windows::Win32::Foundation::HWND(std::ptr::null_mut())) };
+                    let ext_h = LAST_EXTERNAL_HWND.lock().ok().and_then(|g| *g);
+                    let target_id = if !fg.0.is_null() && fg != overlay {
+                        Some(fg.0 as isize)
+                    } else {
+                        ext_h
+                    };
+                    target_id.and_then(|tid| self.switch_windows.iter().position(|w| w.id == tid && w.id != overlay.0 as isize))
                 };
                 #[cfg(not(windows))]
                 let active_idx = None;
 
-                self.switch_focus_index = active_idx.unwrap_or(0);
-                let cur_win = self.switch_windows[self.switch_focus_index].clone();
-                self.switch_active_window_id = Some(cur_win.id);
-                self.numbered_last_hwnd = Some(cur_win.id);
-                self.numbered_targets.clear();
-
-                crate::automation::IS_USER_TYPING.store(false, Ordering::SeqCst);
-
-                #[cfg(windows)]
-                {
-                    let hwnd = windows::Win32::Foundation::HWND(cur_win.id as _);
-                    focus_and_isolate_window(hwnd);
-                    let mut r = windows::Win32::Foundation::RECT::default();
-                    if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut r).is_ok() } {
-                        draw_screen_orange_border([r.left, r.top, r.right, r.bottom]);
-                    } else {
-                        draw_screen_orange_border(cur_win.rect);
+                let overlay_id = self.get_libertide_window_id();
+                let mut chosen_idx = active_idx.unwrap_or(0);
+                if self.switch_windows.get(chosen_idx).map_or(false, |w| w.id == overlay_id) {
+                    if let Some(first_ext) = self.switch_windows.iter().position(|w| w.id != overlay_id) {
+                        chosen_idx = first_ext;
                     }
-                    set_global_cursor_pos(cur_win.click_x, cur_win.click_y);
-                    self.hover_last_cursor_pos = Some((cur_win.click_x, cur_win.click_y));
                 }
-                #[cfg(not(windows))]
-                {
-                    focus_and_isolate_window(&cur_win.title);
-                    set_global_cursor_pos(cur_win.click_x, cur_win.click_y);
-                    self.hover_last_cursor_pos = Some((cur_win.click_x, cur_win.click_y));
-                }
+                self.switch_focus_index = chosen_idx.min(self.switch_windows.len().saturating_sub(1));
+                let cur_win = self.switch_windows[self.switch_focus_index].clone();
 
-                self.transition_to_zones_for_window(cur_win.id, &cur_win.title);
+                if self.is_libertide_window_id(cur_win.id) {
+                    self.switch_to_libertide_window();
+                } else {
+                    self.switch_active_window_id = Some(cur_win.id);
+                    self.numbered_last_hwnd = Some(cur_win.id);
+                    self.numbered_targets.clear();
+
+                    crate::automation::IS_USER_TYPING.store(false, Ordering::SeqCst);
+
+                    #[cfg(windows)]
+                    {
+                        let hwnd = windows::Win32::Foundation::HWND(cur_win.id as _);
+                        focus_and_isolate_window(hwnd);
+                        let mut r = windows::Win32::Foundation::RECT::default();
+                        if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut r).is_ok() } {
+                            draw_screen_orange_border([r.left, r.top, r.right, r.bottom]);
+                        } else {
+                            draw_screen_orange_border(cur_win.rect);
+                        }
+                        set_global_cursor_pos(cur_win.click_x, cur_win.click_y);
+                        self.hover_last_cursor_pos = Some((cur_win.click_x, cur_win.click_y));
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        focus_and_isolate_window(&cur_win.title);
+                        set_global_cursor_pos(cur_win.click_x, cur_win.click_y);
+                        self.hover_last_cursor_pos = Some((cur_win.click_x, cur_win.click_y));
+                    }
+
+                    self.transition_to_zones_for_window(cur_win.id, &cur_win.title);
+                }
             } else {
                 let msg = t!("speech.switch_no_windows").to_string();
                 self.chat_history.push(ChatEntry {
@@ -944,6 +994,7 @@ impl OverlayApp {
             self.hover_last_announced_zone = None;
             self.hover_controls_speech_enabled = false;
             self.hover_physical_mouse_moved = false;
+            self.hover_had_lost_focus = false;
             self.numbered_input_buffer.clear();
             clear_all_screen_overlays();
             play_earcon(Earcon::MicClose);
@@ -995,12 +1046,14 @@ impl OverlayApp {
         }
 
         if is_min {
-            if !self.switch_access_mode {
-                self.is_hidden = false;
-            }
+            self.is_hidden = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
             if let Some(pos) = self.window_pos {
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+            }
+            if self.switch_access_mode {
+                self.switch_to_libertide_window();
             }
             #[cfg(windows)]
             {
@@ -1018,7 +1071,7 @@ impl OverlayApp {
         }
     }
 
-    fn start_recording(&mut self, _ctx: &egui::Context, play_sound: bool) {
+    pub fn start_recording<'a>(&mut self, _ctx: impl Into<Option<&'a egui::Context>>, play_sound: bool) {
         if self.status == AgentStatus::EmergencyStopped || self.voice_is_recording_sample || self.mic_manually_disabled {
             return;
         }
@@ -1037,7 +1090,7 @@ impl OverlayApp {
         let _ = self.audio_sender.send(AudioCommand::Start);
     }
 
-    fn stop_recording(&mut self) {
+    pub fn stop_recording(&mut self) {
         self.is_recording = false;
         self.continuous_mode = false;
         self.mic_manually_disabled = true;
@@ -1048,7 +1101,7 @@ impl OverlayApp {
         self.status = AgentStatus::Idle;
     }
 
-    fn toggle_recording(&mut self, ctx: &egui::Context) {
+    pub fn toggle_recording<'a>(&mut self, ctx: impl Into<Option<&'a egui::Context>>) {
         if self.voice_is_recording_sample {
             return;
         }
@@ -1057,7 +1110,8 @@ impl OverlayApp {
             self.stop_recording();
         } else {
             self.mic_manually_disabled = false;
-            self.start_recording(ctx, true);
+            let ctx_ref = ctx.into();
+            self.start_recording(ctx_ref, true);
         }
     }
 }
@@ -1085,12 +1139,33 @@ impl eframe::App for OverlayApp {
             use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetForegroundWindow};
             let overlay = unsafe { FindWindowW(None, w!("Libertide overlay")).unwrap_or(windows::Win32::Foundation::HWND(std::ptr::null_mut())) };
             let fg = unsafe { GetForegroundWindow() };
-            !overlay.0.is_null() && fg == overlay
+            (!overlay.0.is_null() && fg == overlay) || ctx.input(|i| i.viewport().focused.unwrap_or(false))
         };
         #[cfg(not(windows))]
         let is_libertide_fg = ctx.input(|i| {
-            i.viewport().focused.unwrap_or(true)
+            i.viewport().focused.unwrap_or(false)
         });
+
+        self.restore_window_if_minimized(&ctx);
+
+        // Focus sur Libertide (barre des tâches, Alt+Tab, etc.) : on reste en mode survol et on bascule sur Libertide
+        if self.switch_access_mode {
+            if is_libertide_fg {
+                if self.is_hidden && self.hover_start_time.elapsed() >= Duration::from_millis(300) {
+                    self.switch_to_libertide_window();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.request_repaint();
+                }
+            } else {
+                self.hover_had_lost_focus = true;
+            }
+        } else if self.is_hidden && is_libertide_fg {
+            self.is_hidden = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.request_repaint();
+        }
 
         let is_egui_text_focused = !self.is_hidden
             && is_libertide_fg

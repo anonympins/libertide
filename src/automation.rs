@@ -196,6 +196,24 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
         });
     }
 
+    // Intégration de Libertide comme fenêtre candidate navigable en mode survol
+    if !overlay_hwnd.0.is_null() {
+        let mut r = RECT::default();
+        if unsafe { GetWindowRect(overlay_hwnd, &mut r).is_ok() } {
+            let width = r.right - r.left;
+            let height = r.bottom - r.top;
+            if width >= 100 && height >= 60 {
+                candidates.push(SwitchWindowTarget {
+                    id: overlay_hwnd.0 as isize,
+                    title: "Libertide (Assistant)".to_string(),
+                    click_x: r.left + width / 2,
+                    click_y: (r.top + 24).min(r.bottom - 10),
+                    rect: [r.left, r.top, r.right, r.bottom],
+                });
+            }
+        }
+    }
+
     candidates
 }
 
@@ -264,6 +282,13 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
                 rect: [w.x, w.y, w.x + w.width, w.y + w.height],
             }
         })
+        .chain(std::iter::once(SwitchWindowTarget {
+            id: -999,
+            title: "Libertide (Assistant)".to_string(),
+            click_x: 200,
+            click_y: 200,
+            rect: [50, 50, 600, 350],
+        }))
         .collect()
 }
 
@@ -308,6 +333,13 @@ pub fn collect_switch_candidate_windows() -> Vec<SwitchWindowTarget> {
             }
         }
     }
+    candidates.push(SwitchWindowTarget {
+        id: -999,
+        title: "Libertide (Assistant)".to_string(),
+        click_x: 200,
+        click_y: 200,
+        rect: [50, 50, 600, 350],
+    });
     candidates
 }
 
