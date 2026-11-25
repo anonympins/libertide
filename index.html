@@ -197,6 +197,7 @@
             display: flex;
             flex-direction: column;
             transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+            cursor: pointer;
         }
         .screenshot-card:hover {
             transform: translateY(-4px);
@@ -271,6 +272,92 @@
             padding: 2.5rem;
             text-align: center;
             margin-bottom: 4rem;
+        }
+
+        /* Lightbox */
+        .lightbox-modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.88);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            z-index: 1000;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 1.5rem;
+            opacity: 0;
+            transition: opacity 0.25s ease;
+        }
+        .lightbox-modal.active {
+            display: flex;
+            opacity: 1;
+        }
+        .lightbox-content {
+            position: relative;
+            max-width: 90vw;
+            max-height: 85vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .lightbox-content img {
+            max-width: 100%;
+            max-height: 75vh;
+            object-fit: contain;
+            border-radius: 8px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+            border: 1px solid var(--border);
+        }
+        .lightbox-caption {
+            margin-top: 1rem;
+            color: var(--text);
+            font-size: 1.05rem;
+            font-weight: 600;
+            text-align: center;
+        }
+        .lightbox-btn {
+            background: rgba(18, 24, 34, 0.85);
+            border: 1px solid var(--border);
+            color: var(--text);
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.4rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            position: absolute;
+            user-select: none;
+        }
+        .lightbox-btn:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+            transform: scale(1.1);
+        }
+        .lightbox-close {
+            top: 1.5rem;
+            right: 1.5rem;
+            font-size: 1.8rem;
+            line-height: 1;
+        }
+        .lightbox-prev {
+            left: 1.5rem;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+        .lightbox-prev:hover {
+            transform: translateY(-50%) scale(1.1);
+        }
+        .lightbox-next {
+            right: 1.5rem;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+        .lightbox-next:hover {
+            transform: translateY(-50%) scale(1.1);
         }
 
         /* Section Avis & Retours */
@@ -491,6 +578,19 @@
     <footer>
         <p data-i18n="footerText">Libertide — Développé avec passion pour l'autonomie et l'inclusion numérique de tous.</p>
     </footer>
+
+    <!-- Lightbox Modal -->
+    <div id="lightbox-modal" class="lightbox-modal" role="dialog" aria-modal="true" aria-hidden="true" onclick="if(event.target === this) closeLightbox()">
+        <button id="lightbox-close-btn" class="lightbox-btn lightbox-close" aria-label="Fermer" onclick="closeLightbox()">&times;</button>
+        <button class="lightbox-btn lightbox-prev" aria-label="Précédent" onclick="prevLightbox()">&#10094;</button>
+        
+        <div class="lightbox-content">
+            <img id="lightbox-img" src="" alt="">
+            <div id="lightbox-caption" class="lightbox-caption"></div>
+        </div>
+
+        <button class="lightbox-btn lightbox-next" aria-label="Suivant" onclick="nextLightbox()">&#10095;</button>
+    </div>
 </div>
 
 <script>
@@ -877,6 +977,7 @@
         }
 
         updateFeedbackMailto();
+        updateLightboxContent();
 
         try {
             localStorage.setItem('libertide_lang', targetLang);
@@ -894,6 +995,82 @@
         btn.href = `mailto:anonympins@gmail.com?subject=${encodeURIComponent(`[Libertide] ${subject}`)}`;
     }
 
+    // Lightbox
+    let currentLightboxIndex = 0;
+    const galleryItems = [];
+
+    function initLightbox() {
+        const cards = document.querySelectorAll('.gallery-grid .screenshot-card');
+        cards.forEach((card, index) => {
+            const img = card.querySelector('img');
+            const caption = card.querySelector('figcaption');
+            if (img) {
+                galleryItems.push({
+                    src: img.getAttribute('src'),
+                    alt: img.getAttribute('alt') || '',
+                    captionEl: caption
+                });
+                card.setAttribute('tabindex', '0');
+                card.setAttribute('role', 'button');
+                card.setAttribute('aria-haspopup', 'dialog');
+                card.addEventListener('click', () => openLightbox(index));
+                card.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        openLightbox(index);
+                    }
+                });
+            }
+        });
+
+        window.addEventListener('keydown', (e) => {
+            const modal = document.getElementById('lightbox-modal');
+            if (!modal || !modal.classList.contains('active')) return;
+            if (e.key === 'Escape') closeLightbox();
+            if (e.key === 'ArrowRight') nextLightbox();
+            if (e.key === 'ArrowLeft') prevLightbox();
+        });
+    }
+
+    function openLightbox(index) {
+        if (index < 0 || index >= galleryItems.length) return;
+        currentLightboxIndex = index;
+        updateLightboxContent();
+        const modal = document.getElementById('lightbox-modal');
+        modal.classList.add('active');
+        modal.setAttribute('aria-hidden', 'false');
+        document.body.style.overflow = 'hidden';
+        document.getElementById('lightbox-close-btn').focus();
+    }
+
+    function closeLightbox() {
+        const modal = document.getElementById('lightbox-modal');
+        if (!modal) return;
+        modal.classList.remove('active');
+        modal.setAttribute('aria-hidden', 'true');
+        document.body.style.overflow = '';
+    }
+
+    function updateLightboxContent() {
+        const item = galleryItems[currentLightboxIndex];
+        const img = document.getElementById('lightbox-img');
+        const caption = document.getElementById('lightbox-caption');
+        if (!item || !img || !caption) return;
+        img.src = item.src;
+        img.alt = item.alt;
+        caption.textContent = item.captionEl ? item.captionEl.textContent : '';
+    }
+
+    function nextLightbox() {
+        currentLightboxIndex = (currentLightboxIndex + 1) % galleryItems.length;
+        updateLightboxContent();
+    }
+
+    function prevLightbox() {
+        currentLightboxIndex = (currentLightboxIndex - 1 + galleryItems.length) % galleryItems.length;
+        updateLightboxContent();
+    }
+
     // Initialisation : localStorage ou préférence navigateur
     (function initLang() {
         const supported = ['fr', 'en', 'de', 'es', 'it', 'ja', 'pt', 'ru', 'zh'];
@@ -907,6 +1084,7 @@
             savedLang = supported.includes(browserLang) ? browserLang : 'fr';
         }
         setLanguage(savedLang);
+        initLightbox();
     })();
 </script>
 </body>
