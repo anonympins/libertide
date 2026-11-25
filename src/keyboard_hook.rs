@@ -24,6 +24,7 @@ use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 #[cfg(windows)]
 use windows::Win32::Foundation::RECT;
+#[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
