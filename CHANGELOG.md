@@ -3,6 +3,25 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.8.10] - 2026-11-25
+
+### 👁️📄 Universal Multimodal Vision & Document Attachment Engine (`ocr.rs`, `local_llm.rs`, `fs_util.rs`, `app_ui.rs`, `agent_backend.rs`)
+- **Direct In-App File & Image Attachment (`pick_file_dialog`, `attached_file_path`)**:
+  - Integrated dedicated attachment triggers (`📎`) within the primary control dock allowing users to pair photos, screenshots, PDFs, and code documents with queries.
+  - Dynamic chip indicator with quick-detach controls and localized filetype badges (`🖼️`, `📕`, `💻`, `📄`).
+- **Full Cross-Platform File Selection & Capture Parity (Windows, macOS, Linux)**:
+  - **Windows**: Fast Win32 `GetOpenFileNameW` with background STA PowerShell fallback; in-memory 32-bit RGBA GDI screen & window grabber.
+  - **macOS**: Native CoreGraphics frame capture and Apple Vision (`VNRecognizeTextRequest`) hardware-accelerated on Apple Silicon Neural Engine (ANE); native `osascript` choose file dialogs.
+  - **Linux (Wayland & X11)**: Zero-copy `grim` binary PPM P6 stream decoder (< 2 ms) for Wayland compositors and `XGetImage` for X11; native `zenity` picker integration.
+- **Multimodal Vision-Language Model Grounding (`query_vlm_multimodal`, `Qwen2-VL`)**:
+  - Seamless visual GUI grounding capable of identifying unlabelled icons (e.g. `☰`, `⚙️`, `🔍`), HTML5 canvas widgets, and graphical controls lacking accessibility tree nodes.
+  - Hardware GPU offload via `VLM_GPU_LAYERS` (Vulkan / Metal) with transparent CPU fallback and embedded `llama-server` lifecycle management.
+  - Dual-pipeline multimodal routing automatically dispatching visual queries, captchas, handwritten notes, and image descriptions to local Qwen2-VL or remote vision providers.
+- **Autonomous Document & PDF Parsing (`read_pdf_text`)**:
+  - Pure-Rust `/FlateDecode` stream decompression with memory streams, alongside system PDFKit (macOS) and `pdftotext` discovery for administrative documents, invoices, and source code.
+
+---
+
 ## [0.8.9] - 2026-11-24
 
 ### 💬🧩 AAC Pictogram Communication Board & Generative LLM Expansion (`virtual_keyboard.rs`, `floating_window.rs`, `main.rs`, `app_ui.rs`)
