@@ -273,6 +273,55 @@
             margin-bottom: 4rem;
         }
 
+        /* Section Avis & Retours */
+        .feedback-section {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2.5rem;
+            text-align: center;
+            margin-bottom: 4rem;
+        }
+        .feedback-section h2 {
+            font-size: clamp(1.4rem, 3vw, 1.8rem);
+            margin-bottom: 0.5rem;
+            color: #fff;
+        }
+        .feedback-section p {
+            color: var(--text-muted);
+            margin-bottom: 1.5rem;
+            font-size: 0.95rem;
+            max-width: 620px;
+            margin-inline: auto;
+        }
+        .feedback-form {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .feedback-select {
+            background: #080b10;
+            border: 1px solid var(--border);
+            color: var(--text);
+            font-family: inherit;
+            font-size: 0.95rem;
+            padding: 0.8rem 1.2rem;
+            border-radius: 8px;
+            cursor: pointer;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+        .feedback-select:hover, .feedback-select:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 8px rgba(0, 229, 255, 0.3);
+        }
+        .feedback-select option {
+            background-color: var(--card-bg);
+            color: var(--text);
+        }
+
         footer {
             border-top: 1px solid rgba(255, 255, 255, 0.1);
             padding: 2rem 0;
@@ -420,6 +469,23 @@
                 Libertide est distribué sous licence libre. La reconnaissance vocale (Whisper) et les modèles de langage locaux tournent directement sur votre machine pour préserver le secret médical et votre vie privée.
             </p>
         </section>
+
+        <section class="feedback-section">
+            <h2 data-i18n="feedbackTitle">Votre avis nous intéresse</h2>
+            <p data-i18n="feedbackDesc">Aidez-nous à faire évoluer Libertide en partageant vos retours, suggestions d'amélioration ou témoignages.</p>
+            <div class="feedback-form">
+                <select id="feedback-subject" class="feedback-select" onchange="updateFeedbackMailto()" aria-label="Objet du message">
+                    <option data-i18n="feedbackOpt1">💬 Avis général</option>
+                    <option data-i18n="feedbackOpt2">💡 Suggestion d'amélioration</option>
+                    <option data-i18n="feedbackOpt3">🐛 Signalement de bug</option>
+                    <option data-i18n="feedbackOpt4">♿ Question sur l'accessibilité</option>
+                    <option data-i18n="feedbackOpt5">✉️ Autre demande</option>
+                </select>
+                <a id="feedback-btn" href="mailto:anonympins@gmail.com" class="btn btn-primary">
+                    <span data-i18n="feedbackBtn">Déposer un avis</span>
+                </a>
+            </div>
+        </section>
     </main>
 
     <footer>
@@ -459,6 +525,14 @@
             shot4: "Paramètres d'accessibilité",
             privacyTitle: "🔒 Confidentialité Médicale & Zéro Dépendance",
             privacyDesc: "Libertide est distribué sous licence libre. La reconnaissance vocale (Whisper) et les modèles de langage locaux tournent directement sur votre machine pour préserver le secret médical et votre vie privée.",
+            feedbackTitle: "Votre avis nous intéresse",
+            feedbackDesc: "Aidez-nous à faire évoluer Libertide en partageant vos retours, suggestions d'amélioration ou témoignages.",
+            feedbackBtn: "Déposer un avis",
+            feedbackOpt1: "💬 Avis général",
+            feedbackOpt2: "💡 Suggestion d'amélioration",
+            feedbackOpt3: "🐛 Signalement de bug",
+            feedbackOpt4: "♿ Question sur l'accessibilité",
+            feedbackOpt5: "✉️ Autre demande",
             footerText: "Libertide — Développé avec passion pour l'autonomie et l'inclusion numérique de tous."
         },
         en: {
@@ -491,6 +565,14 @@
             shot4: "Accessibility Settings",
             privacyTitle: "🔒 Medical-Grade Privacy & Zero Cloud Lock-In",
             privacyDesc: "Libertide is released under an open-source license. Speech recognition (Whisper) and local language models run entirely on-device to safeguard patient privacy.",
+            feedbackTitle: "We Value Your Feedback",
+            feedbackDesc: "Help us improve Libertide by sharing your feedback, feature suggestions, or user stories.",
+            feedbackBtn: "Send Feedback",
+            feedbackOpt1: "💬 General Feedback",
+            feedbackOpt2: "💡 Feature Suggestion",
+            feedbackOpt3: "🐛 Bug Report",
+            feedbackOpt4: "♿ Accessibility Inquiry",
+            feedbackOpt5: "✉️ Other Request",
             footerText: "Libertide — Built with passion for digital autonomy and universal inclusion."
         },
         de: {
@@ -523,6 +605,14 @@
             shot4: "Barrierefreiheits-Einstellungen",
             privacyTitle: "🔒 Medizinischer Datenschutz & Null Cloud-Abhängigkeit",
             privacyDesc: "Libertide steht unter freier Lizenz. Spracherkennung (Whisper) und lokale Sprachmodelle laufen vollständig auf Ihrem Rechner, um das Arztgeheimnis und Ihre Privatsphäre zu schützen.",
+            feedbackTitle: "Ihre Meinung ist uns wichtig",
+            feedbackDesc: "Helfen Sie uns, Libertide zu verbessern, indem Sie Ihr Feedback, Verbesserungsvorschläge oder Erfahrungsberichte teilen.",
+            feedbackBtn: "Feedback senden",
+            feedbackOpt1: "💬 Allgemeines Feedback",
+            feedbackOpt2: "💡 Verbesserungsvorschlag",
+            feedbackOpt3: "🐛 Fehlerbericht",
+            feedbackOpt4: "♿ Frage zur Barrierefreiheit",
+            feedbackOpt5: "✉️ Sonstige Anfrage",
             footerText: "Libertide — Mit Leidenschaft entwickelt für digitale Autonomie und universelle Inklusion."
         },
         es: {
@@ -555,6 +645,14 @@
             shot4: "Ajustes de accesibilidad",
             privacyTitle: "🔒 Privacidad Médica y Cero Dependencia Cloud",
             privacyDesc: "Libertide es de código abierto. El reconocimiento de voz (Whisper) y los modelos de lenguaje locales se ejecutan íntegramente en su equipo para proteger su privacidad.",
+            feedbackTitle: "Su opinión nos importa",
+            feedbackDesc: "Ayúdenos a mejorar Libertide compartiendo sus comentarios, sugerencias o testimonios.",
+            feedbackBtn: "Enviar opinión",
+            feedbackOpt1: "💬 Opinión general",
+            feedbackOpt2: "💡 Sugerencia de mejora",
+            feedbackOpt3: "🐛 Reporte de error",
+            feedbackOpt4: "♿ Consulta sobre accesibilidad",
+            feedbackOpt5: "✉️ Otra consulta",
             footerText: "Libertide — Desarrollado con pasión para la autonomía y la inclusión digital de todos."
         },
         it: {
@@ -587,6 +685,14 @@
             shot4: "Impostazioni di accessibilità",
             privacyTitle: "🔒 Riservatezza Medica & Zero Dipendenza Cloud",
             privacyDesc: "Libertide è open source. Il riconoscimento vocale (Whisper) e i modelli linguistici locali girano interamente sul tuo dispositivo per garantire la privacy medica.",
+            feedbackTitle: "La tua opinione è importante",
+            feedbackDesc: "Aiutaci a migliorare Libertide condividendo commenti, suggerimenti o testimonianze.",
+            feedbackBtn: "Invia parere",
+            feedbackOpt1: "💬 Parere generale",
+            feedbackOpt2: "💡 Suggerimento di miglioramento",
+            feedbackOpt3: "🐛 Segnalazione di bug",
+            feedbackOpt4: "♿ Domanda sull'accessibilità",
+            feedbackOpt5: "✉️ Altra richiesta",
             footerText: "Libertide — Sviluppato con passione per l'autonomia e l'inclusione digitale di tutti."
         },
         ja: {
@@ -619,6 +725,14 @@
             shot4: "アクセシビリティ設定",
             privacyTitle: "🔒 医療水準のプライバシー保護・クラウド依存ゼロ",
             privacyDesc: "Libertideはオープンソースです。音声認識（Whisper）やローカルLLMは端末内で直接動作し、患者情報やプライバシーを徹底的に保護します。",
+            feedbackTitle: "ご意見・フィードバックをお待ちしています",
+            feedbackDesc: "ご感想や改善のご提案、利用体験を共有してLibertideの改善にご協力ください。",
+            feedbackBtn: "フィードバックを送信",
+            feedbackOpt1: "💬 一般的なご意見",
+            feedbackOpt2: "💡 改善・機能のご提案",
+            feedbackOpt3: "🐛 不具合・バグの報告",
+            feedbackOpt4: "♿ アクセシビリティに関する質問",
+            feedbackOpt5: "✉️ その他のお問い合わせ",
             footerText: "Libertide — すべての人のデジタルな自立とインクルージョンのために情熱を込めて開発。"
         },
         pt: {
@@ -651,6 +765,14 @@
             shot4: "Configurações de acessibilidade",
             privacyTitle: "🔒 Privacidade Médica e Sem Dependência de Nuvem",
             privacyDesc: "Libertide é software livre. O reconhecimento de voz (Whisper) e os modelos de linguagem locais rodam direto no computador para proteger sua privacidade.",
+            feedbackTitle: "A sua opinião é importante",
+            feedbackDesc: "Ajude-nos a aprimorar o Libertide compartilhando seus comentários, sugestões ou depoimentos.",
+            feedbackBtn: "Enviar avaliação",
+            feedbackOpt1: "💬 Avaliação geral",
+            feedbackOpt2: "💡 Sugestão de melhoria",
+            feedbackOpt3: "🐛 Relato de erro",
+            feedbackOpt4: "♿ Pergunta sobre acessibilidade",
+            feedbackOpt5: "✉️ Outra solicitação",
             footerText: "Libertide — Desenvolvido com paixão para a autonomia e a inclusão digital de todos."
         },
         ru: {
@@ -683,6 +805,14 @@
             shot4: "Настройки доступности",
             privacyTitle: "🔒 Медицинская конфиденциальность и нулевая зависимость от облака",
             privacyDesc: "Libertide распространяется под свободной лицензией. Распознавание речи (Whisper) и языковые модели работают локально на вашем ПК для защиты врачебной тайны.",
+            feedbackTitle: "Ваш отзыв важен для нас",
+            feedbackDesc: "Помогите нам сделать Libertide лучше, поделившись своими предложениями, отзывами или опытом.",
+            feedbackBtn: "Оставить отзыв",
+            feedbackOpt1: "💬 Общий отзыв",
+            feedbackOpt2: "💡 Предложение по улучшению",
+            feedbackOpt3: "🐛 Сообщение об ошибке",
+            feedbackOpt4: "♿ Вопрос о доступности",
+            feedbackOpt5: "✉️ Другой запрос",
             footerText: "Libertide — Создано с заботой о цифровой автономии и инклюзивности для каждого."
         },
         zh: {
@@ -715,6 +845,14 @@
             shot4: "无障碍辅助设置",
             privacyTitle: "🔒 医疗级隐私安全 & 零云端锁定",
             privacyDesc: "Libertide 以开源协议发布。语音识别 (Whisper) 和本地语言模型完全在本地运行，切实保护患者隐私与数据安全。",
+            feedbackTitle: "欢迎提供宝贵意见",
+            feedbackDesc: "欢迎与我们分享您的使用反馈、改进建议或心得体验，共同完善 Libertide。",
+            feedbackBtn: "提交反馈",
+            feedbackOpt1: "💬 总体反馈",
+            feedbackOpt2: "💡 功能改进建议",
+            feedbackOpt3: "🐛 问题与 Bug 反馈",
+            feedbackOpt4: "♿ 无障碍相关咨询",
+            feedbackOpt5: "✉️ 其他需求",
             footerText: "Libertide — 为人人的数字化自主与无障碍包容倾心打造。"
         }
     };
@@ -738,11 +876,22 @@
             select.value = targetLang;
         }
 
+        updateFeedbackMailto();
+
         try {
             localStorage.setItem('libertide_lang', targetLang);
         } catch (e) {
             /* ignore storage quota / sandbox restrictions */
         }
+    }
+
+    function updateFeedbackMailto() {
+        const select = document.getElementById('feedback-subject');
+        const btn = document.getElementById('feedback-btn');
+        if (!select || !btn) return;
+        const selectedOption = select.options[select.selectedIndex];
+        const subject = selectedOption ? selectedOption.text : 'Avis';
+        btn.href = `mailto:anonympins@gmail.com?subject=${encodeURIComponent(`[Libertide] ${subject}`)}`;
     }
 
     // Initialisation : localStorage ou préférence navigateur
