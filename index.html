@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title id="meta-title">Libertide — L'informatique accessible sans barrière physique</title>
+    <meta id="meta-desc" name="description" content="Overlay d'assistance universel pour ordinateur : commande oculaire par webcam IA, LLM multimodaux locaux, navigation au contacteur unique, dictée vocale et domotique.">
+    <link rel="icon" type="image/png" href="public/favicon-256x256.png">
+
+    <style>
+        :root {
+            --bg: #0b0e14;
+            --card-bg: #121822;
+            --accent: #00e5ff;
+            --accent-hover: #00b4d8;
+            --text: #ffffff;
+            --text-muted: #a0aec0;
+            --border: rgba(0, 229, 255, 0.25);
+            --highlight: #ffd600;
+            --font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: var(--font);
+            line-height: 1.6;
+            padding: 0 1.5rem;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+
+        /* Barre supérieure / Sélecteur de langue */
+        .top-nav {
+            display: flex;
+            justify-content: flex-end;
+            padding: 1.25rem 0 0.5rem;
+        }
+        .lang-select-wrapper {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+        }
+        .lang-select-wrapper::after {
+            content: "▼";
+            font-size: 0.65rem;
+            color: var(--accent);
+            position: absolute;
+            right: 0.85rem;
+            pointer-events: none;
+        }
+        .lang-select {
+            appearance: none;
+            -webkit-appearance: none;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            font-family: inherit;
+            font-size: 0.85rem;
+            font-weight: 600;
+            padding: 0.4rem 2rem 0.4rem 0.9rem;
+            border-radius: 999px;
+            cursor: pointer;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+        .lang-select:hover, .lang-select:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 8px rgba(0, 229, 255, 0.3);
+        }
+        .lang-select option {
+            background-color: var(--card-bg);
+            color: var(--text);
+        }
+
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            border: 0;
+        }
+
+        header {
+            padding: 2.5rem 0 2rem;
+            text-align: center;
+        }
+
+        .badge {
+            display: inline-block;
+            background: rgba(0, 229, 255, 0.12);
+            border: 1px solid var(--border);
+            color: var(--accent);
+            padding: 0.35rem 0.85rem;
+            border-radius: 999px;
+            font-size: 0.85rem;
+            font-weight: 700;
+            margin-bottom: 1.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        h1 {
+            font-size: clamp(2.2rem, 5vw, 3.4rem);
+            line-height: 1.2;
+            margin-bottom: 1.2rem;
+            font-weight: 800;
+        }
+
+        h1 span {
+            color: var(--accent);
+        }
+
+        p.lead {
+            font-size: 1.2rem;
+            color: var(--text-muted);
+            max-width: 760px;
+            margin: 0 auto 2.5rem;
+        }
+
+        .cta-group {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-bottom: 3rem;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.85rem 1.75rem;
+            font-size: 1.05rem;
+            font-weight: 700;
+            border-radius: 8px;
+            text-decoration: none;
+            transition: all 0.2s ease;
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: #000;
+        }
+        .btn-primary:hover {
+            background: var(--accent-hover);
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: var(--text);
+            border: 1px solid rgba(255, 255, 255, 0.25);
+        }
+        .btn-secondary:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        /* Galerie de captures d'écran */
+        .gallery-section {
+            margin: 1rem 0 4rem;
+            text-align: center;
+        }
+        .section-title {
+            font-size: clamp(1.6rem, 3.5vw, 2.2rem);
+            font-weight: 800;
+            margin-bottom: 0.5rem;
+            color: #fff;
+        }
+        .section-subtitle {
+            color: var(--text-muted);
+            margin-bottom: 2rem;
+            font-size: 1.05rem;
+        }
+        .gallery-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1.5rem;
+        }
+        @media (max-width: 680px) {
+            .gallery-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        .screenshot-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+        }
+        .screenshot-card:hover {
+            transform: translateY(-4px);
+            border-color: var(--accent);
+            box-shadow: 0 10px 25px rgba(0, 229, 255, 0.15);
+        }
+        .screenshot-img-wrapper {
+            width: 100%;
+            aspect-ratio: 16 / 10;
+            background: #080b10;
+            overflow: hidden;
+        }
+        .screenshot-img-wrapper img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transition: transform 0.35s ease;
+        }
+        .screenshot-card:hover .screenshot-img-wrapper img {
+            transform: scale(1.04);
+        }
+        .screenshot-card figcaption {
+            padding: 0.85rem 1rem;
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text);
+            border-top: 1px solid rgba(255, 255, 255, 0.05);
+            background: rgba(18, 24, 34, 0.95);
+        }
+
+        /* Grid des fonctionnalités */
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 1.5rem;
+            margin: 4rem 0;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.75rem;
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+        .card:hover {
+            transform: translateY(-4px);
+            border-color: var(--accent);
+        }
+
+        .card-icon {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+        }
+
+        .card h3 {
+            font-size: 1.25rem;
+            margin-bottom: 0.5rem;
+            color: #fff;
+        }
+
+        .card p {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+        }
+
+        /* Section Open Source & Confidentialité */
+        .privacy-banner {
+            background: linear-gradient(180deg, rgba(0, 229, 255, 0.05) 0%, rgba(18, 24, 34, 0.6) 100%);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2.5rem;
+            text-align: center;
+            margin-bottom: 4rem;
+        }
+
+        footer {
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 2rem 0;
+            text-align: center;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <nav class="top-nav" aria-label="Langue / Language">
+        <div class="lang-select-wrapper">
+            <label for="lang-select" class="sr-only">Langue / Language</label>
+            <select id="lang-select" class="lang-select" onchange="setLanguage(this.value, true)" aria-label="Sélectionner la langue">
+                <option value="fr">🇫🇷 Français (FR)</option>
+                <option value="en">🇬🇧 English (EN)</option>
+                <option value="de">🇩🇪 Deutsch (DE)</option>
+                <option value="es">🇪🇸 Español (ES)</option>
+                <option value="it">🇮🇹 Italiano (IT)</option>
+                <option value="ja">🇯🇵 日本語 (JA)</option>
+                <option value="pt">🇵🇹 Português (PT)</option>
+                <option value="ru">🇷🇺 Русский (RU)</option>
+                <option value="zh">🇨🇳 中文 (ZH)</option>
+            </select>
+        </div>
+    </nav>
+
+    <header>
+        <div class="badge" data-i18n="heroBadge">Accessibilité Numérique • Open Source</div>
+        <h1><span data-i18n="heroTitle">Reprenez le contrôle de votre ordinateur avec</span> <span style="color: var(--accent);">Libertide</span></h1>
+        <p class="lead" data-i18n="heroLead">
+            Un overlay d'assistance intelligent, rapide et transparent. Conçu pour le handicap moteur,
+            les tremblements, la perte de mobilité et la basse vision, sans matériel propriétaire coûteux.
+        </p>
+
+        <div class="cta-group">
+            <a href="https://github.com/anonympins/libertide/releases/latest" class="btn btn-primary" data-i18n="downloadBtn">
+                ⬇ Télécharger pour Windows / macOS / Linux
+            </a>
+            <a href="https://github.com/anonympins/libertide" class="btn btn-secondary" data-i18n="githubBtn">
+                ⭐ Voir sur GitHub
+            </a>
+        </div>
+    </header>
+
+    <main>
+        <section class="gallery-section">
+            <h2 class="section-title" data-i18n="galleryTitle">Aperçu de Libertide en action</h2>
+            <p class="section-subtitle" data-i18n="gallerySubtitle">Découvrez l'interface accessible et ses différents modules en situation réelle.</p>
+            <div class="gallery-grid">
+                <figure class="screenshot-card">
+                    <div class="screenshot-img-wrapper">
+                        <img src="screenshot-1.png" alt="Capture d'écran 1 - Interface overlay" loading="lazy">
+                    </div>
+                    <figcaption data-i18n="shot1">Interface overlay</figcaption>
+                </figure>
+                <figure class="screenshot-card">
+                    <div class="screenshot-img-wrapper">
+                        <img src="screenshot-2.png" alt="Capture d'écran 2 - Clavier virtuel et instrument musical" loading="lazy">
+                    </div>
+                    <figcaption data-i18n="shot2">Clavier virtuel et instrument musical</figcaption>
+                </figure>
+                <figure class="screenshot-card">
+                    <div class="screenshot-img-wrapper">
+                        <img src="screenshot-3.png" alt="Capture d'écran 3 - Paramètres LLM" loading="lazy">
+                    </div>
+                    <figcaption data-i18n="shot3">Paramètres LLM</figcaption>
+                </figure>
+                <figure class="screenshot-card">
+                    <div class="screenshot-img-wrapper">
+                        <img src="screenshot-4.png" alt="Capture d'écran 4 - Paramètres d'accessibilité" loading="lazy">
+                    </div>
+                    <figcaption data-i18n="shot4">Paramètres d'accessibilité</figcaption>
+                </figure>
+            </div>
+        </section>
+
+        <section class="features-grid">
+
+            <div class="card">
+                <div class="card-icon">🎙️</div>
+                <h3 data-i18n="feat4Title">Dictée Vocale 100% Locale (Whisper)</h3>
+                <p data-i18n="feat4Desc">
+                    Dictez vos textes, courriels et documents sans latence. Aucune donnée vocale ou médicale ne transite par le cloud.
+                </p>
+            </div>
+
+            <div class="card">
+                <div class="card-icon">🧠</div>
+                <h3 data-i18n="feat7Title">LLM Locaux & IA Multimodale</h3>
+                <p data-i18n="feat7Desc">
+                    Analyse d'écran visuelle, résumé et assistance contextuelle propulsés par des modèles multimodaux (VLM) s'exécutant 100% en local, sans cloud.
+                </p>
+            </div>
+
+            <div class="card">
+                <div class="card-icon">⌨️</div>
+                <h3 data-i18n="feat6Title">Clavier Virtuel & Tableau CAA</h3>
+                <p data-i18n="feat6Desc">
+                    Saisie assistée avec auto-balayage, prédiction de mots contextuelle et communication alternative par pictogrammes ARASAAC.
+                </p>
+            </div>
+
+
+            <div class="card">
+                <div class="card-icon">🎯</div>
+                <h3 data-i18n="feat2Title">Ciblage Anti-Tremblement & Badges</h3>
+                <p data-i18n="feat2Desc">
+                    Des badges dorés numérotés se superposent sur chaque contrôle. Dites "clique 3" ou tapez le chiffre pour valider sans effort de précision millimétrique.
+                </p>
+            </div>
+            <div class="card">
+                <div class="card-icon">🏠</div>
+                <h3 data-i18n="feat5Title">Domotique & Chambre Médicale</h3>
+                <p data-i18n="feat5Desc">
+                    Ajustez l'inclinaison de votre lit médicalisé, les lumières et les volets par la voix ou le regard via Home Assistant,
+                    KNXnet/IP (UDP direct) et BACnet/IP.
+                </p>
+            </div>
+
+            <div class="card">
+                <div class="card-icon">🔘</div>
+                <h3 data-i18n="feat3Title">Contacteur Unique & Passerelle Mobile</h3>
+                <p data-i18n="feat3Desc">
+                    Parcours par balayage hiérarchique (Fenêtre ➔ Zone ➔ Bouton). Transformez n'importe quel smartphone,
+                    tablette ou carte ESP32 en contacteur sans fil avec retour haptique.
+                </p>
+            </div>
+
+            <div class="card">
+                <div class="card-icon">👁️</div>
+                <h3 data-i18n="feat1Title">Eye-Tracking IA & Matériel</h3>
+                <p data-i18n="feat1Desc">
+                    Contrôlez le pointeur avec votre simple webcam via notre réseau neuronal local (L2CS-Net ONNX),
+                    ou connectez vos eye-trackers dédiés (Tobii, GazePoint GP3) en OpenGaze et OpenTrack.
+                </p>
+            </div>
+        </section>
+
+        <section class="privacy-banner">
+            <h2 data-i18n="privacyTitle">🔒 Confidentialité Médicale & Zéro Dépendance</h2>
+            <p data-i18n="privacyDesc" style="margin-top: 0.8rem; color: var(--text-muted); max-width: 800px; margin-inline: auto;">
+                Libertide est distribué sous licence libre. La reconnaissance vocale (Whisper) et les modèles de langage locaux tournent directement sur votre machine pour préserver le secret médical et votre vie privée.
+            </p>
+        </section>
+    </main>
+
+    <footer>
+        <p data-i18n="footerText">Libertide — Développé avec passion pour l'autonomie et l'inclusion numérique de tous.</p>
+    </footer>
+</div>
+
+<script>
+    const translations = {
+        fr: {
+            metaTitle: "Libertide — L'informatique accessible sans barrière physique",
+            metaDesc: "Overlay d'assistance universel pour ordinateur : commande oculaire par webcam IA, LLM multimodaux locaux, navigation au contacteur unique, dictée vocale et domotique.",
+            heroBadge: "Accessibilité Numérique • Open Source",
+            heroTitle: "Reprenez le contrôle de votre ordinateur avec",
+            heroLead: "Un overlay d'assistance intelligent, rapide et transparent. Conçu pour le handicap moteur, les tremblements, la perte de mobilité et la basse vision, sans matériel propriétaire coûteux.",
+            downloadBtn: "⬇ Télécharger pour Windows / macOS / Linux",
+            githubBtn: "⭐ Voir sur GitHub",
+            feat1Title: "Eye-Tracking IA & Matériel",
+            feat1Desc: "Contrôlez le pointeur avec votre simple webcam via notre réseau neuronal local (L2CS-Net ONNX), ou connectez vos eye-trackers dédiés (Tobii, GazePoint GP3) en OpenGaze et OpenTrack.",
+            feat2Title: "Ciblage Anti-Tremblement & Badges",
+            feat2Desc: "Des badges dorés numérotés se superposent sur chaque contrôle. Dites \"clique 3\" ou tapez le chiffre pour valider sans effort de précision millimétrique.",
+            feat3Title: "Contacteur Unique & Passerelle Mobile",
+            feat3Desc: "Parcours par balayage hiérarchique (Fenêtre ➔ Zone ➔ Bouton). Transformez n'importe quel smartphone, tablette ou carte ESP32 en contacteur sans fil avec retour haptique.",
+            feat4Title: "Dictée Vocale 100% Locale (Whisper)",
+            feat4Desc: "Dictez vos textes, courriels et documents sans latence. Aucune donnée vocale ou médicale ne transite par le cloud.",
+            feat5Title: "Domotique & Chambre Médicale",
+            feat5Desc: "Ajustez l'inclinaison de votre lit médicalisé, les lumières et les volets par la voix ou le regard via Home Assistant, KNXnet/IP (UDP direct) et BACnet/IP.",
+            feat7Title: "LLM Locaux & IA Multimodale",
+            feat7Desc: "Analyse d'écran visuelle, résumé et assistance contextuelle propulsés par des modèles multimodaux (VLM) s'exécutant 100% en local, sans cloud.",
+            feat6Title: "Clavier Virtuel & Tableau CAA",
+            feat6Desc: "Saisie assistée avec auto-balayage, prédiction de mots contextuelle et communication alternative par pictogrammes ARASAAC.",
+            galleryTitle: "Aperçu de Libertide en action",
+            gallerySubtitle: "Découvrez l'interface accessible et ses différents modules en situation réelle.",
+            shot1: "Interface overlay",
+            shot2: "Clavier virtuel et instrument musical",
+            shot3: "Paramètres LLM",
+            shot4: "Paramètres d'accessibilité",
+            privacyTitle: "🔒 Confidentialité Médicale & Zéro Dépendance",
+            privacyDesc: "Libertide est distribué sous licence libre. La reconnaissance vocale (Whisper) et les modèles de langage locaux tournent directement sur votre machine pour préserver le secret médical et votre vie privée.",
+            footerText: "Libertide — Développé avec passion pour l'autonomie et l'inclusion numérique de tous."
+        },
+        en: {
+            metaTitle: "Libertide — Accessible Computing Without Physical Barriers",
+            metaDesc: "Universal assistive desktop overlay: webcam AI eye-tracking, local multimodal LLMs, single-switch navigation, local voice dictation, and smart home control.",
+            heroBadge: "Digital Accessibility • Open Source",
+            heroTitle: "Take back control of your computer with",
+            heroLead: "An intelligent, high-speed, and seamless assistive overlay. Designed for motor impairments, tremors, limited mobility, and low vision—without expensive proprietary hardware.",
+            downloadBtn: "⬇ Download for Windows / macOS / Linux",
+            githubBtn: "⭐ View on GitHub",
+            feat1Title: "AI & Hardware Eye-Tracking",
+            feat1Desc: "Control your mouse pointer using an ordinary webcam with our local neural network (L2CS-Net ONNX), or plug in dedicated eye-trackers (Tobii, GazePoint GP3) via OpenGaze & OpenTrack.",
+            feat2Title: "Anti-Tremor Targeting & Numbered Badges",
+            feat2Desc: "Gold numbered badges automatically overlay all UI controls. Say \"click 3\" or type the number to activate targets effortlessly without pixel-perfect precision.",
+            feat3Title: "Single-Switch & Mobile Gateway",
+            feat3Desc: "Hierarchical scanning navigation (Window ➔ Zone ➔ Button). Turn any smartphone, tablet, or ESP32 board into a wireless switch with haptic feedback.",
+            feat4Title: "100% Local Voice Dictation (Whisper)",
+            feat4Desc: "Dictate emails, documents, and messages with zero cloud latency. No audio or medical data ever leaves your device.",
+            feat5Title: "Smart Home & Hospital Bed Automation",
+            feat5Desc: "Control medical bed angles, lights, and blinds by voice or eye gaze through Home Assistant, direct UDP KNXnet/IP, and BACnet/IP.",
+            feat7Title: "Local Multimodal LLMs & Vision AI",
+            feat7Desc: "On-screen visual analysis, contextual summaries, and smart assistance powered by multimodal models (VLMs) running 100% locally with zero cloud dependencies.",
+            feat6Title: "On-Screen Keyboard & AAC Board",
+            feat6Desc: "Assisted typing with automatic scanning, contextual word prediction, and augmentative alternative communication with ARASAAC pictograms.",
+            galleryTitle: "Libertide in Action",
+            gallerySubtitle: "Explore the accessible overlay interface and assistive modules.",
+            shot1: "Overlay Interface",
+            shot2: "Virtual Keyboard & Musical Instrument",
+            shot3: "LLM Settings",
+            shot4: "Accessibility Settings",
+            privacyTitle: "🔒 Medical-Grade Privacy & Zero Cloud Lock-In",
+            privacyDesc: "Libertide is released under an open-source license. Speech recognition (Whisper) and local language models run entirely on-device to safeguard patient privacy.",
+            footerText: "Libertide — Built with passion for digital autonomy and universal inclusion."
+        },
+        de: {
+            metaTitle: "Libertide — Barrierefreie Computernutzung ohne physische Hürden",
+            metaDesc: "Universelles barrierefreies Desktop-Overlay: KI-Webcam-Eye-Tracking, lokale multimodale LLMs, Einzeltaster-Navigation, Sprachdiktat und Smart Home.",
+            heroBadge: "Digitale Barrierefreiheit • Open Source",
+            heroTitle: "Gewinnen Sie die Kontrolle über Ihren Computer zurück mit",
+            heroLead: "Ein intelligentes, schnelles und nahtloses Assistenz-Overlay. Entwickelt für motorische Beeinträchtigungen, Tremor, eingeschränkte Mobilität und Sehbehinderungen – ohne teure proprietäre Hardware.",
+            downloadBtn: "⬇ Herunterladen für Windows / macOS / Linux",
+            githubBtn: "⭐ Auf GitHub ansehen",
+            feat1Title: "KI- & Hardware-Eye-Tracking",
+            feat1Desc: "Steuern Sie den Mauszeiger mit einer einfachen Webcam über unser lokales neuronales Netz (L2CS-Net ONNX) oder schließen Sie spezielle Eye-Tracker (Tobii, GazePoint GP3) via OpenGaze & OpenTrack an.",
+            feat2Title: "Anti-Tremor-Zielerfassung & Nummerierte Badges",
+            feat2Desc: "Goldene nummerierte Badges überlagern jedes Bedienelement. Sagen Sie „Klick 3“ oder tippen Sie die Zahl, um Aktionen ohne millimetergenaue Präzision auszulösen.",
+            feat3Title: "Einzeltaster & Mobiles Gateway",
+            feat3Desc: "Hierarchische Scanning-Navigation (Fenster ➔ Bereich ➔ Schaltfläche). Verwandeln Sie jedes Smartphone, Tablet oder ESP32-Board in einen Funktaster mit haptischem Feedback.",
+            feat4Title: "100% Lokales Sprachdiktat (Whisper)",
+            feat4Desc: "Diktieren Sie Texte, E-Mails und Dokumente ohne Cloud-Latenz. Keine Sprach- oder medizinischen Daten verlassen Ihr Gerät.",
+            feat5Title: "Smart Home & Pflegebett-Steuerung",
+            feat5Desc: "Passen Sie die Neigung Ihres Pflegebetts, Beleuchtung und Rollläden per Sprache oder Blick über Home Assistant, direktes UDP KNXnet/IP und BACnet/IP an.",
+            feat7Title: "Lokale multimodale LLMs & Vision-KI",
+            feat7Desc: "Visuelle Bildschirmanalyse, Zusammenfassungen und intelligente Assistenz über multimodale Modelle (VLMs), die zu 100 % lokal ohne Cloud-Übertragung laufen.",
+            feat6Title: "Virtuelle Tastatur & UK-Tafel",
+            feat6Desc: "Unterstützte Texteingabe mit automatischem Scanning, kontextueller Wortvorhersage und unterstützter Kommunikation über ARASAAC-Piktogramme.",
+            galleryTitle: "Libertide in Aktion",
+            gallerySubtitle: "Entdecken Sie die intuitive Benutzeroberfläche und Assistenzmodule im Einsatz.",
+            shot1: "Overlay-Benutzeroberfläche",
+            shot2: "Virtuelle Tastatur & Musikinstrument",
+            shot3: "LLM-Einstellungen",
+            shot4: "Barrierefreiheits-Einstellungen",
+            privacyTitle: "🔒 Medizinischer Datenschutz & Null Cloud-Abhängigkeit",
+            privacyDesc: "Libertide steht unter freier Lizenz. Spracherkennung (Whisper) und lokale Sprachmodelle laufen vollständig auf Ihrem Rechner, um das Arztgeheimnis und Ihre Privatsphäre zu schützen.",
+            footerText: "Libertide — Mit Leidenschaft entwickelt für digitale Autonomie und universelle Inklusion."
+        },
+        es: {
+            metaTitle: "Libertide — Informática accesible sin barreras físicas",
+            metaDesc: "Overlay de asistencia universal: control ocular por webcam IA, LLMs multimodales locales, conmutador único, dictado de voz y domótica.",
+            heroBadge: "Accesibilidad Digital • Código Abierto",
+            heroTitle: "Recupere el control de su ordenador con",
+            heroLead: "Un overlay de asistencia inteligente, rápido y transparente. Diseñado para discapacidades motoras, temblores, movilidad reducida y baja visión, sin hardware propietario costoso.",
+            downloadBtn: "⬇ Descargar para Windows / macOS / Linux",
+            githubBtn: "⭐ Ver en GitHub",
+            feat1Title: "Seguimiento Ocular por IA y Hardware",
+            feat1Desc: "Controle el cursor con una simple cámara web mediante nuestra red neuronal local (L2CS-Net ONNX) o conecte dispositivos dedicados (Tobii, GazePoint GP3) mediante OpenGaze y OpenTrack.",
+            feat2Title: "Puntería Anti-Temblor y Placas Numeradas",
+            feat2Desc: "Placas doradas numeradas se superponen a cada control. Diga «haz clic en 3» o escriba el número para confirmar sin esfuerzo de precisión milimétrica.",
+            feat3Title: "Conmutador Único y Pasarela Móvil",
+            feat3Desc: "Navegación por barrido jerárquico (Ventana ➔ Zona ➔ Botón). Convierta cualquier smartphone, tableta o placa ESP32 en un conmutador inalámbrico con respuesta háptica.",
+            feat4Title: "Dictado por Voz 100% Local (Whisper)",
+            feat4Desc: "Dicte textos, correos y documentos sin latencia. Ningún dato de voz o médico sale jamás hacia la nube.",
+            feat5Title: "Domótica y Cama Médica",
+            feat5Desc: "Ajuste la inclinación de su cama articulada, luces y persianas mediante la voz o la mirada a través de Home Assistant, UDP directo KNXnet/IP y BACnet/IP.",
+            feat7Title: "LLMs Locales e IA Multimodal",
+            feat7Desc: "Análisis visual de pantalla, resúmenes y asistencia inteligente mediante modelos multimodales (VLM) ejecutados 100% en local, sin depender de la nube.",
+            feat6Title: "Teclado en Pantalla y Tablero CAA",
+            feat6Desc: "Escritura asistida con barrido automático, predicción contextual de palabras y comunicación aumentativa con pictogramas ARASAAC.",
+            galleryTitle: "Libertide en acción",
+            gallerySubtitle: "Descubra la interfaz accesible y sus diferentes módulos de asistencia.",
+            shot1: "Interfaz superpuesta (Overlay)",
+            shot2: "Teclado virtual e instrumento musical",
+            shot3: "Ajustes de LLM",
+            shot4: "Ajustes de accesibilidad",
+            privacyTitle: "🔒 Privacidad Médica y Cero Dependencia Cloud",
+            privacyDesc: "Libertide es de código abierto. El reconocimiento de voz (Whisper) y los modelos de lenguaje locales se ejecutan íntegramente en su equipo para proteger su privacidad.",
+            footerText: "Libertide — Desarrollado con pasión para la autonomía y la inclusión digital de todos."
+        },
+        it: {
+            metaTitle: "Libertide — Informatica accessibile senza barriere fisiche",
+            metaDesc: "Overlay di assistenza universale: eye-tracking webcam IA, LLM multimodali locali, sensore singolo, dettatura vocale locale e domotica.",
+            heroBadge: "Accessibilità Digitale • Open Source",
+            heroTitle: "Riprendi il controllo del tuo computer con",
+            heroLead: "Un overlay di assistenza intelligente, rapido e trasparente. Progettato per disabilità motorie, tremori, ridotta mobilità e ipovisione, senza costoso hardware proprietario.",
+            downloadBtn: "⬇ Scarica per Windows / macOS / Linux",
+            githubBtn: "⭐ Visualizza su GitHub",
+            feat1Title: "Eye-Tracking IA & Hardware",
+            feat1Desc: "Controlla il cursore con una normale webcam tramite la nostra rete neurale locale (L2CS-Net ONNX), oppure collega eye-tracker dedicati (Tobii, GazePoint GP3) con OpenGaze e OpenTrack.",
+            feat2Title: "Puntamento Anti-Tremolio & Badge Numerati",
+            feat2Desc: "Badge dorati numerati si sovrappongono a ogni controllo. Dici «clicca 3» o digita il numero per convalidare senza richiedere precisione millimetrica.",
+            feat3Title: "Sensore Singolo & Gateway Mobile",
+            feat3Desc: "Scansione gerarchica (Finestra ➔ Area ➔ Pulsante). Trasforma qualsiasi smartphone, tablet o scheda ESP32 in un sensore wireless con feedback tattile.",
+            feat4Title: "Dettatura Vocale 100% Locale (Whisper)",
+            feat4Desc: "Detta testi, email e documenti a latenza zero. Nessun dato vocale o medico viene trasmesso al cloud.",
+            feat5Title: "Domotica & Letto Ospedaliero",
+            feat5Desc: "Regola l'inclinazione del letto medico, luci e tapparelle con la voce o lo sguardo tramite Home Assistant, KNXnet/IP via UDP diretto e BACnet/IP.",
+            feat7Title: "LLM Locali & IA Multimodale",
+            feat7Desc: "Analisi visiva dello schermo, sintesi e assistenza contestuale tramite modelli multimodali (VLM) eseguiti al 100% in locale, senza cloud né condivisione dati.",
+            feat6Title: "Tastiera a Schermo & Tabella CAA",
+            feat6Desc: "Digitazione assistita con scansione automatica, predizione contestuale delle parole e comunicazione aumentativa alternativa con pittogrammi ARASAAC.",
+            galleryTitle: "Libertide in azione",
+            gallerySubtitle: "Esplora l'interfaccia accessibile e i suoi moduli di supporto.",
+            shot1: "Interfaccia overlay",
+            shot2: "Tastiera virtuale e strumento musicale",
+            shot3: "Impostazioni LLM",
+            shot4: "Impostazioni di accessibilità",
+            privacyTitle: "🔒 Riservatezza Medica & Zero Dipendenza Cloud",
+            privacyDesc: "Libertide è open source. Il riconoscimento vocale (Whisper) e i modelli linguistici locali girano interamente sul tuo dispositivo per garantire la privacy medica.",
+            footerText: "Libertide — Sviluppato con passione per l'autonomia e l'inclusione digitale di tutti."
+        },
+        ja: {
+            metaTitle: "Libertide — 身体的障壁のないアクセシブルなコンピューティング",
+            metaDesc: "汎用アシスティブ・デスクトップオーバーレイ：AIウェブカメラ視線追跡、ローカルマルチモーダルLLM、1ボタンスイッチ、ローカル音声入力、スマートホーム連携。",
+            heroBadge: "デジタルアクセシビリティ • オープンソース",
+            heroTitle: "パソコンの自由を、あなたの手に：",
+            heroLead: "高機能・超高速・シームレスな支援オーバーレイ。高価な専用機器を必要とせず、運動機能障がい、手の震え、四肢麻痺、ロービジョンの方のために設計されています。",
+            downloadBtn: "⬇ Windows / macOS / Linux 向けダウンロード",
+            githubBtn: "⭐ GitHubで見る",
+            feat1Title: "AI＆専用機器 視線追跡（Eye-Tracking）",
+            feat1Desc: "一般的なWebカメラとオンデバイスAI（L2CS-Net ONNX）で視線操作が可能。TobiiやGazePoint GP3など専用のアイトラッカー（OpenGaze / OpenTrack）にも対応。",
+            feat2Title: "手振れ防止ターゲット＆ナンバリングバッジ",
+            feat2Desc: "画面上のすべてのボタンに金色の番号バッジを自動重畳。「クリック3」と発声するかキーを押すだけで、精密なカーソル操作なしに選択可能です。",
+            feat3Title: "1ボタンスイッチ＆モバイル連携",
+            feat3Desc: "階層型スキャンナビゲーション（ウィンドウ ➔ エリア ➔ ボタン）。スマートフォン、タブレット、またはESP32基板をハプティクス対応のワイヤレススイッチとして活用。",
+            feat4Title: "100%ローカル音声入力（Whisper）",
+            feat4Desc: "遅延なしで快適な音声入力。音声データや医療関連のプライベート情報が外部クラウドに送信されることは一切ありません。",
+            feat5Title: "スマートホーム＆介護用電動ベッド制御",
+            feat5Desc: "Home Assistant、KNXnet/IP（UDPダイレクト）、BACnet/IP経由で、視線や声を使って介護ベッドのリクライニング、照明、カーテンを制御。",
+            feat7Title: "完全ローカル マルチモーダルLLM＆視覚AI",
+            feat7Desc: "画面の視覚認識、要約、文脈に応じた操作アシストをオンデバイスのマルチモーダルモデル（VLM）で実現。外部クラウド通信なしで動作します。",
+            feat6Title: "スクリーンキーボード＆AACボード",
+            feat6Desc: "自動スキャン入力、文脈に応じた単語予測、ARASAACピクトグラムによる代替コミュニケーション（AAC）をサポート。",
+            galleryTitle: "Libertideの実際の動作画面",
+            gallerySubtitle: "アクセシブルな操作画面と各種アシストモジュールをご覧ください。",
+            shot1: "オーバーレイ インターフェース",
+            shot2: "仮想キーボード＆楽器演奏",
+            shot3: "LLM（AI）設定",
+            shot4: "アクセシビリティ設定",
+            privacyTitle: "🔒 医療水準のプライバシー保護・クラウド依存ゼロ",
+            privacyDesc: "Libertideはオープンソースです。音声認識（Whisper）やローカルLLMは端末内で直接動作し、患者情報やプライバシーを徹底的に保護します。",
+            footerText: "Libertide — すべての人のデジタルな自立とインクルージョンのために情熱を込めて開発。"
+        },
+        pt: {
+            metaTitle: "Libertide — Computação acessível sem barreiras físicas",
+            metaDesc: "Overlay de assistência universal: rastreamento ocular por IA com webcam, LLMs multimodais locais, acionador único, ditado local e domótica.",
+            heroBadge: "Acessibilidade Digital • Código Aberto",
+            heroTitle: "Retome o controle do seu computador com o",
+            heroLead: "Um overlay de assistência inteligente, ágil e transparente. Desenvolvido para deficiências motoras, tremores, mobilidade reduzida e baixa visão, sem hardware proprietário caro.",
+            downloadBtn: "⬇ Baixar para Windows / macOS / Linux",
+            githubBtn: "⭐ Ver no GitHub",
+            feat1Title: "Rastreamento Ocular por IA e Hardware",
+            feat1Desc: "Controle o cursor com uma webcam comum através de rede neural local (L2CS-Net ONNX), ou conecte rastreadores oculares dedicados (Tobii, GazePoint GP3) via OpenGaze e OpenTrack.",
+            feat2Title: "Alvo Anti-Tremor e Badges Numerados",
+            feat2Desc: "Badges dourados numerados sobrepõem-se a cada controle. Fale \"clicar 3\" ou digite o número para acionar sem esforço de precisão milimétrica.",
+            feat3Title: "Acionador Único e Gateway Móvel",
+            feat3Desc: "Navegação por varredura hierárquica (Janela ➔ Zona ➔ Botão). Transforme qualquer smartphone, tablet ou placa ESP32 em um acionador sem fio com retorno tátil.",
+            feat4Title: "Ditado por Voz 100% Local (Whisper)",
+            feat4Desc: "Dite textos, e-mails e documentos sem latência. Nenhum dado de voz ou médico é enviado para a nuvem.",
+            feat5Title: "Automação Residencial e Leito Hospitalar",
+            feat5Desc: "Ajuste a inclinação da cama hospitalar, luzes e persianas por voz ou olhar via Home Assistant, UDP direto KNXnet/IP e BACnet/IP.",
+            feat7Title: "LLMs Locais e IA Multimodal",
+            feat7Desc: "Análise visual de tela, resumos e assistência inteligente através de modelos multimodais (VLM) executados 100% localmente, sem envio de dados para a nuvem.",
+            feat6Title: "Teclado Virtual e Prancha de CAA",
+            feat6Desc: "Digitação assistida com varredura automática, predição contextual de palavras e comunicação alternativa com pictogramas ARASAAC.",
+            galleryTitle: "Libertide em ação",
+            gallerySubtitle: "Descubra a interface acessível e seus módulos de assistência.",
+            shot1: "Interface overlay",
+            shot2: "Teclado virtual e instrumento musical",
+            shot3: "Configurações de LLM",
+            shot4: "Configurações de acessibilidade",
+            privacyTitle: "🔒 Privacidade Médica e Sem Dependência de Nuvem",
+            privacyDesc: "Libertide é software livre. O reconhecimento de voz (Whisper) e os modelos de linguagem locais rodam direto no computador para proteger sua privacidade.",
+            footerText: "Libertide — Desenvolvido com paixão para a autonomia e a inclusão digital de todos."
+        },
+        ru: {
+            metaTitle: "Libertide — Доступное компьютерное управление без физических барьеров",
+            metaDesc: "Универсальный ассистивный оверлей: айтрекинг по веб-камере с ИИ, локальные мультимодальные LLM, управление одной кнопкой, голосовой ввод и умный дом.",
+            heroBadge: "Цифровая доступность • Открытый исходный код",
+            heroTitle: "Верните контроль над компьютером с помощью",
+            heroLead: "Интеллектуальный, быстрый и бесшовный ассистивный оверлей. Создан для людей с нарушениями моторики, тремором, ограниченной подвижностью и слабым зрением — без дорогостоящего оборудования.",
+            downloadBtn: "⬇ Скачать для Windows / macOS / Linux",
+            githubBtn: "⭐ Смотреть на GitHub",
+            feat1Title: "Айтрекинг с ИИ и поддержка оборудования",
+            feat1Desc: "Управляйте курсором через обычную веб-камеру с локальной нейросетью (L2CS-Net ONNX) или подключайте аппаратные айтрекеры (Tobii, GazePoint GP3) через OpenGaze и OpenTrack.",
+            feat2Title: "Антитремор и нумерованные маркеры",
+            feat2Desc: "Золотые нумерованные маркеры накладываются на все элементы управления. Скажите «клик 3» или нажмите цифру для уверенного выбора без ювелирной точности.",
+            feat3Title: "Управление одной кнопкой и мобильный шлюз",
+            feat3Desc: "Иерархическое сканирование (Окно ➔ Зона ➔ Кнопка). Превратите любой смартфон, планшет или плату ESP32 в беспроводную кнопку с тактильной отдачей.",
+            feat4Title: "100% локальный голосовой ввод (Whisper)",
+            feat4Desc: "Диктуйте тексты, письма и документы без задержек. Голосовые и персональные данные никогда не передаются в облако.",
+            feat5Title: "Умный дом и медицинская кровать",
+            feat5Desc: "Регулируйте наклон медицинской кровати, свет и жалюзи голосом или взглядом через Home Assistant, прямой UDP KNXnet/IP и BACnet/IP.",
+            feat7Title: "Локальные мультимодальные LLM и Vision-ИИ",
+            feat7Desc: "Визуальный анализ экрана, контекстные подсказки и резюме на базе мультимодальных моделей (VLM), работающих на 100% локально без использования облака.",
+            feat6Title: "Экранная клавиатура и таблица ААК",
+            feat6Desc: "Ассистивный ввод с автосканированием, контекстным предсказанием слов и альтернативной коммуникацией на базе пиктограмм ARASAAC.",
+            galleryTitle: "Libertide в действии",
+            gallerySubtitle: "Ознакомьтесь с интерфейсом и модулями доступности на реальных примерах.",
+            shot1: "Интерфейс оверлея",
+            shot2: "Виртуальная клавиатура и музыкальный инструмент",
+            shot3: "Настройки LLM",
+            shot4: "Настройки доступности",
+            privacyTitle: "🔒 Медицинская конфиденциальность и нулевая зависимость от облака",
+            privacyDesc: "Libertide распространяется под свободной лицензией. Распознавание речи (Whisper) и языковые модели работают локально на вашем ПК для защиты врачебной тайны.",
+            footerText: "Libertide — Создано с заботой о цифровой автономии и инклюзивности для каждого."
+        },
+        zh: {
+            metaTitle: "Libertide — 无物理障碍的无障碍计算机辅助系统",
+            metaDesc: "通用电脑辅助悬浮层：AI摄像头眼动追踪、本地多模态大语言模型、单开关导航、本地语音听写及智能家居控制。",
+            heroBadge: "数字无障碍 • 开源项目",
+            heroTitle: "使用以下工具重新掌控您的电脑：",
+            heroLead: "智能、敏捷且无缝的辅助悬浮层。专为肢体运动障碍、震颤、行动受限及低视力人群设计，无需昂贵的专用硬件。",
+            downloadBtn: "⬇ 下载 Windows / macOS / Linux 版",
+            githubBtn: "⭐ 在 GitHub 上查看",
+            feat1Title: "AI 与硬件眼动追踪",
+            feat1Desc: "利用普通网络摄像头和本地神经网络（L2CS-Net ONNX）控制鼠标指针，或通过 OpenGaze / OpenTrack 连接专业眼控仪（Tobii、GazePoint GP3）。",
+            feat2Title: "防抖动目标锁定与编号徽章",
+            feat2Desc: "每个控件都会叠加金色编号徽章。只需说出“点击 3”或输入数字即可确认，无需高精度微操。",
+            feat3Title: "单开关导航与移动端网关",
+            feat3Desc: "分层扫描导航（窗口 ➔ 区域 ➔ 按钮）。将任意智能手机、平板电脑或 ESP32 开发板转化为带触觉反馈的无线开关。",
+            feat4Title: "100% 本地语音听写 (Whisper)",
+            feat4Desc: "无延迟听写文本、邮件及文档。语音与医疗隐私数据绝不上传云端。",
+            feat5Title: "智能家居与医用护理床控制",
+            feat5Desc: "通过 Home Assistant、直连 UDP KNXnet/IP 和 BACnet/IP，通过语音或视线调节护理床角度、灯光与百叶窗。",
+            feat7Title: "本地多模态大模型 (VLM) 与视觉 AI",
+            feat7Desc: "支持屏幕视觉分析、上下文总结与智能问答，多模态模型 100% 在本地离线运行，无需云端，保护隐私安全。",
+            feat6Title: "虚拟键盘与 AAC 辅助沟通板",
+            feat6Desc: "具备自动扫描、上下文词汇预测的辅助输入，并支持 ARASAAC 象形图的辅助与替代性沟通。",
+            galleryTitle: "Libertide 实际界面展示",
+            gallerySubtitle: "查看无障碍悬浮层及各辅助功能模块的实际运行效果。",
+            shot1: "悬浮辅助界面 (Overlay)",
+            shot2: "虚拟键盘与乐器演奏",
+            shot3: "LLM 大模型设置",
+            shot4: "无障碍辅助设置",
+            privacyTitle: "🔒 医疗级隐私安全 & 零云端锁定",
+            privacyDesc: "Libertide 以开源协议发布。语音识别 (Whisper) 和本地语言模型完全在本地运行，切实保护患者隐私与数据安全。",
+            footerText: "Libertide — 为人人的数字化自主与无障碍包容倾心打造。"
+        }
+    };
+
+    function setLanguage(lang) {
+        const supported = ['fr', 'en', 'de', 'es', 'it', 'ja', 'pt', 'ru', 'zh'];
+        const targetLang = supported.includes(lang) ? lang : 'fr';
+        const t = translations[targetLang] || translations.fr;
+        document.documentElement.lang = targetLang;
+
+        document.getElementById('meta-title').innerText = t.metaTitle;
+        document.getElementById('meta-desc').setAttribute('content', t.metaDesc);
+
+        document.querySelectorAll('[data-i18n]').forEach(el => {
+            const key = el.getAttribute('data-i18n');
+            if (t[key]) el.textContent = t[key];
+        });
+
+        const select = document.getElementById('lang-select');
+        if (select && select.value !== targetLang) {
+            select.value = targetLang;
+        }
+
+        try {
+            localStorage.setItem('libertide_lang', targetLang);
+        } catch (e) {
+            /* ignore storage quota / sandbox restrictions */
+        }
+    }
+
+    // Initialisation : localStorage ou préférence navigateur
+    (function initLang() {
+        const supported = ['fr', 'en', 'de', 'es', 'it', 'ja', 'pt', 'ru', 'zh'];
+        let savedLang;
+        try {
+            savedLang = localStorage.getItem('libertide_lang');
+        } catch (e) {}
+
+        if (!savedLang || !supported.includes(savedLang)) {
+            const browserLang = (navigator.language || 'fr').toLowerCase().split('-')[0];
+            savedLang = supported.includes(browserLang) ? browserLang : 'fr';
+        }
+        setLanguage(savedLang);
+    })();
+</script>
+</body>
+</html>
