@@ -163,6 +163,70 @@
             color: var(--accent);
         }
 
+        /* Galerie de captures d'écran */
+        .gallery-section {
+            margin: 1rem 0 4rem;
+            text-align: center;
+        }
+        .section-title {
+            font-size: clamp(1.6rem, 3.5vw, 2.2rem);
+            font-weight: 800;
+            margin-bottom: 0.5rem;
+            color: #fff;
+        }
+        .section-subtitle {
+            color: var(--text-muted);
+            margin-bottom: 2rem;
+            font-size: 1.05rem;
+        }
+        .gallery-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1.5rem;
+        }
+        @media (max-width: 680px) {
+            .gallery-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        .screenshot-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+        }
+        .screenshot-card:hover {
+            transform: translateY(-4px);
+            border-color: var(--accent);
+            box-shadow: 0 10px 25px rgba(0, 229, 255, 0.15);
+        }
+        .screenshot-img-wrapper {
+            width: 100%;
+            aspect-ratio: 16 / 10;
+            background: #080b10;
+            overflow: hidden;
+        }
+        .screenshot-img-wrapper img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transition: transform 0.35s ease;
+        }
+        .screenshot-card:hover .screenshot-img-wrapper img {
+            transform: scale(1.04);
+        }
+        .screenshot-card figcaption {
+            padding: 0.85rem 1rem;
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text);
+            border-top: 1px solid rgba(255, 255, 255, 0.05);
+            background: rgba(18, 24, 34, 0.95);
+        }
+
         /* Grid des fonctionnalités */
         .features-grid {
             display: grid;
@@ -257,6 +321,37 @@
     </header>
 
     <main>
+        <section class="gallery-section">
+            <h2 class="section-title" data-i18n="galleryTitle">Aperçu de Libertide en action</h2>
+            <p class="section-subtitle" data-i18n="gallerySubtitle">Découvrez l'interface accessible et ses différents modules en situation réelle.</p>
+            <div class="gallery-grid">
+                <figure class="screenshot-card">
+                    <div class="screenshot-img-wrapper">
+                        <img src="screenshot-1.png" alt="Capture d'écran 1 - Interface overlay" loading="lazy">
+                    </div>
+                    <figcaption data-i18n="shot1">Interface overlay</figcaption>
+                </figure>
+                <figure class="screenshot-card">
+                    <div class="screenshot-img-wrapper">
+                        <img src="screenshot-2.png" alt="Capture d'écran 2 - Clavier virtuel et instrument musical" loading="lazy">
+                    </div>
+                    <figcaption data-i18n="shot2">Clavier virtuel et instrument musical</figcaption>
+                </figure>
+                <figure class="screenshot-card">
+                    <div class="screenshot-img-wrapper">
+                        <img src="screenshot-3.png" alt="Capture d'écran 3 - Paramètres LLM" loading="lazy">
+                    </div>
+                    <figcaption data-i18n="shot3">Paramètres LLM</figcaption>
+                </figure>
+                <figure class="screenshot-card">
+                    <div class="screenshot-img-wrapper">
+                        <img src="screenshot-4.png" alt="Capture d'écran 4 - Paramètres d'accessibilité" loading="lazy">
+                    </div>
+                    <figcaption data-i18n="shot4">Paramètres d'accessibilité</figcaption>
+                </figure>
+            </div>
+        </section>
+
         <section class="features-grid">
 
             <div class="card">
@@ -356,6 +451,12 @@
             feat7Desc: "Analyse d'écran visuelle, résumé et assistance contextuelle propulsés par des modèles multimodaux (VLM) s'exécutant 100% en local, sans cloud.",
             feat6Title: "Clavier Virtuel & Tableau CAA",
             feat6Desc: "Saisie assistée avec auto-balayage, prédiction de mots contextuelle et communication alternative par pictogrammes ARASAAC.",
+            galleryTitle: "Aperçu de Libertide en action",
+            gallerySubtitle: "Découvrez l'interface accessible et ses différents modules en situation réelle.",
+            shot1: "Interface overlay",
+            shot2: "Clavier virtuel et instrument musical",
+            shot3: "Paramètres LLM",
+            shot4: "Paramètres d'accessibilité",
             privacyTitle: "🔒 Confidentialité Médicale & Zéro Dépendance",
             privacyDesc: "Libertide est distribué sous licence libre. La reconnaissance vocale (Whisper) et les modèles de langage locaux tournent directement sur votre machine pour préserver le secret médical et votre vie privée.",
             footerText: "Libertide — Développé avec passion pour l'autonomie et l'inclusion numérique de tous."
@@ -382,6 +483,12 @@
             feat7Desc: "On-screen visual analysis, contextual summaries, and smart assistance powered by multimodal models (VLMs) running 100% locally with zero cloud dependencies.",
             feat6Title: "On-Screen Keyboard & AAC Board",
             feat6Desc: "Assisted typing with automatic scanning, contextual word prediction, and augmentative alternative communication with ARASAAC pictograms.",
+            galleryTitle: "Libertide in Action",
+            gallerySubtitle: "Explore the accessible overlay interface and assistive modules.",
+            shot1: "Overlay Interface",
+            shot2: "Virtual Keyboard & Musical Instrument",
+            shot3: "LLM Settings",
+            shot4: "Accessibility Settings",
             privacyTitle: "🔒 Medical-Grade Privacy & Zero Cloud Lock-In",
             privacyDesc: "Libertide is released under an open-source license. Speech recognition (Whisper) and local language models run entirely on-device to safeguard patient privacy.",
             footerText: "Libertide — Built with passion for digital autonomy and universal inclusion."
@@ -408,6 +515,12 @@
             feat7Desc: "Visuelle Bildschirmanalyse, Zusammenfassungen und intelligente Assistenz über multimodale Modelle (VLMs), die zu 100 % lokal ohne Cloud-Übertragung laufen.",
             feat6Title: "Virtuelle Tastatur & UK-Tafel",
             feat6Desc: "Unterstützte Texteingabe mit automatischem Scanning, kontextueller Wortvorhersage und unterstützter Kommunikation über ARASAAC-Piktogramme.",
+            galleryTitle: "Libertide in Aktion",
+            gallerySubtitle: "Entdecken Sie die intuitive Benutzeroberfläche und Assistenzmodule im Einsatz.",
+            shot1: "Overlay-Benutzeroberfläche",
+            shot2: "Virtuelle Tastatur & Musikinstrument",
+            shot3: "LLM-Einstellungen",
+            shot4: "Barrierefreiheits-Einstellungen",
             privacyTitle: "🔒 Medizinischer Datenschutz & Null Cloud-Abhängigkeit",
             privacyDesc: "Libertide steht unter freier Lizenz. Spracherkennung (Whisper) und lokale Sprachmodelle laufen vollständig auf Ihrem Rechner, um das Arztgeheimnis und Ihre Privatsphäre zu schützen.",
             footerText: "Libertide — Mit Leidenschaft entwickelt für digitale Autonomie und universelle Inklusion."
@@ -434,6 +547,12 @@
             feat7Desc: "Análisis visual de pantalla, resúmenes y asistencia inteligente mediante modelos multimodales (VLM) ejecutados 100% en local, sin depender de la nube.",
             feat6Title: "Teclado en Pantalla y Tablero CAA",
             feat6Desc: "Escritura asistida con barrido automático, predicción contextual de palabras y comunicación aumentativa con pictogramas ARASAAC.",
+            galleryTitle: "Libertide en acción",
+            gallerySubtitle: "Descubra la interfaz accesible y sus diferentes módulos de asistencia.",
+            shot1: "Interfaz superpuesta (Overlay)",
+            shot2: "Teclado virtual e instrumento musical",
+            shot3: "Ajustes de LLM",
+            shot4: "Ajustes de accesibilidad",
             privacyTitle: "🔒 Privacidad Médica y Cero Dependencia Cloud",
             privacyDesc: "Libertide es de código abierto. El reconocimiento de voz (Whisper) y los modelos de lenguaje locales se ejecutan íntegramente en su equipo para proteger su privacidad.",
             footerText: "Libertide — Desarrollado con pasión para la autonomía y la inclusión digital de todos."
@@ -460,6 +579,12 @@
             feat7Desc: "Analisi visiva dello schermo, sintesi e assistenza contestuale tramite modelli multimodali (VLM) eseguiti al 100% in locale, senza cloud né condivisione dati.",
             feat6Title: "Tastiera a Schermo & Tabella CAA",
             feat6Desc: "Digitazione assistita con scansione automatica, predizione contestuale delle parole e comunicazione aumentativa alternativa con pittogrammi ARASAAC.",
+            galleryTitle: "Libertide in azione",
+            gallerySubtitle: "Esplora l'interfaccia accessibile e i suoi moduli di supporto.",
+            shot1: "Interfaccia overlay",
+            shot2: "Tastiera virtuale e strumento musicale",
+            shot3: "Impostazioni LLM",
+            shot4: "Impostazioni di accessibilità",
             privacyTitle: "🔒 Riservatezza Medica & Zero Dipendenza Cloud",
             privacyDesc: "Libertide è open source. Il riconoscimento vocale (Whisper) e i modelli linguistici locali girano interamente sul tuo dispositivo per garantire la privacy medica.",
             footerText: "Libertide — Sviluppato con passione per l'autonomia e l'inclusione digitale di tutti."
@@ -486,6 +611,12 @@
             feat7Desc: "画面の視覚認識、要約、文脈に応じた操作アシストをオンデバイスのマルチモーダルモデル（VLM）で実現。外部クラウド通信なしで動作します。",
             feat6Title: "スクリーンキーボード＆AACボード",
             feat6Desc: "自動スキャン入力、文脈に応じた単語予測、ARASAACピクトグラムによる代替コミュニケーション（AAC）をサポート。",
+            galleryTitle: "Libertideの実際の動作画面",
+            gallerySubtitle: "アクセシブルな操作画面と各種アシストモジュールをご覧ください。",
+            shot1: "オーバーレイ インターフェース",
+            shot2: "仮想キーボード＆楽器演奏",
+            shot3: "LLM（AI）設定",
+            shot4: "アクセシビリティ設定",
             privacyTitle: "🔒 医療水準のプライバシー保護・クラウド依存ゼロ",
             privacyDesc: "Libertideはオープンソースです。音声認識（Whisper）やローカルLLMは端末内で直接動作し、患者情報やプライバシーを徹底的に保護します。",
             footerText: "Libertide — すべての人のデジタルな自立とインクルージョンのために情熱を込めて開発。"
@@ -512,6 +643,12 @@
             feat7Desc: "Análise visual de tela, resumos e assistência inteligente através de modelos multimodais (VLM) executados 100% localmente, sem envio de dados para a nuvem.",
             feat6Title: "Teclado Virtual e Prancha de CAA",
             feat6Desc: "Digitação assistida com varredura automática, predição contextual de palavras e comunicação alternativa com pictogramas ARASAAC.",
+            galleryTitle: "Libertide em ação",
+            gallerySubtitle: "Descubra a interface acessível e seus módulos de assistência.",
+            shot1: "Interface overlay",
+            shot2: "Teclado virtual e instrumento musical",
+            shot3: "Configurações de LLM",
+            shot4: "Configurações de acessibilidade",
             privacyTitle: "🔒 Privacidade Médica e Sem Dependência de Nuvem",
             privacyDesc: "Libertide é software livre. O reconhecimento de voz (Whisper) e os modelos de linguagem locais rodam direto no computador para proteger sua privacidade.",
             footerText: "Libertide — Desenvolvido com paixão para a autonomia e a inclusão digital de todos."
@@ -538,6 +675,12 @@
             feat7Desc: "Визуальный анализ экрана, контекстные подсказки и резюме на базе мультимодальных моделей (VLM), работающих на 100% локально без использования облака.",
             feat6Title: "Экранная клавиатура и таблица ААК",
             feat6Desc: "Ассистивный ввод с автосканированием, контекстным предсказанием слов и альтернативной коммуникацией на базе пиктограмм ARASAAC.",
+            galleryTitle: "Libertide в действии",
+            gallerySubtitle: "Ознакомьтесь с интерфейсом и модулями доступности на реальных примерах.",
+            shot1: "Интерфейс оверлея",
+            shot2: "Виртуальная клавиатура и музыкальный инструмент",
+            shot3: "Настройки LLM",
+            shot4: "Настройки доступности",
             privacyTitle: "🔒 Медицинская конфиденциальность и нулевая зависимость от облака",
             privacyDesc: "Libertide распространяется под свободной лицензией. Распознавание речи (Whisper) и языковые модели работают локально на вашем ПК для защиты врачебной тайны.",
             footerText: "Libertide — Создано с заботой о цифровой автономии и инклюзивности для каждого."
@@ -564,6 +707,12 @@
             feat7Desc: "支持屏幕视觉分析、上下文总结与智能问答，多模态模型 100% 在本地离线运行，无需云端，保护隐私安全。",
             feat6Title: "虚拟键盘与 AAC 辅助沟通板",
             feat6Desc: "具备自动扫描、上下文词汇预测的辅助输入，并支持 ARASAAC 象形图的辅助与替代性沟通。",
+            galleryTitle: "Libertide 实际界面展示",
+            gallerySubtitle: "查看无障碍悬浮层及各辅助功能模块的实际运行效果。",
+            shot1: "悬浮辅助界面 (Overlay)",
+            shot2: "虚拟键盘与乐器演奏",
+            shot3: "LLM 大模型设置",
+            shot4: "无障碍辅助设置",
             privacyTitle: "🔒 医疗级隐私安全 & 零云端锁定",
             privacyDesc: "Libertide 以开源协议发布。语音识别 (Whisper) 和本地语言模型完全在本地运行，切实保护患者隐私与数据安全。",
             footerText: "Libertide — 为人人的数字化自主与无障碍包容倾心打造。"
