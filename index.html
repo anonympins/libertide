@@ -130,7 +130,32 @@
             gap: 1rem;
             justify-content: center;
             flex-wrap: wrap;
-            margin-bottom: 3rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .downloads-badge-wrapper {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin-bottom: 2.5rem;
+        }
+
+        .downloads-badge-link {
+            display: inline-flex;
+            border-radius: 6px;
+            overflow: hidden;
+            border: 1px solid var(--border);
+            box-shadow: 0 4px 16px rgba(0, 229, 255, 0.15);
+            transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+        }
+        .downloads-badge-link:hover {
+            transform: translateY(-2px) scale(1.04);
+            border-color: var(--accent);
+            box-shadow: 0 6px 24px rgba(0, 229, 255, 0.35);
+        }
+        .downloads-badge-link img {
+            display: block;
+            height: 32px;
         }
 
         .btn {
@@ -452,6 +477,12 @@
             </a>
             <a href="https://github.com/anonympins/libertide" class="btn btn-secondary" data-i18n="githubBtn">
                 ⭐ Voir sur GitHub
+            </a>
+        </div>
+
+        <div class="downloads-badge-wrapper">
+            <a href="https://github.com/anonympins/libertide/releases" target="_blank" rel="noopener noreferrer" class="downloads-badge-link" aria-label="Nombre total de téléchargements sur GitHub">
+                <img src="https://img.shields.io/github/downloads/anonympins/libertide/total?style=for-the-badge&logo=github&logoColor=white&labelColor=121822&color=00e5ff" alt="Total GitHub Downloads">
             </a>
         </div>
     </header>
