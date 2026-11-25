@@ -184,6 +184,8 @@ pub struct OverlayApp {
     // Suggestions d'applications en direct (PATH & Levenshtein)
     input_suggestions: Vec<String>,
     last_suggestion_query: String,
+    attached_file_path: Option<std::path::PathBuf>,
+    file_picker_rx: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
 
     // Macros personnalisées ('raccourci' => texte complet)
     macros: Vec<(String, String)>,
@@ -497,6 +499,8 @@ impl OverlayApp {
             active_download: None,
             input_suggestions: Vec::new(),
             last_suggestion_query: String::new(),
+            attached_file_path: None,
+            file_picker_rx: None,
             macros,
             macro_shortcut_input: String::new(),
             macro_text_input: String::new(),

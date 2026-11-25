@@ -101,6 +101,299 @@ pub fn find_key_remaps_file() -> PathBuf {
     PathBuf::from("key_remaps.json")
 }
 
+/// Ouvre une boîte de dialogue native pour sélectionner un fichier ou une image
+#[cfg(windows)]
+pub fn pick_file_dialog() -> Option<PathBuf> {
+    #[repr(C)]
+    struct OPENFILENAMEW {
+        lStructSize: u32,
+        hwndOwner: *mut std::ffi::c_void,
+        hInstance: *mut std::ffi::c_void,
+        lpstrFilter: *const u16,
+        lpstrCustomFilter: *mut u16,
+        nMaxCustFilter: u32,
+        nFilterIndex: u32,
+        lpstrFile: *mut u16,
+        nMaxFile: u32,
+        lpstrFileTitle: *mut u16,
+        nMaxFileTitle: u32,
+        lpstrInitialDir: *const u16,
+        lpstrTitle: *const u16,
+        Flags: u32,
+        nFileOffset: u16,
+        nFileExtension: u16,
+        lpstrDefExt: *const u16,
+        lCustData: usize,
+        lpfnHook: *const (),
+        lpTemplateName: *const u16,
+        pvReserved: *mut std::ffi::c_void,
+        dwReserved: u32,
+        FlagsEx: u32,
+    }
+
+    #[link(name = "comdlg32")]
+    extern "system" {
+        fn GetOpenFileNameW(lpofn: *mut OPENFILENAMEW) -> windows::Win32::Foundation::BOOL;
+    }
+
+    let mut file_buf = vec![0u16; 1024];
+    let filter: Vec<u16> = "Fichiers multimédias et documents\0*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.svg;*.pdf;*.txt;*.md;*.json;*.rs;*.py;*.c;*.cpp;*.toml;*.csv\0Tous les fichiers (*.*)\0*.*\0\0"
+        .encode_utf16()
+        .collect();
+    let title: Vec<u16> = "Sélectionner un fichier ou une image\0".encode_utf16().collect();
+
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: std::ptr::null_mut(),
+        hInstance: std::ptr::null_mut(),
+        lpstrFilter: filter.as_ptr(),
+        lpstrCustomFilter: std::ptr::null_mut(),
+        nMaxCustFilter: 0,
+        nFilterIndex: 1,
+        lpstrFile: file_buf.as_mut_ptr(),
+        nMaxFile: file_buf.len() as u32,
+        lpstrFileTitle: std::ptr::null_mut(),
+        nMaxFileTitle: 0,
+        lpstrInitialDir: std::ptr::null(),
+        lpstrTitle: title.as_ptr(),
+        Flags: 0x00080000 | 0x00001000 | 0x00000800 | 0x00000004, // OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY
+        nFileOffset: 0,
+        nFileExtension: 0,
+        lpstrDefExt: std::ptr::null(),
+        lCustData: 0,
+        lpfnHook: std::ptr::null(),
+        lpTemplateName: std::ptr::null(),
+        pvReserved: std::ptr::null_mut(),
+        dwReserved: 0,
+        FlagsEx: 0,
+    };
+
+    let ok = unsafe { GetOpenFileNameW(&mut ofn) };
+    if ok.as_bool() {
+        let len = file_buf.iter().position(|&c| c == 0).unwrap_or(file_buf.len());
+        if len > 0 {
+            let path_str = String::from_utf16_lossy(&file_buf[..len]);
+            let p = PathBuf::from(path_str.trim());
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+
+    // Repli de secours via PowerShell configuré avec l'appartement STA
+    let ps_script = r#"[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; $f = New-Object System.Windows.Forms.OpenFileDialog; $f.Title = 'Sélectionner un fichier ou une image'; $f.Filter = 'Fichiers multimédias et documents (*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.svg;*.pdf;*.txt;*.md;*.json;*.rs;*.py)|*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.svg;*.pdf;*.txt;*.md;*.json;*.rs;*.py|Tous les fichiers (*.*)|*.*'; if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.FileName }"#;
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-STA", "-Command", ps_script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !path_str.is_empty() {
+            let p = PathBuf::from(path_str);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+pub fn pick_file_dialog() -> Option<PathBuf> {
+    let script = "POSIX path of (choose file with prompt \"Sélectionner un fichier ou une image\")";
+    let out = std::process::Command::new("osascript")
+        .args(["-e", script])
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !path_str.is_empty() {
+            let p = PathBuf::from(path_str);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn pick_file_dialog() -> Option<PathBuf> {
+    if let Ok(out) = std::process::Command::new("zenity")
+        .args(["--file-selection", "--title=Sélectionner un fichier ou une image"])
+        .output()
+    {
+        if out.status.success() {
+            let path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !path_str.is_empty() {
+                let p = PathBuf::from(path_str);
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extrait le texte d'un fichier PDF (documents vectoriels, attestations CPAM, France Travail, factures)
+#[cfg(windows)]
+pub fn read_pdf_text(path: &Path) -> Option<String> {
+    if !path.is_file() {
+        return None;
+    }
+    let path_str = path.to_string_lossy().to_string();
+
+    // 1. Essai ultra-rapide avec pdftotext si présent dans le PATH
+    if let Ok(out) = std::process::Command::new("pdftotext")
+        .args(["-layout", "-enc", "UTF-8", &path_str, "-"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if s.len() > 10 {
+                return Some(s);
+            }
+        }
+    }
+
+    // 2. Décompression native des flux /FlateDecode PDF via PowerShell et .NET DeflateStream
+    let ps_script = r#"
+$p = if ($args[0]) { $args[0] } else { [Console]::In.ReadLine() }
+$ErrorActionPreference = 'SilentlyContinue'
+if (-not (Test-Path -LiteralPath $p)) { exit 1 }
+$bytes = [System.IO.File]::ReadAllBytes($p)
+$latin1 = [System.Text.Encoding]::GetEncoding(28591)
+$raw = $latin1.GetString($bytes)
+$sb = New-Object System.Text.StringBuilder
+
+$pos = 0
+while (($sIdx = $raw.IndexOf('stream', $pos)) -ge 0) {
+    $start = $sIdx + 6
+    if ($start -lt $bytes.Length -and $bytes[$start] -eq 13) { $start++ }
+    if ($start -lt $bytes.Length -and $bytes[$start] -eq 10) { $start++ }
+    $eIdx = $raw.IndexOf('endstream', $start)
+    if ($eIdx -lt 0) { break }
+    $len = $eIdx - $start
+    while ($len -gt 0 -and ($bytes[$start + $len - 1] -eq 10 -or $bytes[$start + $len - 1] -eq 13)) { $len-- }
+    if ($len -gt 0) {
+        $sBytes = New-Object byte[] $len
+        [System.Array]::Copy($bytes, $start, $sBytes, 0, $len)
+        $text = $null
+        if ($len -gt 2 -and $sBytes[0] -eq 120) {
+            try {
+                $ms = New-Object System.IO.MemoryStream($sBytes, 2, $len - 2)
+                $ds = New-Object System.IO.Compression.DeflateStream($ms, [System.IO.Compression.CompressionMode]::Decompress)
+                $outMs = New-Object System.IO.MemoryStream
+                $ds.CopyTo($outMs)
+                $text = $latin1.GetString($outMs.ToArray())
+            } catch {}
+        } else {
+            $text = $latin1.GetString($sBytes)
+        }
+        if ($text -and ($text.Contains('BT') -or $text.Contains('Tj') -or $text.Contains('TJ'))) {
+            $mList = [regex]::Matches($text, '(?s)\((?:[^()\\]|\\.)*\)\s*(?:Tj|\'')|\[(.*?)\]\s*TJ|<([0-9a-fA-F\s]+)>\s*(?:Tj|TJ)')
+            foreach ($m in $mList) {
+                if ($m.Groups[1].Success) {
+                    $subs = [regex]::Matches($m.Groups[1].Value, '\((?:[^()\\]|\\.)*\)')
+                    foreach ($sm in $subs) {
+                        $v = $sm.Value
+                        $v = $v.Substring(1, $v.Length - 2)
+                        $v = [regex]::Replace($v, '\\([0-7]{1,3})', { param($o) [char][Convert]::ToInt32($o.Groups[1].Value, 8) })
+                        $v = $v.Replace('\(', '(').Replace('\)', ')').Replace('\\', '\').Replace('\n', ' ').Replace('\r', '').Replace('\t', ' ')
+                        [void]$sb.Append($v)
+                    }
+                    [void]$sb.Append(' ')
+                } elseif ($m.Groups[2].Success) {
+                    $h = $m.Groups[2].Value -replace '\s',''
+                    if ($h.Length -ge 4 -and ($h.Length % 4 -eq 0) -and ($h.StartsWith('FEFF') -or $h.StartsWith('00'))) {
+                        for ($k=0; $k -lt $h.Length; $k+=4) {
+                            $code = [Convert]::ToUInt16($h.Substring($k, 4), 16)
+                            if ($code -ne 0xFEFF) { [void]$sb.Append([char]$code) }
+                        }
+                        [void]$sb.Append(' ')
+                    } elseif ($h.Length -ge 2 -and ($h.Length % 2 -eq 0)) {
+                        for ($k=0; $k -lt $h.Length; $k+=2) {
+                            [void]$sb.Append([char][Convert]::ToByte($h.Substring($k, 2), 16))
+                        }
+                        [void]$sb.Append(' ')
+                    }
+                } else {
+                    $v = $m.Value
+                    $ep = $v.LastIndexOf(')')
+                    if ($ep -gt 0) {
+                        $v = $v.Substring(1, $ep - 1)
+                        $v = [regex]::Replace($v, '\\([0-7]{1,3})', { param($o) [char][Convert]::ToInt32($o.Groups[1].Value, 8) })
+                        $v = $v.Replace('\(', '(').Replace('\)', ')').Replace('\\', '\').Replace('\n', ' ').Replace('\r', '').Replace('\t', ' ')
+                        [void]$sb.Append($v)
+                        [void]$sb.Append(' ')
+                    }
+                }
+            }
+            [void]$sb.AppendLine()
+        }
+    }
+    $pos = $eIdx + 9
+}
+$res = $sb.ToString().Trim()
+if ($res.Length -gt 10) {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    Write-Output $res
+    exit 0
+}
+if (Get-Command python -ErrorAction SilentlyContinue) {
+    try {
+        $pyCmd = "import pypdf, sys; r=pypdf.PdfReader(sys.argv[1]); print('\n'.join(p.extract_text() or '' for p in r.pages))"
+        $pyRes = & python -c $pyCmd $p
+        if ($pyRes -and $pyRes.Trim().Length -gt 10) {
+            [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+            Write-Output $pyRes.Trim()
+            exit 0
+        }
+    } catch {}
+}
+"#;
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", ps_script, &path_str])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.len() > 10 {
+            return Some(s);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+pub fn read_pdf_text(path: &Path) -> Option<String> {
+    if !path.is_file() {
+        return None;
+    }
+    let path_str = path.to_string_lossy();
+    let script = format!(
+        "ObjC.import('PDFKit'); var url = $.NSURL.fileURLWithPath('{}'); var doc = $.PDFDocument.alloc.initWithURL(url); doc ? doc.string.js : '';",
+        path_str.replace('\'', "\\'")
+    );
+    let out = std::process::Command::new("osascript")
+        .args(["-l", "JavaScript", "-e", &script])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !s.is_empty() { Some(s) } else { None }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn read_pdf_text(path: &Path) -> Option<String> {
+    let out = std::process::Command::new("pdftotext").args(["-layout", "-enc", "UTF-8"]).arg(path).arg("-").output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !s.is_empty() { Some(s) } else { None }
+}
+
 /// Charge la liste des macros enregistrées ('raccourci' => 'texte complet') en fusionnant .env et macros.json
 pub fn load_macros() -> Vec<(String, String)> {
     let path = find_macros_file();

@@ -9,7 +9,7 @@ use std::time::Duration;
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
     GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    DIB_RGB_COLORS, HDC, SRCCOPY,
+    DIB_RGB_COLORS, HDC, HBITMAP, SRCCOPY,
 };
 #[cfg(windows)]
 use windows::Win32::System::Com::{
@@ -677,6 +677,103 @@ pub fn recognize_texts_ocrs(
     out
 }
 
+#[cfg(windows)]
+fn extract_text_windows_media_ocr(pixels: &[u8], w: u32, h: u32) -> Option<String> {
+    if pixels.is_empty() || w < 8 || h < 8 {
+        return None;
+    }
+
+    let bmp_bytes = rgba_to_bmp(pixels, w, h);
+    if bmp_bytes.is_empty() {
+        return None;
+    }
+
+    let temp_dir = std::env::temp_dir();
+    let file_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp_bmp = temp_dir.join(format!("libertide_ocr_{}_{}.bmp", std::process::id(), file_id));
+
+    if std::fs::write(&temp_bmp, &bmp_bytes).is_err() {
+        return None;
+    }
+
+    let path_str = temp_bmp.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        r#"[Windows.Media.Ocr.OcrEngine, Windows.Foundation.Metadata, ContentType = WindowsRuntime] | Out-Null
+[Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation.Metadata, ContentType = WindowsRuntime] | Out-Null
+[Windows.Storage.StorageFile, Windows.Foundation.Metadata, ContentType = WindowsRuntime] | Out-Null
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {{ $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' }})[0]
+function Await($WinRtTask, $ResultType) {{
+    $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)
+    $netTask = $asTask.Invoke($null, @($WinRtTask))
+    $netTask.Wait(4000) | Out-Null
+    $netTask.Result
+}}
+try {{
+    $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync('{}')) ([Windows.Storage.StorageFile])
+    $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+    $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+    $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+    if (-not $engine) {{ $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new('en-US')) }}
+    $ocrResult = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $ocrResult.Text
+}} catch {{}}
+"#,
+        path_str
+    );
+
+    let mut cmd = std::process::Command::new("powershell.exe");
+    cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script]);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = cmd.output().ok();
+    let _ = std::fs::remove_file(&temp_bmp);
+
+    if let Some(out) = output {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+/// Extrait le texte d'un tampon RGBA en mémoire via les moteurs OCR natifs
+pub fn extract_text_from_rgba(pixels: &[u8], w: usize, h: usize) -> String {
+    if pixels.is_empty() || w < 8 || h < 8 {
+        return String::new();
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(text) = extract_text_windows_media_ocr(pixels, w as u32, h as u32) {
+            return text;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let items = recognize_texts_ocrs(pixels, w as u32, h as u32, [0, 0, w as i32, h as i32]);
+        let texts: Vec<String> = items.into_iter().map(|(t, _)| t).filter(|s| !s.trim().is_empty()).collect();
+        return texts.join("\n");
+    }
+
+    String::new()
+}
+
 #[cfg(target_os = "linux")]
 #[repr(C)]
 struct XImageFuncs {
@@ -1293,6 +1390,217 @@ pub fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+/// Capture la fenêtre ou région donnée et la convertit directement en Data URI Base64 pour Qwen2-VL
+pub fn capture_window_as_data_uri(hwnd: HWND, rect: [i32; 4]) -> Option<String> {
+    let (pixels, w, h) = capture_window_rgba(hwnd, rect)?;
+    if w < 10 || h < 10 || pixels.is_empty() {
+        return None;
+    }
+    let max_dim = 1024u32;
+    let (target_w, target_h) = if w > max_dim || h > max_dim {
+        let scale = (max_dim as f32 / w.max(h) as f32).min(1.0);
+        ((w as f32 * scale).round() as u32, (h as f32 * scale).round() as u32)
+    } else {
+        (w, h)
+    };
+
+    let bmp_bytes = if target_w != w || target_h != h {
+        let mut scaled = vec![0u8; (target_w * target_h * 4) as usize];
+        for dy in 0..target_h {
+            let sy = (dy * h / target_h) as usize;
+            for dx in 0..target_w {
+                let sx = (dx * w / target_w) as usize;
+                let s_idx = (sy * w as usize + sx) * 4;
+                let d_idx = (dy as usize * target_w as usize + dx as usize) * 4;
+                if s_idx + 4 <= pixels.len() && d_idx + 4 <= scaled.len() {
+                    scaled[d_idx..d_idx + 4].copy_from_slice(&pixels[s_idx..s_idx + 4]);
+                }
+            }
+        }
+        rgba_to_bmp(&scaled, target_w, target_h)
+    } else {
+        rgba_to_bmp(&pixels, w, h)
+    };
+
+    let b64 = base64_encode(&bmp_bytes);
+    Some(format!("data:image/bmp;base64,{b64}"))
+}
+
+/// Charge n'importe quel fichier image (PNG, JPG, JPEG, WEBP, BMP, etc.) en pixels RGBA 32 bits
+#[cfg(windows)]
+pub fn load_image_file_rgba(path: &std::path::Path) -> Option<(Vec<u8>, u32, u32)> {
+    use std::os::windows::ffi::OsStrExt;
+
+    if !path.is_file() {
+        return None;
+    }
+
+    #[repr(C)]
+    struct GdiplusStartupInput {
+        gdiplus_version: u32,
+        debug_event_callback: usize,
+        suppress_background_thread: i32,
+        suppress_external_codecs: i32,
+    }
+
+    #[link(name = "gdiplus")]
+    extern "system" {
+        fn GdiplusStartup(token: *mut usize, input: *const GdiplusStartupInput, output: *mut std::ffi::c_void) -> i32;
+        fn GdiplusShutdown(token: usize);
+        fn GdipLoadImageFromFile(filename: *const u16, image: *mut *mut std::ffi::c_void) -> i32;
+        fn GdipCreateHBITMAPFromBitmap(bitmap: *mut std::ffi::c_void, hbmReturn: *mut HBITMAP, background: u32) -> i32;
+        fn GdipGetImageWidth(image: *mut std::ffi::c_void, width: *mut u32) -> i32;
+        fn GdipGetImageHeight(image: *mut std::ffi::c_void, height: *mut u32) -> i32;
+        fn GdipDisposeImage(image: *mut std::ffi::c_void) -> i32;
+    }
+
+    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let mut token: usize = 0;
+        let input = GdiplusStartupInput {
+            gdiplus_version: 1,
+            debug_event_callback: 0,
+            suppress_background_thread: 0,
+            suppress_external_codecs: 0,
+        };
+        if GdiplusStartup(&mut token, &input, std::ptr::null_mut()) != 0 {
+            return None;
+        }
+
+        let mut gdip_img: *mut std::ffi::c_void = std::ptr::null_mut();
+        let status = GdipLoadImageFromFile(wide_path.as_ptr(), &mut gdip_img);
+        if status != 0 || gdip_img.is_null() {
+            GdiplusShutdown(token);
+            return None;
+        }
+
+        let mut w: u32 = 0;
+        let mut h: u32 = 0;
+        let _ = GdipGetImageWidth(gdip_img, &mut w);
+        let _ = GdipGetImageHeight(gdip_img, &mut h);
+
+        if w == 0 || h == 0 {
+            let _ = GdipDisposeImage(gdip_img);
+            GdiplusShutdown(token);
+            return None;
+        }
+
+        let mut hbm = HBITMAP(std::ptr::null_mut());
+        let hbm_status = GdipCreateHBITMAPFromBitmap(gdip_img, &mut hbm, 0);
+        let _ = GdipDisposeImage(gdip_img);
+
+        if hbm_status != 0 || hbm.0.is_null() {
+            GdiplusShutdown(token);
+            return None;
+        }
+
+        let hdc_screen = GetDC(windows::Win32::Foundation::HWND(std::ptr::null_mut()));
+        let hdc_mem = CreateCompatibleDC(hdc_screen);
+        let old_bm = SelectObject(hdc_mem, hbm);
+
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w as i32,
+                biHeight: -(h as i32), // Top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut buffer = vec![0u8; (w * h * 4) as usize];
+        let lines = GetDIBits(
+            hdc_mem,
+            hbm,
+            0,
+            h,
+            Some(buffer.as_mut_ptr() as *mut _),
+            &mut bmi,
+            DIB_RGB_COLORS,
+        );
+
+        SelectObject(hdc_mem, old_bm);
+        let _ = DeleteObject(hbm);
+        let _ = DeleteDC(hdc_mem);
+        ReleaseDC(windows::Win32::Foundation::HWND(std::ptr::null_mut()), hdc_screen);
+        GdiplusShutdown(token);
+
+        if lines > 0 {
+            Some((buffer, w, h))
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn load_image_file_rgba(_path: &std::path::Path) -> Option<(Vec<u8>, u32, u32)> {
+    None
+}
+
+/// Lit un fichier image local, le décode en pixels et le convertit en un bitmap complet 24 bits (BMP) Base64
+pub fn image_file_to_data_uri(path: &std::path::Path) -> Option<String> {
+    if !path.is_file() {
+        return None;
+    }
+
+    // 1. Décodage natif en bitmap complet RGBA et encodage standard BMP 24 bits
+    #[cfg(windows)]
+    if let Some((pixels, w, h)) = load_image_file_rgba(path) {
+        if w >= 4 && h >= 4 && !pixels.is_empty() {
+            let max_dim = 1024u32;
+            let (target_w, target_h) = if w > max_dim || h > max_dim {
+                let scale = (max_dim as f32 / w.max(h) as f32).min(1.0);
+                ((w as f32 * scale).round() as u32, (h as f32 * scale).round() as u32)
+            } else {
+                (w, h)
+            };
+
+            let bmp_bytes = if target_w != w || target_h != h {
+                let mut scaled = vec![0u8; (target_w * target_h * 4) as usize];
+                for dy in 0..target_h {
+                    let sy = (dy * h / target_h) as usize;
+                    for dx in 0..target_w {
+                        let sx = (dx * w / target_w) as usize;
+                        let s_idx = (sy * w as usize + sx) * 4;
+                        let d_idx = (dy as usize * target_w as usize + dx as usize) * 4;
+                        if s_idx + 4 <= pixels.len() && d_idx + 4 <= scaled.len() {
+                            scaled[d_idx..d_idx + 4].copy_from_slice(&pixels[s_idx..s_idx + 4]);
+                        }
+                    }
+                }
+                rgba_to_bmp(&scaled, target_w, target_h)
+            } else {
+                rgba_to_bmp(&pixels, w, h)
+            };
+
+            let b64 = base64_encode(&bmp_bytes);
+            return Some(format!("data:image/bmp;base64,{b64}"));
+        }
+    }
+
+    // 2. Repli direct
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let mime = match ext.as_str() {
+        "bmp" => "image/bmp",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        _ => "image/bmp",
+    };
+    let b64 = base64_encode(&bytes);
+    Some(format!("data:{mime};base64,{b64}"))
+}
+
 #[derive(serde::Deserialize, Debug)]
 struct VlmElement {
     #[serde(default)]
@@ -1345,19 +1653,7 @@ pub fn detect_vlm_grounding_targets(
 
     let prompt = "Detect interactive icons, buttons, menus, canvas controls and cards lacking text. Output JSON list: [{\"name\": \"...\", \"role\": \"bouton\", \"box_2d\": [ymin, xmin, ymax, xmax]}] where coords are normalized 0..1000.";
 
-    // 1. Tenter en priorité absolue le modèle Qwen-VL chargé localement en asynchrone
-    if crate::local_llm::is_vlm_ready() {
-        if let Some(raw_text) = crate::local_llm::query_vlm_grounding_local(prompt) {
-            if let (Some(s), Some(e)) = (raw_text.find('['), raw_text.rfind(']')) {
-                let clean = &raw_text[s..=e];
-                if let Ok(elements) = serde_json::from_str::<Vec<VlmElement>>(clean) {
-                    return convert_vlm_elements_to_targets(elements, window_rect, existing_targets);
-                }
-            }
-        }
-    }
-
-    // 2. Repli vers le serveur / endpoint d'inférence configuré
+    // Envoi du bitmap complet vers le serveur / endpoint d'inférence VLM configuré
     let b64 = base64_encode(&bmp_bytes);
     let data_uri = format!("data:image/bmp;base64,{b64}");
 
@@ -1376,53 +1672,55 @@ pub fn detect_vlm_grounding_targets(
         .or_else(|| crate::fs_util::read_env_var_from_file(".env", "QWENVL_API_KEY"))
         .unwrap_or_default();
 
-    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
-        return Vec::new();
-    };
-
-    let client = match reqwest::Client::builder().timeout(Duration::from_millis(3500)).build() {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    let body = serde_json::json!({
-        "model": model_name,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    { "type": "text", "text": prompt },
-                    { "type": "image_url", "image_url": { "url": data_uri } }
-                ]
-            }
-        ],
-        "temperature": 0.1,
-        "max_tokens": 512
-    });
-
-    let mut req = client.post(&endpoint).json(&body);
-    if !api_key.trim().is_empty() {
-        req = req.bearer_auth(api_key.trim());
-    }
-
-    let res: Result<Vec<VlmElement>, String> = rt.block_on(async {
-        let resp = req.send().await.map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            return Err(format!("HTTP {}", resp.status()));
-        }
-        let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-        let raw_text = v.pointer("/choices/0/message/content").and_then(|v| v.as_str()).unwrap_or("");
-        let clean = if let (Some(s), Some(e)) = (raw_text.find('['), raw_text.rfind(']')) {
-            &raw_text[s..=e]
-        } else {
-            return Ok(Vec::new());
+    let handle = std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+            return Vec::new();
         };
-        serde_json::from_str::<Vec<VlmElement>>(clean).map_err(|e| e.to_string())
+
+        let client = match reqwest::Client::builder().timeout(Duration::from_millis(3500)).build() {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+
+        let body = serde_json::json!({
+            "model": model_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": prompt },
+                        { "type": "image_url", "image_url": { "url": data_uri } }
+                    ]
+                }
+            ],
+            "temperature": 0.1,
+            "max_tokens": 512
+        });
+
+        let mut req = client.post(&endpoint).json(&body);
+        if !api_key.trim().is_empty() {
+            req = req.bearer_auth(api_key.trim());
+        }
+
+        let res: Result<Vec<VlmElement>, String> = rt.block_on(async {
+            let resp = req.send().await.map_err(|e| e.to_string())?;
+            if !resp.status().is_success() {
+                return Err(format!("HTTP {}", resp.status()));
+            }
+            let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            let raw_text = v.pointer("/choices/0/message/content").and_then(|v| v.as_str()).unwrap_or("");
+            let clean = if let (Some(s), Some(e)) = (raw_text.find('['), raw_text.rfind(']')) {
+                &raw_text[s..=e]
+            } else {
+                return Ok(Vec::new());
+            };
+            serde_json::from_str::<Vec<VlmElement>>(clean).map_err(|e| e.to_string())
+        });
+
+        res.unwrap_or_default()
     });
 
-    let Ok(elements) = res else {
-        return Vec::new();
-    };
+    let elements = handle.join().unwrap_or_default();
 
     convert_vlm_elements_to_targets(elements, window_rect, existing_targets)
 }

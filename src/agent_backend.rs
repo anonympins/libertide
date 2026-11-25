@@ -1409,7 +1409,18 @@ pub fn spawn_agent_backend(
                                     let truncated = &sum[..safe_limit];
                                     initial_screen_hint.push_str(truncated);
                                 }
-                                let detected_tags = local_llm::resolve_query_tags(clean_prompt, Some(&initial_screen_hint));
+                                let mut detected_tags = local_llm::resolve_query_tags(clean_prompt, Some(&initial_screen_hint));
+
+                                let has_file_or_doc = clean_prompt.contains(".pdf")
+                                    || clean_prompt.contains(".png")
+                                    || clean_prompt.contains(".jpg")
+                                    || clean_prompt.contains(".jpeg")
+                                    || clean_prompt.contains(".txt")
+                                    || clean_prompt.contains(".docx")
+                                    || clean_prompt.contains(".md")
+                                    || clean_prompt.contains("fichier joint")
+                                    || clean_prompt.contains("document joint");
+
                                 let is_pure_conversational_or_question = !detected_tags.is_empty()
                                     && detected_tags.iter().all(|t| matches!(
                                         t,
@@ -1425,7 +1436,14 @@ pub fn spawn_agent_backend(
                                     && !clean_prompt.to_lowercase().contains("site")
                                     && !clean_prompt.to_lowercase().contains("écran")
                                     && !clean_prompt.to_lowercase().contains("ecran")
-                                    && !clean_prompt.to_lowercase().contains("analyse");
+                                    && !clean_prompt.to_lowercase().contains("screen")
+                                    && !clean_prompt.to_lowercase().contains("analyse")
+                                    && !clean_prompt.to_lowercase().contains("analyze")
+                                    && !clean_prompt.to_lowercase().contains("summarize")
+                                    && !clean_prompt.to_lowercase().contains("summary")
+                                    && !clean_prompt.to_lowercase().contains("window")
+                                    && !clean_prompt.to_lowercase().contains("document")
+                                    && !has_file_or_doc;
 
                                 let active_win_only = local_llm::get_local_llm_options().active_window_only;
                                 let (field_content, screen_state): (Option<String>, String) = tokio::task::spawn_blocking(move || {
@@ -1478,6 +1496,269 @@ pub fn spawn_agent_backend(
                                     let _ = event_tx.send(AgentEvent::ScreenPayloadSize(0.0));
                                 }
 
+                                // 2b. Traitement inconditionnel des fichiers joints (PDF, texte, images)
+                                let mut path_candidates = Vec::new();
+
+                                // Extraction des chemins complets avec espaces (ex: C:\...\ChatGPT Image 12 nov. 2026.png)
+                                const KNOWN_EXTS: &[&str] = &[
+                                    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".svg", ".gif",
+                                    ".tiff", ".tif", ".ico", ".jfif", ".avif", ".pdf", ".txt",
+                                    ".md", ".json", ".rs", ".py", ".docx"
+                                ];
+                                for &ext in KNOWN_EXTS {
+                                    let mut search_from = 0;
+                                    let lower_prompt = clean_prompt.to_lowercase();
+                                    while let Some(pos) = lower_prompt[search_from..].find(ext) {
+                                        let ext_end = search_from + pos + ext.len();
+                                        search_from = ext_end;
+
+                                        // Parcourir en arrière pour trouver le début potentiel du chemin
+                                        let slice_before = &clean_prompt[..ext_end];
+                                        // Tester les découpages plausibles en arrière
+                                        let mut start_idx = 0;
+                                        for (i, c) in slice_before.char_indices().rev() {
+                                            if c == '"' || c == '\'' || c == '«' || c == '»' || c == '<' || c == '>' {
+                                                start_idx = i + 1;
+                                                break;
+                                            }
+                                            if (c == ':' && i >= 1 && slice_before.as_bytes()[i - 1].is_ascii_alphabetic()) {
+                                                // Début de lecteur Windows type C:\
+                                                start_idx = i - 1;
+                                                break;
+                                            }
+                                        }
+                                        let candidate = slice_before[start_idx..].trim().trim_matches(['"', '\'', '«', '»', '<', '>']);
+                                        if candidate.len() >= ext.len() + 1 {
+                                            let p = std::path::Path::new(candidate);
+                                            if p.is_file() && !path_candidates.contains(&candidate.to_string()) {
+                                                path_candidates.push(candidate.to_string());
+                                            } else if let Some((found, _)) = crate::fs_util::find_file_in_workspace(candidate) {
+                                                if !path_candidates.contains(&found) {
+                                                    path_candidates.push(found);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                let mut in_q = false;
+                                let mut cur_q = String::new();
+                                for c in clean_prompt.chars() {
+                                    if c == '"' || c == '\'' || c == '«' || c == '»' {
+                                        if in_q {
+                                            if !cur_q.trim().is_empty() {
+                                                path_candidates.push(cur_q.trim().to_string());
+                                            }
+                                            cur_q.clear();
+                                            in_q = false;
+                                        } else {
+                                            in_q = true;
+                                        }
+                                    } else if in_q {
+                                        cur_q.push(c);
+                                    }
+                                }
+                                for word in clean_prompt.split_whitespace() {
+                                    let clean_w = word.trim_matches(['"', '\'', '(', ')', '<', '>', ',', ';']);
+                                    if !clean_w.is_empty() && !path_candidates.iter().any(|p| p == clean_w) {
+                                        path_candidates.push(clean_w.to_string());
+                                    }
+                                }
+                                println!("[Fichier/Image] Candidats potentiels extraits de la consigne : {:?}", path_candidates);
+
+                                let mut has_attached_image = false;
+                                // Inspection des documents textuels joints (code, PDF extrait, markdown, JSON, txt)
+                                for cand in &path_candidates {
+                                    let p = std::path::Path::new(cand);
+                                    if p.is_file() {
+                                        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                                        if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "svg" | "gif" | "tiff" | "tif" | "ico" | "jfif" | "avif") {
+                                            has_attached_image = true;
+                                            println!("[Fichier/Image] Image locale détectée parmi les candidats : {}", p.display());
+                                        }
+                                        if ext == "pdf" {
+                                            if let Some(content) = crate::fs_util::read_pdf_text(p) {
+                                                let truncated = truncate_with_notice(content.trim(), 15000);
+                                                println!("[Fichier joint] Document PDF extrait ({} caractères) : {}", truncated.len(), p.display());
+                                                prompt_sections.push(format!("[Contenu extrait du document PDF joint : \"{}\"]\n\"\"\"\n{}\n\"\"\"", p.display(), truncated));
+                                                break;
+                                            }
+                                        }
+                                        let is_doc = matches!(ext.as_str(), "txt" | "md" | "json" | "rs" | "py" | "js" | "ts" | "c" | "cpp" | "toml" | "csv" | "log" | "html");
+                                        if is_doc {
+                                            if let Ok(content) = std::fs::read_to_string(p) {
+                                                let truncated = truncate_with_notice(content.trim(), 10000);
+                                                println!("[Fichier joint] Document textuel injecté ({} caractères) : {}", truncated.len(), p.display());
+                                                prompt_sections.push(format!("[Contenu du document joint : \"{}\"]\n```{}\n{}\n```", p.display(), ext, truncated));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                let is_visual_or_file_read = has_attached_image
+                                    || detected_tags.contains(&local_llm::CommandTag::VisualQuestionAnswering)
+                                    || clean_prompt.to_lowercase().contains("image")
+                                    || clean_prompt.to_lowercase().contains("photo")
+                                    || clean_prompt.to_lowercase().contains("vois")
+                                    || clean_prompt.to_lowercase().contains("voi ")
+                                    || clean_prompt.to_lowercase().contains("regarde");
+
+                                if is_visual_or_file_read {
+                                    println!("[VLM] Requête identifiée comme visuelle (has_attached_image: {has_attached_image})");
+                                    if !detected_tags.contains(&local_llm::CommandTag::VisualQuestionAnswering) {
+                                        detected_tags.push(local_llm::CommandTag::VisualQuestionAnswering);
+                                    }
+                                }
+
+                                if detected_tags.contains(&local_llm::CommandTag::VisualQuestionAnswering) {
+                                    println!("[VLM] Tag VisualQuestionAnswering détecté : traitement multimodal par Qwen2-VL.");
+                                    let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
+                                    let candidates_for_vlm = path_candidates.clone();
+                                    let vlm_result = tokio::task::spawn_blocking(move || {
+                                        let mut image_uris = Vec::new();
+                                        for cand in &candidates_for_vlm {
+                                            let path_cand = std::path::Path::new(cand);
+                                            let p_resolved = if path_cand.is_file() {
+                                                path_cand.to_path_buf()
+                                            } else if let Some((found, _)) = crate::fs_util::find_file_in_workspace(cand) {
+                                                std::path::PathBuf::from(found)
+                                            } else {
+                                                path_cand.to_path_buf()
+                                            };
+                                            println!("[VLM] Vérification candidate image : \"{}\" (résolu: {}, existe: {})", cand, p_resolved.display(), p_resolved.is_file());
+                                            if let Some(uri) = crate::ocr::image_file_to_data_uri(&p_resolved) {
+                                                println!("[VLM] Image locale chargée avec succès en bitmap : \"{}\"", p_resolved.display());
+                                                let preview: String = uri.chars().take(80).collect();
+                                                println!("[VLM] URI bitmap générée (longueur: {} octets, début: '{}...')", uri.len(), preview);
+                                                image_uris.push(uri);
+                                                break;
+                                            } else if p_resolved.is_file() {
+                                                eprintln!("[VLM Erreur] image_file_to_data_uri a renvoyé None pour le fichier existant \"{}\"", p_resolved.display());
+                                            }
+                                        }
+                                        // À défaut, capture de la fenêtre active au premier plan
+                                        if image_uris.is_empty() {
+                                            println!("[VLM] Aucun fichier image direct trouvé sur le disque, capture d'écran de repli...");
+                                            #[cfg(windows)]
+                                            {
+                                                let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+                                                if !fg.0.is_null() && !crate::window_util::is_window_hung(fg) {
+                                                    let mut r = windows::Win32::Foundation::RECT::default();
+                                                    if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(fg, &mut r).is_ok() } {
+                                                        if let Some(uri) = crate::ocr::capture_window_as_data_uri(fg, [r.left, r.top, r.right, r.bottom]) {
+                                                            println!("[VLM] Capture d'écran fenêtre active réussie ({} octets)", uri.len());
+                                                            image_uris.push(uri);
+                                                        } else {
+                                                            eprintln!("[VLM Erreur] capture_window_as_data_uri a échoué sur la fenêtre active.");
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            #[cfg(not(windows))]
+                                            {
+                                                let rect = crate::window_util::get_active_window_rect().unwrap_or([0, 0, 1920, 1080]);
+                                                if let Some(uri) = crate::ocr::capture_window_as_data_uri(crate::ocr::HWND::NULL, rect) {
+                                                    println!("[VLM] Capture d'écran réussie ({} octets)", uri.len());
+                                                    image_uris.push(uri);
+                                                } else {
+                                                    eprintln!("[VLM Erreur] capture_window_as_data_uri a échoué.");
+                                                }
+                                            }
+                                        }
+                                        image_uris
+                                    }).await.unwrap_or_default();
+
+                                    let auto_read_messages = std::env::var("AUTO_READ_MESSAGES")
+                                        .ok()
+                                        .or_else(|| crate::fs_util::read_env_var_from_file(".env", "AUTO_READ_MESSAGES"))
+                                        .map(|s| !s.trim().eq_ignore_ascii_case("false") && s.trim() != "0")
+                                        .unwrap_or(true);
+
+                                    if vlm_result.is_empty() {
+                                        eprintln!("[VLM Échec] Aucune image n'a pu être chargée ni capturée ! Interruption de l'analyse.");
+                                        let err_msg = "Impossible de charger le fichier image ou de capturer la vue pour l'analyse visuelle.".to_string();
+                                        let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                                            text: err_msg.clone(),
+                                            quick_suggestions: Vec::new(),
+                                        });
+                                        if auto_read_messages {
+                                            let _ = task_tts_tx.send(TtsCommand::Speak(err_msg));
+                                        }
+                                        let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                                        return;
+                                    }
+
+                                    let vlm_prompt = format!("Analyse cette image ou vue d'écran pour répondre précisément à la question suivante : \"{}\". Décris les éléments visuels avec repères spatiaux (gauche, droite, centre, haut, bas), lis les schémas, graphiques ou textes manuscrits / captchas.", clean_prompt);
+                                    println!("[VLM] Appel de query_vlm_multimodal avec {} image(s)...", vlm_result.len());
+                                    match local_llm::query_vlm_multimodal(&vlm_prompt, &vlm_result, Some(&event_tx)).await {
+                                        Ok(vlm_desc) if !vlm_desc.trim().is_empty() => {
+                                            let trimmed = vlm_desc.trim().to_string();
+                                            println!("[VLM Screen Q&A] Réponse visuelle Qwen2-VL obtenue ({} caractères). Clôture directe sans appel au LLM distant.", trimmed.len());
+
+                                            // Enregistrement dans l'historique conversationnel
+                                            {
+                                                let mut hist = history.lock().await;
+                                                hist.push(ChatMessage {
+                                                    role: "user".to_string(),
+                                                    content: prompt.clone(),
+                                                });
+                                                hist.push(ChatMessage {
+                                                    role: "assistant".to_string(),
+                                                    content: trimmed.clone(),
+                                                });
+                                            }
+
+                                            let suggestions = vec![
+                                                QuickSuggestionItem::Text("Peux-tu détailler davantage ?".to_string()),
+                                                QuickSuggestionItem::Text("Y a-t-il du texte ou des chiffres ?".to_string()),
+                                                QuickSuggestionItem::Text("Merci pour l'analyse".to_string()),
+                                            ];
+
+                                            let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                                                text: trimmed.clone(),
+                                                quick_suggestions: suggestions,
+                                            });
+
+                                            if auto_read_messages {
+                                                let clean_speech = sanitize_for_tts(&trimmed);
+                                                if !clean_speech.trim().is_empty() {
+                                                    let _ = task_tts_tx.send(TtsCommand::Speak(clean_speech));
+                                                }
+                                            }
+
+                                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                                            return;
+                                        }
+                                        Ok(_) => {
+                                            println!("[VLM Screen Q&A] Réponse VLM vide.");
+                                            let err_msg = "Le modèle de vision Qwen2-VL a retourné une réponse vide.".to_string();
+                                            let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                                                text: err_msg.clone(),
+                                                quick_suggestions: Vec::new(),
+                                            });
+                                            if auto_read_messages {
+                                                let _ = task_tts_tx.send(TtsCommand::Speak(err_msg));
+                                            }
+                                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                                            return;
+                                        }
+                                        Err(err) => {
+                                            eprintln!("[VLM Screen Q&A] Échec analyse VLM : {err}");
+                                            let err_msg = format!("L'analyse visuelle par Qwen2-VL a échoué : {err}");
+                                            let _ = event_tx.send(AgentEvent::ReplaceNarration {
+                                                text: err_msg.clone(),
+                                                quick_suggestions: Vec::new(),
+                                            });
+                                            if auto_read_messages {
+                                                let _ = task_tts_tx.send(TtsCommand::Speak(err_msg));
+                                            }
+                                            let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Idle));
+                                            return;
+                                        }
+                                    }
+                                }
+
                                 if let Some(content) = field_content {
                                     if !content.trim().is_empty() {
                                         let safe_content = truncate_with_notice(content.trim(), 1200);
@@ -1505,9 +1786,11 @@ pub fn spawn_agent_backend(
                                 let (_, prompt_lang) = get_system_locale_language();
                                 prompt_sections.push(format!(
                                     "[Demande utilisateur]\n{prompt}\n\n[Consignes impératives pour la réponse]\n\
-                                    1. Formule impérativement ta \"narration\" et tes suggestions en {prompt_lang}.\n\
-                                    2. FOCALISATION EXCLUSIVE : Ne cite et ne décris JAMAIS les composants de l'interface ou les contrôles détectés (boutons, listes de cibles, champs). Ta \"narration\" doit s'adresser directement à l'utilisateur en ne traitant que du contenu pertinent pour sa demande.\n\
-                                    3. COMPAGNON BAVARD, ORIGINAL ET ÉTHIQUE : Sois original, chaleureux et spontané ! BANNIS absolument les formules clichés de veille passive (\"Je vois que tu travailles sur...\", \"Rien d'urgent, je reste en veille bienveillante à tes côtés\"). Varie tes angles, ton humour et tes anecdotes. Si l'utilisateur te salue simplement ou engage la conversation, réponds à sa salutation avec sympathie sans analyser ni commenter l'écran."
+                                    1. Formule impérativement ta \"narration\" et tes suggestions dans la même langue que la demande de l'utilisateur (en français si la demande est en français, même si l'interface est en {prompt_lang}).\n\
+                                    2. DOCUMENTS ET FICHIERS PDFS JOINTS : Si le contenu d'un document ou PDF joint est présent ci-dessus sous [Contenu extrait du document PDF joint : ...], tu as accès direct à son contenu ! Réponds directement et précisément à la question posée à partir des informations qu'il contient (bénéficiaire, dates de validité, organisme CPAM / France Travail, droits ouverts, montants, etc.) sans prétendre que tu ne peux pas le lire.\n\
+                                    3. IMAGES, PHOTOS ET FICHIERS VISUELS (VLM QWEN2-VL) : Si une section [Description Visuelle Détaillée VLM (Qwen2-VL)] est fournie ci-dessus, tu as ACCÈS INTÉGRAL à la vision ! Ne dis JAMAIS que tu ne peux pas voir l'image ou que tu n'as pas d'yeux. Réponds directement, fidèlement et en détail à la question de l'utilisateur ('que vois-tu', 'décris l'image', etc.) en t'appuyant à 100% sur cette description visuelle.\n\
+                                    4. FOCALISATION EXCLUSIVE : Ne cite et ne décris JAMAIS les composants de l'interface ou les contrôles détectés (boutons, listes de cibles, champs). Ta \"narration\" doit s'adresser directement à l'utilisateur en ne traitant que du contenu pertinent pour sa demande.\n\
+                                    5. COMPAGNON BAVARD, ORIGINAL ET ÉTHIQUE : Sois original, chaleureux et spontané ! BANNIS absolument les formules clichés de veille passive (\"Je vois que tu travailles sur...\", \"Rien d'urgent, je reste en veille bienveillante à tes côtés\"). Varie tes angles, ton humour et tes anecdotes. Si l'utilisateur te salue simplement ou engage la conversation, réponds à sa salutation avec sympathie sans analyser ni commenter l'écran."
                                 ));
                                 let final_prompt = prompt_sections.join("\n\n");
 

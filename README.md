@@ -7,6 +7,7 @@
 [![License](https://img.shields.io/github/license/anonympins/libertide?label=License)](https://github.com/anonympins/libertide/blob/main/LICENSE)
 [![WCAG Accessibility](https://img.shields.io/badge/Accessibility-WCAG%20AAA-brightgreen)](#-visual-comfort--high-visibility-wcag-aaa)
 [![Platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue)](#-getting-started-in-3-steps)
+![Lines of Code](https://img.shields.io/github/repo-size/anonympins/libertide)
 ![Lines of Code](https://anonympins.github.io/libertide/badge.svg)
 
 [![Windows Build](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-windows.yml?label=Windows)](https://github.com/anonympins/libertide/actions/workflows/rust-windows.yml)
