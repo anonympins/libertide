@@ -1,3 +1,4 @@
+use std::time::Duration;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -357,6 +358,7 @@ pub fn tags_require_screen(tags: &[CommandTag]) -> bool {
                 | CommandTag::LockedInAndEyeTracking
                 | CommandTag::TremorAndSpasticityFilter
                 | CommandTag::TravelAndFlightBooking
+                | CommandTag::VisualQuestionAnswering
         )
     })
 }
@@ -404,7 +406,119 @@ pub fn get_active_vlm_preset() -> &'static ModelPreset {
             return p;
         }
     }
+    // Si aucun preset explicite n'est configuré, privilégier celui qui est déjà présent sur le disque
+    for p in VLM_PRESETS {
+        if is_preset_downloaded(p) {
+            return p;
+        }
+    }
     &VLM_PRESETS[0]
+}
+
+static VLM_SERVER_PROCESS: Mutex<Option<std::process::Child>> = Mutex::new(None);
+const DEFAULT_INTERNAL_VLM_PORT: u16 = 8088;
+
+/// Vérifie si le serveur VLM écoute sur le port indiqué
+async fn is_vlm_server_alive(port: u16) -> bool {
+    let url = format!("http://127.0.0.1:{}/health", port);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(800))
+        .build()
+        .unwrap_or_default();
+    client.get(&url).send().await.map_or(false, |r| r.status().is_success())
+}
+
+/// Lance llama-server en sous-processus intégré s'il n'est pas déjà actif
+pub async fn ensure_embedded_vlm_server_running(port: u16) -> Result<String, String> {
+    let endpoint = format!("http://127.0.0.1:{}/v1/chat/completions", port);
+    if is_vlm_server_alive(port).await {
+        return Ok(endpoint);
+    }
+
+    {
+        let mut proc_guard = VLM_SERVER_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(child) = proc_guard.as_mut() {
+            if let Ok(None) = child.try_wait() {
+                return Ok(endpoint);
+            }
+        }
+    }
+
+    // Recherche de l'exécutable llama-server
+    let server_bin = [
+        PathBuf::from("bin").join("llama-server.exe"),
+        PathBuf::from("bin").join("llama-server"),
+        PathBuf::from("llama-server.exe"),
+        PathBuf::from("llama-server"),
+    ].into_iter().find(|p| p.is_file());
+
+    let server_path = match server_bin {
+        Some(p) => p,
+        None => return Err("Binaire 'llama-server' introuvable dans ./bin ou à la racine.".to_string()),
+    };
+
+    let model_path = find_local_vlm_model_file()
+        .ok_or_else(|| "Modèle GGUF VLM introuvable sur le disque.".to_string())?;
+
+    // Recherche du projecteur multimodal mmproj
+    let mmproj_path = [
+        PathBuf::from("models").join("mmproj-Qwen2-VL-2B-Instruct-f16.gguf"),
+        PathBuf::from("models").join("mmproj-Qwen2-VL-7B-Instruct-f16.gguf"),
+        PathBuf::from("models").join("mmproj.gguf"),
+    ].into_iter().find(|p| p.is_file()).or_else(|| {
+        // Chercher tout fichier mmproj*.gguf dans models/
+        std::fs::read_dir("models").ok()?.flatten().find_map(|e| {
+            let p = e.path();
+            let n = p.file_name()?.to_str()?.to_lowercase();
+            if n.starts_with("mmproj") && n.ends_with(".gguf") { Some(p) } else { None }
+        })
+    });
+
+    println!("[Embedded VLM] Démarrage du serveur VLM local sur le port {}...", port);
+    let mut cmd = std::process::Command::new(&server_path);
+    cmd.arg("-m")
+        .arg(&model_path)
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("-ngl")
+        .arg("99");
+
+    if let Some(ref mmproj) = mmproj_path {
+        cmd.arg("--mmproj").arg(mmproj);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let child = cmd.spawn().map_err(|e| format!("Impossible de démarrer llama-server: {e}"))?;
+    {
+        let mut proc_guard = VLM_SERVER_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
+        *proc_guard = Some(child);
+    }
+
+    // Attendre que le serveur soit prêt (jusqu'à 15 secondes)
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if is_vlm_server_alive(port).await {
+            println!("[Embedded VLM] Serveur prêt sur le port {}", port);
+            return Ok(endpoint);
+        }
+    }
+
+    Err("Délai dépassé en attendant l'initialisation de llama-server.".to_string())
+}
+
+/// Coupe le sous-processus llama-server lors de la fermeture
+pub fn stop_embedded_vlm_server() {
+    if let Ok(mut lock) = VLM_SERVER_PROCESS.lock() {
+        if let Some(mut child) = lock.take() {
+            let _ = child.kill();
+        }
+    }
 }
 
 pub fn set_active_vlm_preset(preset_id: &str) {
@@ -429,6 +543,56 @@ static VLM_LOADING: AtomicBool = AtomicBool::new(false);
 pub fn is_vlm_ready() -> bool {
     let guard = VLM_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     guard.is_some()
+}
+
+/// S'assure que le moteur VLM local est chargé et prêt en mémoire vive
+pub fn ensure_vlm_loaded_sync(event_tx: Option<&Sender<AgentEvent>>) -> Result<(), String> {
+    {
+        let guard = VLM_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_some() {
+            println!("[Local VLM] Le moteur VLM local est déjà chargé et prêt en mémoire.");
+            return Ok(());
+        }
+    }
+    println!("[Local VLM] Recherche du fichier modèle VLM sur le disque...");
+    let path = if let Some(p) = find_local_vlm_model_file() {
+        println!("[Local VLM] Fichier modèle VLM trouvé : {}", p.display());
+        p
+    } else {
+        let preset = get_active_vlm_preset();
+        println!("[Local VLM] Modèle non trouvé sur le disque. Téléchargement automatique de {}...", preset.name);
+        if let Some(etx) = event_tx {
+            let _ = etx.send(AgentEvent::SilentNarration(format!(
+                "📥 Modèle visuel {} manquant : téléchargement en cours...",
+                preset.name
+            )));
+            ensure_llama_model_downloaded_for_preset(preset, etx)?
+        } else {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        ensure_llama_model_downloaded_for_preset(preset, &tx)?
+        }
+    };
+
+    let vlm_gpu_layers = std::env::var("VLM_GPU_LAYERS")
+        .ok()
+        .or_else(|| crate::fs_util::read_env_var_from_file(".env", "VLM_GPU_LAYERS"))
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or_else(|| {
+            std::env::var("LLAMA_GPU_LAYERS")
+                .ok()
+                .or_else(|| crate::fs_util::read_env_var_from_file(".env", "LLAMA_GPU_LAYERS"))
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .unwrap_or(0)
+        });
+
+    println!("[Local VLM] Chargement du moteur LocalLlamaEngine avec {} couches GPU demandées...", vlm_gpu_layers);
+    let engine = LocalLlamaEngine::load_with_layers(&path, vlm_gpu_layers)
+        .map_err(|e| format!("Erreur lors du chargement du modèle VLM local ({}): {e}", path.display()))?;
+
+    let mut guard = VLM_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(engine);
+    println!("[Local VLM] Modèle visuel local chargé avec succès en mémoire !");
+    Ok(())
 }
 
 /// Initialise et précharge le modèle Qwen-VL de manière totalement asynchrone en arrière-plan
@@ -482,21 +646,540 @@ pub fn init_vlm_async(event_tx: Sender<AgentEvent>) {
 /// Exécute l'inférence locale de grounding sur le modèle Qwen-VL chargé en RAM
 pub fn query_vlm_grounding_local(prompt: &str) -> Option<String> {
     let guard = VLM_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-    let engine = guard.as_ref()?;
+    let engine = match guard.as_ref() {
+        Some(e) => e,
+        None => {
+            eprintln!("[Local VLM Grounding Erreur] VLM_ENGINE est None : le modèle n'a pas été instancié.");
+            return None;
+        }
+    };
     let preset = get_active_vlm_preset();
 
     let formatted = match preset.family {
         ModelFamily::Llama3 => format!(
-            "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are a vision grounding assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+            "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nTu es un assistant visuel expert. Réponds avec précision et clarté.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
             prompt
         ),
         ModelFamily::ChatML => format!(
-            "<|im_start|>system\nYou are a vision grounding assistant.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+            "<|im_start|>system\nTu es un assistant visuel expert. Réponds avec précision et clarté.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
             prompt
         ),
     };
 
-    engine.generate_fast(&formatted, 512).ok()
+    println!("[Local VLM Grounding] Génération texte local (famille: {:?}, max_tokens=512)...", preset.family);
+    match engine.generate_raw_text(&formatted, 512) {
+        Ok(res) => {
+            println!("[Local VLM Grounding] Génération réussie ({} caractères)", res.len());
+                Some(clean_vlm_description(&res))
+        }
+        Err(e) => {
+            eprintln!("[Local VLM Grounding Erreur] Échec generate_raw_text : {e}");
+            None
+        }
+    }
+}
+
+/// Exécute directement une requête visuelle VQA sur Qwen-VL et renvoie une réponse JSON d'agent
+pub fn execute_vlm_vqa_direct(prompt: &str) -> Result<String, String> {
+    if !is_vlm_ready() {
+        ensure_vlm_loaded_sync(None)?;
+    }
+    let answer = query_vlm_grounding_local(prompt)
+        .ok_or_else(|| "Échec de génération du modèle VLM local".to_string())?;
+    let trimmed = answer.trim();
+    if trimmed.is_empty() {
+        return Err("Réponse vide du modèle VLM local".to_string());
+    }
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        return Ok(sanitize_json_output(trimmed));
+    }
+    let resp = serde_json::json!({
+        "narration": clean_vlm_description(trimmed),
+        "nextPass": false,
+        "actions": [],
+        "quick_suggestions": [
+            "Peux-tu détailler davantage ?",
+            "Y a-t-il du texte ou des chiffres ?",
+            "Merci pour l'analyse"
+        ]
+    });
+    Ok(resp.to_string())
+}
+
+/// Envoie une requête d'analyse visuelle conversationnelle (VQA) à Qwen2-VL (local ou endpoint configuré)
+pub async fn query_vlm_multimodal(
+    prompt: &str,
+    image_data_uris: &[String],
+    event_tx: Option<&Sender<AgentEvent>>,
+) -> Result<String, String> {
+    println!("[VLM Multimodal] Requête reçue avec {} image(s). Longueur prompt: {} caractères", image_data_uris.len(), prompt.len());
+    if image_data_uris.is_empty() {
+        eprintln!("[VLM Multimodal Erreur] Aucune image data URI fournie !");
+        return Err("Aucune image fournie pour l'analyse VLM".to_string());
+    }
+    for (idx, uri) in image_data_uris.iter().enumerate() {
+        let preview: String = uri.chars().take(80).collect();
+        println!("[VLM Multimodal Image #{}] Taille: {} octets | Préfixe: '{}...'", idx + 1, uri.len(), preview);
+    }
+
+    // 0. Si un modèle local est présent, tenter de démarrer le serveur interne sur 8088
+    if find_local_vlm_model_file().is_some() {
+        if let Ok(embedded_endpoint) = ensure_embedded_vlm_server_running(DEFAULT_INTERNAL_VLM_PORT).await {
+            std::env::set_var("QWENVL_ENDPOINT", &embedded_endpoint);
+        }
+    }
+
+    let explicit_endpoint = std::env::var("QWENVL_ENDPOINT")
+        .ok()
+        .or_else(|| crate::fs_util::read_env_var_from_file(".env", "QWENVL_ENDPOINT"))
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| Some("http://127.0.0.1:8000/v1/chat/completions".to_string()));
+
+    // 1. Si un endpoint VLM (distant ou serveur local llama-server/vLLM) est configuré ou accessible
+    if let Some(endpoint) = explicit_endpoint.as_deref() {
+        let explicit_model = std::env::var("QWENVL_MODEL")
+            .ok()
+            .or_else(|| crate::fs_util::read_env_var_from_file(".env", "QWENVL_MODEL"))
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "Qwen/Qwen2.5-VL-3B-Instruct".to_string());
+
+        let explicit_key = std::env::var("QWENVL_API_KEY")
+            .ok()
+            .or_else(|| crate::fs_util::read_env_var_from_file(".env", "QWENVL_API_KEY"))
+            .unwrap_or_default();
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("Erreur création client HTTP VLM: {e}"))?;
+
+        println!("[VLM] [Route 1/4] Tentative d'envoi vers l'endpoint VLM multimodal : {} (modèle: {})", endpoint, explicit_model);
+        match send_vlm_request(&client, endpoint, &explicit_model, &explicit_key, prompt, image_data_uris).await {
+            Ok(res) => return Ok(clean_vlm_description(&res)),
+            Err(e) => {
+                eprintln!("[VLM] Échec de l'endpoint multimodal ({endpoint}): {e}. Évaluation des routes de secours...");
+                // Si l'endpoint par défaut sur 8000 échoue, tenter également le port par défaut standard de llama-server (8080)
+                if endpoint == "http://127.0.0.1:8000/v1/chat/completions" {
+                    let alt_endpoint = "http://127.0.0.1:8080/v1/chat/completions";
+                    println!("[VLM] Tentative sur le port alternatif llama-server : {}", alt_endpoint);
+                    if let Ok(res) = send_vlm_request(&client, alt_endpoint, &explicit_model, &explicit_key, prompt, image_data_uris).await {
+                        return Ok(clean_vlm_description(&res));
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Repli prioritaire sur un provider Vision Cloud (OpenAI / GLM)
+    // Note : Doit être tenté avant le modèle local car celui-ci n'a pas encore de projecteur mmproj branché en RAM
+    let cfg = crate::overlay::resolve_llm_config();
+    println!("[VLM] [Route 2/4] Vérification provider Vision Cloud : provider={:?}, endpoint={}, has_key={}", cfg.provider, cfg.endpoint, !cfg.api_key.is_empty());
+    if !cfg.api_key.is_empty() && (cfg.provider == crate::types::LlmProvider::OpenAI || cfg.provider == crate::types::LlmProvider::Glm) {
+        println!("[VLM] Bascule sur le provider vision cloud : {:?} ({})", cfg.provider, cfg.endpoint);
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(45))
+            .build()
+            .map_err(|e| format!("Erreur création client HTTP VLM: {e}"))?;
+        match send_vlm_request(&client, &cfg.endpoint, &cfg.model, &cfg.api_key, prompt, image_data_uris).await {
+            Ok(res) => return Ok(clean_vlm_description(&res)),
+            Err(e) => {
+                eprintln!("[VLM] Échec du provider vision cloud ({}) : {e}", cfg.endpoint);
+            }
+        }
+    }
+
+    // 3. Vérifier si un modèle VLM local est présent dans models/
+    let local_file_opt = find_local_vlm_model_file();
+    let has_local_vlm = local_file_opt.is_some() || is_vlm_ready();
+    println!("[VLM] [Route 3/4] Modèle VLM local : fichier={:?}, prêt={}", local_file_opt, is_vlm_ready());
+    if has_local_vlm {
+        let prompt_owned = prompt.to_string();
+        let uris_cloned = image_data_uris.to_vec();
+        let etx_cloned = event_tx.cloned();
+
+        let local_res = tokio::task::spawn_blocking(move || {
+            let enriched_prompt = enrich_prompt_with_local_visual_ocr(&prompt_owned, &uris_cloned);
+            if !is_vlm_ready() {
+                ensure_vlm_loaded_sync(etx_cloned.as_ref())?;
+            }
+            if let Some(answer) = query_vlm_grounding_local(&enriched_prompt) {
+                let cleaned = clean_vlm_description(&answer);
+                if !cleaned.is_empty() {
+                    println!("[VLM] Réponse reçue du moteur local.");
+                    return Ok(cleaned);
+                }
+            }
+            Err("Le modèle VLM local a retourné une réponse vide.".to_string())
+        }).await.map_err(|e| e.to_string())?;
+
+        return local_res;
+    }
+
+    // 4. Si aucun modèle local n'est encore téléchargé, tenter son initialisation/téléchargement
+    println!("[VLM] [Route 4/4] Aucun endpoint distant ni modèle chargé. Tentative de téléchargement/chargement de Qwen-VL...");
+    let prompt_owned = prompt.to_string();
+    let uris_cloned = image_data_uris.to_vec();
+    let etx_cloned = event_tx.cloned();
+    let load_res = tokio::task::spawn_blocking(move || {
+        let enriched_prompt = enrich_prompt_with_local_visual_ocr(&prompt_owned, &uris_cloned);
+        ensure_vlm_loaded_sync(etx_cloned.as_ref())?;
+        if let Some(answer) = query_vlm_grounding_local(&enriched_prompt) {
+            let cleaned = clean_vlm_description(&answer);
+            if !cleaned.is_empty() {
+                return Ok(cleaned);
+            }
+        }
+        Err("Le modèle VLM local dans models/ a retourné une réponse vide.".to_string())
+    }).await.map_err(|e| e.to_string())?;
+
+    load_res
+}
+
+/// Nettoie la description visuelle retournée par le LLM pour éliminer les formules robotiques
+pub fn clean_vlm_description(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    // Extraction directe du champ narration ou description si formaté en JSON
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(n) = v.get("narration").and_then(|s| s.as_str()) {
+            return clean_vlm_description(n);
+        }
+        if let Some(d) = v.get("description").and_then(|s| s.as_str()) {
+            return clean_vlm_description(d);
+        }
+    }
+
+    let mut cleaned = trimmed;
+
+    // Suppression des balises de code Markdown
+    if cleaned.starts_with("```") {
+        if let Some(first_nl) = cleaned.find('\n') {
+            cleaned = &cleaned[first_nl + 1..];
+        }
+        if let Some(last_fence) = cleaned.rfind("```") {
+            cleaned = &cleaned[..last_fence];
+        }
+        cleaned = cleaned.trim();
+    }
+
+    // Détection et suppression des formules d'annonce comme "La description de l'image (X) est la suivante :"
+    let lower = cleaned.to_lowercase();
+    let intro_markers = [
+        "la description de l'image",
+        "voici la description de l'image",
+        "voici une description de l'image",
+        "voici ce que montre l'image",
+        "voici ce que l'on observe sur cette image",
+    ];
+
+    for marker in intro_markers {
+        if lower.starts_with(marker) {
+            if let Some(colon_pos) = cleaned.find(':') {
+                if colon_pos < 120 {
+                    cleaned = cleaned[colon_pos + 1..].trim();
+                    break;
+                }
+            }
+        }
+    }
+
+    let direct_prefixes = [
+        "Sur cette image, on peut voir :",
+        "Sur cette image, on observe :",
+        "Sur cette image :",
+        "Dans cette image, on peut voir :",
+        "Dans cette image :",
+        "Cette image montre :",
+        "Cette image représente :",
+        "L'image montre :",
+        "L'image représente :",
+    ];
+
+    for prefix in direct_prefixes {
+        if let Some(stripped) = cleaned.strip_prefix(prefix) {
+            cleaned = stripped.trim();
+            break;
+        }
+    }
+
+    cleaned.trim().to_string()
+}
+
+fn enrich_prompt_with_local_visual_ocr(prompt: &str, image_data_uris: &[String]) -> String {
+    let mut enriched = prompt.to_string();
+    for (i, uri) in image_data_uris.iter().enumerate() {
+        if let Some(comma_pos) = uri.find(',') {
+            let b64_part = &uri[comma_pos + 1..];
+            if let Ok(img_bytes) = base64_decode_simple(b64_part) {
+                if let Some((raw_pixels, w, h)) = decode_image_bytes_to_pixels(&img_bytes) {
+                    // Intégrer uniquement le texte lisible s'il est présent, sans lister de coordonnées ni de boîtes visuelles
+                    let ocr_text = crate::ocr::extract_text_from_rgba(&raw_pixels, w as usize, h as usize);
+                    let clean_ocr = ocr_text.trim();
+                    if !clean_ocr.is_empty() {
+                        enriched.push_str(&format!("\n\n[Texte lisible extrait de l'image #{}] :\n{}", i + 1, clean_ocr));
+                    }
+                }
+            }
+        }
+    }
+    enriched.push_str("\n\nDonne une description globale, naturelle et fluide du contenu sans énumérer d'éléments techniques.");
+    enriched
+}
+
+fn to_base64_bitmap(bytes: &[u8]) -> String {
+    const CHARSET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = if chunk.len() > 1 { chunk[1] } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] } else { 0 };
+
+        out.push(CHARSET[(b0 >> 2) as usize] as char);
+        out.push(CHARSET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(CHARSET[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(CHARSET[(b2 & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn base64_decode_simple(input: &str) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    let mut val = 0u32;
+    let mut bits = 0i32;
+    for byte in input.bytes() {
+        let d = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' | b'\r' | b'\n' | b' ' => continue,
+            _ => continue,
+        };
+        val = (val << 6) | (d as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            buf.push(((val >> bits) & 0xFF) as u8);
+        }
+    }
+    Ok(buf)
+}
+
+fn decode_bmp_in_memory(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    if bytes.len() < 54 || &bytes[0..2] != b"BM" {
+        return None;
+    }
+    let data_offset = u32::from_le_bytes(bytes[10..14].try_into().ok()?) as usize;
+    let width = i32::from_le_bytes(bytes[18..22].try_into().ok()?);
+    let height = i32::from_le_bytes(bytes[22..26].try_into().ok()?);
+    let planes = u16::from_le_bytes(bytes[26..28].try_into().ok()?);
+    let bit_count = u16::from_le_bytes(bytes[28..30].try_into().ok()?);
+    let compression = u32::from_le_bytes(bytes[30..34].try_into().ok()?);
+
+    if width <= 0 || height == 0 || planes != 1 || compression != 0 || (bit_count != 24 && bit_count != 32) {
+        return None;
+    }
+
+    let w = width as u32;
+    let top_down = height < 0;
+    let h = height.unsigned_abs();
+
+    if data_offset >= bytes.len() {
+        return None;
+    }
+    let pixel_data = &bytes[data_offset..];
+    let row_stride = match bit_count {
+        24 => ((24 * w + 31) / 32) * 4,
+        32 => w * 4,
+        _ => return None,
+    } as usize;
+
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        let src_y = if top_down { y } else { h - 1 - y } as usize;
+        let row_start = src_y * row_stride;
+        if row_start >= pixel_data.len() {
+            break;
+        }
+        let row = &pixel_data[row_start..];
+        for x in 0..w as usize {
+            let dst_idx = (y as usize * w as usize + x) * 4;
+            if bit_count == 24 {
+                let src_idx = x * 3;
+                if src_idx + 2 < row.len() {
+                    pixels[dst_idx] = row[src_idx];         // B
+                    pixels[dst_idx + 1] = row[src_idx + 1]; // G
+                    pixels[dst_idx + 2] = row[src_idx + 2]; // R
+                    pixels[dst_idx + 3] = 255;              // A
+                }
+            } else if bit_count == 32 {
+                let src_idx = x * 4;
+                if src_idx + 3 < row.len() {
+                    pixels[dst_idx] = row[src_idx];         // B
+                    pixels[dst_idx + 1] = row[src_idx + 1]; // G
+                    pixels[dst_idx + 2] = row[src_idx + 2]; // R
+                    pixels[dst_idx + 3] = row[src_idx + 3]; // A
+                }
+            }
+        }
+    }
+    Some((pixels, w, h))
+}
+
+fn decode_image_bytes_to_pixels(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    if let Some(res) = decode_bmp_in_memory(bytes) {
+        return Some(res);
+    }
+    #[cfg(windows)]
+    {
+        let temp_path = std::env::temp_dir().join(format!("libertide_img_{}.tmp", std::process::id()));
+        let _ = std::fs::write(&temp_path, bytes);
+        let res = crate::ocr::load_image_file_rgba(&temp_path);
+        let _ = std::fs::remove_file(&temp_path);
+        return res;
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+fn ensure_image_bitmap_data_uri(uri: &str) -> String {
+    let trimmed = uri.trim();
+    let p = Path::new(trimmed);
+    if p.is_file() {
+        if let Some(data_uri) = crate::ocr::image_file_to_data_uri(p) {
+            return data_uri;
+        }
+    }
+
+    if trimmed.starts_with("data:image/") {
+        // Normaliser et redimensionner le tampon (max 960 px) comme dans ocr.rs
+        if let Some(comma_pos) = trimmed.find(',') {
+            let b64_part = &trimmed[comma_pos + 1..];
+            if let Ok(bytes) = base64_decode_simple(b64_part) {
+                if let Some((pixels, w, h)) = decode_image_bytes_to_pixels(&bytes) {
+                    let max_dim = 960u32;
+                    if w > max_dim || h > max_dim {
+                        let scale = (max_dim as f32 / w.max(h) as f32).min(1.0);
+                        let target_w = (w as f32 * scale).round() as u32;
+                        let target_h = (h as f32 * scale).round() as u32;
+                        let mut scaled = vec![0u8; (target_w * target_h * 4) as usize];
+                        for dy in 0..target_h {
+                            let sy = (dy * h / target_h) as usize;
+                            for dx in 0..target_w {
+                                let sx = (dx * w / target_w) as usize;
+                                let s_idx = (sy * w as usize + sx) * 4;
+                                let d_idx = (dy as usize * target_w as usize + dx as usize) * 4;
+                                if s_idx + 4 <= pixels.len() && d_idx + 4 <= scaled.len() {
+                                    scaled[d_idx..d_idx + 4].copy_from_slice(&pixels[s_idx..s_idx + 4]);
+                                }
+                            }
+                        }
+                        let bmp = crate::ocr::rgba_to_bmp(&scaled, target_w, target_h);
+                        return format!("data:image/bmp;base64,{}", crate::ocr::base64_encode(&bmp));
+                    }
+                }
+            }
+        }
+        return trimmed.to_string();
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return trimmed.to_string();
+    }
+    if !trimmed.contains(' ') && trimmed.len() > 60 {
+        return format!("data:image/png;base64,{trimmed}");
+    }
+    trimmed.to_string()
+}
+
+async fn send_vlm_request(
+    client: &reqwest::Client,
+    endpoint: &str,
+    model_name: &str,
+    api_key: &str,
+    prompt: &str,
+    image_data_uris: &[String],
+) -> Result<String, String> {
+    println!("[VLM HTTP] Envoi de la requête à {} (Modèle: {}, {} image(s))...", endpoint, model_name, image_data_uris.len());
+    let mut content_parts = Vec::new();
+    // Injection de l'image bitmap encodée en base64 Data URI
+    for uri in image_data_uris {
+        let bitmap_data_uri = ensure_image_bitmap_data_uri(uri);
+        content_parts.push(serde_json::json!({
+            "type": "image_url",
+            "image_url": { "url": bitmap_data_uri }
+        }));
+    }
+
+    let user_prompt = if prompt.trim().is_empty() {
+        "Décris globalement cette image avec clarté, naturel et précision.".to_string()
+    } else {
+        format!("{prompt}\n\nDonne une description globale, vivante et synthétique de ce que tu vois sans réciter d'éléments techniques.")
+    };
+    content_parts.push(serde_json::json!({
+        "type": "text",
+        "text": user_prompt
+    }));
+
+    let body = serde_json::json!({
+        "model": model_name,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Tu es un assistant visuel expert en accessibilité. Décris fidèlement et globalement la scène ou l'image en français. RÈGLE STRICTE : Entre directement dans la description sans formule d'annonce (ne dis jamais 'La description de l'image est...', 'Voici ce que montre l'image...') et n'énumère pas de coordonnées ou de boîtes techniques."
+            },
+            {
+                "role": "user",
+                "content": content_parts
+            }
+        ],
+        "temperature": 0.2,
+        "max_tokens": 1024
+    });
+
+    let mut req = client.post(&*endpoint).json(&body);
+    if !api_key.trim().is_empty() {
+        req = req.bearer_auth(api_key.trim());
+    }
+
+    let resp = req.send().await.map_err(|e| {
+        eprintln!("[VLM HTTP Erreur] Impossible de contacter {endpoint} : {e}");
+        format!("Connexion VLM impossible: {e}")
+    })?;
+    let status = resp.status();
+    println!("[VLM HTTP] Code de retour HTTP : {}", status);
+    if !status.is_success() {
+        let err_body = resp.text().await.unwrap_or_else(|e| format!("<corps illisible: {e}>"));
+        eprintln!("[VLM HTTP Erreur] Échec serveur VLM (HTTP {}): {}", status, err_body);
+        return Err(format!("Erreur HTTP VLM {status}: {err_body}"));
+    }
+
+    let raw_text = resp.text().await.map_err(|e| {
+        eprintln!("[VLM HTTP Erreur] Impossible de lire le texte de réponse: {e}");
+        e.to_string()
+    })?;
+    let v: serde_json::Value = serde_json::from_str(&raw_text).map_err(|e| {
+        eprintln!("[VLM HTTP Erreur] Désérialisation JSON impossible: {e} | Réponse brute: {raw_text}");
+        e.to_string()
+    })?;
+    let text = v.pointer("/choices/0/message/content")
+        .and_then(|val| val.as_str())
+        .unwrap_or("")
+        .trim();
+    let cleaned = clean_vlm_description(text);
+    println!("[VLM HTTP] Réponse extraite avec succès ({} caractères)", cleaned.len());
+    Ok(cleaned)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -616,6 +1299,7 @@ pub enum CommandTag {
     EmotionalSupportAndEmpathy,
     ChattyAndEthicalCompanion,
     HomeAutomation,
+    VisualQuestionAnswering,
 }
 
 impl CommandTag {
@@ -663,6 +1347,7 @@ impl CommandTag {
         Self::EmotionalSupportAndEmpathy,
         Self::ChattyAndEthicalCompanion,
         Self::HomeAutomation,
+        Self::VisualQuestionAnswering,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -710,6 +1395,7 @@ impl CommandTag {
             Self::EmotionalSupportAndEmpathy => "EMOTIONAL_SUPPORT_AND_EMPATHY",
             Self::ChattyAndEthicalCompanion => "CHATTY_AND_ETHICAL_COMPANION",
             Self::HomeAutomation => "HOME_AUTOMATION",
+            Self::VisualQuestionAnswering => "VISUAL_QUESTION_ANSWERING",
         }
     }
 
@@ -758,6 +1444,7 @@ impl CommandTag {
             Self::EmotionalSupportAndEmpathy => "Soutien moral et écoute active : réconfort face à la fatigue, l'isolement, le découragement ou gratitude de l'utilisateur.",
             Self::ChattyAndEthicalCompanion => "Compagnon pour des conversations éthiques",
             Self::HomeAutomation => "Contrôle domotique local direct (Home Assistant, Matter, Zigbee/Z-Wave) : allumer ou éteindre lumières, ouvrir ou fermer volets et stores, régler le chauffage/climatisation, incliner le lit médicalisé, prises et ventilateurs. Action : home_control.",
+            Self::VisualQuestionAnswering => "Analyse visuelle et multimodale par VLM (Qwen2-VL) : À SÉLECTIONNER DÈS QU'UNE IMAGE, PHOTO, CAPTURE D'ÉCRAN OU LECTURE DE FICHIER VISUEL EST DEMANDÉE ('que vois-tu', 'décris l'image', 'lis l'image/le fichier', 'regarde', 'analyse ce document/schéma/graphique'), ainsi que pour la lecture de texte manuscrit, la résolution de captchas et toute question descriptive sur ce qui est visible à l'écran ou dans un fichier joint.",
         }
     }
 }
@@ -774,6 +1461,101 @@ pub fn all_command_tags_prompt_list() -> String {
 /// Filtrage rapide des cas évidents (bruit pur, signal de micro, impulsions système)
 pub fn fast_classify_intent(query: &str, screen_hint: Option<&str>) -> Vec<CommandTag> {
     let lower = query.to_lowercase();
+
+    let is_img_ext = |s: &str| -> bool {
+        s.contains(".png")
+            || s.contains(".jpg")
+            || s.contains(".jpeg")
+            || s.contains(".webp")
+            || s.contains(".bmp")
+            || s.contains(".svg")
+            || s.contains(".gif")
+            || s.contains(".tiff")
+            || s.contains(".tif")
+            || s.contains(".ico")
+            || s.contains(".jfif")
+            || s.contains(".avif")
+    };
+
+    let has_image_ext = is_img_ext(&lower);
+    let hint_has_image = screen_hint.map_or(false, |h| is_img_ext(&h.to_lowercase()));
+
+    let has_local_image_file = query
+        .split(['"', '\'', ' ', '\t', '\n', '«', '»'])
+        .any(|part| {
+            let trimmed = part.trim_matches(|c: char| c == ',' || c == ';' || c == '(' || c == ')' || c == '<' || c == '>');
+            if trimmed.len() >= 4 {
+                let p = std::path::Path::new(trimmed);
+                if p.is_file() {
+                    if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                        let el = ext.to_lowercase();
+                        return matches!(
+                            el.as_str(),
+                            "png" | "jpg" | "jpeg" | "webp" | "bmp" | "svg" | "gif" | "tiff" | "tif" | "ico" | "jfif" | "avif"
+                        );
+                    }
+                }
+            }
+            false
+        });
+
+    let has_doc_ext = lower.contains(".pdf")
+        || lower.contains(".txt")
+        || lower.contains(".md")
+        || lower.contains(".csv")
+        || lower.contains(".doc")
+        || lower.contains(".docx")
+        || lower.contains(".rs")
+        || lower.contains(".py")
+        || lower.contains(".js")
+        || lower.contains(".ts")
+        || lower.contains(".json")
+        || lower.contains(".toml");
+
+    if (has_doc_ext || lower.contains("document joint") || lower.contains("attestation"))
+        && !has_image_ext && !has_local_image_file
+    {
+        return vec![CommandTag::ScreenReadingOrSummary];
+    }
+
+    if has_image_ext || hint_has_image || has_local_image_file || lower.contains("image jointe") || screen_hint.map_or(false, |h| {
+        let hl = h.to_lowercase(); hl.contains("fichier joint") || hl.contains("image jointe")
+    }) {
+        return vec![CommandTag::VisualQuestionAnswering, CommandTag::ScreenReadingOrSummary];
+    }
+
+    // Détection immédiate VLM Visual Question Answering / Capchas / Schémas / Images / Lecture visuelle
+    let is_visual_vlm_query = lower.contains("que vois")
+        || lower.contains("que voi")
+        || lower.contains("tu vois")
+        || lower.contains("tu voi")
+        || lower.contains("qu'est-ce que tu vois")
+        || lower.contains("qu'est ce que tu vois")
+        || lower.contains("qu est ce que tu vois")
+        || lower.contains("qu'y a-t-il sur")
+        || lower.contains("qu est ce qu il y a sur")
+        || lower.contains("décris")
+        || lower.contains("decris")
+        || lower.contains("décrire")
+        || lower.contains("regarde")
+        || lower.contains("lis l'image")
+        || lower.contains("lis cette image")
+        || lower.contains("lis la photo")
+        || lower.contains("lire l'image")
+        || lower.contains("lire la photo")
+        || lower.contains("lis ce fichier")
+        || lower.contains("lire ce fichier")
+        || lower.contains("analyse l'image")
+        || lower.contains("analyse cette image")
+        || lower.contains("analyse la photo")
+        || lower.contains("analyse ce fichier")
+        || lower.contains("analyse le fichier")
+        || lower.contains("captcha")
+        || lower.contains("manuscrit");
+
+    if is_visual_vlm_query {
+        return vec![CommandTag::VisualQuestionAnswering, CommandTag::ScreenReadingOrSummary];
+    }
 
     // Détection domotique multilingue (FR, EN, DE, ES, IT, PT, RU, JA, ZH)
     const HOME_AUTO_KEYWORDS: &[&str] = &[
@@ -1941,6 +2723,20 @@ Règles DOMOTIQUE LOCALE, HOME ASSISTANT, KNX & BACNET (TAG HOME_AUTOMATION) :
   * Relever le lit médicalisé : {"action": "home_control", "domain": "switch", "service": "turn_on", "entity_id": "switch.lit_medicalise_tete"}
 "#);
             }
+            CommandTag::VisualQuestionAnswering => {
+                prompt.push_str(r#"
+Règles ANALYSE VISUELLE CONVERSATIONNELLE & VLM (TAG VISUAL_QUESTION_ANSWERING) :
+- L'utilisateur te pose une question directe sur le contenu visuel d'une image, d'un fichier joint ou de l'écran (photo, document, schéma, graphique, texte manuscrit ou captcha).
+- Tu disposes ci-dessous dans le prompt d'une section [Description Visuelle Détaillée VLM (Qwen2-VL)] analysée directement par le modèle de vision.
+- RÈGLE D'UTILISATION OBLIGATOIRE DE LA DESCRIPTION VLM :
+  * Si la section [Description Visuelle Détaillée VLM (Qwen2-VL)] est présente, BASE TOUTE TA RÉPONSE DESSUS : elle contient ce que voit réellement le modèle de vision.
+  * Ne prétends JAMAIS que tu ne peux pas voir l'image ou que tu es un modèle uniquement textuel quand cette description est fournie !
+- RÈGLE DE RESTITUTION ORALE ACCESSIBLE :
+  * Décris avec bienveillance et précision le contenu en structurant l'espace avec des repères clairs : "En haut à gauche...", "Au centre...", "En bas à droite...".
+  * Pour un graphique : énonce clairement les axes, les grandeurs et les tendances observées.
+  * Pour un captcha ou texte manuscrit : retranscris fidèlement les caractères lus mot à mot.
+  * Conclus directement dans "narration" avec "actions": [] et "nextPass": false."#);
+            }
         }
     }
 
@@ -2104,6 +2900,7 @@ Règles DOMOTIQUE LOCALE, HOME ASSISTANT, KNX & BACNET (TAG HOME_AUTOMATION) :
             CommandTag::AgentIdentityAndCapabilities => {}
             CommandTag::EmotionalSupportAndEmpathy => {}
             CommandTag::ChattyAndEthicalCompanion => {}
+            CommandTag::VisualQuestionAnswering => {}
             CommandTag::HomeAutomation => {
                 prompt.push_str("- {\"action\": \"home_control\", \"domain\": \"light\", \"service\": \"turn_on\", \"entity_id\": \"light.salon\"}\n");
                 prompt.push_str("- {\"action\": \"home_control\", \"domain\": \"cover\", \"service\": \"open_cover\", \"entity_id\": \"cover.chambre\"}\n");
@@ -2981,13 +3778,68 @@ pub fn find_local_llama_model_file() -> Option<PathBuf> {
 }
 
 pub fn find_local_vlm_model_file() -> Option<PathBuf> {
-    if let Ok(env_path) = std::env::var("LOCAL_VLM_MODEL").or_else(|_| std::env::var("VLM_MODEL")) {
-        let p = PathBuf::from(env_path.trim());
-        if p.is_file() {
+    const MIN_GGUF_SIZE: u64 = 200_000_000;
+
+    let env_file_cand = std::env::var("LOCAL_VLM_MODEL")
+        .ok()
+        .or_else(|| std::env::var("VLM_MODEL").ok())
+        .or_else(|| crate::fs_util::read_env_var_from_file(".env", "LOCAL_VLM_MODEL"))
+        .or_else(|| crate::fs_util::read_env_var_from_file(".env", "VLM_MODEL"));
+
+    if let Some(env_path) = env_file_cand {
+        let trimmed = env_path.trim();
+        let direct = PathBuf::from(trimmed);
+        if direct.is_file() && direct.metadata().map_or(0, |m| m.len()) > MIN_GGUF_SIZE {
+            return Some(direct);
+        }
+        let in_models = PathBuf::from("models").join(trimmed);
+        if in_models.is_file() && in_models.metadata().map_or(0, |m| m.len()) > MIN_GGUF_SIZE {
+            return Some(in_models);
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            let mut curr = exe.parent();
+            for _ in 0..5 {
+                if let Some(dir) = curr {
+                    let p = dir.join("models").join(trimmed);
+                    if p.is_file() && p.metadata().map_or(0, |m| m.len()) > MIN_GGUF_SIZE {
+                        return Some(p);
+                    }
+                    curr = dir.parent();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(p) = find_model_file_for_preset(get_active_vlm_preset()) {
+        return Some(p);
+    }
+
+    for preset in VLM_PRESETS {
+        if let Some(p) = find_model_file_for_preset(preset) {
             return Some(p);
         }
     }
-    find_model_file_for_preset(get_active_vlm_preset())
+
+    // Balayage général du dossier models pour repérer tout modèle VLM / Qwen2-VL déjà téléchargé
+    for dir in &[PathBuf::from("models"), PathBuf::from(".")] {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+                    if name.ends_with(".gguf") && (name.contains("vl") || name.contains("qwen2") || name.contains("vision")) {
+                        if p.metadata().map_or(0, |m| m.len()) > MIN_GGUF_SIZE {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 pub fn ensure_llama_model_downloaded_for_preset(
@@ -3563,6 +4415,101 @@ impl LocalLlamaEngine {
         Ok(output)
     }
 
+    pub fn generate_raw_text(&self, formatted_prompt: &str, max_tokens: usize) -> Result<String, String> {
+        let max_ctx = std::env::var("LLAMA_CTX_SIZE")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(4096);
+        let n_batch = 512;
+        let threads = if self.gpu_enabled {
+            4
+        } else {
+            std::thread::available_parallelism()
+                .map_or(2, |p| p.get() / 2)
+                .clamp(2, 4) as i32
+        };
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(std::num::NonZeroU32::new(max_ctx))
+            .with_n_batch(n_batch)
+            .with_n_threads(threads)
+            .with_n_threads_batch(threads);
+
+        let mut ctx = self.model
+            .new_context(&self.backend, ctx_params)
+            .map_err(|e| format!("Erreur création contexte VLM: {e}"))?;
+
+        let vocab = self.model.vocab();
+        let mut tokens = vocab.tokenize(formatted_prompt.as_bytes(), false, true);
+
+        if tokens.is_empty() {
+            return Ok(String::new());
+        }
+
+        let max_prompt_tokens = (max_ctx as usize).saturating_sub(max_tokens.max(64));
+        if tokens.len() > max_prompt_tokens {
+            tokens.truncate(max_prompt_tokens);
+        }
+
+        let total_tokens = tokens.len();
+        let chunk_size = (n_batch as usize).min(total_tokens).max(1);
+        let mut batch = LlamaBatch::new(chunk_size, 1);
+        let mut current_pos = 0i32;
+
+        for chunk in tokens.chunks(chunk_size) {
+            batch.clear();
+            for token in chunk {
+                if current_pos >= max_ctx as i32 {
+                    break;
+                }
+                let is_last = (current_pos as usize + 1) == total_tokens;
+                batch.add(*token, current_pos, &[0], is_last).map_err(|e| e.to_string())?;
+                current_pos += 1;
+            }
+            ctx.decode(&mut batch).map_err(|e| format!("Erreur décodage VLM: {e}"))?;
+        }
+
+        let mut output = String::new();
+        let mut n_cur = total_tokens as i32;
+
+        for _ in 0..max_tokens {
+            if n_cur >= max_ctx as i32 {
+                break;
+            }
+            let candidates = ctx.candidates_ith(batch.n_tokens() - 1);
+            let mut best_token = None;
+            let mut best_logit = f32::NEG_INFINITY;
+            for c in candidates {
+                let logit = c.logit();
+                if logit > best_logit {
+                    best_logit = logit;
+                    best_token = Some(c.id());
+                }
+            }
+            let next_token = match best_token {
+                Some(t) => t,
+                None => break,
+            };
+
+            if vocab.is_eog(next_token) {
+                break;
+            }
+
+            let piece = vocab.token_to_piece(next_token, false, None);
+            let piece_str = String::from_utf8_lossy(&piece);
+            if piece_str.contains("<|im_end|>") || piece_str.contains("<|endoftext|>") || piece_str.contains("<|eot_id|>") {
+                break;
+            }
+            output.push_str(&piece_str);
+
+            batch.clear();
+            batch.add(next_token, n_cur, &[0], true).map_err(|e| e.to_string())?;
+            ctx.decode(&mut batch).map_err(|e| e.to_string())?;
+            n_cur += 1;
+        }
+
+        Ok(output)
+    }
+
     pub fn generate_local_text(prompt: &str, max_tokens: usize) -> Result<String, String> {
         let lock = LOCAL_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         let engine = lock.as_ref().ok_or_else(|| "Moteur local non initialisé".to_string())?;
@@ -3655,6 +4602,8 @@ pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<Command
                 }
             } else if clean.to_lowercase().contains("page") || clean.to_lowercase().contains("site") || clean.to_lowercase().contains("écran") || clean.to_lowercase().contains("ecran") {
                 vec![CommandTag::WebpageAnalysis, CommandTag::ScreenReadingOrSummary]
+            } else if clean.to_lowercase().contains("image") || clean.to_lowercase().contains("photo") || clean.to_lowercase().contains("vois") || clean.to_lowercase().contains("regarde") {
+                vec![CommandTag::VisualQuestionAnswering, CommandTag::ScreenReadingOrSummary]
             } else if clean.to_lowercase().contains("fenêtre") || clean.to_lowercase().contains("fenetre") {
                 vec![CommandTag::FocusWindow, CommandTag::ClickElementOrButton]
             } else if clean.to_lowercase().contains("focus") {

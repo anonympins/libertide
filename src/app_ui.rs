@@ -620,6 +620,13 @@ impl OverlayApp {
         }
         self.stop_speaking();
 
+        let mut prompt = prompt;
+        if let Some(attached) = self.attached_file_path.take() {
+            let path_str = attached.to_string_lossy();
+            if !prompt.contains(&*path_str) {
+                prompt = format!("{} \"{}\"", prompt.trim(), path_str);
+            }
+        }
         let raw_prompt = prompt.clone();
         let prompt = self.expand_macro(&raw_prompt);
         if prompt != raw_prompt {
@@ -2199,6 +2206,22 @@ impl OverlayApp {
         time: f64,
         theme: &ThemeColors,
     ) {
+        if let Some(ref rx) = self.file_picker_rx {
+            match rx.try_recv() {
+                Ok(res) => {
+                    if let Some(path) = res {
+                        self.attached_file_path = Some(path);
+                        play_earcon(Earcon::Success);
+                    }
+                    self.file_picker_rx = None;
+                    ui.ctx().request_repaint();
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.file_picker_rx = None;
+                }
+            }
+        }
         let ctx = ui.ctx().clone();
         ui.scope_builder(egui::UiBuilder::new().max_rect(control_rect), |ui| {
             egui::Frame::new()
@@ -2358,6 +2381,40 @@ impl OverlayApp {
 
                             let mut clicked_app_suggestion: Option<String> = None;
                             let mut autocomplete_input_to: Option<String> = None;
+
+                            let mut detach_file = false;
+                            if let Some(ref attached) = self.attached_file_path {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    let fname = attached.file_name().and_then(|n| n.to_str()).unwrap_or("fichier");
+                                    let ext = attached.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                                    let icon = match ext.as_str() {
+                                        "png" | "jpg" | "jpeg" | "webp" | "bmp" | "svg" => "🖼️",
+                                        "pdf" => "📕",
+                                        "rs" | "py" | "js" | "ts" | "c" | "cpp" | "json" | "toml" => "💻",
+                                        _ => "📄",
+                                    };
+                                    let chip_btn = egui::Button::new(
+                                        egui::RichText::new(format!("{icon} {fname} ✕"))
+                                            .size(11.0)
+                                            .color(theme.accent)
+                                            .strong(),
+                                    )
+                                    .fill(theme.tab_active_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.border))
+                                    .corner_radius(egui::CornerRadius::same(6))
+                                    .small();
+
+                                    if ui.add(chip_btn).on_hover_text("Fichier joint pour l'analyse multimodale. Cliquer pour détacher.").clicked() {
+                                        detach_file = true;
+                                    }
+                                });
+                                ui.add_space(2.0);
+                            }
+                            if detach_file {
+                                self.attached_file_path = None;
+                                play_earcon(Earcon::MicClose);
+                            }
 
                             if !self.input_suggestions.is_empty() {
                                 ui.horizontal(|ui| {
@@ -2635,6 +2692,41 @@ impl OverlayApp {
                                     }
                                 }
 
+                                // 2c. Joindre un fichier / Image (Multimodalité VLM)
+                                let file_btn_id = ui.make_persistent_id("dwell_btn_attach_file");
+                                let file_prog = self.dwell_state.get_progress(file_btn_id);
+                                let is_file_attached = self.attached_file_path.is_some();
+                                let file_sub = if is_file_attached { "Joint" } else { "Fichier" };
+                                let file_resp = render_accessible_icon_button(
+                                    ui,
+                                    "📎",
+                                    file_sub,
+                                    "Joindre un fichier ou une image pour l'analyse multimodale (Qwen2-VL / Document)",
+                                    is_file_attached,
+                                    file_prog,
+                                    Some(egui::Color32::from_rgb(0, 180, 255)),
+                                    Some(egui::Color32::from_rgb(0, 210, 255)),
+                                );
+                                let (file_dwell, _) = self.dwell_state.update(file_btn_id, file_resp.hovered());
+                                let is_file_key = file_resp.has_focus() && ui.input(|i| {
+                                    i.events.iter().any(|ev| match ev {
+                                        egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                        egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                        _ => false,
+                                    })
+                                });
+                                if file_resp.clicked() || file_dwell || is_file_key {
+                                    if self.file_picker_rx.is_none() {
+                                        let (tx, rx) = std::sync::mpsc::channel();
+                                        self.file_picker_rx = Some(rx);
+                                        std::thread::spawn(move || {
+                                            let res = crate::fs_util::pick_file_dialog();
+                                            let _ = tx.send(res);
+                                        });
+                                        play_earcon(Earcon::Navigation);
+                                    }
+                                }
+
                                 // 3. Eye-Tracking
                                 if self.should_show_eye_tracking_button() {
                                     let eye_id = ui.make_persistent_id("dwell_btn_eyetracking");
@@ -2872,6 +2964,16 @@ impl OverlayApp {
         self.input_suggestions.clear();
         self.last_suggestion_query.clear();
         self.auto_scroll_to_bottom = true;
+
+        let mut prompt_raw = prompt_raw;
+        if let Some(attached) = self.attached_file_path.take() {
+            let path_str = attached.to_string_lossy();
+            if prompt_raw.trim().is_empty() {
+                prompt_raw = format!("Analyse et décris ce fichier joint : \"{path_str}\"");
+            } else if !prompt_raw.contains(&*path_str) {
+                prompt_raw = format!("{} \"{}\"", prompt_raw.trim(), path_str);
+            }
+        }
         let prompt = self.expand_macro(&prompt_raw);
         self.live_transcript.clear();
 
