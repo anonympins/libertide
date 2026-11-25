@@ -33,5 +33,6 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           # Le dossier qui contient notre badge à déployer
           publish_dir: ./public
+          keep_files: true
           # Le message du commit sur la branche gh-pages
           commit_message: "chore: update LoC badge"
