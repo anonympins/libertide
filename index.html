@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Libertide — L'informatique accessible sans barrière physique</title>
+    <meta name="description" content="Overlay d'assistance universel pour ordinateur : commande oculaire par webcam IA, navigation au contacteur unique, dictée vocale locale et domotique.">
+    <link rel="icon" type="image/png" href="public/favicon-256x256.png">
+
+    <style>
+        :root {
+            --bg: #0b0e14;
+            --card-bg: #121822;
+            --accent: #00e5ff;
+            --accent-hover: #00b4d8;
+            --text: #ffffff;
+            --text-muted: #a0aec0;
+            --border: rgba(0, 229, 255, 0.25);
+            --highlight: #ffd600;
+            --font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: var(--font);
+            line-height: 1.6;
+            padding: 0 1.5rem;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+
+        header {
+            padding: 4rem 0 2rem;
+            text-align: center;
+        }
+
+        .badge {
+            display: inline-block;
+            background: rgba(0, 229, 255, 0.12);
+            border: 1px solid var(--border);
+            color: var(--accent);
+            padding: 0.35rem 0.85rem;
+            border-radius: 999px;
+            font-size: 0.85rem;
+            font-weight: 700;
+            margin-bottom: 1.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        h1 {
+            font-size: clamp(2.2rem, 5vw, 3.4rem);
+            line-height: 1.2;
+            margin-bottom: 1.2rem;
+            font-weight: 800;
+        }
+
+        h1 span {
+            color: var(--accent);
+        }
+
+        p.lead {
+            font-size: 1.2rem;
+            color: var(--text-muted);
+            max-width: 760px;
+            margin: 0 auto 2.5rem;
+        }
+
+        .cta-group {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-bottom: 3rem;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.85rem 1.75rem;
+            font-size: 1.05rem;
+            font-weight: 700;
+            border-radius: 8px;
+            text-decoration: none;
+            transition: all 0.2s ease;
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: #000;
+        }
+        .btn-primary:hover {
+            background: var(--accent-hover);
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: var(--text);
+            border: 1px solid rgba(255, 255, 255, 0.25);
+        }
+        .btn-secondary:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        /* Grid des fonctionnalités */
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 1.5rem;
+            margin: 4rem 0;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.75rem;
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+        .card:hover {
+            transform: translateY(-4px);
+            border-color: var(--accent);
+        }
+
+        .card-icon {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+        }
+
+        .card h3 {
+            font-size: 1.25rem;
+            margin-bottom: 0.5rem;
+            color: #fff;
+        }
+
+        .card p {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+        }
+
+        /* Section Open Source & Confidentialité */
+        .privacy-banner {
+            background: linear-gradient(180deg, rgba(0, 229, 255, 0.05) 0%, rgba(18, 24, 34, 0.6) 100%);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2.5rem;
+            text-align: center;
+            margin-bottom: 4rem;
+        }
+
+        footer {
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 2rem 0;
+            text-align: center;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <div class="badge">Accessibilité Numérique • Open Source</div>
+        <h1>Reprenez le contrôle de votre ordinateur avec <span>Libertide</span></h1>
+        <p class="lead">
+            Un overlay d'assistance intelligent, rapide et transparent. Conçu pour le handicap moteur,
+            les tremblements, la perte de mobilité et la basse vision, sans matériel propriétaire coûteux.
+        </p>
+
+        <div class="cta-group">
+            <a href="https://github.com/anonympins/libertide/releases/latest" class="btn btn-primary">
+                ⬇ Télécharger pour Windows / macOS / Linux
+            </a>
+            <a href="https://github.com/anonympins/libertide" class="btn btn-secondary">
+                ⭐ Voir sur GitHub
+            </a>
+        </div>
+    </header>
+
+    <main>
+        <section class="features-grid">
+            <div class="card">
+                <div class="card-icon">👁️</div>
+                <h3>Eye-Tracking IA & Matériel</h3>
+                <p>
+                    Contrôlez le pointeur avec votre simple webcam via notre réseau neuronal local (L2CS-Net ONNX),
+                    ou connectez vos eye-trackers dédiés (Tobii, GazePoint GP3) en OpenGaze et OpenTrack.
+                </p>
+            </div>
+
+            <div class="card">
+                <div class="card-icon">🎯</div>
+                <h3>Ciblage Anti-Tremblement & Badges</h3>
+                <p>
+                    Des badges dorés numérotés se superposent sur chaque contrôle. Dites <em>"clique 3"</em> ou tapez le chiffre
+                    pour valider sans effort de précision millimétrique.
+                </p>
+            </div>
+
+            <div class="card">
+                <div class="card-icon">🔘</div>
+                <h3>Contacteur Unique & Passerelle Mobile</h3>
+                <p>
+                    Parcours par balayage hiérarchique (Fenêtre ➔ Zone ➔ Bouton). Transformez n'importe quel smartphone,
+                    tablette ou carte ESP32 en contacteur sans fil avec retour haptique.
+                </p>
+            </div>
+
+            <div class="card">
+                <div class="card-icon">🎙️</div>
+                <h3>Dictée Vocale 100% Locale (Whisper)</h3>
+                <p>
+                    Dictez vos textes, courriels et documents sans latence. Aucune donnée vocale ou médicale ne transite par le cloud.
+                </p>
+            </div>
+
+            <div class="card">
+                <div class="card-icon">🏠</div>
+                <h3>Domotique & Chambre Médicale</h3>
+                <p>
+                    Ajustez l'inclinaison de votre lit médicalisé, les lumières et les volets par la voix ou le regard via Home Assistant,
+                    KNXnet/IP (UDP direct) et BACnet/IP.
+                </p>
+            </div>
+
+            <div class="card">
+                <div class="card-icon">⌨️</div>
+                <h3>Clavier Virtuel & Tableau CAA</h3>
+                <p>
+                    Saisie assistée avec auto-balayage, prédiction de mots contextuelle et communication alternative par pictogrammes ARASAAC.
+                </p>
+            </div>
+        </section>
+
+        <section class="privacy-banner">
+            <h2>🔒 Confidentialité Médicale & Zéro Dépendance</h2>
+            <p style="margin-top: 0.8rem; color: var(--text-muted); max-width: 800px; margin-inline: auto;">
+                Libertide est distribué sous licence libre. La reconnaissance vocale (Whisper) et les modèles de langage locaux tournent directement sur votre machine pour préserver le secret médical et votre vie privée.
+            </p>
+        </section>
+    </main>
+
+    <footer>
+        <p>Libertide — Développé avec passion pour l'autonomie et l'inclusion numérique de tous.</p>
+    </footer>
+</div>
+
+</body>
+</html>
