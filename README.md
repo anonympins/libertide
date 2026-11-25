@@ -9,8 +9,7 @@
 [![Platforms](https://img.shields.io/badge/Platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue)](#-getting-started-in-3-steps)
 ![Repo size](https://img.shields.io/github/repo-size/anonympins/libertide)
 ![Lines of Code](https://anonympins.github.io/libertide/badge.svg)
-![Downloads](https://img.shields.io/github/downloads/anonympins/libertide/latest/total?label=Downloads
-)
+![Downloads](https://img.shields.io/github/downloads/anonympins/libertide/total)
 
 [![Windows Build](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-windows.yml?label=Windows)](https://github.com/anonympins/libertide/actions/workflows/rust-windows.yml)
 [![UNIX Build](https://img.shields.io/github/actions/workflow/status/anonympins/libertide/rust-unix.yml?label=Linux%20%2F%20UNIX)](https://github.com/anonympins/libertide/actions/workflows/rust-unix.yml)
