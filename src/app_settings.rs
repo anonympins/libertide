@@ -221,6 +221,7 @@ impl OverlayApp {
         self.auto_read_suggestions = true;
         self.earcons_enabled = true;
         crate::overlay::set_earcons_enabled(true);
+        crate::audio_player::set_auditory_beacon_map_enabled(true);
         self.dwell_state.dwell_duration = Duration::ZERO;
         self.dwell_state.activation_delay = Duration::from_millis(200);
         SWITCH_DEBOUNCE_MS.store(180, Ordering::Relaxed);
@@ -292,6 +293,7 @@ impl OverlayApp {
             self.auto_read_suggestions = true;
             self.earcons_enabled = true;
             crate::overlay::set_earcons_enabled(true);
+            crate::audio_player::set_auditory_beacon_map_enabled(true);
         } else if has_cognitive || has_tremor {
             self.auto_read_agent_messages = true;
             self.auto_read_suggestions = false;
@@ -1224,6 +1226,23 @@ impl OverlayApp {
                                             let val_str = if self.auto_read_agent_messages { "true" } else { "false" };
                                             let _ = write_env_var_to_file(".env", "AUTO_READ_MESSAGES", val_str);
                                             std::env::set_var("AUTO_READ_MESSAGES", val_str);
+                                        }
+
+                                        ui.add_space(4.0);
+
+                                        let mut beacon_map = crate::audio_player::is_auditory_beacon_map_enabled();
+                                        let resp_beacon = ui.checkbox(
+                                            &mut beacon_map,
+                                            egui::RichText::new("Carte sonore 3D de l'écran (Auditory Beacon Map)")
+                                                .size(11.5)
+                                                .color(theme.text_primary),
+                                        ).on_hover_text("Balayage binaural spatialisé des fenêtres et boutons pour se repérer instantanément sans la vue (gauche à gauche, haut plus aigu).");
+                                        let id_beacon = ui.make_persistent_id("dwell_auditory_beacon_map_enabled");
+                                        let is_beacon_key = make_toggle_accessible(ui, &resp_beacon, theme.accent);
+                                        if resp_beacon.changed() || apply_dwell_to_response(ui, &mut self.dwell_state, id_beacon, &resp_beacon) || is_beacon_key {
+                                            let new_val = if resp_beacon.changed() { beacon_map } else { !beacon_map };
+                                            crate::audio_player::set_auditory_beacon_map_enabled(new_val);
+                                            play_earcon(Earcon::Success);
                                         }
 
                                         ui.add_space(4.0);

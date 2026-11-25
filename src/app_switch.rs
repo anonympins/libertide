@@ -701,6 +701,11 @@ impl OverlayApp {
         let focused_target_idx = self.numbered_targets.first().map(|t| t.index);
         draw_screen_zones_and_targets(&zone_infos, &self.numbered_targets, self.zoom_factor, focused_target_idx);
 
+        // Carte sonore binaurale 3D
+        if crate::audio_player::is_auditory_beacon_map_enabled() {
+            crate::window_util::trigger_screen_auditory_beacon_sweep(&self.numbered_targets);
+        }
+
         if speak_summary {
             let speech = if let Some(first_z) = self.switch_zones.first() {
                 format!("Zone 1 : {}", first_z.title)
@@ -858,5 +863,10 @@ impl OverlayApp {
         draw_screen_zones_and_targets(&zone_info, &self.numbered_targets, self.zoom_factor, Some(1));
         #[cfg(windows)]
         draw_screen_control_border(cur_zone.rect, true);
+
+        // Carte sonore binaurale 3D
+        if crate::audio_player::is_auditory_beacon_map_enabled() {
+            crate::window_util::trigger_screen_auditory_beacon_sweep(&self.numbered_targets);
+        }
     }
 }

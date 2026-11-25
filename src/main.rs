@@ -382,6 +382,13 @@ impl OverlayApp {
             .unwrap_or(true);
         crate::overlay::EARCONS_ENABLED.store(earcons_enabled, Ordering::Relaxed);
 
+        let beacon_map_enabled = std::env::var("AUDITORY_BEACON_MAP")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "AUDITORY_BEACON_MAP"))
+            .map(|s| !s.trim().eq_ignore_ascii_case("false") && s.trim() != "0")
+            .unwrap_or(true);
+        crate::audio_player::set_auditory_beacon_map_enabled(beacon_map_enabled);
+
         let mut app = Self {
             status: AgentStatus::Idle,
             chat_history: vec![ChatEntry {
@@ -526,6 +533,10 @@ impl OverlayApp {
         };
         app.sync_modal_inputs_for_provider(llm_config.provider);
         update_open_floating_cards(&app.floating_cards);
+
+        if !app.current_twitch_channel.trim().is_empty() {
+            let _ = app.twitch_channel_sender.send(app.current_twitch_channel.clone());
+        }
 
         if llm_config.provider == LlmProvider::Local {
             std::thread::spawn(|| {

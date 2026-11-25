@@ -881,6 +881,12 @@ trigger_window_scan_async(hwnd: HWND) {
                     draw_screen_numbered_badges(&targets, 1.0, None);
                     trigger_repaint();
                 }
+                if crate::audio_player::is_auditory_beacon_map_enabled() {
+                    crate::window_util::trigger_screen_auditory_beacon_sweep(&targets);
+                }
+                if crate::audio_player::is_auditory_beacon_map_enabled() {
+                    crate::window_util::trigger_screen_auditory_beacon_sweep(&targets);
+                }
             }
 
             // 2. Passe en arrière-plan : Qwen VLM pour les zones et canvas
