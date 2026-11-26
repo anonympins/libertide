@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpStream, UdpSocket};
 use std::path::PathBuf;
@@ -178,6 +179,18 @@ pub static EYE_TRACKING_SENSITIVITY: AtomicU32 = AtomicU32::new(1.0f32.to_bits()
 pub static EYE_OFFSET_X: AtomicU32 = AtomicU32::new((0f32).to_bits());
 pub static EYE_OFFSET_Y: AtomicU32 = AtomicU32::new((0.0f32).to_bits());
 pub static EYE_CAMERA_PITCH_OFFSET: AtomicU32 = AtomicU32::new((-16.0f32).to_bits());
+pub static EYE_AUTO_CALIBRATION_ENABLED: AtomicBool = AtomicBool::new(true);
+
+pub fn is_auto_calibration_enabled() -> bool {
+    EYE_AUTO_CALIBRATION_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn set_auto_calibration_enabled(enabled: bool) {
+    EYE_AUTO_CALIBRATION_ENABLED.store(enabled, Ordering::Relaxed);
+    let val_str = if enabled { "true" } else { "false" };
+    let _ = write_env_var_to_file(".env", "EYE_AUTO_CALIBRATION_ENABLED", val_str);
+    std::env::set_var("EYE_AUTO_CALIBRATION_ENABLED", val_str);
+}
 
 pub fn get_camera_pitch_offset() -> f32 {
     f32::from_bits(EYE_CAMERA_PITCH_OFFSET.load(Ordering::Relaxed))
@@ -311,6 +324,7 @@ pub static LATEST_RAW_GAZE: Mutex<Option<RawGazeMeasurement>> = Mutex::new(None)
 pub static GLOBAL_GAZE_POS: Mutex<Option<(f32, f32)>> = Mutex::new(None);
 pub static GAZE_FREEZE_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
 pub static LAST_GLOBAL_GAZE_CLICK: Mutex<Option<Instant>> = Mutex::new(None);
+pub static LAST_GROUND_TRUTH_CLICK: Mutex<Option<((i32, i32), Instant)>> = Mutex::new(None);
 
 pub fn freeze_gaze_global(duration: Duration) {
     if let Ok(mut g) = GAZE_FREEZE_UNTIL.lock() {
@@ -345,6 +359,10 @@ pub fn perform_system_gaze_click() {
         Some(pos) => pos,
         None => return,
     };
+
+    if let Ok(mut gt) = LAST_GROUND_TRUTH_CLICK.lock() {
+        *gt = Some(((cur_x, cur_y), now));
+    }
 
     eprintln!("[Eye-Tracking] Clic système physique déclenché à ({}, {})", cur_x, cur_y);
 
@@ -1240,6 +1258,63 @@ impl GazePolynomialModel {
         }
     }
 
+    /// Ajustement bayésien continu "Zero-Click" (Ridge Regression avec Shrinkage & lissage EMA)
+    pub fn adapt_online(
+        &mut self,
+        eye_x: f32,
+        eye_y: f32,
+        head_yaw: f32,
+        head_pitch: f32,
+        target_x: f32,
+        target_y: f32,
+        ema_weight: f32,
+    ) {
+        let x = if eye_x.is_finite() { eye_x } else { 0.0 };
+        let y = if eye_y.is_finite() { eye_y } else { 0.0 };
+
+        if !self.is_trained {
+            self.coeff_x = [target_x, 700.0, 0.0, 0.0, 0.0, 0.0];
+            self.coeff_y = [target_y, 0.0, 700.0, 0.0, 0.0, 0.0];
+            self.is_trained = true;
+            self.rms_error_px = 45.0;
+            return;
+        }
+
+        let terms = [
+            1.0f32,
+            x,
+            y,
+            x * x,
+            y * y,
+            x * y,
+        ];
+
+        let (pred_x, pred_y) = self.predict(x, y, head_yaw, head_pitch);
+        let err_x = (target_x - pred_x).clamp(-280.0, 280.0);
+        let err_y = (target_y - pred_y).clamp(-280.0, 280.0);
+
+        // Régularisation de crête bayésienne (Ridge Shrinkage)
+        let ridge_lambda = 3.0f32;
+        let norm_sq: f32 = terms.iter().map(|t| t * t).sum();
+        let inv_denom = 1.0 / (norm_sq + ridge_lambda);
+        let alpha = ema_weight.clamp(0.01, 0.25);
+
+        for i in 0..GAZE_MODEL_TERMS {
+            let gain = terms[i] * inv_denom;
+            self.coeff_x[i] += alpha * gain * err_x;
+            self.coeff_y[i] += alpha * gain * err_y;
+
+            // Shrinkage doux vers 0 sur les termes d'ordre 2 pour garantir la convexité globale
+            if i >= 3 {
+                self.coeff_x[i] *= 0.998;
+                self.coeff_y[i] *= 0.998;
+            }
+        }
+
+        let instant_err = err_x.hypot(err_y);
+        self.rms_error_px = self.rms_error_px * 0.96 + instant_err * 0.04;
+    }
+
     pub fn fit(&mut self, samples: &[CalibrationSample]) -> bool {
         const N_TERMS: usize = GAZE_MODEL_TERMS;
         if samples.len() < N_TERMS {
@@ -1745,6 +1820,8 @@ pub struct EyeTrackingController {
     pub raw_history_len: usize,
     pub last_snapped_target_id: Option<usize>,
     pub last_snap_timestamp: Option<Instant>,
+    pub last_adapted_target_id: Option<usize>,
+    pub last_model_save: Instant,
     pub snap_radius: f32,
     pub sensitivity: f32,
     pub offset_x: f32,
@@ -1783,6 +1860,13 @@ impl Default for EyeTrackingController {
             .map(|s| s.trim().eq_ignore_ascii_case("true") || s.trim() == "1")
             .unwrap_or(true);
         EYE_SNAPPING_ENABLED.store(snapping_enabled, Ordering::Relaxed);
+
+        let auto_calib = std::env::var("EYE_AUTO_CALIBRATION_ENABLED")
+            .ok()
+            .or_else(|| read_env_var_from_file(".env", "EYE_AUTO_CALIBRATION_ENABLED"))
+            .map(|s| s.trim().eq_ignore_ascii_case("true") || s.trim() == "1")
+            .unwrap_or(true);
+        EYE_AUTO_CALIBRATION_ENABLED.store(auto_calib, Ordering::Relaxed);
 
         let snap_radius = std::env::var("EYE_SNAP_RADIUS")
             .ok()
@@ -1881,6 +1965,8 @@ impl Default for EyeTrackingController {
             raw_history_len: 0,
             last_snapped_target_id: None,
             last_snap_timestamp: None,
+            last_adapted_target_id: None,
+            last_model_save: Instant::now(),
             snap_radius,
             sensitivity: sens_val,
             offset_x,
@@ -1920,6 +2006,7 @@ impl EyeTrackingController {
         self.last_target_local = None;
         self.last_eye_applied_cursor = None;
         self.last_detected_mouse_pos = None;
+        self.last_adapted_target_id = None;
         self.mouse_override_until = None;
         self.freeze_until = None;
     }
@@ -1940,6 +2027,7 @@ impl EyeTrackingController {
         self.last_target_local = None;
         self.last_eye_applied_cursor = None;
         self.last_detected_mouse_pos = None;
+        self.last_adapted_target_id = None;
         self.mouse_override_until = None;
         self.freeze_until = None;
         if let Ok(mut lock) = GLOBAL_GAZE_POS.lock() {
@@ -1976,6 +2064,7 @@ impl EyeTrackingController {
         self.last_raw_gaze = None;
         self.last_snapped_target_id = None;
         self.last_snap_timestamp = None;
+        self.last_adapted_target_id = None;
         self.last_eye_applied_cursor = None;
         self.last_detected_mouse_pos = None;
         self.freeze_until = None;
@@ -2198,6 +2287,40 @@ impl EyeTrackingController {
             return (target.0, target.1, None);
         }
 
+        // Calibrage continu "Zero-Click" : consommation d'un clic de vérité terrain récent
+        if is_auto_calibration_enabled() {
+            let ground_truth_click = if let Ok(mut g) = LAST_GROUND_TRUTH_CLICK.lock() {
+                g.take()
+            } else {
+                None
+            };
+            if let Some(((gt_x, gt_y), click_time)) = ground_truth_click {
+                if click_time.elapsed() < Duration::from_millis(800) {
+                    let ppp_safe = ppp.max(0.1);
+                    let local_gt_x = (gt_x as f32 / ppp_safe) - work_area_offset.0;
+                    let local_gt_y = (gt_y as f32 / ppp_safe) - work_area_offset.1;
+                    if is_eye_continuous_mode() {
+                        self.offset_x = self.offset_x * 0.92 + effective_raw_x * 0.08;
+                        set_eye_offset_x(self.offset_x);
+                    } else {
+                        self.model.adapt_online(
+                            effective_raw_x,
+                            effective_raw_y,
+                            effective_yaw,
+                            effective_pitch,
+                            local_gt_x,
+                            local_gt_y,
+                            0.14,
+                        );
+                        if self.last_model_save.elapsed() > Duration::from_secs(10) {
+                            self.model.save_to_file();
+                            self.last_model_save = Instant::now();
+                        }
+                    }
+                }
+            }
+        }
+
         // Détection de prise de contrôle par la souris physique
         if let Some(phys_mouse) = get_physical_cursor_pos() {
             let is_overridden = self.is_mouse_overridden();
@@ -2341,8 +2464,21 @@ impl EyeTrackingController {
             let target_idx = snapped_target.map(|t| t.index);
             if target_idx != self.last_snapped_target_id {
                 self.last_snap_timestamp = Some(Instant::now());
+                self.last_adapted_target_id = None;
             }
             self.last_snapped_target_id = target_idx;
+
+            // En mode joystick, une fixation prolongée (>= 600ms) réajuste le centrage neutre par EMA
+            if is_auto_calibration_enabled() {
+                if let Some(target) = snapped_target {
+                    let dwell = self.last_snap_timestamp.map_or(Duration::ZERO, |t| t.elapsed());
+                    if dwell >= Duration::from_millis(600) && self.last_adapted_target_id != Some(target.index) {
+                        self.offset_x = self.offset_x * 0.95 + effective_raw_x * 0.05;
+                        set_eye_offset_x(self.offset_x);
+                        self.last_adapted_target_id = Some(target.index);
+                    }
+                }
+            }
 
             if should_snap && snapped_target.is_some() {
                 let snap_local_x = (snapped_phys_x / ppp) - work_area_offset.0;
@@ -2413,8 +2549,35 @@ impl EyeTrackingController {
         let target_idx = snapped_target.map(|t| t.index);
         if target_idx != self.last_snapped_target_id {
             self.last_snap_timestamp = Some(Instant::now());
+            self.last_adapted_target_id = None;
         }
         self.last_snapped_target_id = target_idx;
+
+        // En mode absolu biquadratique : fixation prolongée (>= 600ms) déclenche l'ajustement Ridge bayésien
+        if is_auto_calibration_enabled() {
+            if let Some(target) = snapped_target {
+                let dwell = self.last_snap_timestamp.map_or(Duration::ZERO, |t| t.elapsed());
+                if dwell >= Duration::from_millis(600) && self.last_adapted_target_id != Some(target.index) {
+                    let ppp_safe = ppp.max(0.1);
+                    let t_cx = (target.rect[0] + target.rect[2]) as f32 / (2.0 * ppp_safe) - work_area_offset.0;
+                    let t_cy = (target.rect[1] + target.rect[3]) as f32 / (2.0 * ppp_safe) - work_area_offset.1;
+                    self.model.adapt_online(
+                        effective_raw_x,
+                        effective_raw_y,
+                        effective_yaw,
+                        effective_pitch,
+                        t_cx,
+                        t_cy,
+                        0.06,
+                    );
+                    self.last_adapted_target_id = Some(target.index);
+                    if self.last_model_save.elapsed() > Duration::from_secs(10) {
+                        self.model.save_to_file();
+                        self.last_model_save = Instant::now();
+                    }
+                }
+            }
+        }
 
         let effective_target_x = (snapped_phys_x / ppp) - work_area_offset.0;
         let effective_target_y = (snapped_phys_y / ppp) - work_area_offset.1;
@@ -2616,6 +2779,42 @@ pub fn run_l2cs_inference(input_tensor: &[f32]) -> Option<(f32, f32)> {
 pub const L2CS_INPUT_SIZE: usize = 224;
 pub const L2CS_NUM_BINS: usize = 90;
 
+/// Tampons de travail persistants par thread pour éliminer toute allocation sur le chemin critique
+struct L2CSScratchBuffers {
+    raw_r: Vec<f32>,
+    raw_g: Vec<f32>,
+    raw_b: Vec<f32>,
+    raw_lum: Vec<f32>,
+    blur_temp: Vec<f32>,
+    blur_dst: Vec<f32>,
+    norm_r: Vec<f32>,
+    norm_g: Vec<f32>,
+    norm_b: Vec<f32>,
+    tensor: Vec<f32>,
+}
+
+impl Default for L2CSScratchBuffers {
+    fn default() -> Self {
+        let plane = L2CS_INPUT_SIZE * L2CS_INPUT_SIZE;
+        Self {
+            raw_r: vec![0.0f32; plane],
+            raw_g: vec![0.0f32; plane],
+            raw_b: vec![0.0f32; plane],
+            raw_lum: vec![0.0f32; plane],
+            blur_temp: vec![0.0f32; plane],
+            blur_dst: vec![0.0f32; plane],
+            norm_r: vec![0.0f32; plane],
+            norm_g: vec![0.0f32; plane],
+            norm_b: vec![0.0f32; plane],
+            tensor: vec![0.0f32; 3 * plane],
+        }
+    }
+}
+
+thread_local! {
+    static L2CS_SCRATCH: RefCell<L2CSScratchBuffers> = RefCell::new(L2CSScratchBuffers::default());
+}
+
 /// Échantillonne un pixel RGB dans n'importe quel format caméra brut
 #[inline]
 fn sample_pixel_rgb(frame: &[u8], width: usize, height: usize, format: PixelFormat, px: usize, py: usize) -> (u8, u8, u8) {
@@ -2800,12 +2999,10 @@ pub fn detect_face_region(
     (min_x, max_x, min_y, max_y)
 }
 
-/// Filtre passe-bas séparable en boîte 2D ultra-rapide (O(N)) pour estimer la carte d'illumination locale
-fn separable_box_blur_224(src: &[f32], radius: usize) -> Vec<f32> {
+/// Filtre passe-bas séparable en boîte 2D (O(N)) in-place sans réallocation
+fn separable_box_blur_224_into(src: &[f32], temp: &mut [f32], dst: &mut [f32], radius: usize) {
     const W: usize = L2CS_INPUT_SIZE;
     const H: usize = L2CS_INPUT_SIZE;
-    let mut temp = vec![0.0f32; W * H];
-    let mut dst = vec![0.0f32; W * H];
 
     // Passe horizontale
     for y in 0..H {
@@ -2851,8 +3048,6 @@ fn separable_box_blur_224(src: &[f32], radius: usize) -> Vec<f32> {
             dst[y * W + x] = sum / count.max(1) as f32;
         }
     }
-
-    dst
 }
 
 /// Prétraitement avec :
@@ -2866,114 +3061,120 @@ pub fn direct_preprocess_l2cs_with_illumination(
     format: PixelFormat,
     face_roi: (usize, usize, usize, usize),
 ) -> (Vec<f32>, f32, f32) {
-    const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-    const STD: [f32; 3] = [0.229, 0.224, 0.225];
+    L2CS_SCRATCH.with(|scratch| {
+        let mut s_guard = scratch.borrow_mut();
+        let s = &mut *s_guard;
+        const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
+        const STD: [f32; 3] = [0.229, 0.224, 0.225];
 
-    let (min_x, max_x, min_y, max_y) = face_roi;
-    let roi_w = (max_x.saturating_sub(min_x)).max(1) as f32;
-    let roi_h = (max_y.saturating_sub(min_y)).max(1) as f32;
+        let (min_x, max_x, min_y, max_y) = face_roi;
+        let roi_w = (max_x.saturating_sub(min_x)).max(1) as f32;
+        let roi_h = (max_y.saturating_sub(min_y)).max(1) as f32;
+        let plane_size = L2CS_INPUT_SIZE * L2CS_INPUT_SIZE;
 
-    let plane_size = L2CS_INPUT_SIZE * L2CS_INPUT_SIZE;
-    let mut raw_r = vec![0.0f32; plane_size];
-    let mut raw_g = vec![0.0f32; plane_size];
-    let mut raw_b = vec![0.0f32; plane_size];
-    let mut raw_lum = vec![0.0f32; plane_size];
+        let step_x = roi_w / L2CS_INPUT_SIZE as f32;
+        let step_y = roi_h / L2CS_INPUT_SIZE as f32;
 
-    let step_x = roi_w / L2CS_INPUT_SIZE as f32;
-    let step_y = roi_h / L2CS_INPUT_SIZE as f32;
+        // 1. Échantillonnage bilinéaire et atténuation des reflets spéculaires
+        for out_y in 0..L2CS_INPUT_SIZE {
+            let fy = min_y as f32 + (out_y as f32 + 0.5) * step_y;
+            for out_x in 0..L2CS_INPUT_SIZE {
+                let fx = min_x as f32 + (out_x as f32 + 0.5) * step_x;
+                let (r_f255, g_f255, b_f255) = sample_pixel_rgb_bilinear(frame, width, height, format, fx, fy);
+                let pixel_idx = out_y * L2CS_INPUT_SIZE + out_x;
+                let lum = 0.299 * r_f255 + 0.587 * g_f255 + 0.114 * b_f255;
 
-    // 1. Échantillonnage bilinéaire et atténuation des reflets spéculaires (Glints)
-    for out_y in 0..L2CS_INPUT_SIZE {
-        let fy = min_y as f32 + (out_y as f32 + 0.5) * step_y;
-        for out_x in 0..L2CS_INPUT_SIZE {
-            let fx = min_x as f32 + (out_x as f32 + 0.5) * step_x;
-            let (r_f255, g_f255, b_f255) = sample_pixel_rgb_bilinear(frame, width, height, format, fx, fy);
-            let pixel_idx = out_y * L2CS_INPUT_SIZE + out_x;
-            let lum = 0.299 * r_f255 + 0.587 * g_f255 + 0.114 * b_f255;
+                let (r_comp, g_comp, b_comp, lum_comp) = if lum > 225.0 {
+                    let excess = lum - 225.0;
+                    let compressed_lum = 225.0 + 15.0 * (excess / 30.0).tanh();
+                    let scale = compressed_lum / lum.max(1.0);
+                    (r_f255 * scale, g_f255 * scale, b_f255 * scale, compressed_lum)
+                } else {
+                    (r_f255, g_f255, b_f255, lum)
+                };
 
-            // Suppression des reflets spéculaires / points de surbrillance cornéenne
-            let (r_comp, g_comp, b_comp, lum_comp) = if lum > 225.0 {
-                let excess = lum - 225.0;
-                let compressed_lum = 225.0 + 15.0 * (excess / 30.0).tanh();
-                let scale = compressed_lum / lum.max(1.0);
-                (r_f255 * scale, g_f255 * scale, b_f255 * scale, compressed_lum)
-            } else {
-                (r_f255, g_f255, b_f255, lum)
-            };
-
-            raw_r[pixel_idx] = r_comp;
-            raw_g[pixel_idx] = g_comp;
-            raw_b[pixel_idx] = b_comp;
-            raw_lum[pixel_idx] = lum_comp;
+                s.raw_r[pixel_idx] = r_comp;
+                s.raw_g[pixel_idx] = g_comp;
+                s.raw_b[pixel_idx] = b_comp;
+                s.raw_lum[pixel_idx] = lum_comp;
+            }
         }
-    }
 
-    // 2. Mesure du gradient vectoriel d'asymétrie lumineuse (G/D et H/B)
-    let mut left_lum = 0.0f32;
-    let mut right_lum = 0.0f32;
-    let mut top_lum = 0.0f32;
-    let mut bottom_lum = 0.0f32;
-    let half_w = L2CS_INPUT_SIZE / 2;
-    let half_h = L2CS_INPUT_SIZE / 2;
+        // 2. Mesure du gradient vectoriel d'asymétrie lumineuse
+        let mut left_lum = 0.0f32;
+        let mut right_lum = 0.0f32;
+        let mut top_lum = 0.0f32;
+        let mut bottom_lum = 0.0f32;
+        let half_w = L2CS_INPUT_SIZE / 2;
+        let half_h = L2CS_INPUT_SIZE / 2;
 
-    for y in 0..L2CS_INPUT_SIZE {
-        let row_idx = y * L2CS_INPUT_SIZE;
-        for x in 0..L2CS_INPUT_SIZE {
-            let l = raw_lum[row_idx + x];
-            if x < half_w { left_lum += l; } else { right_lum += l; }
-            if y < half_h { top_lum += l; } else { bottom_lum += l; }
+        for y in 0..L2CS_INPUT_SIZE {
+            let row_idx = y * L2CS_INPUT_SIZE;
+            for x in 0..L2CS_INPUT_SIZE {
+                let l = s.raw_lum[row_idx + x];
+                if x < half_w { left_lum += l; } else { right_lum += l; }
+                if y < half_h { top_lum += l; } else { bottom_lum += l; }
+            }
         }
-    }
-    let half_count = (half_w * L2CS_INPUT_SIZE) as f32;
-    let mean_left = left_lum / half_count;
-    let mean_right = right_lum / half_count;
-    let mean_top = top_lum / half_count;
-    let mean_bottom = bottom_lum / half_count;
+        let half_count = (half_w * L2CS_INPUT_SIZE) as f32;
+        let mean_left = left_lum / half_count;
+        let mean_right = right_lum / half_count;
+        let mean_top = top_lum / half_count;
+        let mean_bottom = bottom_lum / half_count;
 
-    let light_bias_x = ((mean_right - mean_left) / (mean_right + mean_left + 1e-3)).clamp(-1.0, 1.0);
-    let light_bias_y = ((mean_bottom - mean_top) / (mean_bottom + mean_top + 1e-3)).clamp(-1.0, 1.0);
+        let light_bias_x = ((mean_right - mean_left) / (mean_right + mean_left + 1e-3)).clamp(-1.0, 1.0);
+        let light_bias_y = ((mean_bottom - mean_top) / (mean_bottom + mean_top + 1e-3)).clamp(-1.0, 1.0);
 
-    // 3. Normalisation Retinex / Self-Quotient Image (division de fond basse-fréquence)
-    let illumination_bg = separable_box_blur_224(&raw_lum, 14);
-    let global_mean_lum = raw_lum.iter().copied().sum::<f32>() / plane_size.max(1) as f32;
+        // 3. Normalisation Retinex / Self-Quotient Image in-place
+        let global_mean_lum = s.raw_lum.iter().copied().sum::<f32>() / plane_size.max(1) as f32;
+        separable_box_blur_224_into(&s.raw_lum, &mut s.blur_temp, &mut s.blur_dst, 14);
 
-    let mut norm_r = vec![0.0f32; plane_size];
-    let mut norm_g = vec![0.0f32; plane_size];
-    let mut norm_b = vec![0.0f32; plane_size];
-    let mut min_val = 255.0f32;
-    let mut max_val = 0.0f32;
+        let mut min_val = 255.0f32;
+        let mut max_val = 0.0f32;
 
-    for i in 0..plane_size {
-        let local_bg = illumination_bg[i];
-        let factor = global_mean_lum / (local_bg + 12.0);
-        // Fusion 75% Retinex équilibré + 25% signal direct
-        let r = (raw_r[i] * factor * 0.75 + raw_r[i] * 0.25).clamp(0.0, 255.0);
-        let g = (raw_g[i] * factor * 0.75 + raw_g[i] * 0.25).clamp(0.0, 255.0);
-        let b = (raw_b[i] * factor * 0.75 + raw_b[i] * 0.25).clamp(0.0, 255.0);
+        for i in 0..plane_size {
+            let local_bg = s.blur_dst[i];
+            let factor = global_mean_lum / (local_bg + 12.0);
+            let r = (s.raw_r[i] * factor * 0.75 + s.raw_r[i] * 0.25).clamp(0.0, 255.0);
+            let g = (s.raw_g[i] * factor * 0.75 + s.raw_g[i] * 0.25).clamp(0.0, 255.0);
+            let b = (s.raw_b[i] * factor * 0.75 + s.raw_b[i] * 0.25).clamp(0.0, 255.0);
 
-        min_val = min_val.min(r).min(g).min(b);
-        max_val = max_val.max(r).max(g).max(b);
+            min_val = min_val.min(r).min(g).min(b);
+            max_val = max_val.max(r).max(g).max(b);
 
-        norm_r[i] = r;
-        norm_g[i] = g;
-        norm_b[i] = b;
-    }
+            s.norm_r[i] = r;
+            s.norm_g[i] = g;
+            s.norm_b[i] = b;
+        }
 
-    let range = (max_val - min_val).max(25.0);
-    let contrast_scale = 255.0 / range;
+        let range = (max_val - min_val).max(25.0);
+        let contrast_scale = 255.0 / range;
 
-    let mut tensor = vec![0.0f32; 3 * plane_size];
-    for i in 0..plane_size {
-        let r_stretched = ((norm_r[i] - min_val) * contrast_scale).clamp(0.0, 255.0) / 255.0;
-        let g_stretched = ((norm_g[i] - min_val) * contrast_scale).clamp(0.0, 255.0) / 255.0;
-        let b_stretched = ((norm_b[i] - min_val) * contrast_scale).clamp(0.0, 255.0) / 255.0;
+        for i in 0..plane_size {
+            let r_stretched = ((s.norm_r[i] - min_val) * contrast_scale).clamp(0.0, 255.0) / 255.0;
+            let g_stretched = ((s.norm_g[i] - min_val) * contrast_scale).clamp(0.0, 255.0) / 255.0;
+            let b_stretched = ((s.norm_b[i] - min_val) * contrast_scale).clamp(0.0, 255.0) / 255.0;
 
-        tensor[i] = (r_stretched - MEAN[0]) / STD[0];
-        tensor[plane_size + i] = (g_stretched - MEAN[1]) / STD[1];
-        tensor[plane_size * 2 + i] = (b_stretched - MEAN[2]) / STD[2];
-    }
+            s.tensor[i] = (r_stretched - MEAN[0]) / STD[0];
+            s.tensor[plane_size + i] = (g_stretched - MEAN[1]) / STD[1];
+            s.tensor[plane_size * 2 + i] = (b_stretched - MEAN[2]) / STD[2];
+        }
 
-    (tensor, light_bias_x, light_bias_y)
+        (s.tensor.clone(), light_bias_x, light_bias_y)
+    })
+}
+
+/// Exécute le prétraitement et l'inférence neuronale L2CS directement sur les tampons locaux
+pub fn process_l2cs_and_infer(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+    format: PixelFormat,
+    face_roi: (usize, usize, usize, usize),
+) -> Option<((f32, f32), f32, f32)> {
+    let (tensor, lb_x, lb_y) = direct_preprocess_l2cs_with_illumination(frame, width, height, format, face_roi);
+    let angles = run_l2cs_inference(&tensor)?;
+    Some((angles, lb_x, lb_y))
 }
 
 /// Prétraitement avec interpolation bilinéaire anti-aliasing vers le tenseur NCHW [1, 3, 224, 224] normalisé ImageNet
@@ -3303,13 +3504,12 @@ pub fn extract_pupil_and_head_pose(
         return None;
     }
 
-    // 1. Priorité absolue : Inférence neuronale directe L2CS-Net sans pré/post-traitement intermédiaire
+    // 1. Priorité absolue : Inférence neuronale directe L2CS-Net sans réallocation heap
     if is_eyetracking_model_installed() {
         let face_roi = detect_face_region(frame, width, height, format);
-        let (tensor, light_bias_x, light_bias_y) =
-            direct_preprocess_l2cs_with_illumination(frame, width, height, format, face_roi);
-
-        if let Some((raw_pitch_deg, raw_yaw_deg)) = run_l2cs_inference(&tensor) {
+        if let Some(((raw_pitch_deg, raw_yaw_deg), light_bias_x, light_bias_y)) =
+            process_l2cs_and_infer(frame, width, height, format, face_roi)
+        {
             // 3. Compensation vectorielle du gradient d'asymétrie lumineuse :
             // Annule la traction mécanique artificielle exercée par les spots ou fenêtres latérales
             let k_yaw = 3.2f32;   // Atténuation en degrés par unité d'asymétrie [-1, +1]

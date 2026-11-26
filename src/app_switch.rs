@@ -215,6 +215,10 @@ impl OverlayApp {
                 }
             }
 
+            if let Ok(mut g) = crate::eyetracking::LAST_GROUND_TRUTH_CLICK.lock() {
+                *g = Some(((target.click_x, target.click_y), Instant::now()));
+            }
+
             if let Some(wid) = target.window_id {
                 if self.is_libertide_window_id(wid) {
                     self.handle_libertide_target_action(&target);

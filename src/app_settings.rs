@@ -1443,6 +1443,29 @@ impl OverlayApp {
                                         }
                                         ui.add_space(3.0);
 
+                                        let mut auto_calib_on = crate::eyetracking::is_auto_calibration_enabled();
+                                        let auto_calib_label = {
+                                            let s = t!("eyetracking.auto_calib_checkbox");
+                                            if s.starts_with("eyetracking.") {
+                                                "Calibrage Continu Transparent (Zero-Click)".to_string()
+                                            } else {
+                                                s.into_owned()
+                                            }
+                                        };
+                                        let auto_calib_tooltip = {
+                                            let s = t!("eyetracking.auto_calib_tooltip");
+                                            if s.starts_with("eyetracking.") {
+                                                "Ajuste automatiquement et en arrière-plan la régression du regard lors des clics et fixations réelles, éliminant le besoin de recalibration à 9 points quand vous bougez la tête.".to_string()
+                                            } else {
+                                                s.into_owned()
+                                            }
+                                        };
+                                        if ui.checkbox(&mut auto_calib_on, auto_calib_label).on_hover_text(auto_calib_tooltip).changed() {
+                                            crate::eyetracking::set_auto_calibration_enabled(auto_calib_on);
+                                            play_earcon(Earcon::Success);
+                                        }
+                                        ui.add_space(3.0);
+
                                         // Réglage fin du Pitch caméra / hauteur du regard
                                         let current_pitch = crate::eyetracking::get_camera_pitch_offset();
                                         let mut pitch_val = current_pitch;
