@@ -441,6 +441,102 @@
             font-size: 0.9rem;
             color: var(--text-muted);
         }
+
+        .voice-commands-section {
+            padding: 3rem 1rem;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .commands-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1.5rem;
+            margin-top: 2rem;
+        }
+
+        .command-card {
+            background: #111622;
+            border: 1px solid rgba(0, 229, 255, 0.2);
+            border-radius: 12px;
+            padding: 1.25rem;
+            display: flex;
+            flex-direction: column;
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+
+        .command-card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(0, 229, 255, 0.5);
+            box-shadow: 0 6px 20px rgba(0, 229, 255, 0.08);
+        }
+
+        .command-card-header {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .command-card-icon {
+            font-size: 1.8rem;
+            line-height: 1;
+        }
+
+        .command-card-header h3 {
+            margin: 0;
+            font-size: 1.05rem;
+            color: #ffffff;
+        }
+
+        .command-badge {
+            display: inline-block;
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 6px;
+            background: rgba(0, 229, 255, 0.12);
+            color: #00e5ff;
+            margin-top: 2px;
+        }
+
+        .command-desc {
+            font-size: 0.85rem;
+            color: var(--text-muted, #94a3b8);
+            margin: 0 0 1rem 0;
+            line-height: 1.4;
+        }
+
+        .command-examples {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            font-size: 0.85rem;
+        }
+
+        .command-examples li {
+            background: rgba(255, 255, 255, 0.03);
+            border-left: 2px solid #00e5ff;
+            padding: 0.4rem 0.6rem;
+            border-radius: 0 6px 6px 0;
+            color: #e2e8f0;
+            line-height: 1.35;
+        }
+
+        .command-examples em {
+            color: #ffe696;
+            font-style: normal;
+        }
+
+        .command-examples small {
+            display: block;
+            color: #818cf8;
+            font-size: 0.75rem;
+            margin-top: 2px;
+        }
     </style>
 </head>
 <body>
@@ -610,6 +706,184 @@
                 </a>
             </div>
         </section>
+
+        <!-- Section Commandes Vocales & Capacités LLM -->
+        <section class="voice-commands-section" id="voice-commands">
+            <h2 class="section-title" data-i18n="commandsTitle">Exemples de Commandes Vocales & Intentions</h2>
+            <p class="section-subtitle" data-i18n="commandsSubtitle">
+                Parlez naturellement. Le routeur sémantique local de Libertide comprend vos intentions, élimine les hésitations et pilote votre ordinateur pas à pas.
+            </p>
+
+            <div class="commands-grid">
+                <!-- Catégorie 1 : Planification & Rappels -->
+                <div class="command-card">
+                    <div class="command-card-header">
+                        <span class="command-card-icon">⏰</span>
+                        <div>
+                            <h3 data-i18n="cmdScheduleTitle">Minuteurs, Rappels & Cronjobs</h3>
+                            <span class="command-badge" data-i18n="cmdBadgeSchedule">Temporel & Différé</span>
+                        </div>
+                    </div>
+                    <p class="command-desc" data-i18n="cmdScheduleDesc">
+                        Programmez des actions futures ou des alertes médicales précises sans quitter votre activité.
+                    </p>
+                    <ul class="command-examples" data-i18n="cmdScheduleList">
+                        <li>« <em>Dans 5 minutes, rappelle-moi d'éteindre le four</em> »</li>
+                        <li>« <em>Rappelle-moi de prendre mes médicaments dans 1 heure</em> »</li>
+                        <li>« <em>Minuteur de 12 minutes pour le thé</em> »</li>
+                        <li>« <em>Toutes les 30 minutes, rappelle-moi de m'hydrater</em> »</li>
+                        <li>« <em>Annule tous les minuteurs actifs</em> »</li>
+                    </ul>
+                </div>
+
+                <!-- Catégorie 2 : Multimédia, Radios & Volume -->
+                <div class="command-card">
+                    <div class="command-card-header">
+                        <span class="command-card-icon">📻</span>
+                        <div>
+                            <h3 data-i18n="cmdRadioTitle">Radios en Direct, Vidéos & Audio</h3>
+                            <span class="command-badge" data-i18n="cmdBadgeMedia">Flux & Média</span>
+                        </div>
+                    </div>
+                    <p class="command-desc" data-i18n="cmdRadioDesc">
+                        Accédez directement aux directs et vidéos sans vous perdre dans les bannières cookies.
+                    </p>
+                    <ul class="command-examples" data-i18n="cmdRadioList">
+                        <li>« <em>Mets France Inter en direct</em> » ou « <em>Mets une station de radio</em> »</li>
+                        <li>« <em>Lance une vidéo relaxante sur YouTube</em> »</li>
+                        <li>« <em>Mets le son</em> » ou « <em>Baisse le volume d'un cran</em> »</li>
+                        <li>« <em>Silence</em> » ou « <em>Mute</em> » <small>(coupe les sons externes tout en conservant la voix de Libertide)</small></li>
+                        <li>« <em>Ouvre la boîte à rythme</em> » <small>(instrument musical adapté)</small></li>
+                    </ul>
+                </div>
+
+                <!-- Catégorie 3 : Navigation Web & Synthèse -->
+                <div class="command-card">
+                    <div class="command-card-header">
+                        <span class="command-card-icon">🌐</span>
+                        <div>
+                            <h3 data-i18n="cmdWebTitle">Navigation Web & Lecture Intelligente</h3>
+                            <span class="command-badge" data-i18n="cmdBadgeWeb">Exploration Web</span>
+                        </div>
+                    </div>
+                    <p class="command-desc" data-i18n="cmdWebDesc">
+                        Recherche Google, validation automatique des cookies et extraction synthétique du contenu.
+                    </p>
+                    <ul class="command-examples" data-i18n="cmdWebList">
+                        <li>« <em>Quelle est la météo à Lyon aujourd'hui ?</em> »</li>
+                        <li>« <em>Trouve un billet de train pour Marseille</em> »</li>
+                        <li>« <em>De quoi parle cet article ? Fais-moi un résumé</em> »</li>
+                        <li>« <em>Accepte les cookies et descends dans la page</em> »</li>
+                        <li>« <em>Page précédente</em> » ou « <em>Ferme cet onglet</em> »</li>
+                    </ul>
+                </div>
+
+                <!-- Catégorie 4 : Domotique & Scénarios Médicaux -->
+                <div class="command-card">
+                    <div class="command-card-header">
+                        <span class="command-card-icon">🏠</span>
+                        <div>
+                            <h3 data-i18n="cmdHomeTitle">Chambre Médicalisée & Domotique Locale</h3>
+                            <span class="command-badge" data-i18n="cmdBadgeHome">KNX / BACnet / HASS</span>
+                        </div>
+                    </div>
+                    <p class="command-desc" data-i18n="cmdHomeDesc">
+                        Contrôle direct de l'environnement physique et activation de macro-scénarios en 1 geste oral.
+                    </p>
+                    <ul class="command-examples" data-i18n="cmdHomeList">
+                        <li>« <em>Mode sommeil</em> » <small>(lit à plat, volets fermés, lumières éteintes, PC verrouillé)</small></li>
+                        <li>« <em>Mode repas / travail</em> » <small>(tête du lit relevée, éclairage de travail, fenêtre centrée)</small></li>
+                        <li>« <em>Allume la lumière de la chambre</em> »</li>
+                        <li>« <em>Ouvre les volets à moitié</em> »</li>
+                        <li>« <em>Règle le chauffage sur 21 degrés</em> »</li>
+                    </ul>
+                </div>
+
+                <!-- Catégorie 5 : Vision & Analyse VLM (Qwen2-VL) -->
+                <div class="command-card">
+                    <div class="command-card-header">
+                        <span class="command-card-icon">👁️</span>
+                        <div>
+                            <h3 data-i18n="cmdVisionTitle">Vision Multimodale & Lecture de Documents</h3>
+                            <span class="command-badge" data-i18n="cmdBadgeVlm">VLM 100% Local</span>
+                        </div>
+                    </div>
+                    <p class="command-desc" data-i18n="cmdVisionDesc">
+                        Compréhension spatiale, détection d'icônes, lecture de graphiques et formulaires administratifs.
+                    </p>
+                    <ul class="command-examples" data-i18n="cmdVisionList">
+                        <li>« <em>Que vois-tu à l'écran ?</em> »</li>
+                        <li>« <em>Décris l'image jointe avec des repères spatiaux</em> »</li>
+                        <li>« <em>Lis cette attestation de droits CPAM / France Travail en PDF</em> »</li>
+                        <li>« <em>Qu'y a-t-il d'écrit sur ce schéma ou ce graphique ?</em> »</li>
+                        <li>« <em>Lis le texte manuscrit ou le captcha affiché</em> »</li>
+                    </ul>
+                </div>
+
+                <!-- Catégorie 6 : Pilotage Sans Souris & Accessibilité -->
+                <div class="command-card">
+                    <div class="command-card-header">
+                        <span class="command-card-icon">🎯</span>
+                        <div>
+                            <h3 data-i18n="cmdA11yTitle">Pilotage Numéroté, Dictée & Contacteur</h3>
+                            <span class="command-badge" data-i18n="cmdBadgeA11y">Zéro Précision Requise</span>
+                        </div>
+                    </div>
+                    <p class="command-desc" data-i18n="cmdA11yDesc">
+                        Contrôle total au contacteur unique, à la voix ou avec des tremblements sévères.
+                    </p>
+                    <ul class="command-examples" data-i18n="cmdA11yList">
+                        <li>« <em>Clique 4</em> » ou « <em>Clique sur Connexion</em> »</li>
+                        <li>« <em>Mode contacteur</em> » ou « <em>Mode survol</em> »</li>
+                        <li>« <em>Active la dictée vocale</em> » ➔ « <em>À la ligne</em> », « <em>Efface le mot</em> »</li>
+                        <li>« <em>Ouvre le clavier virtuel</em> » ou « <em>Affiche la grille CAA</em> »</li>
+                        <li>« <em>Focus sur le Bloc-notes et écris bonjour</em> »</li>
+                    </ul>
+                </div>
+
+                <!-- Catégorie 7 : Twitch, Réseaux & Fenêtrage -->
+                <div class="command-card">
+                    <div class="command-card-header">
+                        <span class="command-card-icon">💬</span>
+                        <div>
+                            <h3 data-i18n="cmdTwitchTitle">Twitch Chat & Espace de Travail</h3>
+                            <span class="command-badge" data-i18n="cmdBadgeTwitch">Social & Fenêtres</span>
+                        </div>
+                    </div>
+                    <p class="command-desc" data-i18n="cmdTwitchDesc">
+                        Suivi du chat vocal Twitch en direct et organisation ergonomique des fenêtres d'écran.
+                    </p>
+                    <ul class="command-examples" data-i18n="cmdTwitchList">
+                        <li>« <em>Ouvre le chat de ZeratoR sur Twitch</em> » <small>(lecture TTS en direct)</small></li>
+                        <li>« <em>Rejoins le live de Kamet0</em> »</li>
+                        <li>« <em>Mets cette fenêtre à gauche et le navigateur à droite</em> »</li>
+                        <li>« <em>Plein écran</em> » ou « <em>Affiche la fenêtre Discord</em> »</li>
+                        <li>« <em>Annule</em> » <small>(reviens en arrière sur la dernière action)</small></li>
+                    </ul>
+                </div>
+
+                <!-- Catégorie 8 : Compagnon Bienveillant & Éthique -->
+                <div class="command-card">
+                    <div class="command-card-header">
+                        <span class="command-card-icon">🤝</span>
+                        <div>
+                            <h3 data-i18n="cmdCompanionTitle">Compagnon Présent & Réconfort</h3>
+                            <span class="command-badge" data-i18n="cmdBadgeCompanion">Écoute Active</span>
+                        </div>
+                    </div>
+                    <p class="command-desc" data-i18n="cmdCompanionDesc">
+                        Un assistant vivant, lucide, chaleureux et respectueux qui ne vous laisse jamais seul.
+                    </p>
+                    <ul class="command-examples" data-i18n="cmdCompanionList">
+                        <li>« <em>Tu m'entends ?</em> » ➔ Réponse chaleureuse immédiate</li>
+                        <li>« <em>Je me sens un peu fatigué aujourd'hui</em> »</li>
+                        <li>« <em>Raconte-moi une anecdote étonnante sur l'espace</em> »</li>
+                        <li>« <em>Change de voix</em> » ou « <em>Active la voix clonée</em> »</li>
+                        <li>« <em>Active le contraste élevé</em> » ou « <em>Grossis le texte</em> »</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
     </main>
 
     <footer>
@@ -660,6 +934,41 @@
             shot2: "Clavier virtuel et instrument musical",
             shot3: "Paramètres LLM",
             shot4: "Paramètres d'accessibilité",
+            shot5: "Chat Twitch",
+            commandsTitle: "Exemples de Commandes Vocales & Intentions",
+            commandsSubtitle: "Parlez naturellement. Le routeur sémantique local de Libertide comprend vos intentions, élimine les hésitations et pilote votre ordinateur pas à pas.",
+            cmdScheduleTitle: "Minuteurs, Rappels & Cronjobs",
+            cmdBadgeSchedule: "Temporel & Différé",
+            cmdScheduleDesc: "Programmez des actions futures ou des alertes médicales précises sans quitter votre activité.",
+            cmdScheduleList: "<li>« <em>Dans 5 minutes, rappelle-moi d'éteindre le four</em> »</li><li>« <em>Rappelle-moi de prendre mes médicaments dans 1 heure</em> »</li><li>« <em>Minuteur de 12 minutes pour le thé</em> »</li><li>« <em>Toutes les 30 minutes, rappelle-moi de m'hydrater</em> »</li><li>« <em>Annule tous les minuteurs actifs</em> »</li>",
+            cmdRadioTitle: "Radios en Direct, Vidéos & Audio",
+            cmdBadgeMedia: "Flux & Média",
+            cmdRadioDesc: "Accédez directement aux directs et vidéos sans vous perdre dans les bannières cookies.",
+            cmdRadioList: "<li>« <em>Mets France Inter en direct</em> » ou « <em>Mets une station de radio</em> »</li><li>« <em>Lance une vidéo relaxante sur YouTube</em> »</li><li>« <em>Mets le son</em> » ou « <em>Baisse le volume d'un cran</em> »</li><li>« <em>Silence</em> » ou « <em>Mute</em> » <small>(coupe les sons externes tout en conservant la voix de Libertide)</small></li><li>« <em>Ouvre la boîte à rythme</em> » <small>(instrument musical adapté)</small></li>",
+            cmdWebTitle: "Navigation Web & Lecture Intelligente",
+            cmdBadgeWeb: "Exploration Web",
+            cmdWebDesc: "Recherche Google, validation automatique des cookies et extraction synthétique du contenu.",
+            cmdWebList: "<li>« <em>Quelle est la météo à Lyon aujourd'hui ?</em> »</li><li>« <em>Trouve un billet de train pour Marseille</em> »</li><li>« <em>De quoi parle cet article ? Fais-moi un résumé</em> »</li><li>« <em>Accepte les cookies et descends dans la page</em> »</li><li>« <em>Page précédente</em> » ou « <em>Ferme cet onglet</em> »</li>",
+            cmdHomeTitle: "Chambre Médicalisée & Domotique Locale",
+            cmdBadgeHome: "KNX / BACnet / HASS",
+            cmdHomeDesc: "Contrôle direct de l'environnement physique et activation de macro-scénarios en 1 geste oral.",
+            cmdHomeList: "<li>« <em>Mode sommeil</em> » <small>(lit à plat, volets fermés, lumières éteintes, PC verrouillé)</small></li><li>« <em>Mode repas / travail</em> » <small>(tête du lit relevée, éclairage de travail, fenêtre centrée)</small></li><li>« <em>Allume la lumière de la chambre</em> »</li><li>« <em>Ouvre les volets à moitié</em> »</li><li>« <em>Règle le chauffage sur 21 degrés</em> »</li>",
+            cmdVisionTitle: "Vision Multimodale & Lecture de Documents",
+            cmdBadgeVlm: "VLM 100% Local",
+            cmdVisionDesc: "Compréhension spatiale, détection d'icônes, lecture de graphiques et formulaires administratifs.",
+            cmdVisionList: "<li>« <em>Que vois-tu à l'écran ?</em> »</li><li>« <em>Décris l'image jointe avec des repères spatiaux</em> »</li><li>« <em>Lis cette attestation de droits CPAM / France Travail en PDF</em> »</li><li>« <em>Qu'y a-t-il d'écrit sur ce schéma ou ce graphique ?</em> »</li><li>« <em>Lis le texte manuscrit ou le captcha affiché</em> »</li>",
+            cmdA11yTitle: "Pilotage Numéroté, Dictée & Contacteur",
+            cmdBadgeA11y: "Zéro Précision Requise",
+            cmdA11yDesc: "Contrôle total au contacteur unique, à la voix ou avec des tremblements sévères.",
+            cmdA11yList: "<li>« <em>Clique 4</em> » ou « <em>Clique sur Connexion</em> »</li><li>« <em>Mode contacteur</em> » ou « <em>Mode survol</em> »</li><li>« <em>Active la dictée vocale</em> » ➔ « <em>À la ligne</em> », « <em>Efface le mot</em> »</li><li>« <em>Ouvre le clavier virtuel</em> » ou « <em>Affiche la grille CAA</em> »</li><li>« <em>Focus sur le Bloc-notes et écris bonjour</em> »</li>",
+            cmdTwitchTitle: "Twitch Chat & Espace de Travail",
+            cmdBadgeTwitch: "Social & Fenêtres",
+            cmdTwitchDesc: "Suivi du chat vocal Twitch en direct et organisation ergonomique des fenêtres d'écran.",
+            cmdTwitchList: "<li>« <em>Ouvre le chat de ZeratoR sur Twitch</em> » <small>(lecture TTS en direct)</small></li><li>« <em>Rejoins le live de Kamet0</em> »</li><li>« <em>Mets cette fenêtre à gauche et le navigateur à droite</em> »</li><li>« <em>Plein écran</em> » ou « <em>Affiche la fenêtre Discord</em> »</li><li>« <em>Annule</em> » <small>(reviens en arrière sur la dernière action)</small></li>",
+            cmdCompanionTitle: "Compagnon Présent & Réconfort",
+            cmdBadgeCompanion: "Écoute Active",
+            cmdCompanionDesc: "Un assistant vivant, lucide, chaleureux et respectueux qui ne vous laisse jamais seul.",
+            cmdCompanionList: "<li>« <em>Tu m'entends ?</em> » ➔ Réponse chaleureuse immédiate</li><li>« <em>Je me sens un peu fatigué aujourd'hui</em> »</li><li>« <em>Raconte-moi une anecdote étonnante sur l'espace</em> »</li><li>« <em>Change de voix</em> » ou « <em>Active la voix clonée</em> »</li><li>« <em>Active le contraste élevé</em> » ou « <em>Grossis le texte</em> »</li>",
             privacyTitle: "🔒 Confidentialité Médicale & Zéro Dépendance",
             privacyDesc: "Libertide est distribué sous licence libre. La reconnaissance vocale (Whisper) et les modèles de langage locaux tournent directement sur votre machine pour préserver le secret médical et votre vie privée.",
             feedbackTitle: "Votre avis nous intéresse",
@@ -700,6 +1009,41 @@
             shot2: "Virtual Keyboard & Musical Instrument",
             shot3: "LLM Settings",
             shot4: "Accessibility Settings",
+            shot5: "Twitch Chat",
+            commandsTitle: "Voice Commands & Natural Intent Examples",
+            commandsSubtitle: "Speak naturally. Libertide's on-device semantic router interprets your intent, filters hesitations, and controls your computer seamlessly.",
+            cmdScheduleTitle: "Timers, Reminders & Cronjobs",
+            cmdBadgeSchedule: "Time & Scheduling",
+            cmdScheduleDesc: "Schedule future actions or essential medical alerts without leaving your current workspace.",
+            cmdScheduleList: "<li>“<em>In 5 minutes, remind me to turn off the oven</em>”</li><li>“<em>Remind me to take my medicine in 1 hour</em>”</li><li>“<em>Set a 12-minute timer for tea</em>”</li><li>“<em>Remind me to hydrate every 30 minutes</em>”</li><li>“<em>Cancel all active timers</em>”</li>",
+            cmdRadioTitle: "Live Radios, Streams & Audio",
+            cmdBadgeMedia: "Media & Audio",
+            cmdRadioDesc: "Instant access to live radio streams and videos without getting trapped in cookie popups.",
+            cmdRadioList: "<li>“<em>Play BBC Radio 1 live</em>” or “<em>Play a radio station</em>”</li><li>“<em>Play a relaxing YouTube video</em>”</li><li>“<em>Unmute sound</em>” or “<em>Turn the volume down one notch</em>”</li><li>“<em>Silence</em>” or “<em>Mute</em>” <small>(mutes external audio while keeping Libertide's voice active)</small></li><li>“<em>Open drum machine</em>” <small>(adapted virtual instrument)</small></li>",
+            cmdWebTitle: "Web Browsing & Smart Summaries",
+            cmdBadgeWeb: "Web Exploration",
+            cmdWebDesc: "Google search, automatic cookie consent bypass, and contextual page summarization.",
+            cmdWebList: "<li>“<em>What is the weather in London today?</em>”</li><li>“<em>Find a train ticket to Edinburgh</em>”</li><li>“<em>What is this article about? Give me a summary</em>”</li><li>“<em>Accept cookies and scroll down</em>”</li><li>“<em>Previous page</em>” or “<em>Close this tab</em>”</li>",
+            cmdHomeTitle: "Hospital Bed & Smart Home Automation",
+            cmdBadgeHome: "KNX / BACnet / HASS",
+            cmdHomeDesc: "Direct environmental control and compound automation macros with a single voice command.",
+            cmdHomeList: "<li>“<em>Sleep mode</em>” <small>(flat bed, closed blinds, lights off, PC locked)</small></li><li>“<em>Meal / Work mode</em>” <small>(elevated backrest, task lighting, centered window)</small></li><li>“<em>Turn on bedroom lights</em>”</li><li>“<em>Open blinds halfway</em>”</li><li>“<em>Set thermostat to 21 degrees</em>”</li>",
+            cmdVisionTitle: "Multimodal Vision & Document OCR",
+            cmdBadgeVlm: "100% Local VLM",
+            cmdVisionDesc: "Spatial reasoning, icon detection, chart reading, and administrative form processing.",
+            cmdVisionList: "<li>“<em>What do you see on my screen?</em>”</li><li>“<em>Describe the attached image with spatial landmarks</em>”</li><li>“<em>Read this medical / insurance statement in PDF</em>”</li><li>“<em>What is written on this diagram or chart?</em>”</li><li>“<em>Read the handwritten text or captcha</em>”</li>",
+            cmdA11yTitle: "Numbered Badges, Dictation & Switch",
+            cmdBadgeA11y: "Zero Precision Needed",
+            cmdA11yDesc: "Full control using single switches, voice triggers, or severe tremor compensation.",
+            cmdA11yList: "<li>“<em>Click 4</em>” or “<em>Click Login</em>”</li><li>“<em>Switch access mode</em>” or “<em>Dwell click mode</em>”</li><li>“<em>Start voice dictation</em>” ➔ “<em>New line</em>”, “<em>Delete word</em>”</li><li>“<em>Open virtual keyboard</em>” or “<em>Show AAC grid</em>”</li><li>“<em>Focus Notepad and type hello</em>”</li>",
+            cmdTwitchTitle: "Twitch Chat & Window Management",
+            cmdBadgeTwitch: "Social & Layout",
+            cmdTwitchDesc: "Real-time Twitch audio chat synthesis and adaptive on-screen window management.",
+            cmdTwitchList: "<li>“<em>Open Shroud's Twitch chat</em>” <small>(live TTS read-aloud)</small></li><li>“<em>Join stream</em>”</li><li>“<em>Tile this window to the left and browser to the right</em>”</li><li>“<em>Fullscreen</em>” or “<em>Bring Discord to front</em>”</li><li>“<em>Undo</em>” <small>(revert last action)</small></li>",
+            cmdCompanionTitle: "Supportive AI Companion",
+            cmdBadgeCompanion: "Active Listening",
+            cmdCompanionDesc: "A warm, lucid, empathetic assistant that keeps you company and offers real-time support.",
+            cmdCompanionList: "<li>“<em>Can you hear me?</em>” ➔ Immediate warm response</li><li>“<em>I am feeling a bit tired today</em>”</li><li>“<em>Tell me an interesting fact about space</em>”</li><li>“<em>Change voice</em>” or “<em>Activate cloned voice</em>”</li><li>“<em>Turn on high contrast</em>” or “<em>Increase text size</em>”</li>",
             privacyTitle: "🔒 Medical-Grade Privacy & Zero Cloud Lock-In",
             privacyDesc: "Libertide is released under an open-source license. Speech recognition (Whisper) and local language models run entirely on-device to safeguard patient privacy.",
             feedbackTitle: "We Value Your Feedback",
@@ -740,6 +1084,41 @@
             shot2: "Virtuelle Tastatur & Musikinstrument",
             shot3: "LLM-Einstellungen",
             shot4: "Barrierefreiheits-Einstellungen",
+            shot5: "Twitch-Chat",
+            commandsTitle: "Beispiele für Sprachbefehle & Absichten",
+            commandsSubtitle: "Sprechen Sie ganz natürlich. Der lokale semantische Router von Libertide erkennt Ihre Absichten, ignoriert Zögern und steuert Ihren PC präzise.",
+            cmdScheduleTitle: "Timer, Erinnerungen & Cronjobs",
+            cmdBadgeSchedule: "Zeitgesteuert & Verzögert",
+            cmdScheduleDesc: "Planen Sie zukünftige Aktionen oder wichtige medizinische Alarme, ohne Ihre aktuelle Aufgabe zu unterbrechen.",
+            cmdScheduleList: "<li>„<em>Erinnere mich in 5 Minuten daran, den Ofen auszuschalten</em>“</li><li>„<em>Erinnere mich in 1 Stunde an meine Medikamente</em>“</li><li>„<em>12-Minuten-Timer für Tee stellen</em>“</li><li>„<em>Erinnere mich alle 30 Minuten ans Trinken</em>“</li><li>„<em>Alle aktiven Timer abbrechen</em>“</li>",
+            cmdRadioTitle: "Live-Radio, Videos & Audio",
+            cmdBadgeMedia: "Streaming & Medien",
+            cmdRadioDesc: "Direkter Zugriff auf Radiosender und Videos ohne störende Cookie-Banner.",
+            cmdRadioList: "<li>„<em>Deutschlandfunk live abspielen</em>“ oder „<em>Radiosender starten</em>“</li><li>„<em>Entspannungsvideo auf YouTube abspielen</em>“</li><li>„<em>Ton an</em>“ oder „<em>Lautstärke etwas senken</em>“</li><li>„<em>Ruhe</em>“ oder „<em>Mute</em>“ <small>(schaltet externe Töne stumm, behält Libertide-Stimme bei)</small></li><li>„<em>Drum-Machine öffnen</em>“ <small>(barrierefreies Musikinstrument)</small></li>",
+            cmdWebTitle: "Web-Navigation & Intelligente Zusammenfassung",
+            cmdBadgeWeb: "Web-Navigation",
+            cmdWebDesc: "Google-Suche, automatische Cookie-Bestätigung und präzise Inhaltszusammenfassungen.",
+            cmdWebList: "<li>„<em>Wie ist das Wetter heute in Berlin?</em>“</li><li>„<em>Zugticket nach München suchen</em>“</li><li>„<em>Worum geht es in diesem Artikel? Fasse ihn zusammen</em>“</li><li>„<em>Cookies akzeptieren und nach unten scrollen</em>“</li><li>„<em>Vorherige Seite</em>“ oder „<em>Diesen Tab schließen</em>“</li>",
+            cmdHomeTitle: "Pflegebett & Lokale Hausautomation",
+            cmdBadgeHome: "KNX / BACnet / HASS",
+            cmdHomeDesc: "Direkte Steuerung Ihres Zimmers und Ausführen ganzer Szenarien mit nur einem Sprachbefehl.",
+            cmdHomeList: "<li>„<em>Schlafmodus</em>“ <small>(Bett flach, Rollläden zu, Licht aus, PC sperren)</small></li><li>„<em>Ess- und Arbeitsmodus</em>“ <small>(Kopfteil hoch, Arbeitslicht an, Fenster zentriert)</small></li><li>„<em>Zimmerlicht einschalten</em>“</li><li>„<em>Rollläden zur Hälfte öffnen</em>“</li><li>„<em>Heizung auf 21 Grad einstellen</em>“</li>",
+            cmdVisionTitle: "Multimodale Vision & Dokumentenanalyse",
+            cmdBadgeVlm: "100% Lokales VLM",
+            cmdVisionDesc: "Räumliches Verständnis, Symbolerkennung, Diagrammanalyse und Ausfüllen von Formularen.",
+            cmdVisionList: "<li>„<em>Was siehst du auf dem Bildschirm?</em>“</li><li>„<em>Beschreibe das Bild mit räumlichen Angaben</em>“</li><li>„<em>Lies dieses PDF-Dokument vor</em>“</li><li>„<em>Was steht in diesem Diagramm?</em>“</li><li>„<em>Lies den handgeschriebenen Text oder das Captcha</em>“</li>",
+            cmdA11yTitle: "Nummeriertes Zielen, Diktat & Taster",
+            cmdBadgeA11y: "Keine Präzision Erforderlich",
+            cmdA11yDesc: "Volle Kontrolle per Einzeltaster, Stimme oder bei starkem Tremor.",
+            cmdA11yList: "<li>„<em>Klick 4</em>“ oder „<em>Klicke auf Anmelden</em>“</li><li>„<em>Taster-Modus aktivieren</em>“ oder „<em>Verweilklick-Modus</em>“</li><li>„<em>Sprachdiktat starten</em>“ ➔ „<em>Neue Zeile</em>“, „<em>Wort löschen</em>“</li><li>„<em>Virtuelle Tastatur öffnen</em>“ oder „<em>UK-Tafel anzeigen</em>“</li><li>„<em>Fokus auf Editor und Hallo schreiben</em>“</li>",
+            cmdTwitchTitle: "Twitch-Chat & Fensterverwaltung",
+            cmdBadgeTwitch: "Social & Fenster",
+            cmdTwitchDesc: "Echtzeit-Sprachwiedergabe des Twitch-Chats und ergonomische Fensteranordnung.",
+            cmdTwitchList: "<li>„<em>Twitch-Chat von Gronkh öffnen</em>“ <small>(Live-TTS-Vorlesen)</small></li><li>„<em>Stream beitreten</em>“</li><li>„<em>Fenster links und Browser rechts anordnen</em>“</li><li>„<em>Vollbild</em>“ oder „<em>Discord-Fenster anzeigen</em>“</li><li>„<em>Rückgängig</em>“ <small>(letzte Aktion verwerfen)</small></li>",
+            cmdCompanionTitle: "Einfühlsamer Begleiter & Zuhörer",
+            cmdBadgeCompanion: "Aktives Zuhören",
+            cmdCompanionDesc: "Ein aufmerksamer, herzlicher und verlässlicher Assistent, der Ihnen stets zur Seite steht.",
+            cmdCompanionList: "<li>„<em>Hörst du mich?</em>“ ➔ Sofortige freundliche Antwort</li><li>„<em>Ich fühle mich heute etwas erschöpft</em>“</li><li>„<em>Erzähle mir eine spannende Anekdote über den Weltraum</em>“</li><li>„<em>Stimme wechseln</em>“ oder „<em>Klon-Stimme aktivieren</em>“</li><li>„<em>Hohen Kontrast aktivieren</em>“ oder „<em>Text vergrößern</em>“</li>",
             privacyTitle: "🔒 Medizinischer Datenschutz & Null Cloud-Abhängigkeit",
             privacyDesc: "Libertide steht unter freier Lizenz. Spracherkennung (Whisper) und lokale Sprachmodelle laufen vollständig auf Ihrem Rechner, um das Arztgeheimnis und Ihre Privatsphäre zu schützen.",
             feedbackTitle: "Ihre Meinung ist uns wichtig",
@@ -780,6 +1159,41 @@
             shot2: "Teclado virtual e instrumento musical",
             shot3: "Ajustes de LLM",
             shot4: "Ajustes de accesibilidad",
+            shot5: "Chat de Twitch",
+            commandsTitle: "Ejemplos de Comandos de Voz e Intenciones",
+            commandsSubtitle: "Hable con naturalidad. El enrutador semántico local de Libertide comprende sus intenciones, filtra las dudas y guía su ordenador paso a paso.",
+            cmdScheduleTitle: "Temporizadores, Recordatorios y Cronjobs",
+            cmdBadgeSchedule: "Temporal y Diferido",
+            cmdScheduleDesc: "Programe acciones futuras o avisos médicos precisos sin interrumpir su actividad.",
+            cmdScheduleList: "<li>«<em>En 5 minutos, recuérdame apagar el horno</em>»</li><li>«<em>Recuérdame tomar mis medicamentos en 1 hora</em>»</li><li>«<em>Temporizador de 12 minutos para el té</em>»</li><li>«<em>Recuérdame beber agua cada 30 minutos</em>»</li><li>«<em>Cancela todos los temporizadores activos</em>»</li>",
+            cmdRadioTitle: "Radios en Directo, Vídeos y Audio",
+            cmdBadgeMedia: "Emisión y Medios",
+            cmdRadioDesc: "Acceda al instante a transmisiones y vídeos sin complicaciones con las cookies.",
+            cmdRadioList: "<li>«<em>Pon Radio Nacional en directo</em>» o «<em>Pon una emisora de radio</em>»</li><li>«<em>Pon un vídeo relajante en YouTube</em>»</li><li>«<em>Activa el sonido</em>» o «<em>Baja el volumen un poco</em>»</li><li>«<em>Silencio</em>» o «<em>Mute</em>» <small>(silencia ruidos externos manteniendo la voz de Libertide)</small></li><li>«<em>Abre la caja de ritmos</em>» <small>(instrumento adaptado)</small></li>",
+            cmdWebTitle: "Navegación Web y Resúmenes Inteligentes",
+            cmdBadgeWeb: "Exploración Web",
+            cmdWebDesc: "Búsqueda en Google, omisión de banners de cookies y resúmenes automáticos del contenido.",
+            cmdWebList: "<li>«<em>¿Qué tiempo hace hoy en Madrid?</em>»</li><li>«<em>Busca un billete de tren a Barcelona</em>»</li><li>«<em>¿De qué trata este artículo? Hazme un resumen</em>»</li><li>«<em>Acepta las cookies y baja en la página</em>»</li><li>«<em>Página anterior</em>» o «<em>Cierra esta pestaña</em>»</li>",
+            cmdHomeTitle: "Cama Articulada y Domótica Local",
+            cmdBadgeHome: "KNX / BACnet / HASS",
+            cmdHomeDesc: "Control directo del entorno físico y ejecución de rutinas completas con un único comando.",
+            cmdHomeList: "<li>«<em>Modo dormir</em>» <small>(cama horizontal, persianas bajadas, luces apagadas, PC bloqueado)</small></li><li>«<em>Modo comer / trabajar</em>» <small>(respaldo elevado, iluminación de trabajo, ventana centrada)</small></li><li>«<em>Enciende la luz de la habitación</em>»</li><li>«<em>Abre las persianas a la mitad</em>»</li><li>«<em>Pon la calefacción a 21 grados</em>»</li>",
+            cmdVisionTitle: "Visión Multimodal y Lectura de Documentos",
+            cmdBadgeVlm: "VLM 100% Local",
+            cmdVisionDesc: "Comprensión visual, detección de iconos, interpretación de gráficos y formularios en PDF.",
+            cmdVisionList: "<li>«<em>¿Qué ves en pantalla?</em>»</li><li>«<em>Describe la imagen adjunta con referencias espaciales</em>»</li><li>«<em>Lee este informe médico en PDF</em>»</li><li>«<em>¿Qué indica este gráfico?</em>»</li><li>«<em>Lee el texto manuscrito o el captcha</em>»</li>",
+            cmdA11yTitle: "Control Numerado, Dictado y Conmutador",
+            cmdBadgeA11y: "Cero Precisión Requerida",
+            cmdA11yDesc: "Control absoluto con un solo pulsador, por voz o con temblores intensos.",
+            cmdA11yList: "<li>«<em>Haz clic en 4</em>» o «<em>Haz clic en Iniciar sesión</em>»</li><li>«<em>Modo conmutador</em>» o «<em>Modo fijación</em>»</li><li>«<em>Activa el dictado de voz</em>» ➔ «<em>Punto y aparte</em>», «<em>Borra la palabra</em>»</li><li>«<em>Abre el teclado virtual</em>» o «<em>Muestra el tablero CAA</em>»</li><li>«<em>Ve al Bloc de notas y escribe hola</em>»</li>",
+            cmdTwitchTitle: "Chat de Twitch y Organización de Ventanas",
+            cmdBadgeTwitch: "Social y Ventanas",
+            cmdTwitchDesc: "Lectura oral del chat de Twitch en vivo y distribución ágil de las ventanas en pantalla.",
+            cmdTwitchList: "<li>«<em>Abre el chat de Ibai en Twitch</em>» <small>(lectura TTS en directo)</small></li><li>«<em>Entra al directo</em>»</li><li>«<em>Pon esta ventana a la izquierda y el navegador a la derecha</em>»</li><li>«<em>Pantalla completa</em>» o «<em>Muestra Discord</em>»</li><li>«<em>Deshacer</em>» <small>(vuelve a la acción anterior)</small></li>",
+            cmdCompanionTitle: "Acompañamiento y Escucha Cercana",
+            cmdBadgeCompanion: "Escucha Activa",
+            cmdCompanionDesc: "Un asistente comprensivo, afectuoso y sereno que le acompaña permanentemente.",
+            cmdCompanionList: "<li>«<em>¿Me oyes?</em>» ➔ Respuesta inmediata y reconfortante</li><li>«<em>Hoy me siento algo cansado</em>»</li><li>«<em>Cuéntame una curiosidad sobre el universo</em>»</li><li>«<em>Cambia de voz</em>» o «<em>Activa la voz clonada</em>»</li><li>«<em>Activa el alto contraste</em>» o «<em>Aumenta el texto</em>»</li>",
             privacyTitle: "🔒 Privacidad Médica y Cero Dependencia Cloud",
             privacyDesc: "Libertide es de código abierto. El reconocimiento de voz (Whisper) y los modelos de lenguaje locales se ejecutan íntegramente en su equipo para proteger su privacidad.",
             feedbackTitle: "Su opinión nos importa",
@@ -820,6 +1234,41 @@
             shot2: "Tastiera virtuale e strumento musicale",
             shot3: "Impostazioni LLM",
             shot4: "Impostazioni di accessibilità",
+            shot5: "Chat di Twitch",
+            commandsTitle: "Esempi di Comandi Vocali e Intenzioni",
+            commandsSubtitle: "Parla in modo naturale. Il router semantico locale di Libertide interpreta le tue intenzioni, filtra le esitazioni e guida il computer passo dopo passo.",
+            cmdScheduleTitle: "Timer, Promemoria e Cronjob",
+            cmdBadgeSchedule: "Temporale e Differito",
+            cmdScheduleDesc: "Pianifica azioni future o promemoria sanitari essenziali senza interrompere ciò che stai facendo.",
+            cmdScheduleList: "<li>«<em>Tra 5 minuti ricordami di spegnere il forno</em>»</li><li>«<em>Ricordami di prendere i farmaci tra 1 ora</em>»</li><li>«<em>Imposta un timer di 12 minuti per il tè</em>»</li><li>«<em>Ricordami di bere acqua ogni 30 minuti</em>»</li><li>«<em>Annulla tutti i timer attivi</em>»</li>",
+            cmdRadioTitle: "Radio in Diretta, Video e Audio",
+            cmdBadgeMedia: "Media e Flussi",
+            cmdRadioDesc: "Ascolta trasmissioni e video all'istante senza doverti districare tra i banner dei cookie.",
+            cmdRadioList: "<li>«<em>Metti Radio Rai 1 in diretta</em>» o «<em>Fai partire una stazione radio</em>»</li><li>«<em>Avvia un video rilassante su YouTube</em>»</li><li>«<em>Riattiva l'audio</em>» o «<em>Abbassa il volume di un livello</em>»</li><li>«<em>Silenzio</em>» o «<em>Mute</em>» <small>(silenzia i suoni esterni mantenendo la voce guida di Libertide)</small></li><li>«<em>Apri la batteria elettronica</em>» <small>(strumento musicale accessibile)</small></li>",
+            cmdWebTitle: "Navigazione Web e Sintesi Intelligente",
+            cmdBadgeWeb: "Esplorazione Web",
+            cmdWebDesc: "Ricerche Google, bypass automatico dei cookie e riassunto contestuale del testo.",
+            cmdWebList: "<li>«<em>Che tempo fa oggi a Roma?</em>»</li><li>«<em>Cerca un biglietto del treno per Milano</em>»</li><li>«<em>Di cosa parla questo articolo? Riassumilo</em>»</li><li>«<em>Accetta i cookie e scorri verso il basso</em>»</li><li>«<em>Pagina precedente</em>» o «<em>Chiudi questa scheda</em>»</li>",
+            cmdHomeTitle: "Letto Ospedaliero e Domotica Locale",
+            cmdBadgeHome: "KNX / BACnet / HASS",
+            cmdHomeDesc: "Gestione diretta della stanza e macro-scenari automatizzati con un singolo comando vocale.",
+            cmdHomeList: "<li>«<em>Modalità riposo</em>» <small>(letto piatto, tapparelle chiuse, luci spente, PC bloccato)</small></li><li>«<em>Modalità pasto / lavoro</em>» <small>(schienale alzato, luce da lettura, finestra centrata)</small></li><li>«<em>Accendi la luce della camera</em>»</li><li>«<em>Apri le tapparelle a metà</em>»</li><li>«<em>Imposta il riscaldamento a 21 gradi</em>»</li>",
+            cmdVisionTitle: "Visione Multimodale e Lettura Documenti",
+            cmdBadgeVlm: "VLM 100% Locale",
+            cmdVisionDesc: "Comprensione spaziale, riconoscimento icone, interpretazione grafici e documenti sanitari in PDF.",
+            cmdVisionList: "<li>«<em>Cosa vedi sullo schermo?</em>»</li><li>«<em>Descrivi l'immagine con riferimenti spaziali</em>»</li><li>«<em>Leggi questo referto medico in PDF</em>»</li><li>«<em>Cosa c'è scritto in questo grafico?</em>»</li><li>«<em>Leggi il testo scritto a mano o il captcha</em>»</li>",
+            cmdA11yTitle: "Puntamento Numerato, Dettatura e Sensore",
+            cmdBadgeA11y: "Zero Precisione Richiesta",
+            cmdA11yDesc: "Controllo totale a sensore singolo, con la voce o in presenza di forti tremori.",
+            cmdA11yList: "<li>«<em>Clicca 4</em>» o «<em>Clicca su Accedi</em>»</li><li>«<em>Modalità sensore</em>» o «<em>Modalità sosta</em>»</li><li>«<em>Attiva la dettatura vocale</em>» ➔ «<em>A capo</em>», «<em>Cancella parola</em>»</li><li>«<em>Apri la tastiera virtuale</em>» o «<em>Mostra tabella CAA</em>»</li><li>«<em>Vai sul Blocco note e scrivi ciao</em>»</li>",
+            cmdTwitchTitle: "Chat Twitch e Gestione Finestre",
+            cmdBadgeTwitch: "Social e Finestre",
+            cmdTwitchDesc: "Sintesi vocale in tempo reale della chat di Twitch e organizzazione ordinata delle finestre.",
+            cmdTwitchList: "<li>«<em>Apri la chat di Twitch di Pow3r</em>» <small>(lettura vocale TTS dal vivo)</small></li><li>«<em>Entra nella diretta</em>»</li><li>«<em>Metti questa finestra a sinistra e il browser a destra</em>»</li><li>«<em>Schermo intero</em>» o «<em>Mostra Discord</em>»</li><li>«<em>Annulla</em>» <small>(ripristina lo stato precedente)</small></li>",
+            cmdCompanionTitle: "Compagno Empatico e Conforto",
+            cmdBadgeCompanion: "Ascolto Attivo",
+            cmdCompanionDesc: "Un assistente presente, rassicurante e discreto che non ti lascia mai solo.",
+            cmdCompanionList: "<li>«<em>Mi senti?</em>» ➔ Risposta immediata e calorosa</li><li>«<em>Oggi mi sento un po' stanco</em>»</li><li>«<em>Raccontami una curiosità sullo spazio</em>»</li><li>«<em>Cambia voce</em>» o «<em>Attiva la voce clonata</em>»</li><li>«<em>Attiva il contrasto elevato</em>» o «<em>Ingrandisci il testo</em>»</li>",
             privacyTitle: "🔒 Riservatezza Medica & Zero Dipendenza Cloud",
             privacyDesc: "Libertide è open source. Il riconoscimento vocale (Whisper) e i modelli linguistici locali girano interamente sul tuo dispositivo per garantire la privacy medica.",
             feedbackTitle: "La tua opinione è importante",
@@ -860,6 +1309,41 @@
             shot2: "仮想キーボード＆楽器演奏",
             shot3: "LLM（AI）設定",
             shot4: "アクセシビリティ設定",
+            shot5: "Twitchチャット",
+            commandsTitle: "音声コマンド・意図解釈の実例",
+            commandsSubtitle: "普段の言葉で話しかけてください。オンデバイスのセマンティックルーターが意図をくみ取り、言い淀みを補正してパソコンを直感的に操作します。",
+            cmdScheduleTitle: "タイマー・リマインダー・定時処理",
+            cmdBadgeSchedule: "時間管理・タイマー",
+            cmdScheduleDesc: "現在の作業を中断することなく、予定された動作や大切な服薬アラートを設定できます。",
+            cmdScheduleList: "<li>「<em>5分後にオーブンを止めるよう教えて</em>」</li><li>「<em>1時間後に薬の時間を知らせて</em>」</li><li>「<em>紅茶用に12分のタイマーをセット</em>」</li><li>「<em>30分ごとに水分補給を促して</em>」</li><li>「<em>動いているタイマーをすべて解除して</em>」</li>",
+            cmdRadioTitle: "ラジオ生放送・動画・サウンド",
+            cmdBadgeMedia: "配信・メディア",
+            cmdRadioDesc: "Cookieの確認画面などに煩わされることなく、生放送や動画を瞬時に再生します。",
+            cmdRadioList: "<li>「<em>NHKラジオ第1を流して</em>」または「<em>ラジオ局を再生</em>」</li><li>「<em>YouTubeでリラックスできる動画をつけて</em>」</li><li>「<em>音を出して</em>」または「<em>音量を一段下げて</em>」</li><li>「<em>静かに</em>」または「<em>ミュート</em>」 <small>(外部音のみ消音し、Libertideの案内音声は保持)</small></li><li>「<em>リズムマシンを開いて</em>」 <small>(アクセシブルな仮想楽器)</small></li>",
+            cmdWebTitle: "ウェブ閲覧＆AI要約",
+            cmdBadgeWeb: "Webブラウジング",
+            cmdWebDesc: "Google検索、同意バナーの自動処理、ページ全体の要点要約をすべて声で行えます。",
+            cmdWebList: "<li>「<em>今日の東京の天気は？</em>」</li><li>「<em>京都までの新幹線チケットを探して</em>」</li><li>「<em>この記事には何が書かれている？要約して</em>」</li><li>「<em>Cookieに同意して下にスクロール</em>」</li><li>「<em>前のページに戻る</em>」または「<em>このタブを閉じて</em>」</li>",
+            cmdHomeTitle: "介護ベッド＆スマートホーム連携",
+            cmdBadgeHome: "KNX / BACnet / HASS",
+            cmdHomeDesc: "声ひとことで室内環境を整え、電動介護ベッドや連動マクロを自在に実行。",
+            cmdHomeList: "<li>「<em>おやすみモード</em>」 <small>(ベッド水平、カーテン閉鎖、消灯、PCロック)</small></li><li>「<em>食事・作業モード</em>」 <small>(背もたれ起床、手元灯点灯、画面中央寄せ)</small></li><li>「<em>部屋の電気をつけて</em>」</li><li>「<em>カーテンを半分開けて</em>」</li><li>「<em>エアコンを21度に設定</em>」</li>",
+            cmdVisionTitle: "マルチモーダル視覚認識・書類読取",
+            cmdBadgeVlm: "100% ローカルVLM",
+            cmdVisionDesc: "空間把握、アイコン判別、グラフの読み取り、各種書類のOCRに対応。",
+            cmdVisionList: "<li>「<em>画面に何が映っている？</em>」</li><li>「<em>添付画像の配置を説明して</em>」</li><li>「<em>この医療書類（PDF）を読み上げて</em>」</li><li>「<em>この図表の数値は何を示している？</em>」</li><li>「<em>手書き文字やキャプチャを読んで</em>」</li>",
+            cmdA11yTitle: "番号指定クリック・音声入力・スイッチ",
+            cmdBadgeA11y: "精密操作不要",
+            cmdA11yDesc: "手元の震えや四肢麻痺があっても、ワンボタンスイッチや声だけで確実に入力。",
+            cmdA11yList: "<li>「<em>4番をクリック</em>」または「<em>ログインを押して</em>」</li><li>「<em>スイッチモード</em>」または「<em>滞留クリックモード</em>」</li><li>「<em>音声入力を開始</em>」 ➔ 「<em>改行</em>」「<em>一語削除</em>」</li><li>「<em>仮想キーボードを開いて</em>」または「<em>AACボードを表示</em>」</li><li>「<em>メモ帳を開いてこんにちはと入力</em>」</li>",
+            cmdTwitchTitle: "Twitchチャット読上＆ウィンドウ配置",
+            cmdBadgeTwitch: "配信チャット＆ウィンドウ",
+            cmdTwitchDesc: "Twitchチャットのリアルタイム音声読み上げや、画面上のウィンドウ整列をアシスト。",
+            cmdTwitchList: "<li>「<em>Twitchの配信チャットを開いて</em>」 <small>(TTSによるリアルタイム音声読上)</small></li><li>「<em>配信に参加して</em>」</li><li>「<em>このウィンドウを左に、ブラウザを右に並べて</em>」</li><li>「<em>全画面表示</em>」または「<em>Discordを表示</em>」</li><li>「<em>やり直し</em>」 <small>(直前の操作を取り消し)</small></li>",
+            cmdCompanionTitle: "寄り添うパートナーAI",
+            cmdBadgeCompanion: "傾聴・心のサポート",
+            cmdCompanionDesc: "常にそばで温かく話を聞き、安心感をもたらす心強いサポーター。",
+            cmdCompanionList: "<li>「<em>聞こえる？</em>」 ➔ 即座に温かく応答</li><li>「<em>今日は少し体が疲れたよ</em>」</li><li>「<em>宇宙についての面白い話を教えて</em>」</li><li>「<em>声を切り替えて</em>」または「<em>クローン音声を有効化</em>」</li><li>「<em>ハイコントラストをオン</em>」または「<em>文字を大きくして</em>」</li>",
             privacyTitle: "🔒 医療水準のプライバシー保護・クラウド依存ゼロ",
             privacyDesc: "Libertideはオープンソースです。音声認識（Whisper）やローカルLLMは端末内で直接動作し、患者情報やプライバシーを徹底的に保護します。",
             feedbackTitle: "ご意見・フィードバックをお待ちしています",
@@ -900,6 +1384,41 @@
             shot2: "Teclado virtual e instrumento musical",
             shot3: "Configurações de LLM",
             shot4: "Configurações de acessibilidade",
+            shot5: "Chat da Twitch",
+            commandsTitle: "Exemplos de Comandos de Voz e Intenções",
+            commandsSubtitle: "Fale com naturalidade. O roteador semântico local do Libertide interpreta as suas intenções, ignora hesitações e conduz o computador passo a passo.",
+            cmdScheduleTitle: "Temporizadores, Lembretes e Cronjobs",
+            cmdBadgeSchedule: "Agendamento e Prazos",
+            cmdScheduleDesc: "Programe tarefas futuras ou avisos de medicação sem precisar interromper a sua atividade.",
+            cmdScheduleList: "<li>«<em>Em 5 minutos, lembra-me de desligar o forno</em>»</li><li>«<em>Lembra-me de tomar os remédios daqui a 1 hora</em>»</li><li>«<em>Temporizador de 12 minutos para o chá</em>»</li><li>«<em>A cada 30 minutos, lembra-me de beber água</em>»</li><li>«<em>Cancela todos os temporizadores ativos</em>»</li>",
+            cmdRadioTitle: "Rádios ao Vivo, Vídeos e Áudio",
+            cmdBadgeMedia: "Fluxos e Mídia",
+            cmdRadioDesc: "Acesse transmissões e vídeos de imediato sem se deparar com barreiras de cookies.",
+            cmdRadioList: "<li>«<em>Toca a Antena 1 ao vivo</em>» ou «<em>Liga uma estação de rádio</em>»</li><li>«<em>Coloca um vídeo relaxante no YouTube</em>»</li><li>«<em>Ativa o som</em>» ou «<em>Diminui o volume um ponto</em>»</li><li>«<em>Silêncio</em>» ou «<em>Mute</em>» <small>(silencia sons externos mantendo a voz do Libertide ativa)</small></li><li>«<em>Abre a bateria eletrônica</em>» <small>(instrumento adaptado)</small></li>",
+            cmdWebTitle: "Navegação Web e Resumos Inteligentes",
+            cmdBadgeWeb: "Navegação Web",
+            cmdWebDesc: "Buscas no Google, aceitação automática de cookies e resumos automáticos do conteúdo.",
+            cmdWebList: "<li>«<em>Como está o tempo em Lisboa hoje?</em>»</li><li>«<em>Encontra uma passagem de comboio para o Porto</em>»</li><li>«<em>Sobre o que é este artigo? Faz um resumo</em>»</li><li>«<em>Aceita os cookies e desce na página</em>»</li><li>«<em>Página anterior</em>» ou «<em>Fecha esta aba</em>»</li>",
+            cmdHomeTitle: "Cama Hospitalar e Domótica Local",
+            cmdBadgeHome: "KNX / BACnet / HASS",
+            cmdHomeDesc: "Comando total do quarto e automações integradas em um único pedido verbal.",
+            cmdHomeList: "<li>«<em>Modo dormir</em>» <small>(cama nivelada, persianas fechadas, luzes apagadas, PC bloqueado)</small></li><li>«<em>Modo refeição / trabalho</em>» <small>(cabeceira levantada, luz de trabalho, janela centralizada)</small></li><li>«<em>Acende a luz do quarto</em>»</li><li>«<em>Abre as persianas até a metade</em>»</li><li>«<em>Regula a temperatura para 21 graus</em>»</li>",
+            cmdVisionTitle: "Visão Multimodal e Leitura de Documentos",
+            cmdBadgeVlm: "VLM 100% Local",
+            cmdVisionDesc: "Compreensão espacial, detecção de botões, leitura de infográficos e guias em PDF.",
+            cmdVisionList: "<li>«<em>O que vês no ecrã?</em>»</li><li>«<em>Descreve esta imagem com referências de posição</em>»</li><li>«<em>Lê este laudo médico em PDF</em>»</li><li>«<em>O que está indicado neste gráfico?</em>»</li><li>«<em>Lê o texto manuscrito ou o captcha</em>»</li>",
+            cmdA11yTitle: "Controle Numerado, Ditado e Acionador",
+            cmdBadgeA11y: "Sem Precisão Milimétrica",
+            cmdA11yDesc: "Navegação por botão único, fala ou em situações de tremores intensos.",
+            cmdA11yList: "<li>«<em>Clica no 4</em>» ou «<em>Clica em Entrar</em>»</li><li>«<em>Modo acionador</em>» ou «<em>Modo de fixação</em>»</li><li>«<em>Ativa o ditado por voz</em>» ➔ «<em>Nova linha</em>», «<em>Apaga a palavra</em>»</li><li>«<em>Abre o teclado virtual</em>» ou «<em>Mostra a prancha CAA</em>»</li><li>«<em>Abre o Bloco de Notas e escreve olá</em>»</li>",
+            cmdTwitchTitle: "Chat da Twitch e Organização de Janelas",
+            cmdBadgeTwitch: "Social e Janelas",
+            cmdTwitchDesc: "Leitura sintetizada do chat da Twitch e disposição organizada das janelas no monitor.",
+            cmdTwitchList: "<li>«<em>Abre o chat da Twitch do Alanzoka</em>» <small>(leitura por voz em tempo real)</small></li><li>«<em>Entra na transmissão</em>»</li><li>«<em>Coloca esta janela à esquerda e o navegador à direita</em>»</li><li>«<em>Tela cheia</em>» ou «<em>Mostra a janela do Discord</em>»</li><li>«<em>Desfazer</em>» <small>(anula a última ação)</small></li>",
+            cmdCompanionTitle: "Companheiro Atencioso e Acolhimento",
+            cmdBadgeCompanion: "Escuta Atenta",
+            cmdCompanionDesc: "Um parceiro prestativo, sensível e bem-humorado para estar sempre ao seu lado.",
+            cmdCompanionList: "<li>«<em>Estás a ouvir-me?</em>» ➔ Resposta acolhedora imediata</li><li>«<em>Sinto-me um pouco cansado hoje</em>»</li><li>«<em>Conta-me um fato curioso sobre o espaço</em>»</li><li>«<em>Muda de voz</em>» ou «<em>Ativa a voz clonada</em>»</li><li>«<em>Ativa o alto contraste</em>» ou «<em>Aumenta o texto</em>»</li>",
             privacyTitle: "🔒 Privacidade Médica e Sem Dependência de Nuvem",
             privacyDesc: "Libertide é software livre. O reconhecimento de voz (Whisper) e os modelos de linguagem locais rodam direto no computador para proteger sua privacidade.",
             feedbackTitle: "A sua opinião é importante",
@@ -940,6 +1459,41 @@
             shot2: "Виртуальная клавиатура и музыкальный инструмент",
             shot3: "Настройки LLM",
             shot4: "Настройки доступности",
+            shot5: "Чат Twitch",
+            commandsTitle: "Примеры голосовых команд и намерений",
+            commandsSubtitle: "Говорите свободно. Локальный семантический маршрутизатор Libertide распознает суть команд, убирает заминки и бережно управляет компьютером.",
+            cmdScheduleTitle: "Таймеры, напоминания и расписания",
+            cmdBadgeSchedule: "Время и отложенные действия",
+            cmdScheduleDesc: "Задавайте действия на будущее или медицинские напоминания, не отвлекаясь от текущего дела.",
+            cmdScheduleList: "<li>«<em>Через 5 минут напомни выключить плиту</em>»</li><li>«<em>Напомни принять таблетки через 1 час</em>»</li><li>«<em>Поставь таймер на 12 минут для чая</em>»</li><li>«<em>Каждые 30 минут напоминай выпить воды</em>»</li><li>«<em>Отмени все активные таймеры</em>»</li>",
+            cmdRadioTitle: "Прямой радиоэфир, видео и звук",
+            cmdBadgeMedia: "Медиа и потоки",
+            cmdRadioDesc: "Мгновенный доступ к любимым станциям и видео без блуждания по баннерам cookie.",
+            cmdRadioList: "<li>«<em>Включи радио в прямом эфире</em>» или «<em>Запусти радиостанцию</em>»</li><li>«<em>Включи успокаивающее видео на YouTube</em>»</li><li>«<em>Включи звук</em>» или «<em>Сделай немного тише</em>»</li><li>«<em>Тишина</em>» или «<em>Заглуши</em>» <small>(отключает внешние звуки, сохраняя голос ассистента)</small></li><li>«<em>Открой драм-машину</em>» <small>(адаптированный виртуальный инструмент)</small></li>",
+            cmdWebTitle: "Навигация в сети и быстрый анализ",
+            cmdBadgeWeb: "Веб-серфинг",
+            cmdWebDesc: "Поиск информации, автоматическое подтверждение cookie и краткое изложение статей.",
+            cmdWebList: "<li>«<em>Какая погода сегодня в Москве?</em>»</li><li>«<em>Найди билет на поезд до Санкт-Петербурга</em>»</li><li>«<em>О чем эта статья? Сделай краткое резюме</em>»</li><li>«<em>Прими cookie и прокрути страницу вниз</em>»</li><li>«<em>Предыдущая страница</em>» или «<em>Закрой эту вкладку</em>»</li>",
+            cmdHomeTitle: "Медицинская кровать и умный дом",
+            cmdBadgeHome: "KNX / BACnet / HASS",
+            cmdHomeDesc: "Управление освещением, приводами кровати и комбинированными сценариями одной фразой.",
+            cmdHomeList: "<li>«<em>Режим сна</em>» <small>(кровать ровно, шторы закрыты, свет выключен, ПК заблокирован)</small></li><li>«<em>Режим обеда / работы</em>» <small>(изголовье поднято, рабочий свет, окно по центру)</small></li><li>«<em>Включи свет в комнате</em>»</li><li>«<em>Открой жалюзи наполовину</em>»</li><li>«<em>Установи температуру на 21 градус</em>»</li>",
+            cmdVisionTitle: "Мультимодальное зрение и анализ документов",
+            cmdBadgeVlm: "100% Локальный VLM",
+            cmdVisionDesc: "Ориентация в пространстве окна, чтение графиков, распознавание значков и справок в PDF.",
+            cmdVisionList: "<li>«<em>Что сейчас на экране?</em>»</li><li>«<em>Опиши картинку с указанием расположения элементов</em>»</li><li>«<em>Прочитай эту медицинскую выписку в PDF</em>»</li><li>«<em>Что написано на этой схеме?</em>»</li><li>«<em>Прочитай рукописный текст или капчу</em>»</li>",
+            cmdA11yTitle: "Управление по номерам, диктовка и кнопка",
+            cmdBadgeA11y: "Точность не требуется",
+            cmdA11yDesc: "Полный контроль через одну кнопку-переключатель, голосом или при сильном треморе.",
+            cmdA11yList: "<li>«<em>Нажми 4</em>» или «<em>Нажми кнопку Войти</em>»</li><li>«<em>Режим переключателя</em>» или «<em>Режим фиксации взгляда</em>»</li><li>«<em>Включи диктовку</em>» ➔ «<em>С новой строки</em>», «<em>Удали слово</em>»</li><li>«<em>Открой экранную клавиатуру</em>» или «<em>Покажи сетку ААК</em>»</li><li>«<em>Перейди в Блокнот и напиши привет</em>»</li>",
+            cmdTwitchTitle: "Чат Twitch и окна",
+            cmdBadgeTwitch: "Общение и экраны",
+            cmdTwitchDesc: "Голосовое воспроизведение чата Twitch в реальном времени и эргономичная раскладка окон.",
+            cmdTwitchList: "<li>«<em>Открой чат стрима на Twitch</em>» <small>(голосовое чтение чата вслух)</small></li><li>«<em>Войди в трансляцию</em>»</li><li>«<em>Это окно слева, а браузер справа</em>»</li><li>«<em>На весь экран</em>» или «<em>Покажи окно Discord</em>»</li><li>«<em>Отмени</em>» <small>(возврат последнего действия)</small></li>",
+            cmdCompanionTitle: "Чуткий компаньон и поддержка",
+            cmdBadgeCompanion: "Активное слушание",
+            cmdCompanionDesc: "Живой, тактичный и дружелюбный собеседник, который всегда рядом.",
+            cmdCompanionList: "<li>«<em>Ты меня слышишь?</em>» ➔ Мгновенный теплый ответ</li><li>«<em>Я сегодня немного устал</em>»</li><li>«<em>Расскажи интересный факт о космосе</em>»</li><li>«<em>Смени голос</em>» или «<em>Включи клонированный голос</em>»</li><li>«<em>Включи высокую контрастность</em>» или «<em>Увеличь текст</em>»</li>",
             privacyTitle: "🔒 Медицинская конфиденциальность и нулевая зависимость от облака",
             privacyDesc: "Libertide распространяется под свободной лицензией. Распознавание речи (Whisper) и языковые модели работают локально на вашем ПК для защиты врачебной тайны.",
             feedbackTitle: "Ваш отзыв важен для нас",
@@ -980,6 +1534,41 @@
             shot2: "虚拟键盘与乐器演奏",
             shot3: "LLM 大模型设置",
             shot4: "无障碍辅助设置",
+            shot5: "Twitch 聊天室",
+            commandsTitle: "语音指令与自然意图范例",
+            commandsSubtitle: "自然交流即可。Libertide 本地语义路由器能敏锐理解您的真实意图、自动忽略停顿与口误，顺畅操作整台电脑。",
+            cmdScheduleTitle: "定时器、提醒事项与计划任务",
+            cmdBadgeSchedule: "时间与延时任务",
+            cmdScheduleDesc: "无需切出当前工作，随时安排后续动作或关键用药提醒。",
+            cmdScheduleList: "<li>“<em>5分钟后提醒我关火</em>”</li><li>“<em>1小时后提醒我按时服药</em>”</li><li>“<em>定一个12分钟的泡茶倒计时</em>”</li><li>“<em>每隔30分钟提醒我喝水</em>”</li><li>“<em>取消所有正在运行的定时器</em>”</li>",
+            cmdRadioTitle: "电台直播、音视频与音量",
+            cmdBadgeMedia: "流媒体与音频",
+            cmdRadioDesc: "一键直达电台直播与视频，彻底告别繁琐的 Cookie 弹窗干扰。",
+            cmdRadioList: "<li>“<em>播放广播电台直播</em>” 或 “<em>打开音乐电台</em>”</li><li>“<em>在 YouTube 播放一段舒缓放松的视频</em>”</li><li>“<em>开启声音</em>” 或 “<em>把音量调小一格</em>”</li><li>“<em>静音</em>” <small>(消除外部噪音，但完整保留 Libertide 语音播报)</small></li><li>“<em>打开节奏鼓机</em>” <small>(无障碍虚拟乐器演奏)</small></li>",
+            cmdWebTitle: "网页无障碍浏览与智能摘要",
+            cmdBadgeWeb: "网络浏览",
+            cmdWebDesc: "Google 智能搜索、Cookie 弹窗自动跳过以及长文章要点提取。",
+            cmdWebList: "<li>“<em>今天北京的天气怎么样？</em>”</li><li>“<em>查询去上海的高铁车票</em>”</li><li>“<em>这篇文章讲了什么？帮我做个摘要</em>”</li><li>“<em>同意 Cookie 并向下滚动页面</em>”</li><li>“<em>返回上一页</em>” 或 “<em>关闭当前标签页</em>”</li>",
+            cmdHomeTitle: "医用护理床与本地智能家居",
+            cmdBadgeHome: "KNX / BACnet / HASS",
+            cmdHomeDesc: "仅凭一句口令即可调节室内环境并联动护理床执行多步骤场景。",
+            cmdHomeList: "<li>“<em>睡眠模式</em>” <small>(床体放平、关闭窗帘、熄灭灯光、锁定电脑)</small></li><li>“<em>就餐/工作模式</em>” <small>(背板抬起、打开工作灯、窗口居中)</small></li><li>“<em>打开卧室顶灯</em>”</li><li>“<em>百叶窗打开一半</em>”</li><li>“<em>空调调至 21 度</em>”</li>",
+            cmdVisionTitle: "多模态视觉理解与文档识别",
+            cmdBadgeVlm: "100% 本地 VLM",
+            cmdVisionDesc: "空间相对位置推理、图标检索、图表分析及 PDF 医疗单据识别。",
+            cmdVisionList: "<li>“<em>屏幕上显示了什么内容？</em>”</li><li>“<em>结合方位描述这张配图中的各个要素</em>”</li><li>“<em>朗读这份 PDF 格式的体检报告单</em>”</li><li>“<em>这个趋势图上的数据表达了什么？</em>”</li><li>“<em>识别手写字迹或验证码内容</em>”</li>",
+            cmdA11yTitle: "编号点击、语音听写与单按键开关",
+            cmdBadgeA11y: "零精度要求",
+            cmdA11yDesc: "专为单开关按键、语音控制或严重手部震颤设计的全方位无障碍交互。",
+            cmdA11yList: "<li>“<em>点击 4</em>” 或 “<em>点击登录按钮</em>”</li><li>“<em>切换到开关控制模式</em>” 或 “<em>悬停点击模式</em>”</li><li>“<em>开启语音听写</em>” ➔ “<em>换行</em>”、“<em>删除刚才的词</em>”</li><li>“<em>打开虚拟键盘</em>” 或 “<em>显示 AAC 辅助沟通板</em>”</li><li>“<em>聚焦到记事本并输入你好</em>”</li>",
+            cmdTwitchTitle: "Twitch 弹幕朗读与窗口布局",
+            cmdBadgeTwitch: "社交与窗口管理",
+            cmdTwitchDesc: "实时将 Twitch 弹幕朗读为语音，并智能整理与排列屏幕窗口。",
+            cmdTwitchList: "<li>“<em>打开 Twitch 直播聊天室</em>” <small>(实时 TTS 语音念弹幕)</small></li><li>“<em>进入当前直播间</em>”</li><li>“<em>把这个窗口靠左，浏览器靠右并排</em>”</li><li>“<em>全屏显示</em>” 或 “<em>切换到 Discord 窗口</em>”</li><li>“<em>撤销操作</em>” <small>(回退上一步执行结果)</small></li>",
+            cmdCompanionTitle: "贴心陪伴与倾听助手",
+            cmdBadgeCompanion: "积极倾听",
+            cmdCompanionDesc: "随时随地陪伴在侧、温和清醒且富有人文关怀的知心伙伴。",
+            cmdCompanionList: "<li>“<em>你听得清我说话吗？</em>” ➔ 立即给予温暖回应</li><li>“<em>我今天感觉有点疲惫</em>”</li><li>“<em>给我讲一个有趣的太空科普冷知识</em>”</li><li>“<em>换一种声音</em>” 或 “<em>启用克隆音色</em>”</li><li>“<em>开启高对比度模式</em>” 或 “<em>放大界面文字</em>”</li>",
             privacyTitle: "🔒 医疗级隐私安全 & 零云端锁定",
             privacyDesc: "Libertide 以开源协议发布。语音识别 (Whisper) 和本地语言模型完全在本地运行，切实保护患者隐私与数据安全。",
             feedbackTitle: "欢迎提供宝贵意见",
@@ -1005,7 +1594,11 @@
 
         document.querySelectorAll('[data-i18n]').forEach(el => {
             const key = el.getAttribute('data-i18n');
-            if (t[key]) el.textContent = t[key];
+            if (t[key]) {
+                t[key].includes('<')
+                    ? el.innerHTML = t[key]
+                    : el.textContent = t[key];
+            }
         });
 
         const select = document.getElementById('lang-select');
