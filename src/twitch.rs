@@ -4,6 +4,19 @@ use std::time::Duration;
 use crate::current_time_str;
 use crate::types::{AgentEvent, TwitchChannelItem, TwitchMessage};
 
+const TWITCH_CLIENT_ID: &str = "kimne78kx3ncx6brgo4mv6wki5h1ko";
+const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+const TWITCH_DEVICE_ID: &str = "d3b07384d113edec49eaa6238ad5ff00";
+const TWITCH_SESSION_ID: &str = "5b23d9a1e0b54289";
+
+fn make_twitch_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(BROWSER_USER_AGENT)
+        .timeout(Duration::from_secs(6))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 pub fn spawn_twitch_worker(event_tx: Sender<AgentEvent>, channel_rx: Receiver<String>) {
     std::thread::spawn(move || {
         use std::io::{BufRead, BufReader, ErrorKind, Write};
@@ -124,52 +137,64 @@ pub async fn check_channels_live_details(channels: &[String]) -> HashMap<String,
     if channels.is_empty() {
         return map;
     }
+    let client = make_twitch_http_client();
 
-    let client = reqwest::Client::new();
-    let mut user_queries = String::new();
-    for (i, ch) in channels.iter().enumerate() {
-        let clean = ch.trim().to_lowercase().trim_start_matches('#').to_string();
-        if !clean.is_empty() {
-            user_queries.push_str(&format!(
-                r#"u{}: user(login: "{}") {{ login stream {{ id viewersCount title }} broadcastSettings {{ title }} }} "#,
-                i, clean
-            ));
+    // Découpage par blocs de 15 chaînes max pour respecter les limites de complexité GraphQL
+    for chunk in channels.chunks(15) {
+        let mut user_queries = String::new();
+        for (i, ch) in chunk.iter().enumerate() {
+            let clean = ch.trim().to_lowercase().trim_start_matches('#').to_string();
+            if !clean.is_empty() {
+                // Dans le schéma Twitch GQL, `stream` n'a PAS de champ `title` (le titre réside dans `broadcastSettings`)
+                user_queries.push_str(&format!(
+                    r#"u{}: user(login: "{}") {{ login displayName stream {{ id viewersCount }} broadcastSettings {{ title }} }} "#,
+                    i, clean
+                ));
+            }
         }
-    }
 
-    if user_queries.is_empty() {
-        return map;
-    }
+        if user_queries.is_empty() {
+            continue;
+        }
 
-    let gql_body = serde_json::json!({
-        "query": format!("query {{ {} }}", user_queries)
-    });
+        let gql_body = serde_json::json!({
+            "operationName": "GetLiveUsers",
+            "query": format!("query GetLiveUsers {{ {} }}", user_queries)
+        });
 
-    let res = client
-        .post("https://gql.twitch.tv/gql")
-        .header("Client-Id", "kimne78kx3ncx6brgo4mv6wki5h1ko")
-        .json(&gql_body)
-        .send()
-        .await;
+        let res = client
+            .post("https://gql.twitch.tv/gql")
+            .header("Client-Id", TWITCH_CLIENT_ID)
+            .header("Client-Session-Id", TWITCH_SESSION_ID)
+            .header("X-Device-Id", TWITCH_DEVICE_ID)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(&gql_body)
+            .send()
+            .await;
 
-    if let Ok(resp) = res {
-        if resp.status().is_success() {
-            if let Ok(v) = resp.json::<serde_json::Value>().await {
-                if let Some(data) = v.get("data").and_then(|d| d.as_object()) {
-                    for (_k, user_val) in data {
-                        let login = user_val.get("login").and_then(|s| s.as_str()).unwrap_or("").to_lowercase();
-                        let stream_val = user_val.get("stream");
-                        let is_live = stream_val.map_or(false, |s| !s.is_null() && s.get("id").is_some());
-                        let viewers = stream_val.and_then(|s| s.get("viewersCount")).and_then(|vc| vc.as_u64()).map(|n| n as u32);
-                        let title = stream_val
-                            .and_then(|s| s.get("title"))
-                            .and_then(|t| t.as_str())
-                            .or_else(|| user_val.get("broadcastSettings").and_then(|b| b.get("title")).and_then(|t| t.as_str()))
-                            .map(|s| s.to_string())
-                            .filter(|t| !t.trim().is_empty());
+        if let Ok(resp) = res {
+            if resp.status().is_success() {
+                if let Ok(v) = resp.json::<serde_json::Value>().await {
+                    if let Some(data) = v.get("data").and_then(|d| d.as_object()) {
+                        for (_k, user_val) in data {
+                            if user_val.is_null() {
+                                continue;
+                            }
+                            let login = user_val.get("login").and_then(|s| s.as_str()).unwrap_or("").to_lowercase();
+                            let stream_val = user_val.get("stream");
+                            let is_live = stream_val.map_or(false, |s| !s.is_null() && s.get("id").is_some());
+                            let viewers = stream_val.and_then(|s| s.get("viewersCount")).and_then(|vc| vc.as_u64()).map(|n| n as u32);
+                            let title = user_val
+                                .get("broadcastSettings")
+                                .and_then(|b| b.get("title"))
+                                .and_then(|t| t.as_str())
+                                .map(|s| s.to_string())
+                                .filter(|t| !t.trim().is_empty());
 
-                        if !login.is_empty() {
-                            map.insert(login, (is_live, viewers, title));
+                            if !login.is_empty() {
+                                map.insert(login, (is_live, viewers, title));
+                            }
                         }
                     }
                 }
@@ -181,34 +206,44 @@ pub async fn check_channels_live_details(channels: &[String]) -> HashMap<String,
 
 pub async fn search_twitch_channels(query: &str) -> Vec<TwitchChannelItem> {
     let clean = query.trim().trim_start_matches('#');
-    let client = reqwest::Client::new();
+    let client = make_twitch_http_client();
 
     if clean.is_empty() {
-        // Requête GraphQL Twitch pour récupérer les 20 streams actuellement en direct
+        // 1. Récupération des streams actuellement en direct sur Twitch
         let gql_body = serde_json::json!({
-            "query": r#"query { streams(first: 20) { edges { node { id viewersCount title broadcaster { login displayName profileImageURL(width: 70) } } } } }"#
+            "operationName": "TopStreams",
+            "query": "query TopStreams { streams(first: 30) { edges { node { id viewersCount broadcaster { id login displayName profileImageURL(width: 70) broadcastSettings { title } } } } } }"
         });
 
-        let res = client
+        if let Ok(resp) = client
             .post("https://gql.twitch.tv/gql")
-            .header("Client-Id", "kimne78kx3ncx6brgo4mv6wki5h1ko")
+            .header("Client-Id", TWITCH_CLIENT_ID)
+            .header("Client-Session-Id", TWITCH_SESSION_ID)
+            .header("X-Device-Id", TWITCH_DEVICE_ID)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
             .json(&gql_body)
             .send()
-            .await;
-
-        if let Ok(resp) = res {
+            .await
+        {
             if resp.status().is_success() {
                 if let Ok(v) = resp.json::<serde_json::Value>().await {
-                    let mut results = Vec::new();
                     if let Some(edges) = v.pointer("/data/streams/edges").and_then(|e| e.as_array()) {
+                        let mut results = Vec::new();
                         for edge in edges {
                             if let Some(node) = edge.get("node") {
                                 let viewers = node.get("viewersCount").and_then(|vc| vc.as_u64()).map(|n| n as u32);
-                                let title = node.get("title").and_then(|t| t.as_str()).map(|s| s.to_string());
-                                if let Some(b) = node.get("broadcaster") {
-                                    let login = b.get("login").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                                    let display_name = b.get("displayName").and_then(|s| s.as_str()).unwrap_or(&login).to_string();
-                                    let profile_image_url = b.get("profileImageURL").and_then(|s| s.as_str()).map(|s| s.to_string());
+                                if let Some(broadcaster) = node.get("broadcaster") {
+                                    let login = broadcaster.get("login").and_then(|s| s.as_str()).unwrap_or("").to_lowercase();
+                                    let display_name = broadcaster.get("displayName").and_then(|s| s.as_str()).unwrap_or(&login).to_string();
+                                    let profile_image_url = broadcaster.get("profileImageURL").and_then(|s| s.as_str()).map(|s| s.to_string());
+                                    let title = broadcaster
+                                        .get("broadcastSettings")
+                                        .and_then(|b| b.get("title"))
+                                        .and_then(|t| t.as_str())
+                                        .map(|s| s.to_string())
+                                        .filter(|t| !t.trim().is_empty());
+
                                     if !login.is_empty() {
                                         results.push(TwitchChannelItem {
                                             login,
@@ -222,50 +257,64 @@ pub async fn search_twitch_channels(query: &str) -> Vec<TwitchChannelItem> {
                                 }
                             }
                         }
-                    }
-                    if !results.is_empty() {
-                        results.sort_by(|a, b| b.viewers_count.unwrap_or(0).cmp(&a.viewers_count.unwrap_or(0)));
-                        return results;
+                        if !results.is_empty() {
+                            return results;
+                        }
                     }
                 }
             }
         }
 
-        // Repli : vérifier le statut en direct de streamers populaires
+        // 2. Repli de secours uniquement si l'appel TopStreams échoue
+        // Sélection variée de chaînes populaires (FR & International)
         let fallback_list = vec![
             "kamet0", "zerator", "squeezie", "aminematue", "gotaga", "antoinedaniel",
             "mistermv", "domingo", "ponce", "etoiles", "otplol_", "solary",
             "xqc", "ibai", "tarik", "shroud", "caseoh_", "gaules",
+            "fps_shaka", "summit1g", "hasanabi", "kaicenat", "auronplay", "pokimane",
         ];
         let logins: Vec<String> = fallback_list.into_iter().map(String::from).collect();
         let live_details = check_channels_live_details(&logins).await;
         let mut results = Vec::new();
-        for (login, (is_live, viewers, title)) in live_details {
-            if is_live {
-                results.push(TwitchChannelItem {
-                    login: login.clone(),
-                    display_name: login,
-                    profile_image_url: None,
-                    is_live: true,
-                    viewers_count: viewers,
-                    stream_title: title,
-                });
-            }
+        for login in &logins {
+            let (is_live, viewers, title) = live_details.get(login).cloned().unwrap_or((false, None, None));
+            results.push(TwitchChannelItem {
+                login: login.clone(),
+                display_name: login.clone(),
+                profile_image_url: None,
+                is_live,
+                viewers_count: viewers,
+                stream_title: title,
+            });
         }
-        results.sort_by(|a, b| b.viewers_count.unwrap_or(0).cmp(&a.viewers_count.unwrap_or(0)));
+        // Ne conserver que les chaînes en direct si au moins une est live
+        if results.iter().any(|r| r.is_live) {
+            results.retain(|r| r.is_live);
+        }
+        // Priorité aux chaînes actuellement en direct, puis tri par viewers décroissants
+        results.sort_by(|a, b| {
+            b.is_live
+                .cmp(&a.is_live)
+                .then_with(|| b.viewers_count.unwrap_or(0).cmp(&a.viewers_count.unwrap_or(0)))
+        });
         return results;
     }
 
     let gql_body = serde_json::json!({
+        "operationName": "SearchForChannels",
         "query": format!(
-            r#"query {{ searchFor(userQuery: "{}", platform: "web") {{ channels {{ items {{ id login displayName profileImageURL(width: 70) }} }} }} }}"#,
+            r#"query SearchForChannels {{ searchFor(userQuery: "{}", platform: "web") {{ channels {{ items {{ id login displayName profileImageURL(width: 70) }} }} }} }}"#,
             clean.replace('"', "\\\"")
         )
     });
 
     let res = client
         .post("https://gql.twitch.tv/gql")
-        .header("Client-Id", "kimne78kx3ncx6brgo4mv6wki5h1ko")
+        .header("Client-Id", TWITCH_CLIENT_ID)
+        .header("Client-Session-Id", TWITCH_SESSION_ID)
+        .header("X-Device-Id", TWITCH_DEVICE_ID)
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
         .json(&gql_body)
         .send()
         .await;

@@ -221,6 +221,7 @@ impl OverlayApp {
         self.auto_read_suggestions = true;
         self.earcons_enabled = true;
         crate::overlay::set_earcons_enabled(true);
+        crate::audio_player::set_auditory_beacon_map_enabled(true);
         self.dwell_state.dwell_duration = Duration::ZERO;
         self.dwell_state.activation_delay = Duration::from_millis(200);
         SWITCH_DEBOUNCE_MS.store(180, Ordering::Relaxed);
@@ -292,6 +293,7 @@ impl OverlayApp {
             self.auto_read_suggestions = true;
             self.earcons_enabled = true;
             crate::overlay::set_earcons_enabled(true);
+            crate::audio_player::set_auditory_beacon_map_enabled(true);
         } else if has_cognitive || has_tremor {
             self.auto_read_agent_messages = true;
             self.auto_read_suggestions = false;
@@ -1228,6 +1230,23 @@ impl OverlayApp {
 
                                         ui.add_space(4.0);
 
+                                        let mut beacon_map = crate::audio_player::is_auditory_beacon_map_enabled();
+                                        let resp_beacon = ui.checkbox(
+                                            &mut beacon_map,
+                                            egui::RichText::new("Carte sonore 3D de l'écran (Auditory Beacon Map)")
+                                                .size(11.5)
+                                                .color(theme.text_primary),
+                                        ).on_hover_text("Balayage binaural spatialisé des fenêtres et boutons pour se repérer instantanément sans la vue (gauche à gauche, haut plus aigu).");
+                                        let id_beacon = ui.make_persistent_id("dwell_auditory_beacon_map_enabled");
+                                        let is_beacon_key = make_toggle_accessible(ui, &resp_beacon, theme.accent);
+                                        if resp_beacon.changed() || apply_dwell_to_response(ui, &mut self.dwell_state, id_beacon, &resp_beacon) || is_beacon_key {
+                                            let new_val = if resp_beacon.changed() { beacon_map } else { !beacon_map };
+                                            crate::audio_player::set_auditory_beacon_map_enabled(new_val);
+                                            play_earcon(Earcon::Success);
+                                        }
+
+                                        ui.add_space(4.0);
+
                                         let mut read_sugs = self.auto_read_suggestions;
                                         let resp_sugs = ui.checkbox(
                                             &mut read_sugs,
@@ -1420,6 +1439,29 @@ impl OverlayApp {
                                         let mut eye_on = crate::eyetracking::is_eye_tracking_enabled();
                                         if ui.checkbox(&mut eye_on, t!("eyetracking.enable_checkbox")).changed() {
                                             crate::eyetracking::set_eye_tracking_enabled(eye_on);
+                                            play_earcon(Earcon::Success);
+                                        }
+                                        ui.add_space(3.0);
+
+                                        let mut auto_calib_on = crate::eyetracking::is_auto_calibration_enabled();
+                                        let auto_calib_label = {
+                                            let s = t!("eyetracking.auto_calib_checkbox");
+                                            if s.starts_with("eyetracking.") {
+                                                "Calibrage Continu Transparent (Zero-Click)".to_string()
+                                            } else {
+                                                s.into_owned()
+                                            }
+                                        };
+                                        let auto_calib_tooltip = {
+                                            let s = t!("eyetracking.auto_calib_tooltip");
+                                            if s.starts_with("eyetracking.") {
+                                                "Ajuste automatiquement et en arrière-plan la régression du regard lors des clics et fixations réelles, éliminant le besoin de recalibration à 9 points quand vous bougez la tête.".to_string()
+                                            } else {
+                                                s.into_owned()
+                                            }
+                                        };
+                                        if ui.checkbox(&mut auto_calib_on, auto_calib_label).on_hover_text(auto_calib_tooltip).changed() {
+                                            crate::eyetracking::set_auto_calibration_enabled(auto_calib_on);
                                             play_earcon(Earcon::Success);
                                         }
                                         ui.add_space(3.0);

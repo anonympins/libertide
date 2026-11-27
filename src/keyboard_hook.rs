@@ -23,12 +23,14 @@ use windows::core::w;
 #[cfg(windows)]
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 #[cfg(windows)]
+use windows::Win32::Foundation::RECT;
+#[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, FindWindowW, GetForegroundWindow, GetMessageW, HHOOK, IsIconic, MSG,
+    CallNextHookEx, DispatchMessageW, FindWindowW, GetForegroundWindow, GetMessageW, GetWindowRect, HHOOK, IsIconic, MSG,
     PostThreadMessageW, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_QUIT,
+    SetForegroundWindow, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_QUIT,
 };
 
 // --- Suivi d'état des modificateurs clavier (Windows) ---

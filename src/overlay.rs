@@ -27,18 +27,13 @@ pub enum Earcon {
 }
 
 pub static EARCONS_ENABLED: AtomicBool = AtomicBool::new(true);
-static SPATIAL_EARCON_PLAYER: Mutex<Option<AudioPlayer>> = Mutex::new(None);
 
 pub fn is_earcons_enabled() -> bool {
     EARCONS_ENABLED.load(Ordering::Relaxed)
 }
 
 fn get_or_init_earcon_player() -> Option<AudioPlayer> {
-    let mut guard = SPATIAL_EARCON_PLAYER.lock().ok()?;
-    if guard.is_none() {
-        *guard = AudioPlayer::new().ok();
-    }
-    guard.clone()
+    crate::audio_player::get_or_init_audio_player()
 }
 
 pub fn set_earcons_enabled(enabled: bool) {

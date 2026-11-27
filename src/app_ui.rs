@@ -183,7 +183,7 @@ impl OverlayApp {
                                     && !AGENT_BUSY.load(Ordering::SeqCst)
                                 {
                                     let play_indicator = self.dictation_mode;
-                                    self.start_recording(ctx, play_indicator);
+                                self.start_recording(Some(ctx), play_indicator);
                                 }
                             }
                         }
@@ -391,7 +391,7 @@ impl OverlayApp {
                         && !AGENT_BUSY.load(Ordering::SeqCst)
                         && !is_user_typing
                     {
-                        self.start_recording(ctx, true);
+                        self.start_recording(Some(ctx), true);
                     }
                     ctx.request_repaint();
                 }
@@ -1587,8 +1587,11 @@ impl OverlayApp {
                 unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(fg, Some(&mut fg_pid)) };
                 let is_overlay = fg_pid == current_pid;
                 let is_tray = is_system_tray_or_desktop(fg);
+                let overlay_id = self.get_libertide_window_id();
 
-                let (target_hwnd, cur_hwnd_id) = if !fg.0.is_null() && !is_overlay && !is_tray && !is_window_hung(fg) {
+                let (target_hwnd, cur_hwnd_id) = if is_overlay {
+                    (fg, Some(overlay_id))
+                } else if !fg.0.is_null() && !is_tray && !is_window_hung(fg) {
                     (fg, Some(fg.0 as isize))
                 } else if let Some(wid) = self.switch_active_window_id {
                     let h = windows::Win32::Foundation::HWND(wid as _);
@@ -1624,6 +1627,19 @@ impl OverlayApp {
                         self.numbered_chunk_offset = 0;
                         self.numbered_input_buffer.clear();
 
+                        if let Some(wid) = cur_hwnd_id {
+                            if self.is_libertide_window_id(wid) {
+                                if self.switch_access_mode {
+                                    self.switch_to_libertide_window();
+                                    ctx.request_repaint();
+                                }
+                                return;
+                            }
+                        }
+
+                        if self.switch_access_mode {
+                            self.is_hidden = true;
+                        }
                         if !self.switch_access_mode {
                             self.refresh_numbered_targets_for_window(target_hwnd.0 as isize);
                         } else {
@@ -1864,27 +1880,41 @@ impl OverlayApp {
                             self.numbered_targets.clear();
                             clear_screen_numbered_badges();
 
-                            #[cfg(windows)]
-                            {
-                                let hwnd = windows::Win32::Foundation::HWND(cur_win.id as _);
-                                focus_and_isolate_window(hwnd);
-                                let mut r = windows::Win32::Foundation::RECT::default();
-                                if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut r).is_ok() } {
-                                    draw_screen_orange_border([r.left, r.top, r.right, r.bottom]);
-                                } else {
-                                    draw_screen_orange_border(cur_win.rect);
+                            let is_libertide = self.is_libertide_window_id(cur_win.id);
+                            if is_libertide {
+                                self.is_hidden = false;
+                                clear_screen_numbered_badges();
+                                #[cfg(windows)]
+                                {
+                                    let hwnd = windows::Win32::Foundation::HWND(cur_win.id as _);
+                                    if !hwnd.0.is_null() {
+                                        force_foreground_window(hwnd);
+                                    }
                                 }
-                                set_global_cursor_pos(cur_win.click_x, cur_win.click_y);
-                                self.hover_last_cursor_pos = Some((cur_win.click_x, cur_win.click_y));
-                            }
-                            #[cfg(not(windows))]
-                            {
-                                focus_and_isolate_window(&cur_win.title);
-                                set_global_cursor_pos(cur_win.click_x, cur_win.click_y);
-                                self.hover_last_cursor_pos = Some((cur_win.click_x, cur_win.click_y));
-                            }
+                            } else {
+                                self.is_hidden = true;
+                                #[cfg(windows)]
+                                {
+                                    let hwnd = windows::Win32::Foundation::HWND(cur_win.id as _);
+                                    focus_and_isolate_window(hwnd);
+                                    let mut r = windows::Win32::Foundation::RECT::default();
+                                    if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut r).is_ok() } {
+                                        draw_screen_orange_border([r.left, r.top, r.right, r.bottom]);
+                                    } else {
+                                        draw_screen_orange_border(cur_win.rect);
+                                    }
+                                    set_global_cursor_pos(cur_win.click_x, cur_win.click_y);
+                                    self.hover_last_cursor_pos = Some((cur_win.click_x, cur_win.click_y));
+                                }
+                                #[cfg(not(windows))]
+                                {
+                                    focus_and_isolate_window(&cur_win.title);
+                                    set_global_cursor_pos(cur_win.click_x, cur_win.click_y);
+                                    self.hover_last_cursor_pos = Some((cur_win.click_x, cur_win.click_y));
+                                }
 
-                            self.refresh_numbered_targets_for_window(cur_win.id);
+                                self.refresh_numbered_targets_for_window(cur_win.id);
+                            }
 
                             let _ = self.tts_sender.send(TtsCommand::Stop);
                             let vocal_msg = format!("{} : {}", self.switch_focus_index + 1, cur_win.title);
@@ -2636,7 +2666,7 @@ impl OverlayApp {
                                     })
                                 });
                                 if mic_resp.clicked() || mic_dwell || is_mic_key {
-                                    self.toggle_recording(ui.ctx());
+                                    self.toggle_recording(Some(ui.ctx()));
                                 }
 
                                 // 2b. Sous-titres en direct (toujours présent et actif)
@@ -2955,7 +2985,7 @@ impl OverlayApp {
         });
     }
 
-    fn submit_prompt(&mut self, prompt_raw: String) {
+    pub fn submit_prompt(&mut self, prompt_raw: String) {
         self.stop_speaking();
         if self.is_recording {
             self.stop_recording();

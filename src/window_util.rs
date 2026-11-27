@@ -2773,6 +2773,16 @@ pub fn launch_browser_new_window(url: &str) -> Option<String> {
     None
 }
 
+/// Déclenche le balayage sonore binaural 3D représentant la disposition spatiale de la fenêtre active
+pub fn trigger_screen_auditory_beacon_sweep(targets: &[crate::types::NumberedElementTarget]) {
+    crate::audio_player::play_auditory_beacon_map_for_targets(targets);
+}
+
+/// Déclenche le balayage sonore binaural 3D représentant les fenêtres actives candidates à l'écran
+pub fn trigger_windows_auditory_beacon_sweep(windows: &[crate::automation::SwitchWindowTarget]) {
+    crate::audio_player::play_auditory_beacon_map_for_windows(windows);
+}
+
 #[cfg(windows)]
 pub fn wait_for_new_window(
     initial_hwnds: &HashSet<isize>,
