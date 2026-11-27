@@ -3,6 +3,44 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.8.11] - 2026-11-27
+
+### 🎯👁️ Continuous Auto-Calibration & Automatic Gaze Tuning (`eyetracking.rs`, `app_settings.rs`)
+- **Zero-Click Transparent Online Calibration (`EYE_AUTO_CALIBRATION_ENABLED`, `adapt_online`)**:
+  - Implemented an online Bayesian adaptation algorithm (Ridge Regression with L2 shrinkage and exponential moving average smoothing) dynamically updating the 2D biquadratic polynomial model in the background upon confirmed clicks and sustained fixations, eliminating the need for periodic manual 9-point recalibrations.
+  - Dynamic consumption of ground-truth click coordinates (`LAST_GROUND_TRUTH_CLICK`) recorded during physical mouse clicks and system switch selections (`perform_system_gaze_click`, `click_numbered_target_by_index`).
+- **Automated Camera Pitch Compensation & Covariance Detection (`finalize_calibration`, `tare_camera_pitch_to_current_gaze`)**:
+  - Automatic vertical tilt inference from median screen fixations during calibration completion, automatically setting `EYE_CAMERA_PITCH_OFFSET`.
+  - Covariance-driven automatic axis inversion detection (`EYE_INVERT_X`, `EYE_INVERT_Y`) and neutral resting offset calculation (`EYE_OFFSET_X`, `EYE_OFFSET_Y`).
+  - Added a dedicated *"🎯 Tare"* button in Settings to instantly align neutral camera pitch and joystick resting deadzones with the user's relaxed posture.
+
+### 🎧🌐 3D Binaural Sound Map & Acoustic Spatialization (`audio_player.rs`, `overlay.rs`, `window_util.rs`, `app_settings.rs`)
+- **Panoramic Screen Sound Map ("Auditory Beacon Map", `generate_auditory_beacon_map`)**:
+  - Synthesized a non-visual 3D binaural screen sweep representing interactive layout and window distribution (stereo air sweep `synth_breeze_sweep` combined with a harmonic pentatonic scale `PENTATONIC_SCALE` spanning G3 to G6).
+  - Semantic acoustic timbres tailored by control role (`BeaconRole`: windows, buttons, links, input fields, headings, media controls).
+  - Musical note pitch mapped to vertical elevation $Y$ (higher pitch towards top) and acoustic panning / interaural time delay mapped to horizontal azimuth $X$ (left ear to left, right ear to right).
+- **Real-Time 3D Spatialization (`spatialize_mono_to_stereo`, `play_earcon_spatial`)**:
+  - Comprehensive physical simulation: Woodworth Interaural Time Difference (ITD up to $0.65\text{ ms}$), constant-power Interaural Level Difference (ILD) panning law, and anatomical pinna elevation filtering.
+  - Dedicated accessibility toggle with `.env` persistence (`AUDITORY_BEACON_MAP`).
+
+### 🔀⌨️ In-Memory Egui Key Remapping & Hook Pipeline (`keyboard_hook.rs`, `app_settings.rs`)
+- **In-Memory Egui Event Rewriting (`apply_egui_key_remaps`)**:
+  - Physical keystrokes are rerouted directly at `egui::Event::Key` and `egui::Event::Text` level, bypassing OS-level `SendInput` simulation conflicts on Libertide's internal UI widgets.
+  - Dynamic virtual key code and character translation across keyboard layouts (`char_to_vk`, `vk_to_char_layout`, `azerty_char_to_vk`).
+  - Automatic synthetic text event generation when non-printable function keys (F1..F12) are remapped to printable characters or symbols.
+- **Low-Level Win32 & Rdev Hook Hardening (`switch_keyboard_hook_proc`)**:
+  - Precise state tracking of depressed keys (`REMAPPED_KEYS_DOWN`) and hardware auto-repeat handling without event leakage to background applications.
+
+### 🪟🎯 Libertide In-App Switch Access & Hover Mode Integration (`app_switch.rs`, `automation.rs`, `main.rs`)
+- **Hands-Free In-App Navigation for Libertide (`switch_to_libertide_window`)**:
+  - Automatically registered Libertide's own window among candidate windows during hover and single-switch scanning (`collect_switch_candidate_windows`).
+  - Semantic decomposition of Libertide's overlay into 2 interactive macro-zones:
+    - *Zone 1: Commands & Dock Actions* (Full dock: Analyze, Mic, Subtitles, Attach file, Hover mode, Settings, Clear context, text prompt field).
+    - *Zone 2: Chat & Responses* (Assistance tabs, Twitch Live Chat, text-to-speech voicing of current response).
+- **Direct In-App Action Dispatching (`handle_libertide_target_action`)**:
+  - Mouse-free selection and triggering of internal Libertide features via eye gaze, single switch, or dwell pointer.
+  - Focus recovery preservation maintaining active hover navigation across focus transitions (`hover_had_lost_focus`, `is_libertide_window_id`).
+
 ## [0.8.10] - 2026-11-25
 
 ### 👁️📄 Universal Multimodal Vision & Document Attachment Engine (`ocr.rs`, `local_llm.rs`, `fs_util.rs`, `app_ui.rs`, `agent_backend.rs`)
