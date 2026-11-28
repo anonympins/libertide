@@ -722,7 +722,37 @@ pub async fn query_vlm_multimodal(
         println!("[VLM Multimodal Image #{}] Taille: {} octets | Préfixe: '{}...'", idx + 1, uri.len(), preview);
     }
 
-    // 0. Si un modèle local est présent, tenter de démarrer le serveur interne sur 8088
+    // 1. Priorité absolue : Moteur local Qwen-VL en mémoire (chargé ou téléchargé automatiquement)
+    println!("[VLM] [Route 1/3] Exécution prioritaire sur le moteur local Qwen-VL...");
+    let prompt_owned = prompt.to_string();
+    let uris_cloned = image_data_uris.to_vec();
+    let etx_cloned = event_tx.cloned();
+
+    let local_res: Result<String, String> = tokio::task::spawn_blocking(move || {
+        let enriched_prompt = enrich_prompt_with_local_visual_ocr(&prompt_owned, &uris_cloned);
+        if !is_vlm_ready() {
+            ensure_vlm_loaded_sync(etx_cloned.as_ref())?;
+        }
+        if let Some(answer) = query_vlm_grounding_local(&enriched_prompt) {
+            let cleaned = clean_vlm_description(&answer);
+            if !cleaned.is_empty() {
+                return Ok(cleaned);
+            }
+        }
+        Err("Le modèle VLM local a retourné une réponse vide.".to_string())
+    }).await.unwrap_or_else(|e| Err(format!("Tâche bloquante interrompue: {e}")));
+
+    match local_res {
+        Ok(cleaned) => {
+            println!("[VLM] Réponse reçue avec succès du moteur local.");
+            return Ok(cleaned);
+        }
+        Err(e) => {
+            eprintln!("[VLM] Moteur local non disponible ou échec : {e}. Bascule sur les fallbacks...");
+        }
+    }
+
+    // 2. Repli HTTP : tentative avec serveur local embarqué ou endpoints locaux / configurés
     if find_local_vlm_model_file().is_some() {
         if let Ok(embedded_endpoint) = ensure_embedded_vlm_server_running(DEFAULT_INTERNAL_VLM_PORT).await {
             std::env::set_var("QWENVL_ENDPOINT", &embedded_endpoint);
@@ -732,55 +762,62 @@ pub async fn query_vlm_multimodal(
     let explicit_endpoint = std::env::var("QWENVL_ENDPOINT")
         .ok()
         .or_else(|| crate::fs_util::read_env_var_from_file(".env", "QWENVL_ENDPOINT"))
+        .filter(|s| !s.trim().is_empty());
+
+    let explicit_model = std::env::var("QWENVL_MODEL")
+        .ok()
+        .or_else(|| crate::fs_util::read_env_var_from_file(".env", "QWENVL_MODEL"))
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| Some("http://127.0.0.1:8000/v1/chat/completions".to_string()));
+        .unwrap_or_else(|| "Qwen/Qwen2.5-VL-3B-Instruct".to_string());
 
-    // 1. Si un endpoint VLM (distant ou serveur local llama-server/vLLM) est configuré ou accessible
+    let explicit_key = std::env::var("QWENVL_API_KEY")
+        .ok()
+        .or_else(|| crate::fs_util::read_env_var_from_file(".env", "QWENVL_API_KEY"))
+        .unwrap_or_default();
+
+    let fast_client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(2500))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
     if let Some(endpoint) = explicit_endpoint.as_deref() {
-        let explicit_model = std::env::var("QWENVL_MODEL")
-            .ok()
-            .or_else(|| crate::fs_util::read_env_var_from_file(".env", "QWENVL_MODEL"))
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "Qwen/Qwen2.5-VL-3B-Instruct".to_string());
-
-        let explicit_key = std::env::var("QWENVL_API_KEY")
-            .ok()
-            .or_else(|| crate::fs_util::read_env_var_from_file(".env", "QWENVL_API_KEY"))
-            .unwrap_or_default();
-
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|e| format!("Erreur création client HTTP VLM: {e}"))?;
-
-        println!("[VLM] [Route 1/4] Tentative d'envoi vers l'endpoint VLM multimodal : {} (modèle: {})", endpoint, explicit_model);
-        match send_vlm_request(&client, endpoint, &explicit_model, &explicit_key, prompt, image_data_uris).await {
+        println!("[VLM] [Route 2/3] Tentative sur l'endpoint configuré : {} (modèle: {})", endpoint, explicit_model);
+        match send_vlm_request(&fast_client, endpoint, &explicit_model, &explicit_key, prompt, image_data_uris).await {
             Ok(res) => return Ok(clean_vlm_description(&res)),
             Err(e) => {
-                eprintln!("[VLM] Échec de l'endpoint multimodal ({endpoint}): {e}. Évaluation des routes de secours...");
-                // Si l'endpoint par défaut sur 8000 échoue, tenter également le port par défaut standard de llama-server (8080)
-                if endpoint == "http://127.0.0.1:8000/v1/chat/completions" {
-                    let alt_endpoint = "http://127.0.0.1:8080/v1/chat/completions";
-                    println!("[VLM] Tentative sur le port alternatif llama-server : {}", alt_endpoint);
-                    if let Ok(res) = send_vlm_request(&client, alt_endpoint, &explicit_model, &explicit_key, prompt, image_data_uris).await {
-                        return Ok(clean_vlm_description(&res));
-                    }
-                }
+                eprintln!("[VLM] Échec de l'endpoint configuré ({endpoint}): {e}");
             }
         }
     }
 
-    // 2. Repli prioritaire sur un provider Vision Cloud (OpenAI / GLM)
-    // Note : Doit être tenté avant le modèle local car celui-ci n'a pas encore de projecteur mmproj branché en RAM
+    let candidate_local_endpoints = [
+        "http://127.0.0.1:8000/v1/chat/completions",
+        "http://127.0.0.1:8080/v1/chat/completions",
+    ];
+
+    for local_ep in candidate_local_endpoints {
+        if explicit_endpoint.as_deref() == Some(local_ep) {
+            continue;
+        }
+        println!("[VLM] Sonde rapide du port local alternatif : {}", local_ep);
+        if let Ok(res) = send_vlm_request(&fast_client, local_ep, &explicit_model, &explicit_key, prompt, image_data_uris).await {
+            let cleaned = clean_vlm_description(&res);
+            if !cleaned.is_empty() {
+                return Ok(cleaned);
+            }
+        }
+    }
+
+    // 3. Repli Vision Cloud (OpenAI / GLM)
     let cfg = crate::overlay::resolve_llm_config();
-    println!("[VLM] [Route 2/4] Vérification provider Vision Cloud : provider={:?}, endpoint={}, has_key={}", cfg.provider, cfg.endpoint, !cfg.api_key.is_empty());
+    println!("[VLM] [Route 3/3] Vérification provider Vision Cloud : provider={:?}, endpoint={}, has_key={}", cfg.provider, cfg.endpoint, !cfg.api_key.is_empty());
     if !cfg.api_key.is_empty() && (cfg.provider == crate::types::LlmProvider::OpenAI || cfg.provider == crate::types::LlmProvider::Glm) {
         println!("[VLM] Bascule sur le provider vision cloud : {:?} ({})", cfg.provider, cfg.endpoint);
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(45))
+        let cloud_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| format!("Erreur création client HTTP VLM: {e}"))?;
-        match send_vlm_request(&client, &cfg.endpoint, &cfg.model, &cfg.api_key, prompt, image_data_uris).await {
+        match send_vlm_request(&cloud_client, &cfg.endpoint, &cfg.model, &cfg.api_key, prompt, image_data_uris).await {
             Ok(res) => return Ok(clean_vlm_description(&res)),
             Err(e) => {
                 eprintln!("[VLM] Échec du provider vision cloud ({}) : {e}", cfg.endpoint);
@@ -788,51 +825,7 @@ pub async fn query_vlm_multimodal(
         }
     }
 
-    // 3. Vérifier si un modèle VLM local est présent dans models/
-    let local_file_opt = find_local_vlm_model_file();
-    let has_local_vlm = local_file_opt.is_some() || is_vlm_ready();
-    println!("[VLM] [Route 3/4] Modèle VLM local : fichier={:?}, prêt={}", local_file_opt, is_vlm_ready());
-    if has_local_vlm {
-        let prompt_owned = prompt.to_string();
-        let uris_cloned = image_data_uris.to_vec();
-        let etx_cloned = event_tx.cloned();
-
-        let local_res = tokio::task::spawn_blocking(move || {
-            let enriched_prompt = enrich_prompt_with_local_visual_ocr(&prompt_owned, &uris_cloned);
-            if !is_vlm_ready() {
-                ensure_vlm_loaded_sync(etx_cloned.as_ref())?;
-            }
-            if let Some(answer) = query_vlm_grounding_local(&enriched_prompt) {
-                let cleaned = clean_vlm_description(&answer);
-                if !cleaned.is_empty() {
-                    println!("[VLM] Réponse reçue du moteur local.");
-                    return Ok(cleaned);
-                }
-            }
-            Err("Le modèle VLM local a retourné une réponse vide.".to_string())
-        }).await.map_err(|e| e.to_string())?;
-
-        return local_res;
-    }
-
-    // 4. Si aucun modèle local n'est encore téléchargé, tenter son initialisation/téléchargement
-    println!("[VLM] [Route 4/4] Aucun endpoint distant ni modèle chargé. Tentative de téléchargement/chargement de Qwen-VL...");
-    let prompt_owned = prompt.to_string();
-    let uris_cloned = image_data_uris.to_vec();
-    let etx_cloned = event_tx.cloned();
-    let load_res = tokio::task::spawn_blocking(move || {
-        let enriched_prompt = enrich_prompt_with_local_visual_ocr(&prompt_owned, &uris_cloned);
-        ensure_vlm_loaded_sync(etx_cloned.as_ref())?;
-        if let Some(answer) = query_vlm_grounding_local(&enriched_prompt) {
-            let cleaned = clean_vlm_description(&answer);
-            if !cleaned.is_empty() {
-                return Ok(cleaned);
-            }
-        }
-        Err("Le modèle VLM local dans models/ a retourné une réponse vide.".to_string())
-    }).await.map_err(|e| e.to_string())?;
-
-    load_res
+    Err("Aucune méthode d'analyse VLM n'a pu aboutir (moteur local, serveur local et cloud ont échoué).".to_string())
 }
 
 /// Nettoie la description visuelle retournée par le LLM pour éliminer les formules robotiques
@@ -1148,7 +1141,7 @@ async fn send_vlm_request(
         "max_tokens": 1024
     });
 
-    let mut req = client.post(&*endpoint).json(&body);
+    let mut req = client.post(endpoint).json(&body);
     if !api_key.trim().is_empty() {
         req = req.bearer_auth(api_key.trim());
     }
@@ -4527,7 +4520,7 @@ impl LocalLlamaEngine {
         engine.generate_fast(&formatted, max_tokens)
     }
 
-    pub fn classify_intent(&self, user_query: &str, screen_hint: Option<&str>) -> Vec<CommandTag> {
+    pub fn classify_intent(&self, user_query: &str, screen_hint: Option<&str>, active_tags: Option<&[CommandTag]>) -> Vec<CommandTag> {
         let clean = user_query.trim();
         if clean.is_empty() {
             return vec![CommandTag::ClarificationRequired];
@@ -4548,13 +4541,24 @@ impl LocalLlamaEngine {
         } else {
             String::new()
         };
+        let active_tags_info = if let Some(tags) = active_tags.filter(|t| !t.is_empty()) {
+            let tags_str = tags.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ");
+            format!("\n[Tags actuellement actifs lors de l'itération précédente] : {}\n", tags_str)
+        } else {
+            String::new()
+        };
+
         let prompt_text = format!(
             "Tu es le routeur sémantique d'intention pour l'agent d'accessibilité numérique Libertide.\n\
-            Analyse la demande de l'utilisateur et le contexte d'écran fourni ci-dessous, puis sélectionne 1 à 3 tags pertinents parmi la liste exhaustive.\n{}\n\
+            Analyse la demande de l'utilisateur, l'historique et le contexte d'écran fourni ci-dessous, puis sélectionne 1 à 4 tags pertinents parmi la liste exhaustive.\n{}{}\n\
+            RÈGLE DE CUMUL ET CONTINUITÉ SÉMANTIQUE :\n\
+            - Les tags sont cumulatifs lorsqu'une action est la suite logique ou une sous-étape de l'itération précédente (ex: recherche web en cours qui nécessite maintenant de cliquer ou d'écrire -> conserve WEB_NAVIGATE_OR_SEARCH et ajoute CLICK_ELEMENT_OR_BUTTON ou NAVIGATE_IN_WEBPAGE).\n\
+            - Si l'utilisateur change complètement de sujet (nouvelle demande sans rapport, salutation, question isolée ou alerte), réinitialise et choisis uniquement les nouveaux tags pertinents.\n\
+            - Tu as l'autorité absolue pour décider de conserver, ajouter ou retirer des tags pour la prochaine itération.\n\n\
             CATALOGUE COMPLET DES COMMANDTAGS ET RÈGLES D'ÉVALUATION (NOM = DESCRIPTION) :\n\
             {}\n\n\
-            Réponds STRICTEMENT avec les tags choisis séparés par une virgule (ex: WEBPAGE_ANALYSIS, SCREEN_READING_OR_SUMMARY).",
-            screen_info, tags_list
+            Réponds STRICTEMENT avec les tags choisis séparés par une virgule (ex: WEB_NAVIGATE_OR_SEARCH, CLICK_ELEMENT_OR_BUTTON).",
+            screen_info, active_tags_info, tags_list
         );
 
         let formatted = match preset.family {
@@ -4583,7 +4587,7 @@ impl LocalLlamaEngine {
 }
 
 /// Résout les tags sémantiques pertinents pour n'importe quelle requête (utilisable par tous les LLM)
-pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<CommandTag> {
+pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>, active_tags: Option<&[CommandTag]>) -> Vec<CommandTag> {
     let clean = query.trim();
     if clean.is_empty() {
         vec![CommandTag::ClarificationRequired]
@@ -4594,7 +4598,7 @@ pub fn resolve_query_tags(query: &str, screen_hint: Option<&str>) -> Vec<Command
         } else {
             let lock = LOCAL_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref engine) = *lock {
-                let tags = engine.classify_intent(clean, screen_hint);
+                let tags = engine.classify_intent(clean, screen_hint, active_tags);
                 if tags.is_empty() {
                     vec![CommandTag::ClarificationRequired]
                 } else {
@@ -4748,7 +4752,7 @@ pub fn run_local_llama_completion(
         if !preliminary_fast.is_empty() {
             preliminary_fast
         } else {
-            let classified = engine.classify_intent(clean_goal, Some(last_user_msg));
+            let classified = engine.classify_intent(clean_goal, Some(last_user_msg), None);
             if classified.is_empty() {
                 vec![CommandTag::ClarificationRequired]
             } else {
