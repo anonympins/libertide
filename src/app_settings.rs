@@ -12,6 +12,12 @@ use crate::keyboard_hook::{
     CustomKeyRemap,
     SWITCH_DEBOUNCE_MS,
     SWITCH_LONG_PRESS_MS,
+    is_steady_click_enabled, set_steady_click_enabled,
+    is_prevent_accidental_drag, set_prevent_accidental_drag,
+    is_bounce_keys_enabled, set_bounce_keys_enabled,
+    get_bounce_keys_ms, set_bounce_keys_ms,
+    is_tremor_filter_enabled, set_tremor_filter_enabled,
+    is_spasm_shock_guard, set_spasm_shock_guard,
 };
 use crate::fs_util::{read_env_var_from_file, save_macros, write_env_var_to_file};
 use crate::local_llm;
@@ -21,7 +27,7 @@ use crate::overlay::{
     make_widget_accessible_and_activated, play_earcon, render_accessible_input, resolve_llm_config, Earcon,
 };
 use crate::theme::{localized_theme_desc, localized_theme_name, AppTheme, SettingsTab, ThemeColors};
-use crate::types::{AgentEvent, DisabilityPreset, LlmProvider, TtsCommand, VoiceProfile};
+use crate::types::{AgentEvent, AgentStatus, DisabilityPreset, LlmProvider, TtsCommand, VoiceProfile};
 use crate::OverlayApp;
 
 impl OverlayApp {
@@ -227,6 +233,11 @@ impl OverlayApp {
         SWITCH_DEBOUNCE_MS.store(180, Ordering::Relaxed);
         SWITCH_LONG_PRESS_MS.store(1100, Ordering::Relaxed);
         self.switch_auto_scroll = false;
+        set_steady_click_enabled(false);
+        set_prevent_accidental_drag(false);
+        set_bounce_keys_enabled(false);
+        set_tremor_filter_enabled(false);
+        set_spasm_shock_guard(false);
     }
 
     pub fn select_exclusive_disability_preset(&mut self, preset: DisabilityPreset, ctx: &egui::Context) {
@@ -294,6 +305,18 @@ impl OverlayApp {
             self.earcons_enabled = true;
             crate::overlay::set_earcons_enabled(true);
             crate::audio_player::set_auditory_beacon_map_enabled(true);
+
+            // Fermer les sous-titres en direct s'ils étaient ouverts
+            if self.is_subtitles_open() {
+                self.stop_live_subtitles();
+            }
+
+            // Activer immédiatement le micro à la sélection du profil visuel
+            self.mic_manually_disabled = false;
+            self.continuous_mode = true;
+            if !self.is_recording && self.status != AgentStatus::EmergencyStopped && !self.voice_is_recording_sample {
+                self.start_recording(Some(ctx), true);
+            }
         } else if has_cognitive || has_tremor {
             self.auto_read_agent_messages = true;
             self.auto_read_suggestions = false;
@@ -309,12 +332,22 @@ impl OverlayApp {
             SWITCH_DEBOUNCE_MS.store(450, Ordering::Relaxed);
             SWITCH_LONG_PRESS_MS.store(1600, Ordering::Relaxed);
             self.switch_auto_scroll = true;
+            set_steady_click_enabled(true);
+            set_prevent_accidental_drag(true);
+            set_bounce_keys_enabled(true);
+            set_tremor_filter_enabled(true);
+            set_spasm_shock_guard(true);
         } else if has_tremor {
             self.dwell_state.dwell_duration = Duration::ZERO;
             self.dwell_state.activation_delay = Duration::from_millis(200);
             SWITCH_DEBOUNCE_MS.store(450, Ordering::Relaxed);
             SWITCH_LONG_PRESS_MS.store(1600, Ordering::Relaxed);
             self.switch_auto_scroll = false;
+            set_steady_click_enabled(true);
+            set_prevent_accidental_drag(true);
+            set_bounce_keys_enabled(true);
+            set_tremor_filter_enabled(true);
+            set_spasm_shock_guard(true);
         } else if has_switch {
             self.dwell_state.dwell_duration = Duration::from_millis(1400);
             self.dwell_state.activation_delay = Duration::from_millis(450);
@@ -427,7 +460,10 @@ impl OverlayApp {
                         close_btn.widget_info(|| {
                             egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), t!("ui.btn_close").to_string())
                         });
-                        if make_widget_accessible_and_activated(ui, &close_btn, theme.accent) {
+                        let close_btn_id = ui.make_persistent_id("dwell_settings_modal_close_btn");
+                        if make_widget_accessible_and_activated(ui, &close_btn, theme.accent)
+                            || apply_dwell_to_response(ui, &mut self.dwell_state, close_btn_id, &close_btn)
+                        {
                             self.show_api_key_modal = false;
                             self.api_key_error = None;
                         }
@@ -652,7 +688,10 @@ impl OverlayApp {
                                         };
 
                                         let p_resp = ui.selectable_label(is_selected_in_modal, label_rich);
-                                        if make_widget_accessible_and_activated(ui, &p_resp, theme.accent) {
+                                        let p_id = ui.make_persistent_id(format!("dwell_provider_{:?}", provider));
+                                        if make_widget_accessible_and_activated(ui, &p_resp, theme.accent)
+                                            || apply_dwell_to_response(ui, &mut self.dwell_state, p_id, &p_resp)
+                                        {
                                             self.sync_modal_inputs_for_provider(provider);
                                         }
                                     }
@@ -663,14 +702,23 @@ impl OverlayApp {
                                 ui.horizontal(|ui| {
                                     let mut is_enabled = self.selected_provider_modal.is_enabled();
                                     let chk_resp = ui.checkbox(&mut is_enabled, t!("ui.provider_enabled_checkbox"));
-                                    if make_toggle_accessible(ui, &chk_resp, theme.accent) {
+                                    let chk_id = ui.make_persistent_id(format!("dwell_provider_enabled_{:?}", self.selected_provider_modal));
+                                    if make_toggle_accessible(ui, &chk_resp, theme.accent)
+                                        || apply_dwell_to_response(ui, &mut self.dwell_state, chk_id, &chk_resp)
+                                    {
+                                        if !chk_resp.changed() {
+                                            is_enabled = !is_enabled;
+                                        }
                                         let _ = self.selected_provider_modal.set_enabled(is_enabled);
                                         self.llm_config = resolve_llm_config();
                                     }
 
                                     if self.selected_provider_modal != self.llm_config.provider {
                                         let prim_btn = ui.button(t!("ui.btn_set_primary_provider"));
-                                        if make_widget_accessible_and_activated(ui, &prim_btn, theme.accent) {
+                                        let prim_btn_id = ui.make_persistent_id(format!("dwell_set_primary_provider_{:?}", self.selected_provider_modal));
+                                        if make_widget_accessible_and_activated(ui, &prim_btn, theme.accent)
+                                            || apply_dwell_to_response(ui, &mut self.dwell_state, prim_btn_id, &prim_btn)
+                                        {
                                             let _ = self.selected_provider_modal.set_enabled(true);
                                             let _ = write_env_var_to_file(".env", "LLM_PROVIDER", self.selected_provider_modal.display_name());
                                             std::env::set_var("LLM_PROVIDER", self.selected_provider_modal.display_name());
@@ -692,12 +740,17 @@ impl OverlayApp {
                                 // Option de contrôle des tokens distants en arrière-plan
                                 let mut allow_remote_proactive = crate::scheduler::PROACTIVE_ALLOW_REMOTE.load(Ordering::Relaxed);
                                 let label_color = if allow_remote_proactive { theme.accent } else { theme.text_secondary };
-                                if ui.checkbox(
+                                let chk_remote = ui.checkbox(
                                     &mut allow_remote_proactive,
                                     egui::RichText::new("Autoriser les réveils spontanés sur les LLMs distants (consomme des tokens)")
                                         .size(11.0)
                                         .color(label_color),
-                                ).on_hover_text("Par défaut désactivé : les réveils en arrière-plan (compagnon proactif, vérification d'écran) sont réservés au modèle local gratuit pour ne pas consommer vos crédits d'API distants.").changed() {
+                                ).on_hover_text("Par défaut désactivé : les réveils en arrière-plan (compagnon proactif, vérification d'écran) sont réservés au modèle local gratuit pour ne pas consommer vos crédits d'API distants.");
+                                let chk_remote_id = ui.make_persistent_id("dwell_proactive_allow_remote");
+                                if chk_remote.changed() || apply_dwell_to_response(ui, &mut self.dwell_state, chk_remote_id, &chk_remote) {
+                                    if !chk_remote.changed() {
+                                        allow_remote_proactive = !allow_remote_proactive;
+                                    }
                                     crate::scheduler::PROACTIVE_ALLOW_REMOTE.store(allow_remote_proactive, Ordering::SeqCst);
                                     let val_str = if allow_remote_proactive { "true" } else { "false" };
                                     let _ = write_env_var_to_file(".env", "PROACTIVE_ALLOW_REMOTE", val_str);
@@ -727,7 +780,11 @@ impl OverlayApp {
                                                 ui.horizontal(|ui| {
                                                     let radio_label = format!("{} ({})", preset.name, preset.size_desc);
                                                     let radio_resp = ui.radio(is_active, radio_label);
-                                                    if make_widget_accessible_and_activated(ui, &radio_resp, theme.accent) && !is_active {
+                                                    let radio_id = ui.make_persistent_id(format!("dwell_local_model_preset_{}", preset.id));
+                                                    if (make_widget_accessible_and_activated(ui, &radio_resp, theme.accent)
+                                                        || apply_dwell_to_response(ui, &mut self.dwell_state, radio_id, &radio_resp))
+                                                        && !is_active
+                                                    {
                                                         self.llm_config.model = preset.name.to_string();
                                                         self.model_input = preset.name.to_string();
                                                         play_earcon(Earcon::Success);
@@ -753,7 +810,10 @@ impl OverlayApp {
                                                     if is_installed {
                                                         ui.label(egui::RichText::new(t!("ui.local_model_ready")).size(10.5).color(egui::Color32::from_rgb(100, 225, 130)).strong());
                                                         let del_btn = ui.small_button("🗑").on_hover_text(t!("ui.local_model_delete_tooltip"));
-                                                        if make_widget_accessible_and_activated(ui, &del_btn, theme.accent) {
+                                                        let del_id = ui.make_persistent_id(format!("dwell_del_local_model_{}", preset.id));
+                                                        if make_widget_accessible_and_activated(ui, &del_btn, theme.accent)
+                                                            || apply_dwell_to_response(ui, &mut self.dwell_state, del_id, &del_btn)
+                                                        {
                                                             model_to_delete = Some(preset);
                                                         }
                                                     } else {
@@ -788,7 +848,10 @@ impl OverlayApp {
                                                 let p = *active_preset;
                                                 let btn_text = t!("ui.local_model_download_btn", name = p.name, size = p.size_desc).to_string();
                                                 let dl_btn = ui.button(egui::RichText::new(btn_text).strong().color(theme.accent));
-                                                if make_widget_accessible_and_activated(ui, &dl_btn, theme.accent) {
+                                                let dl_id = ui.make_persistent_id(format!("dwell_download_local_model_{}", p.id));
+                                                if make_widget_accessible_and_activated(ui, &dl_btn, theme.accent)
+                                                    || apply_dwell_to_response(ui, &mut self.dwell_state, dl_id, &dl_btn)
+                                                {
                                                     std::thread::spawn(move || {
                                                         if local_llm::ensure_llama_model_downloaded_for_preset(&p, &event_tx_clone).is_ok() {
                                                             local_llm::init_local_llm();
@@ -826,7 +889,12 @@ impl OverlayApp {
                                             ui.add_space(4.0);
 
                                             let mut vlm_on = local_llm::is_vlm_grounding_enabled();
-                                            if ui.checkbox(&mut vlm_on, "Activer le Grounding Visuel Qwen2-VL").changed() {
+                                            let chk_vlm = ui.checkbox(&mut vlm_on, "Activer le Grounding Visuel Qwen2-VL");
+                                            let chk_vlm_id = ui.make_persistent_id("dwell_vlm_grounding_enabled");
+                                            if chk_vlm.changed() || apply_dwell_to_response(ui, &mut self.dwell_state, chk_vlm_id, &chk_vlm) {
+                                                if !chk_vlm.changed() {
+                                                    vlm_on = !vlm_on;
+                                                }
                                                 local_llm::set_vlm_grounding_enabled(vlm_on);
                                                 if vlm_on {
                                                     local_llm::init_vlm_async(self.event_sender.clone());
@@ -845,7 +913,11 @@ impl OverlayApp {
                                                 ui.horizontal(|ui| {
                                                     let radio_label = format!("{} ({})", preset.name, preset.size_desc);
                                                     let radio_resp = ui.radio(is_active, radio_label);
-                                                    if make_widget_accessible_and_activated(ui, &radio_resp, theme.accent) && !is_active {
+                                                    let radio_id = ui.make_persistent_id(format!("dwell_vlm_preset_{}", preset.id));
+                                                    if (make_widget_accessible_and_activated(ui, &radio_resp, theme.accent)
+                                                        || apply_dwell_to_response(ui, &mut self.dwell_state, radio_id, &radio_resp))
+                                                        && !is_active
+                                                    {
                                                         local_llm::set_active_vlm_preset(preset.id);
                                                         if local_llm::is_vlm_grounding_enabled() {
                                                             local_llm::init_vlm_async(self.event_sender.clone());
@@ -856,14 +928,20 @@ impl OverlayApp {
                                                     if is_installed {
                                                         ui.label(egui::RichText::new("✓ Installé").size(10.5).color(egui::Color32::from_rgb(100, 225, 130)).strong());
                                                         let del_btn = ui.small_button("🗑").on_hover_text("Supprimer ce modèle local du disque");
-                                                        if make_widget_accessible_and_activated(ui, &del_btn, theme.accent) {
+                                                        let del_id = ui.make_persistent_id(format!("dwell_del_vlm_model_{}", preset.id));
+                                                        if make_widget_accessible_and_activated(ui, &del_btn, theme.accent)
+                                                            || apply_dwell_to_response(ui, &mut self.dwell_state, del_id, &del_btn)
+                                                        {
                                                             model_to_delete = Some(preset);
                                                         }
                                                     } else {
                                                         let event_tx_clone = self.event_sender.clone();
                                                         let p = *preset;
                                                         let dl_btn = ui.small_button(format!("📥 Télécharger ({})", p.size_desc));
-                                                        if make_widget_accessible_and_activated(ui, &dl_btn, theme.accent) {
+                                                        let dl_id = ui.make_persistent_id(format!("dwell_dl_vlm_model_{}", p.id));
+                                                        if make_widget_accessible_and_activated(ui, &dl_btn, theme.accent)
+                                                            || apply_dwell_to_response(ui, &mut self.dwell_state, dl_id, &dl_btn)
+                                                        {
                                                             std::thread::spawn(move || {
                                                                 let _ = local_llm::ensure_llama_model_downloaded_for_preset(&p, &event_tx_clone);
                                                             });
@@ -942,12 +1020,18 @@ impl OverlayApp {
 
                                         let eye_icon = if self.show_api_key_plain { "🔒" } else { "👁" };
                                         let eye_btn = ui.button(eye_icon).on_hover_text(t!("ui.toggle_api_key_visibility"));
-                                        if make_widget_accessible_and_activated(ui, &eye_btn, theme.accent) {
+                                        let eye_id = ui.make_persistent_id("dwell_toggle_api_key_visibility");
+                                        if make_widget_accessible_and_activated(ui, &eye_btn, theme.accent)
+                                            || apply_dwell_to_response(ui, &mut self.dwell_state, eye_id, &eye_btn)
+                                        {
                                             self.show_api_key_plain = !self.show_api_key_plain;
                                         }
 
                                         let paste_btn = ui.button("📋").on_hover_text(t!("ui.paste_from_clipboard"));
-                                        if make_widget_accessible_and_activated(ui, &paste_btn, theme.accent) {
+                                        let paste_id = ui.make_persistent_id("dwell_paste_api_key");
+                                        if make_widget_accessible_and_activated(ui, &paste_btn, theme.accent)
+                                            || apply_dwell_to_response(ui, &mut self.dwell_state, paste_id, &paste_btn)
+                                        {
                                             if let Some(clip) = get_clipboard_text() {
                                                 self.api_key_input = clip.trim().to_string();
                                             }
@@ -958,8 +1042,11 @@ impl OverlayApp {
                                     ui.horizontal(|ui| {
                                         ui.label(egui::RichText::new(t!("ui.model_label", env = env_model_target)).size(11.0).color(egui::Color32::WHITE).strong());
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                let rec_btn = ui.small_button(t!("ui.btn_model_recommended")).on_hover_text(t!("ui.restore_default_model_tooltip", model = default_model_name));
-                                                if make_widget_accessible_and_activated(ui, &rec_btn, theme.accent) {
+                                            let rec_btn = ui.small_button(t!("ui.btn_model_recommended")).on_hover_text(t!("ui.restore_default_model_tooltip", model = default_model_name));
+                                            let rec_id = ui.make_persistent_id(format!("dwell_model_recommended_{}", self.selected_provider_modal.env_prefix()));
+                                            if make_widget_accessible_and_activated(ui, &rec_btn, theme.accent)
+                                                || apply_dwell_to_response(ui, &mut self.dwell_state, rec_id, &rec_btn)
+                                            {
                                                 self.model_input = default_model_name.to_string();
                                             }
                                         });
@@ -984,8 +1071,11 @@ impl OverlayApp {
                                     ui.horizontal(|ui| {
                                         ui.label(egui::RichText::new(t!("ui.endpoint_label")).size(11.0).color(egui::Color32::WHITE).strong());
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                let def_ep_btn = ui.small_button(t!("ui.btn_endpoint_default")).on_hover_text(t!("ui.btn_endpoint_default_tooltip", url = default_endpoint_url).to_string());
-                                                if make_widget_accessible_and_activated(ui, &def_ep_btn, theme.accent) {
+                                            let def_ep_btn = ui.small_button(t!("ui.btn_endpoint_default")).on_hover_text(t!("ui.btn_endpoint_default_tooltip", url = default_endpoint_url).to_string());
+                                            let def_ep_id = ui.make_persistent_id(format!("dwell_endpoint_default_{}", self.selected_provider_modal.env_prefix()));
+                                            if make_widget_accessible_and_activated(ui, &def_ep_btn, theme.accent)
+                                                || apply_dwell_to_response(ui, &mut self.dwell_state, def_ep_id, &def_ep_btn)
+                                            {
                                                 self.endpoint_input = default_endpoint_url.to_string();
                                             }
                                         });
@@ -1033,7 +1123,9 @@ impl OverlayApp {
                                 ui.add_space(5.0);
                                 ui.horizontal(|ui| {
                                     let save_btn = ui.button(t!("ui.btn_save_apply"));
-                                    let save_btn_hit = make_widget_accessible_and_activated(ui, &save_btn, theme.accent);
+                                    let save_btn_id = ui.make_persistent_id("dwell_save_apply_llm");
+                                    let save_btn_hit = make_widget_accessible_and_activated(ui, &save_btn, theme.accent)
+                                        || apply_dwell_to_response(ui, &mut self.dwell_state, save_btn_id, &save_btn);
                                     if save_btn_hit || enter_pressed_in_fields {
                                         let key = self.api_key_input.trim();
                                         let model = if self.model_input.trim().is_empty() { default_model_name } else { &self.model_input };
@@ -1077,7 +1169,10 @@ impl OverlayApp {
                                         }
                                     }
                                     let cancel_btn = ui.button(t!("ui.btn_cancel"));
-                                    if make_widget_accessible_and_activated(ui, &cancel_btn, theme.accent) {
+                                    let cancel_btn_id = ui.make_persistent_id("dwell_cancel_llm");
+                                    if make_widget_accessible_and_activated(ui, &cancel_btn, theme.accent)
+                                        || apply_dwell_to_response(ui, &mut self.dwell_state, cancel_btn_id, &cancel_btn)
+                                    {
                                         self.show_api_key_modal = false;
                                         self.api_key_error = None;
                                     }
@@ -1117,7 +1212,10 @@ impl OverlayApp {
                                                 let is_solo = is_checked && self.active_disability_presets.len() == 1;
                                                 let solo_label = if is_solo { t!("ui.a11y_preset_solo_active").to_string() } else { t!("ui.a11y_preset_solo").to_string() };
                                                 let solo_btn = ui.small_button(solo_label).on_hover_text(t!("ui.a11y_preset_solo_tooltip"));
-                                                if make_widget_accessible_and_activated(ui, &solo_btn, theme.accent) {
+                                                let solo_id = ui.make_persistent_id(format!("dwell_solo_preset_{:?}", preset));
+                                                if make_widget_accessible_and_activated(ui, &solo_btn, theme.accent)
+                                                    || apply_dwell_to_response(ui, &mut self.dwell_state, solo_id, &solo_btn)
+                                                {
                                                     self.select_exclusive_disability_preset(preset, ctx);
                                                     play_earcon(Earcon::Success);
                                                 }
@@ -1129,21 +1227,30 @@ impl OverlayApp {
                                             ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
                                             let reset_all_btn = ui.small_button(t!("ui.a11y_btn_reset"))
                                                 .on_hover_text(t!("ui.a11y_reset_presets_tooltip"));
-                                            if make_widget_accessible_and_activated(ui, &reset_all_btn, theme.accent) {
+                                            let reset_id = ui.make_persistent_id("dwell_reset_all_presets");
+                                            if make_widget_accessible_and_activated(ui, &reset_all_btn, theme.accent)
+                                                || apply_dwell_to_response(ui, &mut self.dwell_state, reset_id, &reset_all_btn)
+                                            {
                                                 self.active_disability_presets.clear();
                                                 self.apply_active_disability_presets(ctx);
                                                 play_earcon(Earcon::Success);
                                             }
                                             let open_inst_btn = ui.small_button(t!("ui.a11y_btn_rhythm"))
                                                 .on_hover_text(t!("instrument.open_btn_tooltip"));
-                                            if make_widget_accessible_and_activated(ui, &open_inst_btn, theme.accent) {
+                                            let inst_id = ui.make_persistent_id("dwell_open_inst_btn");
+                                            if make_widget_accessible_and_activated(ui, &open_inst_btn, theme.accent)
+                                                || apply_dwell_to_response(ui, &mut self.dwell_state, inst_id, &open_inst_btn)
+                                            {
                                                 self.open_instrument_card();
                                                 self.show_api_key_modal = false;
                                                 play_earcon(Earcon::Success);
                                             }
                                             let open_kbd_btn = ui.small_button(t!("ui.a11y_btn_keyboard"))
                                                 .on_hover_text(t!("keyboard.open_btn_tooltip"));
-                                            if make_widget_accessible_and_activated(ui, &open_kbd_btn, theme.accent) {
+                                            let kbd_id = ui.make_persistent_id("dwell_open_kbd_btn");
+                                            if make_widget_accessible_and_activated(ui, &open_kbd_btn, theme.accent)
+                                                || apply_dwell_to_response(ui, &mut self.dwell_state, kbd_id, &open_kbd_btn)
+                                            {
                                                 self.open_keyboard_card();
                                                 self.show_api_key_modal = false;
                                                 play_earcon(Earcon::Success);
@@ -1292,6 +1399,124 @@ impl OverlayApp {
                                 ui.separator();
                                 ui.add_space(6.0);
 
+                                // 3b. Filtres Spasticité, Parkinson & Dystonie
+                                ui.label(
+                                    egui::RichText::new("🛡️ Filtres Spasticité, Parkinson & Dystonie")
+                                        .size(12.0)
+                                        .color(theme.accent)
+                                        .strong(),
+                                );
+                                ui.add_space(2.0);
+                                ui.label(
+                                    egui::RichText::new("Stabilisation du pointeur physique, anti-dérapage au clic et suppression des doubles frappes involontaires.")
+                                        .size(10.5)
+                                        .color(theme.text_secondary),
+                                );
+                                ui.add_space(4.0);
+
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, theme.border_subtle))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        let mut steady_click = is_steady_click_enabled();
+                                        let resp_steady = ui.checkbox(
+                                            &mut steady_click,
+                                            egui::RichText::new("Steady-Click (Gel du curseur pendant la pression physique)")
+                                                .size(11.5)
+                                                .color(theme.text_primary),
+                                        ).on_hover_text("Fige instantanément la position du pointeur dès que vous appuyez sur le bouton de la souris pour empêcher les spasmes musculaires de faire déraper le clic hors de la cible.");
+                                        let id_steady = ui.make_persistent_id("dwell_steady_click_enabled");
+                                        if resp_steady.changed() || apply_dwell_to_response(ui, &mut self.dwell_state, id_steady, &resp_steady) {
+                                            if !resp_steady.changed() { steady_click = !steady_click; }
+                                            set_steady_click_enabled(steady_click);
+                                            play_earcon(Earcon::Success);
+                                        }
+
+                                        ui.add_space(3.0);
+
+                                        let mut prevent_drag = is_prevent_accidental_drag();
+                                        let resp_drag = ui.checkbox(
+                                            &mut prevent_drag,
+                                            egui::RichText::new("Protection Anti-Glisser/Déposer (Drag-Lock Guard)")
+                                                .size(11.5)
+                                                .color(theme.text_primary),
+                                        ).on_hover_text("Empêche le déplacement involontaire de fichiers, de dossiers ou de texte lors d'une contraction prolongée sur le bouton. Maintenez Shift ou Ctrl pour autoriser un glisser-déposer volontaire.");
+                                        let id_drag = ui.make_persistent_id("dwell_prevent_accidental_drag");
+                                        if resp_drag.changed() || apply_dwell_to_response(ui, &mut self.dwell_state, id_drag, &resp_drag) {
+                                            if !resp_drag.changed() { prevent_drag = !prevent_drag; }
+                                            set_prevent_accidental_drag(prevent_drag);
+                                            play_earcon(Earcon::Success);
+                                        }
+
+                                        ui.add_space(3.0);
+
+                                        let mut bounce_keys = is_bounce_keys_enabled();
+                                        let resp_bounce = ui.checkbox(
+                                            &mut bounce_keys,
+                                            egui::RichText::new("Filtre Anti-Mitraillette Clavier (BounceKeys)")
+                                                .size(11.5)
+                                                .color(theme.text_primary),
+                                        ).on_hover_text("Ignore les frappes répétées involontaires sur une même touche survenant trop rapidement suite à une secousse ou un tremblement de la main.");
+                                        let id_bounce = ui.make_persistent_id("dwell_bounce_keys_enabled");
+                                        if resp_bounce.changed() || apply_dwell_to_response(ui, &mut self.dwell_state, id_bounce, &resp_bounce) {
+                                            if !resp_bounce.changed() { bounce_keys = !bounce_keys; }
+                                            set_bounce_keys_enabled(bounce_keys);
+                                            play_earcon(Earcon::Success);
+                                        }
+
+                                        if bounce_keys {
+                                            ui.add_space(2.0);
+                                            let mut cur_ms = get_bounce_keys_ms();
+                                            let prev_ms = cur_ms;
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new("Délai anti-rebond :").size(11.0).color(theme.text_secondary));
+                                                let slider = egui::Slider::new(&mut cur_ms, 80..=500).suffix(" ms").step_by(10.0);
+                                                ui.add(slider).on_hover_text("Délai minimal sous lequel une ré-enfoncement de la même touche est considéré comme un bégaiement involontaire.");
+                                            });
+                                            if cur_ms != prev_ms {
+                                                set_bounce_keys_ms(cur_ms);
+                                            }
+                                        }
+
+                                        ui.add_space(3.0);
+
+                                        let mut tremor_filter = is_tremor_filter_enabled();
+                                        let resp_tremor = ui.checkbox(
+                                            &mut tremor_filter,
+                                            egui::RichText::new("Amortisseur de tremblements souris (Tremor Deadzone)")
+                                                .size(11.5)
+                                                .color(theme.text_primary),
+                                        ).on_hover_text("Filtre les micro-oscillations haute fréquence de la main (4-12 Hz) pour stabiliser le pointeur sur les boutons sans gêner les déplacements amples.");
+                                        let id_tremor = ui.make_persistent_id("dwell_tremor_filter_enabled");
+                                        if resp_tremor.changed() || apply_dwell_to_response(ui, &mut self.dwell_state, id_tremor, &resp_tremor) {
+                                            if !resp_tremor.changed() { tremor_filter = !tremor_filter; }
+                                            set_tremor_filter_enabled(tremor_filter);
+                                            play_earcon(Earcon::Success);
+                                        }
+
+                                        ui.add_space(3.0);
+
+                                        let mut shock_guard = is_spasm_shock_guard();
+                                        let resp_shock = ui.checkbox(
+                                            &mut shock_guard,
+                                            egui::RichText::new("Protection Anti-Spasmes / Chocs Myocloniques")
+                                                .size(11.5)
+                                                .color(theme.text_primary),
+                                        ).on_hover_text("Détecte les accélérations anormales causées par un spasme ou un réflexe musculaire soudain (> 300 px en 30 ms) et amortit le sursaut pour éviter que le curseur ne s'envole.");
+                                        let id_shock = ui.make_persistent_id("dwell_spasm_shock_guard");
+                                        if resp_shock.changed() || apply_dwell_to_response(ui, &mut self.dwell_state, id_shock, &resp_shock) {
+                                            if !resp_shock.changed() { shock_guard = !shock_guard; }
+                                            set_spasm_shock_guard(shock_guard);
+                                            play_earcon(Earcon::Success);
+                                        }
+                                    });
+
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(6.0);
+
                                 // 3. Clic par temporisation au survol (Dwell Timing)
                                 ui.label(egui::RichText::new(t!("ui.dwell_timing_label")).size(12.0).color(theme.accent).strong());
                                 ui.add_space(4.0);
@@ -1417,17 +1642,23 @@ impl OverlayApp {
                                                 ui.add_space(2.0);
                                                 ui.horizontal_wrapped(|ui| {
                                                     let is_webcam = cur_source == crate::eyetracking::EyeTrackerSource::WebcamNeural;
-                                                    if ui.selectable_label(is_webcam, t!("eyetracking.source_webcam")).clicked() && !is_webcam {
+                                                    let btn_wc = ui.selectable_label(is_webcam, t!("eyetracking.source_webcam"));
+                                                    let wc_id = ui.make_persistent_id("dwell_eye_source_webcam");
+                                                    if (btn_wc.clicked() || apply_dwell_to_response(ui, &mut self.dwell_state, wc_id, &btn_wc)) && !is_webcam {
                                                         crate::eyetracking::set_eye_tracker_source(crate::eyetracking::EyeTrackerSource::WebcamNeural);
                                                         play_earcon(Earcon::Success);
                                                     }
                                                     let is_opengaze = cur_source == crate::eyetracking::EyeTrackerSource::OpenGazeTcp;
-                                                    if ui.selectable_label(is_opengaze, t!("eyetracking.source_opengaze")).clicked() && !is_opengaze {
+                                                    let btn_og = ui.selectable_label(is_opengaze, t!("eyetracking.source_opengaze"));
+                                                    let og_id = ui.make_persistent_id("dwell_eye_source_opengaze");
+                                                    if (btn_og.clicked() || apply_dwell_to_response(ui, &mut self.dwell_state, og_id, &btn_og)) && !is_opengaze {
                                                         crate::eyetracking::set_eye_tracker_source(crate::eyetracking::EyeTrackerSource::OpenGazeTcp);
                                                         play_earcon(Earcon::Success);
                                                     }
                                                     let is_opentrack = cur_source == crate::eyetracking::EyeTrackerSource::OpenTrackUdp;
-                                                    if ui.selectable_label(is_opentrack, t!("eyetracking.source_opentrack")).clicked() && !is_opentrack {
+                                                    let btn_ot = ui.selectable_label(is_opentrack, t!("eyetracking.source_opentrack"));
+                                                    let ot_id = ui.make_persistent_id("dwell_eye_source_opentrack");
+                                                    if (btn_ot.clicked() || apply_dwell_to_response(ui, &mut self.dwell_state, ot_id, &btn_ot)) && !is_opentrack {
                                                         crate::eyetracking::set_eye_tracker_source(crate::eyetracking::EyeTrackerSource::OpenTrackUdp);
                                                         play_earcon(Earcon::Success);
                                                     }
@@ -1471,7 +1702,9 @@ impl OverlayApp {
                                         let mut pitch_val = current_pitch;
                                         ui.horizontal(|ui| {
                                             ui.label(egui::RichText::new(t!("eyetracking.pitch_label")).size(11.0).color(theme.text_secondary));
-                                            if ui.small_button("➖").on_hover_text(t!("eyetracking.pitch_minus_tooltip")).clicked() {
+                                            let btn_minus = ui.small_button("➖").on_hover_text(t!("eyetracking.pitch_minus_tooltip"));
+                                            let minus_id = ui.make_persistent_id("dwell_pitch_minus");
+                                            if btn_minus.clicked() || apply_dwell_to_response(ui, &mut self.dwell_state, minus_id, &btn_minus) {
                                                 crate::eyetracking::set_camera_pitch_offset(current_pitch - 1.0);
                                             }
                                             let slider = egui::Slider::new(&mut pitch_val, -60.0..=30.0)
@@ -1481,10 +1714,14 @@ impl OverlayApp {
                                             if ui.add(slider).on_hover_text(t!("eyetracking.pitch_slider_tooltip")).changed() {
                                                 crate::eyetracking::set_camera_pitch_offset(pitch_val);
                                             }
-                                            if ui.small_button("➕").on_hover_text(t!("eyetracking.pitch_plus_tooltip")).clicked() {
+                                            let btn_plus = ui.small_button("➕").on_hover_text(t!("eyetracking.pitch_plus_tooltip"));
+                                            let plus_id = ui.make_persistent_id("dwell_pitch_plus");
+                                            if btn_plus.clicked() || apply_dwell_to_response(ui, &mut self.dwell_state, plus_id, &btn_plus) {
                                                 crate::eyetracking::set_camera_pitch_offset(current_pitch + 1.0);
                                             }
-                                            if ui.small_button(t!("eyetracking.pitch_tare_btn")).on_hover_text(t!("eyetracking.pitch_tare_tooltip")).clicked() {
+                                            let btn_tare = ui.small_button(t!("eyetracking.pitch_tare_btn")).on_hover_text(t!("eyetracking.pitch_tare_tooltip"));
+                                            let tare_id = ui.make_persistent_id("dwell_pitch_tare");
+                                            if btn_tare.clicked() || apply_dwell_to_response(ui, &mut self.dwell_state, tare_id, &btn_tare) {
                                                 crate::eyetracking::tare_camera_pitch_to_current_gaze();
                                             }
                                         });
@@ -1511,7 +1748,9 @@ impl OverlayApp {
                                                 .step_by(0.05)
                                                 .custom_formatter(|v, _| format!("{:.2}x", v));
                                             ui.add(slider).on_hover_text(t!("eyetracking.sensitivity_tooltip"));
-                                            if ui.small_button("0.75").on_hover_text(t!("eyetracking.sensitivity_reset_tooltip")).clicked() {
+                                            let btn_reset_sens = ui.small_button("0.75").on_hover_text(t!("eyetracking.sensitivity_reset_tooltip"));
+                                            let reset_sens_id = ui.make_persistent_id("dwell_eye_reset_sens");
+                                            if btn_reset_sens.clicked() || apply_dwell_to_response(ui, &mut self.dwell_state, reset_sens_id, &btn_reset_sens) {
                                                 sens = 0.75;
                                             }
                                         });
@@ -1572,7 +1811,9 @@ impl OverlayApp {
                                                 let prec = (100.0 - (rms / 250.0 * 100.0)).clamp(10.0, 99.0);
                                                 let calib_str = t!("eyetracking.calibrated_status", precision = format!("{:.0}", prec), rms = format!("{:.1}", rms)).to_string();
                                                 ui.label(egui::RichText::new(calib_str).size(11.0).color(egui::Color32::from_rgb(0, 230, 118)).strong());
-                                                if ui.small_button("🗑").on_hover_text(t!("eyetracking.delete_calib_tooltip")).clicked() {
+                                                let btn_del_cal = ui.small_button("🗑").on_hover_text(t!("eyetracking.delete_calib_tooltip"));
+                                                let del_cal_id = ui.make_persistent_id("dwell_eye_del_calib");
+                                                if btn_del_cal.clicked() || apply_dwell_to_response(ui, &mut self.dwell_state, del_cal_id, &btn_del_cal) {
                                                     self.eye_tracker.reset_calibration();
                                                 }
                                             } else {
@@ -1633,7 +1874,9 @@ impl OverlayApp {
                                         } else if is_installed {
                                             ui.horizontal(|ui| {
                                                 ui.label(egui::RichText::new(t!("eyetracking.model_installed")).size(11.0).color(egui::Color32::from_rgb(100, 225, 130)).strong());
-                                                if ui.small_button("🗑").on_hover_text(t!("eyetracking.model_delete_tooltip")).clicked() {
+                                                let btn_del_model = ui.small_button("🗑").on_hover_text(t!("eyetracking.model_delete_tooltip"));
+                                                let del_model_id = ui.make_persistent_id("dwell_eye_del_model");
+                                                if btn_del_model.clicked() || apply_dwell_to_response(ui, &mut self.dwell_state, del_model_id, &btn_del_model) {
                                                     let _ = crate::eyetracking::delete_eyetracking_model();
                                                     play_earcon(Earcon::Success);
                                                 }
@@ -1641,7 +1884,9 @@ impl OverlayApp {
                                         } else {
                                             ui.horizontal(|ui| {
                                                 let event_tx_clone = self.event_sender.clone();
-                                                if ui.button(egui::RichText::new(t!("eyetracking.download_model_btn")).strong().color(theme.accent)).on_hover_text(t!("eyetracking.download_model_tooltip")).clicked() {
+                                                let btn_dl_model = ui.button(egui::RichText::new(t!("eyetracking.download_model_btn")).strong().color(theme.accent)).on_hover_text(t!("eyetracking.download_model_tooltip"));
+                                                let dl_model_id = ui.make_persistent_id("dwell_eye_dl_model");
+                                                if btn_dl_model.clicked() || apply_dwell_to_response(ui, &mut self.dwell_state, dl_model_id, &btn_dl_model) {
                                                     std::thread::spawn(move || {
                                                         let _ = crate::eyetracking::ensure_eyetracking_model_downloaded(&event_tx_clone);
                                                     });
@@ -1652,7 +1897,9 @@ impl OverlayApp {
 
                                         ui.add_space(6.0);
                                         ui.horizontal(|ui| {
-                                            if ui.button(t!("eyetracking.calibration_9_btn")).on_hover_text(t!("eyetracking.calibration_9_tooltip")).clicked() {
+                                            let btn_calib9 = ui.button(t!("eyetracking.calibration_9_btn")).on_hover_text(t!("eyetracking.calibration_9_tooltip"));
+                                            let calib9_id = ui.make_persistent_id("dwell_eye_start_calib9");
+                                            if btn_calib9.clicked() || apply_dwell_to_response(ui, &mut self.dwell_state, calib9_id, &btn_calib9) {
                                                 self.eye_tracker.start_calibration();
                                                 crate::eyetracking::ensure_camera_worker_running();
                                                 self.show_api_key_modal = false;
@@ -1663,7 +1910,9 @@ impl OverlayApp {
                                                 let wa = crate::overlay::get_desktop_work_area_scaled(ui.ctx());
                                                 (wa.w, wa.h)
                                             };
-                                            if ui.button(t!("eyetracking.recenter_1_btn")).on_hover_text(t!("eyetracking.recenter_1_tooltip")).clicked() {
+                                            let btn_calib1 = ui.button(t!("eyetracking.recenter_1_btn")).on_hover_text(t!("eyetracking.recenter_1_tooltip"));
+                                            let calib1_id = ui.make_persistent_id("dwell_eye_recenter_1");
+                                            if btn_calib1.clicked() || apply_dwell_to_response(ui, &mut self.dwell_state, calib1_id, &btn_calib1) {
                                                 self.eye_tracker.recenter_center_gaze(screen_w, screen_h);
                                                 self.show_api_key_modal = false;
                                             }
@@ -1673,7 +1922,10 @@ impl OverlayApp {
                                 ui.add_space(8.0);
                                 ui.horizontal(|ui| {
                                     let close_a11y_btn = ui.button(t!("ui.btn_close"));
-                                    if make_widget_accessible_and_activated(ui, &close_a11y_btn, theme.accent) {
+                                    let close_a11y_id = ui.make_persistent_id("dwell_close_a11y_tab");
+                                    if make_widget_accessible_and_activated(ui, &close_a11y_btn, theme.accent)
+                                        || apply_dwell_to_response(ui, &mut self.dwell_state, close_a11y_id, &close_a11y_btn)
+                                    {
                                         self.show_api_key_modal = false;
                                     }
                                 });
@@ -2187,7 +2439,10 @@ impl OverlayApp {
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 if !self.voice_reference_text_input.trim().is_empty() {
                                                     let clear_btn = ui.small_button(t!("ui.btn_clear_short")).on_hover_text(t!("voice.clear_transcript_tooltip"));
-                                                    if make_widget_accessible_and_activated(ui, &clear_btn, theme.accent) {
+                                                    let clear_id = ui.make_persistent_id("dwell_voice_clear_transcript");
+                                                    if make_widget_accessible_and_activated(ui, &clear_btn, theme.accent)
+                                                        || apply_dwell_to_response(ui, &mut self.dwell_state, clear_id, &clear_btn)
+                                                    {
                                                         self.voice_reference_text_input.clear();
                                                         let _ = write_env_var_to_file(".env", "VOICE_REFERENCE_TEXT", "");
                                                         std::env::set_var("VOICE_REFERENCE_TEXT", "");
@@ -2386,7 +2641,10 @@ impl OverlayApp {
                                 ui.add_space(6.0);
                                 ui.horizontal(|ui| {
                                     let close_theme_btn = ui.button(t!("ui.btn_close"));
-                                    if make_widget_accessible_and_activated(ui, &close_theme_btn, theme.accent) {
+                                    let close_theme_id = ui.make_persistent_id("dwell_close_theme_tab");
+                                    if make_widget_accessible_and_activated(ui, &close_theme_btn, theme.accent)
+                                        || apply_dwell_to_response(ui, &mut self.dwell_state, close_theme_id, &close_theme_btn)
+                                    {
                                         self.show_api_key_modal = false;
                                     }
                                 });
@@ -2432,7 +2690,10 @@ impl OverlayApp {
 
                                 ui.horizontal(|ui| {
                                     let close_lang_btn = ui.button(t!("ui.btn_close"));
-                                    if make_widget_accessible_and_activated(ui, &close_lang_btn, theme.accent) {
+                                    let close_lang_id = ui.make_persistent_id("dwell_close_lang_tab");
+                                    if make_widget_accessible_and_activated(ui, &close_lang_btn, theme.accent)
+                                        || apply_dwell_to_response(ui, &mut self.dwell_state, close_lang_id, &close_lang_btn)
+                                    {
                                         self.show_api_key_modal = false;
                                     }
                                 });
@@ -2502,7 +2763,9 @@ impl OverlayApp {
 
                                         ui.horizontal(|ui| {
                                             let add_btn = ui.button(egui::RichText::new(t!("ui.macros_add_btn")).strong().color(theme.accent));
-                                            let add_btn_hit = make_widget_accessible_and_activated(ui, &add_btn, theme.accent);
+                                            let add_btn_id = ui.make_persistent_id("dwell_macros_add_btn");
+                                            let add_btn_hit = make_widget_accessible_and_activated(ui, &add_btn, theme.accent)
+                                                || apply_dwell_to_response(ui, &mut self.dwell_state, add_btn_id, &add_btn);
                                             if add_btn_hit || enter_in_macro_input {
                                                 let sc = self.macro_shortcut_input.trim().to_string();
                                                 let tx = self.macro_text_input.trim().to_string();
@@ -2547,7 +2810,10 @@ impl OverlayApp {
                                                 ui.label(egui::RichText::new(preview).size(11.0).color(egui::Color32::WHITE)).on_hover_text(tx);
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                     let del_macro_btn = ui.small_button("🗑").on_hover_text(t!("ui.macros_delete_tooltip"));
-                                                    if make_widget_accessible_and_activated(ui, &del_macro_btn, theme.accent) {
+                                                    let del_macro_id = ui.make_persistent_id(format!("dwell_del_macro_{idx}"));
+                                                    if make_widget_accessible_and_activated(ui, &del_macro_btn, theme.accent)
+                                                        || apply_dwell_to_response(ui, &mut self.dwell_state, del_macro_id, &del_macro_btn)
+                                                    {
                                                         to_remove = Some(idx);
                                                     }
                                                 });
@@ -2562,13 +2828,27 @@ impl OverlayApp {
                                     let _ = save_macros(&self.macros);
                                     play_earcon(Earcon::Success);
                                 }
+
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    let close_macros_btn = ui.button(t!("ui.btn_close"));
+                                    let close_macros_id = ui.make_persistent_id("dwell_close_macros_tab");
+                                    if make_widget_accessible_and_activated(ui, &close_macros_btn, theme.accent)
+                                        || apply_dwell_to_response(ui, &mut self.dwell_state, close_macros_id, &close_macros_btn)
+                                    {
+                                        self.show_api_key_modal = false;
+                                    }
+                                });
                             }
                             SettingsTab::Devices => {
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new(t!("ui.devices_tab_desc")).size(11.5).color(theme.text_secondary));
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         let ref_btn = ui.button(t!("ui.devices_refresh_btn")).on_hover_text(t!("ui.devices_refresh_btn"));
-                                        if make_widget_accessible_and_activated(ui, &ref_btn, theme.accent) {
+                                        let ref_btn_id = ui.make_persistent_id("dwell_devices_refresh_btn");
+                                        if make_widget_accessible_and_activated(ui, &ref_btn, theme.accent)
+                                            || apply_dwell_to_response(ui, &mut self.dwell_state, ref_btn_id, &ref_btn)
+                                        {
                                             self.refresh_devices();
                                             play_earcon(Earcon::Success);
                                         }
@@ -2648,7 +2928,10 @@ impl OverlayApp {
                                 ui.add_space(8.0);
                                 ui.horizontal(|ui| {
                                     let close_dev_btn = ui.button(t!("ui.btn_close"));
-                                    if make_widget_accessible_and_activated(ui, &close_dev_btn, theme.accent) {
+                                    let close_dev_id = ui.make_persistent_id("dwell_close_devices_tab");
+                                    if make_widget_accessible_and_activated(ui, &close_dev_btn, theme.accent)
+                                        || apply_dwell_to_response(ui, &mut self.dwell_state, close_dev_id, &close_dev_btn)
+                                    {
                                         self.show_api_key_modal = false;
                                     }
                                 });
@@ -2678,7 +2961,10 @@ impl OverlayApp {
                                         let is_kbd_open = self.is_keyboard_open();
                                         let btn_label = if is_kbd_open { "🔌 Reconnecter / Réinitialiser le clavier" } else { "⌨ Ouvrir / Connecter le clavier virtuel" };
                                         let connect_btn = ui.add(egui::Button::new(egui::RichText::new(btn_label).strong().color(theme.control_bg)).fill(theme.accent));
-                                        if make_widget_accessible_and_activated(ui, &connect_btn, theme.accent) {
+                                        let connect_id = ui.make_persistent_id("dwell_connect_virtual_kbd");
+                                        if make_widget_accessible_and_activated(ui, &connect_btn, theme.accent)
+                                            || apply_dwell_to_response(ui, &mut self.dwell_state, connect_id, &connect_btn)
+                                        {
                                             if !is_kbd_open {
                                                 self.open_keyboard_card();
                                             }
@@ -2723,12 +3009,18 @@ impl OverlayApp {
                                             ui.label(egui::RichText::new(&companion_url).size(11.5).color(theme.accent).underline());
 
                                             let copy_btn = ui.small_button("📋 Copier").on_hover_text("Copier l'URL pour l'ouvrir sur votre smartphone ou tablette");
-                                            if make_widget_accessible_and_activated(ui, &copy_btn, theme.accent) {
+                                            let copy_id = ui.make_persistent_id("dwell_copy_companion_url");
+                                            if make_widget_accessible_and_activated(ui, &copy_btn, theme.accent)
+                                                || apply_dwell_to_response(ui, &mut self.dwell_state, copy_id, &copy_btn)
+                                            {
                                                 crate::clipboard::set_clipboard_text(&companion_url);
                                                 play_earcon(Earcon::Success);
                                             }
                                             let open_btn = ui.small_button("↗ Ouvrir").on_hover_text("Tester le contacteur dans votre navigateur");
-                                            if make_widget_accessible_and_activated(ui, &open_btn, theme.accent) {
+                                            let open_id = ui.make_persistent_id("dwell_open_companion_url");
+                                            if make_widget_accessible_and_activated(ui, &open_btn, theme.accent)
+                                                || apply_dwell_to_response(ui, &mut self.dwell_state, open_id, &open_btn)
+                                            {
                                                 crate::automation::open_browser_smart(&companion_url);
                                             }
                                         });
@@ -2738,7 +3030,10 @@ impl OverlayApp {
                                             ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
                                             ui.label(egui::RichText::new(format!("Port UDP pour ESP32 / Pédales matérielles : {}", crate::keyboard_hook::COMPANION_UDP_PORT)).size(10.5).color(theme.text_secondary));
                                             let test_switch_btn = ui.small_button("🎯 Tester Clic Contacteur");
-                                            if make_widget_accessible_and_activated(ui, &test_switch_btn, theme.accent) {
+                                            let test_sw_id = ui.make_persistent_id("dwell_test_switch_companion");
+                                            if make_widget_accessible_and_activated(ui, &test_switch_btn, theme.accent)
+                                                || apply_dwell_to_response(ui, &mut self.dwell_state, test_sw_id, &test_switch_btn)
+                                            {
                                                 crate::keyboard_hook::inject_switch_event(crate::types::SwitchKeyEvent::Select);
                                                 play_earcon(Earcon::Success);
                                             }
@@ -2750,6 +3045,82 @@ impl OverlayApp {
                                                 if elapsed < 15 {
                                                     ui.add_space(2.0);
                                                     ui.label(egui::RichText::new(format!("⚡ Dernier signal reçu : {} (il y a {}s)", name, elapsed)).size(10.5).color(egui::Color32::from_rgb(255, 214, 0)));
+                                                }
+                                            }
+                                        }
+                                    });
+
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(6.0);
+
+                                // 2b. Section BCI / EEG / EMG via Lab Streaming Layer (LSL)
+                                egui::Frame::new()
+                                    .fill(theme.control_bg)
+                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 70, 240)))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        let is_connected = crate::keyboard_hook::is_bci_lsl_connected();
+                                        let packets = crate::keyboard_hook::BCI_LSL_PACKETS_COUNT.load(Ordering::Relaxed);
+                                        let port = crate::keyboard_hook::get_bci_lsl_port();
+
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(egui::RichText::new("🧠 Interface Cerveau-Ordinateur & EMG (Lab Streaming Layer - LSL)").size(12.0).color(egui::Color32::from_rgb(205, 95, 255)).strong());
+                                            let status_str = if is_connected {
+                                                format!("● Connecté ({} paquets reçus)", packets)
+                                            } else {
+                                                format!("○ En écoute sur le port {}", port)
+                                            };
+                                            let status_col = if is_connected { egui::Color32::from_rgb(0, 230, 118) } else { theme.text_secondary };
+                                            ui.label(egui::RichText::new(status_str).size(10.5).color(status_col));
+                                        });
+                                        ui.add_space(2.0);
+                                        ui.label(egui::RichText::new("Reçoit les flux de casques EEG ou capteurs EMG (OpenBCI, Muse, Emotiv, Delsys). Déclenche le contacteur unique sur potentiels P300 ou micro-contractions musculaires.").size(10.5).color(theme.text_secondary));
+                                        ui.add_space(4.0);
+
+                                        // Seuil de sensibilité EMG
+                                        let mut emg_th = crate::keyboard_hook::get_bci_emg_threshold();
+                                        let prev_th = emg_th;
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("Seuil de contraction EMG :").size(11.0).color(Color32::WHITE));
+                                            let slider = egui::Slider::new(&mut emg_th, 0.010..=0.200)
+                                                .step_by(0.005)
+                                                .custom_formatter(|v, _| format!("{:.3} RMS", v));
+                                            ui.add(slider).on_hover_text("Ajustez la sensibilité de détection des micro-contractions (mâchoire, tempe, doigt). Plus la valeur est basse, plus le détecteur est sensible.");
+                                            let def_emg_btn = ui.small_button("Défaut (0.065)");
+                                            let def_emg_id = ui.make_persistent_id("dwell_default_bci_emg_th");
+                                            if def_emg_btn.clicked() || apply_dwell_to_response(ui, &mut self.dwell_state, def_emg_id, &def_emg_btn) {
+                                                emg_th = 0.065;
+                                            }
+                                        });
+                                        if (emg_th - prev_th).abs() > 0.001 {
+                                            crate::keyboard_hook::set_bci_emg_threshold(emg_th);
+                                        }
+
+                                        ui.add_space(4.0);
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                                            ui.label(egui::RichText::new(format!("Port UDP/TCP LSL : {}", port)).size(10.5).color(theme.text_secondary));
+                                            let test_bci_btn = ui.small_button("⚡ Tester Déclencheur P300 / EMG");
+                                            let test_bci_id = ui.make_persistent_id("dwell_test_bci_trigger");
+                                            if make_widget_accessible_and_activated(ui, &test_bci_btn, theme.accent)
+                                                || apply_dwell_to_response(ui, &mut self.dwell_state, test_bci_id, &test_bci_btn)
+                                            {
+                                                crate::keyboard_hook::inject_switch_event(crate::types::SwitchKeyEvent::Select);
+                                                if let Ok(mut last) = crate::keyboard_hook::LAST_BCI_EVENT.lock() {
+                                                    *last = Some(("Test BCI P300 manuel".to_string(), Instant::now()));
+                                                }
+                                                play_earcon(Earcon::Success);
+                                            }
+                                        });
+
+                                        if let Ok(last_bci) = crate::keyboard_hook::LAST_BCI_EVENT.lock() {
+                                            if let Some((ref desc, ref time)) = *last_bci {
+                                                let elapsed = time.elapsed().as_secs();
+                                                if elapsed < 20 {
+                                                    ui.add_space(2.0);
+                                                    ui.label(egui::RichText::new(format!("⚡ Dernier signal BCI/EMG : {} (il y a {}s)", desc, elapsed)).size(10.5).color(egui::Color32::from_rgb(0, 230, 118)));
                                                 }
                                             }
                                         }
@@ -2873,8 +3244,10 @@ impl OverlayApp {
                                                             .strong()
                                                             .color(theme.accent),
                                                     ).on_hover_text("Cliquez pour écouter et mapper n'importe quelle combinaison de touches (avec Ctrl, Alt, Shift)");
-
-                                                    if make_widget_accessible_and_activated(ui, &rebind_btn, theme.accent) {
+                                                    let rebind_id = ui.make_persistent_id(format!("dwell_rebind_btn_{}", env_var));
+                                                    if make_widget_accessible_and_activated(ui, &rebind_btn, theme.accent)
+                                                        || apply_dwell_to_response(ui, &mut self.dwell_state, rebind_id, &rebind_btn)
+                                                    {
                                                         if let Ok(mut lock) = crate::keyboard_hook::REBIND_LISTENING_TARGET.lock() {
                                                             *lock = Some(env_var.to_string());
                                                         }
@@ -2925,7 +3298,10 @@ impl OverlayApp {
                                         ui.add_space(6.0);
                                         ui.horizontal(|ui| {
                                             let reset_keys_btn = ui.small_button("↺ Rétablir les touches par défaut");
-                                            if make_widget_accessible_and_activated(ui, &reset_keys_btn, theme.accent) {
+                                            let reset_keys_id = ui.make_persistent_id("dwell_reset_all_keybindings");
+                                            if make_widget_accessible_and_activated(ui, &reset_keys_btn, theme.accent)
+                                                || apply_dwell_to_response(ui, &mut self.dwell_state, reset_keys_id, &reset_keys_btn)
+                                            {
                                                 let default_bindings: [(&str, u32); 11] = [
                                                     ("KEY_BIND_SWITCH", 0x76),         // F7
                                                     ("KEY_BIND_DICTATION", 0x77),      // F8
@@ -3020,7 +3396,11 @@ impl OverlayApp {
                                             ui.data_mut(|d| d.insert_temp(egui::Id::NULL.with("new_remap_to_vk"), final_dest));
 
                                             let add_btn = ui.button(egui::RichText::new("➕ Ajouter").strong().color(theme.accent));
-                                            if add_btn.clicked() || make_widget_accessible_and_activated(ui, &add_btn, theme.accent) {
+                                            let add_remap_id = ui.make_persistent_id("dwell_add_custom_key_remap");
+                                            if add_btn.clicked()
+                                                || make_widget_accessible_and_activated(ui, &add_btn, theme.accent)
+                                                || apply_dwell_to_response(ui, &mut self.dwell_state, add_remap_id, &add_btn)
+                                            {
                                                 let mut remaps = match crate::keyboard_hook::CUSTOM_KEY_REMAPS.lock() {
                                                     Ok(guard) => guard,
                                                     Err(poisoned) => poisoned.into_inner(),
@@ -3075,7 +3455,11 @@ impl OverlayApp {
 
                                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                         let del_btn = ui.small_button("🗑").on_hover_text("Supprimer cette redirection");
-                                                        if del_btn.clicked() || make_widget_accessible_and_activated(ui, &del_btn, theme.accent) {
+                                                        let del_id = ui.make_persistent_id(format!("dwell_del_remap_rule_{idx}"));
+                                                        if del_btn.clicked()
+                                                            || make_widget_accessible_and_activated(ui, &del_btn, theme.accent)
+                                                            || apply_dwell_to_response(ui, &mut self.dwell_state, del_id, &del_btn)
+                                                        {
                                                             remap_to_remove = Some(idx);
                                                         }
                                                     });
@@ -3104,7 +3488,11 @@ impl OverlayApp {
                                         if !remaps.is_empty() {
                                             ui.add_space(4.0);
                                             let clear_all_btn = ui.small_button("🗑 Effacer toutes les redirections");
-                                            if clear_all_btn.clicked() || make_widget_accessible_and_activated(ui, &clear_all_btn, theme.accent) {
+                                            let clear_all_id = ui.make_persistent_id("dwell_clear_all_remaps");
+                                            if clear_all_btn.clicked()
+                                                || make_widget_accessible_and_activated(ui, &clear_all_btn, theme.accent)
+                                                || apply_dwell_to_response(ui, &mut self.dwell_state, clear_all_id, &clear_all_btn)
+                                            {
                                                 remaps.clear();
                                                 match save_custom_key_remaps(&remaps) {
                                                     Ok(()) => println!("[KeyRemaps] Toutes les redirections ont été effacées"),
@@ -3121,7 +3509,10 @@ impl OverlayApp {
 
                                 ui.horizontal(|ui| {
                                     let close_btn = ui.button(t!("ui.btn_close"));
-                                    if make_widget_accessible_and_activated(ui, &close_btn, theme.accent) {
+                                    let close_kb_id = ui.make_persistent_id("dwell_close_keybindings_tab");
+                                    if make_widget_accessible_and_activated(ui, &close_btn, theme.accent)
+                                        || apply_dwell_to_response(ui, &mut self.dwell_state, close_kb_id, &close_btn)
+                                    {
                                         self.show_api_key_modal = false;
                                     }
                                 });
@@ -3172,7 +3563,10 @@ impl OverlayApp {
                                             ).on_hover_text("Généré dans Home Assistant > Profil utilisateur > Jetons d'accès longue durée");
 
                                             let paste_btn = ui.button("📋").on_hover_text("Coller le jeton depuis le presse-papiers");
-                                            if make_widget_accessible_and_activated(ui, &paste_btn, theme.accent) {
+                                            let paste_id = ui.make_persistent_id("dwell_paste_hass_token");
+                                            if make_widget_accessible_and_activated(ui, &paste_btn, theme.accent)
+                                                || apply_dwell_to_response(ui, &mut self.dwell_state, paste_id, &paste_btn)
+                                            {
                                                 if let Some(clip) = get_clipboard_text().or_else(get_plain_clipboard_text) {
                                                     self.hass_token_input = clip.trim().to_string();
                                                     play_earcon(Earcon::Success);
@@ -3205,7 +3599,10 @@ impl OverlayApp {
                                         ui.add_space(8.0);
                                         ui.horizontal(|ui| {
                                             let test_btn = ui.button("🔌 Tester la connexion");
-                                            if make_widget_accessible_and_activated(ui, &test_btn, theme.accent) {
+                                    let test_id = ui.make_persistent_id("dwell_test_home_assistant_btn");
+                                    if make_widget_accessible_and_activated(ui, &test_btn, theme.accent)
+                                        || apply_dwell_to_response(ui, &mut self.dwell_state, test_id, &test_btn)
+                                    {
                                                 let url = self.hass_url_input.trim();
                                                 let token = self.hass_token_input.trim();
                                                 let _ = crate::home_automation::set_home_assistant_config(url, token);
@@ -3222,7 +3619,10 @@ impl OverlayApp {
                                             }
 
                                             let save_btn = ui.button(egui::RichText::new("💾 Enregistrer et Appliquer").strong().color(theme.accent));
-                                            if make_widget_accessible_and_activated(ui, &save_btn, theme.accent) {
+                                    let save_id = ui.make_persistent_id("dwell_save_home_assistant_btn");
+                                    if make_widget_accessible_and_activated(ui, &save_btn, theme.accent)
+                                        || apply_dwell_to_response(ui, &mut self.dwell_state, save_id, &save_btn)
+                                    {
                                                 let url = self.hass_url_input.trim();
                                                 let token = self.hass_token_input.trim();
                                                 let knx_ip = self.knx_gateway_input.trim();
@@ -3249,14 +3649,20 @@ impl OverlayApp {
                                             ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
                                             let sleep_btn = ui.button("🌙 Tester Mode Sommeil")
                                                 .on_hover_text("Incline le lit à plat, ferme les volets, éteint les lumières, coupe le son et verrouille l'écran");
-                                            if make_widget_accessible_and_activated(ui, &sleep_btn, theme.accent) {
+                                            let sleep_id = ui.make_persistent_id("dwell_test_mode_sommeil_btn");
+                                            if make_widget_accessible_and_activated(ui, &sleep_btn, theme.accent)
+                                                || apply_dwell_to_response(ui, &mut self.dwell_state, sleep_id, &sleep_btn)
+                                            {
                                                 let res = crate::home_automation::execute_medical_scene("sleep");
                                                 self.hass_status_feedback = Some(res);
                                                 play_earcon(Earcon::Success);
                                             }
                                             let meal_btn = ui.button("🥣 Tester Mode Repas / Travail")
                                                 .on_hover_text("Relève la tête de lit, allume l'éclairage de travail, ouvre les volets et centre la fenêtre active");
-                                            if make_widget_accessible_and_activated(ui, &meal_btn, theme.accent) {
+                                            let meal_id = ui.make_persistent_id("dwell_test_mode_repas_btn");
+                                            if make_widget_accessible_and_activated(ui, &meal_btn, theme.accent)
+                                                || apply_dwell_to_response(ui, &mut self.dwell_state, meal_id, &meal_btn)
+                                            {
                                                 let res = crate::home_automation::execute_medical_scene("meal_work");
                                                 self.hass_status_feedback = Some(res);
                                                 play_earcon(Earcon::Success);
@@ -3283,7 +3689,11 @@ impl OverlayApp {
                                     });
 
                                 ui.add_space(6.0);
-                                if ui.button(t!("ui.btn_close")).clicked() {
+                                let close_ha_btn = ui.button(t!("ui.btn_close"));
+                                let close_ha_id = ui.make_persistent_id("dwell_close_home_automation_tab");
+                                if make_widget_accessible_and_activated(ui, &close_ha_btn, theme.accent)
+                                    || apply_dwell_to_response(ui, &mut self.dwell_state, close_ha_id, &close_ha_btn)
+                                {
                                     self.show_api_key_modal = false;
                                 }
                             }

@@ -172,11 +172,12 @@ impl OverlayApp {
                             if !has_pending_twitch {
                                 if !self.mic_manually_disabled
                                     && (self.dictation_mode
+                                    || self.has_visual_disability()
                                     || (prev_status == AgentStatus::Thinking && self.continuous_mode)
                                     || (prev_status == AgentStatus::Speaking && self.continuous_mode))
                                     && !crate::audio::is_live_subtitles_active()
                                     && self.whisper_ready
-                                    && !self.show_api_key_modal
+                                    && (!self.show_api_key_modal || self.has_visual_disability())
                                     && !self.voice_is_recording_sample
                                     && self.status != AgentStatus::EmergencyStopped
                                     && (!self.is_hidden || self.switch_access_mode)
@@ -363,10 +364,10 @@ impl OverlayApp {
                         }
                     }
                     if !self.mic_manually_disabled
-                        && self.continuous_mode
+                        && (self.continuous_mode || self.has_visual_disability())
                         && !crate::audio::is_live_subtitles_active()
                         && self.status != AgentStatus::EmergencyStopped
-                        && !self.show_api_key_modal
+                        && (!self.show_api_key_modal || self.has_visual_disability())
                         && !self.voice_is_recording_sample
                         && !AGENT_BUSY.load(Ordering::SeqCst)
                         && self.whisper_ready
@@ -383,10 +384,10 @@ impl OverlayApp {
                             || m.has_focus(egui::Id::NULL.with("model_input_field"))
                     });
                     if !self.mic_manually_disabled
-                        && self.continuous_mode
+                        && (self.continuous_mode || self.has_visual_disability())
                         && self.status != AgentStatus::EmergencyStopped
                         && self.status != AgentStatus::Speaking
-                        && !self.show_api_key_modal
+                        && (!self.show_api_key_modal || self.has_visual_disability())
                         && !self.voice_is_recording_sample
                         && !AGENT_BUSY.load(Ordering::SeqCst)
                         && !is_user_typing
@@ -2669,56 +2670,58 @@ impl OverlayApp {
                                     self.toggle_recording(Some(ui.ctx()));
                                 }
 
-                                // 2b. Sous-titres en direct (toujours présent et actif)
-                                let sub_id = ui.make_persistent_id("dwell_btn_subtitles");
-                                let sub_prog = self.dwell_state.get_progress(sub_id);
-                                let is_sub_on = self.is_subtitles_open();
-                                let (sub_sub, sub_tooltip) = if is_sub_on {
-                                    (
-                                        t!("ui.btn_subtitles_active").to_string(),
-                                        t!("ui.btn_subtitles_active_tooltip").to_string(),
-                                    )
-                                } else {
-                                    (
-                                        t!("ui.btn_subtitles").to_string(),
-                                        t!("ui.btn_subtitles_tooltip").to_string(),
-                                    )
-                                };
-                                let sub_sub_display = if sub_sub == "ui.btn_subtitles_active" {
-                                    "Actifs".to_string()
-                                } else if sub_sub == "ui.btn_subtitles" {
-                                    "S-Titres".to_string()
-                                } else {
-                                    sub_sub
-                                };
-                                let sub_tooltip_display = if sub_tooltip == "ui.btn_subtitles_tooltip" || sub_tooltip == "ui.btn_subtitles_active_tooltip" {
-                                    t!("commands.subtitles_title").to_string()
-                                } else {
-                                    sub_tooltip
-                                };
-                                let sub_resp = render_accessible_icon_button(
-                                    ui,
-                                    "💬",
-                                    &sub_sub_display,
-                                    &sub_tooltip_display,
-                                    is_sub_on,
-                                    sub_prog,
-                                    Some(egui::Color32::from_rgb(0, 200, 150)),
-                                    Some(egui::Color32::from_rgb(0, 230, 175)),
-                                );
-                                let (sub_dwell, _) = self.dwell_state.update(sub_id, sub_resp.hovered());
-                                let is_sub_key = sub_resp.has_focus() && ui.input(|i| {
-                                    i.events.iter().any(|ev| match ev {
-                                        egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
-                                        egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
-                                        _ => false,
-                                    })
-                                });
-                                if sub_resp.clicked() || sub_dwell || is_sub_key {
-                                    if is_sub_on {
-                                        self.stop_live_subtitles();
+                                // 2b. Sous-titres en direct (masqué si déficience visuelle)
+                                if !self.has_visual_disability() {
+                                    let sub_id = ui.make_persistent_id("dwell_btn_subtitles");
+                                    let sub_prog = self.dwell_state.get_progress(sub_id);
+                                    let is_sub_on = self.is_subtitles_open();
+                                    let (sub_sub, sub_tooltip) = if is_sub_on {
+                                        (
+                                            t!("ui.btn_subtitles_active").to_string(),
+                                            t!("ui.btn_subtitles_active_tooltip").to_string(),
+                                        )
                                     } else {
-                                        self.start_live_subtitles(None);
+                                        (
+                                            t!("ui.btn_subtitles").to_string(),
+                                            t!("ui.btn_subtitles_tooltip").to_string(),
+                                        )
+                                    };
+                                    let sub_sub_display = if sub_sub == "ui.btn_subtitles_active" {
+                                        "Actifs".to_string()
+                                    } else if sub_sub == "ui.btn_subtitles" {
+                                        "S-Titres".to_string()
+                                    } else {
+                                        sub_sub
+                                    };
+                                    let sub_tooltip_display = if sub_tooltip == "ui.btn_subtitles_tooltip" || sub_tooltip == "ui.btn_subtitles_active_tooltip" {
+                                        t!("commands.subtitles_title").to_string()
+                                    } else {
+                                        sub_tooltip
+                                    };
+                                    let sub_resp = render_accessible_icon_button(
+                                        ui,
+                                        "💬",
+                                        &sub_sub_display,
+                                        &sub_tooltip_display,
+                                        is_sub_on,
+                                        sub_prog,
+                                        Some(egui::Color32::from_rgb(0, 200, 150)),
+                                        Some(egui::Color32::from_rgb(0, 230, 175)),
+                                    );
+                                    let (sub_dwell, _) = self.dwell_state.update(sub_id, sub_resp.hovered());
+                                    let is_sub_key = sub_resp.has_focus() && ui.input(|i| {
+                                        i.events.iter().any(|ev| match ev {
+                                            egui::Event::Key { key, pressed: true, repeat: false, .. } => *key == egui::Key::Space || *key == egui::Key::Enter,
+                                            egui::Event::Text(t) => t == " " || t == "\n" || t == "\r",
+                                            _ => false,
+                                        })
+                                    });
+                                    if sub_resp.clicked() || sub_dwell || is_sub_key {
+                                        if is_sub_on {
+                                            self.stop_live_subtitles();
+                                        } else {
+                                            self.start_live_subtitles(None);
+                                        }
                                     }
                                 }
 

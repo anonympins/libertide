@@ -21,16 +21,15 @@ use crate::window_util::clear_screen_numbered_badges;
 #[cfg(windows)]
 use windows::core::w;
 #[cfg(windows)]
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-#[cfg(windows)]
-use windows::Win32::Foundation::RECT;
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 #[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, FindWindowW, GetForegroundWindow, GetMessageW, GetWindowRect, HHOOK, IsIconic, MSG,
-    PostThreadMessageW, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
-    SetForegroundWindow, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_QUIT,
+    CallNextHookEx, DispatchMessageW, FindWindowW, GetForegroundWindow, GetMessageW, GetWindowRect, HHOOK, IsIconic,
+    MSG, MSLLHOOKSTRUCT, PostThreadMessageW, SetCursorPos, SetForegroundWindow, SetWindowsHookExW, ShowWindow,
+    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
 };
 
 // --- Suivi d'état des modificateurs clavier (Windows) ---
@@ -59,6 +58,85 @@ pub static SWITCH_KEY_QUEUE: Mutex<Vec<SwitchKeyEvent>> = Mutex::new(Vec::new())
 pub static NUMBER_KEY_QUEUE: Mutex<Vec<char>> = Mutex::new(Vec::new());
 pub static SWITCH_LONG_PRESS_MS: AtomicU64 = AtomicU64::new(1100);
 pub static SWITCH_DEBOUNCE_MS: AtomicU64 = AtomicU64::new(180);
+
+// ============================================================================
+// Filtres Spasticité, Parkinson, Tremblements & Dystonie
+// ============================================================================
+
+pub static STEADY_CLICK_ENABLED: AtomicBool = AtomicBool::new(false);
+pub static PREVENT_ACCIDENTAL_DRAG: AtomicBool = AtomicBool::new(false);
+pub static BOUNCE_KEYS_ENABLED: AtomicBool = AtomicBool::new(false);
+pub static BOUNCE_KEYS_MS: AtomicU64 = AtomicU64::new(180);
+pub static TREMOR_FILTER_ENABLED: AtomicBool = AtomicBool::new(false);
+pub static SPASM_SHOCK_GUARD: AtomicBool = AtomicBool::new(false);
+
+pub fn is_steady_click_enabled() -> bool {
+    STEADY_CLICK_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn set_steady_click_enabled(enabled: bool) {
+    STEADY_CLICK_ENABLED.store(enabled, Ordering::Relaxed);
+    let val_str = if enabled { "true" } else { "false" };
+    let _ = write_env_var_to_file(".env", "STEADY_CLICK_ENABLED", val_str);
+    std::env::set_var("STEADY_CLICK_ENABLED", val_str);
+}
+
+pub fn is_prevent_accidental_drag() -> bool {
+    PREVENT_ACCIDENTAL_DRAG.load(Ordering::Relaxed)
+}
+
+pub fn set_prevent_accidental_drag(enabled: bool) {
+    PREVENT_ACCIDENTAL_DRAG.store(enabled, Ordering::Relaxed);
+    let val_str = if enabled { "true" } else { "false" };
+    let _ = write_env_var_to_file(".env", "PREVENT_ACCIDENTAL_DRAG", val_str);
+    std::env::set_var("PREVENT_ACCIDENTAL_DRAG", val_str);
+}
+
+pub fn is_bounce_keys_enabled() -> bool {
+    BOUNCE_KEYS_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn set_bounce_keys_enabled(enabled: bool) {
+    BOUNCE_KEYS_ENABLED.store(enabled, Ordering::Relaxed);
+    let val_str = if enabled { "true" } else { "false" };
+    let _ = write_env_var_to_file(".env", "BOUNCE_KEYS_ENABLED", val_str);
+    std::env::set_var("BOUNCE_KEYS_ENABLED", val_str);
+}
+
+pub fn get_bounce_keys_ms() -> u64 {
+    let ms = BOUNCE_KEYS_MS.load(Ordering::Relaxed);
+    if ms < 50 { 180 } else { ms }
+}
+
+pub fn set_bounce_keys_ms(ms: u64) {
+    let clamped = ms.clamp(50, 1000);
+    BOUNCE_KEYS_MS.store(clamped, Ordering::Relaxed);
+    let val_str = clamped.to_string();
+    let _ = write_env_var_to_file(".env", "BOUNCE_KEYS_MS", &val_str);
+    std::env::set_var("BOUNCE_KEYS_MS", val_str);
+}
+
+pub fn is_tremor_filter_enabled() -> bool {
+    TREMOR_FILTER_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn set_tremor_filter_enabled(enabled: bool) {
+    TREMOR_FILTER_ENABLED.store(enabled, Ordering::Relaxed);
+    let val_str = if enabled { "true" } else { "false" };
+    let _ = write_env_var_to_file(".env", "TREMOR_FILTER_ENABLED", val_str);
+    std::env::set_var("TREMOR_FILTER_ENABLED", val_str);
+}
+
+pub fn is_spasm_shock_guard() -> bool {
+    SPASM_SHOCK_GUARD.load(Ordering::Relaxed)
+}
+
+pub fn set_spasm_shock_guard(enabled: bool) {
+    SPASM_SHOCK_GUARD.store(enabled, Ordering::Relaxed);
+    let val_str = if enabled { "true" } else { "false" };
+    let _ = write_env_var_to_file(".env", "SPASM_SHOCK_GUARD", val_str);
+    std::env::set_var("SPASM_SHOCK_GUARD", val_str);
+}
 
 // Masque de touche de base et drapeaux de bits pour les touches modificatrices
 pub const VK_KEY_MASK: u32 = 0x0000FFFF;
@@ -899,6 +977,235 @@ pub fn stop_companion_switch_server() {
     COMPANION_SERVER_RUNNING.store(false, Ordering::SeqCst);
 }
 
+// ============================================================================
+// Récepteur BCI / EEG / EMG (Lab Streaming Layer - LSL)
+// ============================================================================
+
+pub static BCI_LSL_RUNNING: AtomicBool = AtomicBool::new(false);
+pub static BCI_LSL_CONNECTED: AtomicBool = AtomicBool::new(false);
+pub static BCI_LSL_PACKETS_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static BCI_EMG_THRESHOLD: AtomicU32 = AtomicU32::new(0.065f32.to_bits());
+pub static BCI_LSL_PORT: AtomicU32 = AtomicU32::new(16572);
+pub static LAST_BCI_EVENT: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+
+pub fn is_bci_lsl_running() -> bool {
+    BCI_LSL_RUNNING.load(Ordering::Relaxed)
+}
+
+pub fn is_bci_lsl_connected() -> bool {
+    BCI_LSL_CONNECTED.load(Ordering::Relaxed)
+}
+
+pub fn get_bci_emg_threshold() -> f32 {
+    let val = f32::from_bits(BCI_EMG_THRESHOLD.load(Ordering::Relaxed));
+    if val < 0.005 { 0.065 } else { val }
+}
+
+pub fn set_bci_emg_threshold(th: f32) {
+    let clamped = th.clamp(0.005, 0.500);
+    BCI_EMG_THRESHOLD.store(clamped.to_bits(), Ordering::Relaxed);
+    let val_str = format!("{:.4}", clamped);
+    let _ = write_env_var_to_file(".env", "BCI_EMG_THRESHOLD", &val_str);
+    std::env::set_var("BCI_EMG_THRESHOLD", val_str);
+}
+
+pub fn get_bci_lsl_port() -> u16 {
+    (BCI_LSL_PORT.load(Ordering::Relaxed) as u16).max(1024)
+}
+
+pub fn set_bci_lsl_port(port: u16) {
+    let p = port.max(1024);
+    BCI_LSL_PORT.store(p as u32, Ordering::Relaxed);
+    let val_str = p.to_string();
+    let _ = write_env_var_to_file(".env", "LSL_BCI_PORT", &val_str);
+    std::env::set_var("LSL_BCI_PORT", val_str);
+}
+
+/// Analyse un paquet LSL (marqueur textuel, JSON ou tableau de floats bruts EEG/EMG)
+fn process_bci_lsl_packet(payload: &[u8], last_trigger: &mut Instant, baseline_rms: &mut f32) {
+    BCI_LSL_PACKETS_COUNT.fetch_add(1, Ordering::Relaxed);
+    BCI_LSL_CONNECTED.store(true, Ordering::Relaxed);
+    let now = Instant::now();
+
+    // 1. Détection de marqueur textuel ou JSON (P300, Trigger, Clench, Select...)
+    if let Ok(text) = std::str::from_utf8(payload) {
+        let clean = text.trim();
+        let lower = clean.to_lowercase();
+
+        let is_p300_or_select = lower.contains("p300")
+            || lower.contains("target")
+            || lower.contains("select")
+            || lower.contains("clench")
+            || lower.contains("jaw")
+            || lower.contains("blink")
+            || lower.contains("switch")
+            || lower.contains("trigger")
+            || lower == "1"
+            || lower == "click";
+
+        if is_p300_or_select {
+            if now.duration_since(*last_trigger) >= Duration::from_millis(350) {
+                *last_trigger = now;
+                inject_switch_event(SwitchKeyEvent::Select);
+                if let Ok(mut last) = LAST_BCI_EVENT.lock() {
+                    *last = Some((format!("Marqueur LSL: \"{}\"", clean.chars().take(24).collect::<String>()), now));
+                }
+                crate::overlay::play_earcon(crate::overlay::Earcon::Success);
+            }
+            return;
+        } else if lower.contains("next") || lower.contains("right") {
+            if now.duration_since(*last_trigger) >= Duration::from_millis(250) {
+                *last_trigger = now;
+                inject_switch_event(SwitchKeyEvent::Next);
+                if let Ok(mut last) = LAST_BCI_EVENT.lock() {
+                    *last = Some(("Commande BCI: Suivant".to_string(), now));
+                }
+            }
+            return;
+        } else if lower.contains("prev") || lower.contains("left") {
+            if now.duration_since(*last_trigger) >= Duration::from_millis(250) {
+                *last_trigger = now;
+                inject_switch_event(SwitchKeyEvent::Prev);
+                if let Ok(mut last) = LAST_BCI_EVENT.lock() {
+                    *last = Some(("Commande BCI: Précédent".to_string(), now));
+                }
+            }
+            return;
+        } else if lower.contains("back") || lower.contains("escape") {
+            if now.duration_since(*last_trigger) >= Duration::from_millis(300) {
+                *last_trigger = now;
+                inject_switch_event(SwitchKeyEvent::Back);
+                if let Ok(mut last) = LAST_BCI_EVENT.lock() {
+                    *last = Some(("Commande BCI: Retour".to_string(), now));
+                }
+            }
+            return;
+        }
+    }
+
+    // 2. Traitement des flux binaires bruts de micro-contractions musculaires EMG (flotteurs 32-bit LE/BE)
+    if payload.len() >= 16 && (payload.len() % 4 == 0) {
+        let num_floats = payload.len() / 4;
+        let mut sum_sq = 0.0f32;
+        let mut sum = 0.0f32;
+
+        for i in 0..num_floats {
+            let b: [u8; 4] = payload[i * 4..(i + 1) * 4].try_into().unwrap_or_default();
+            let val = f32::from_le_bytes(b);
+            if val.is_finite() {
+                sum += val;
+                sum_sq += val * val;
+            }
+        }
+
+        let count = num_floats as f32;
+        let mean = sum / count;
+        let variance = ((sum_sq / count) - (mean * mean)).max(0.0);
+        let rms = variance.sqrt();
+
+        // Suivi adaptatif doux du bruit de fond
+        *baseline_rms = *baseline_rms * 0.95 + rms * 0.05;
+        let net_rms = (rms - *baseline_rms).max(0.0);
+        let threshold = get_bci_emg_threshold();
+
+        if net_rms >= threshold && now.duration_since(*last_trigger) >= Duration::from_millis(380) {
+            *last_trigger = now;
+            inject_switch_event(SwitchKeyEvent::Select);
+            if let Ok(mut last) = LAST_BCI_EVENT.lock() {
+                *last = Some((format!("Contraction EMG (RMS: {:.3} > {:.3})", net_rms, threshold), now));
+            }
+            crate::overlay::play_earcon(crate::overlay::Earcon::Success);
+        }
+    }
+}
+
+pub fn start_bci_lsl_receiver() {
+    if BCI_LSL_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let port = get_bci_lsl_port();
+
+    // 1. Thread d'écoute UDP (Broadcast / Multicast LSL)
+    std::thread::Builder::new()
+        .name("bci_lsl_udp_worker".to_string())
+        .spawn(move || {
+            let bind_addr = format!("0.0.0.0:{}", port);
+            let socket = match UdpSocket::bind(&bind_addr) {
+                Ok(s) => {
+                    let _ = s.set_broadcast(true);
+                    let _ = s.set_read_timeout(Some(Duration::from_millis(300)));
+                    println!("[BCI/LSL] Récepteur UDP actif sur {}", bind_addr);
+                    s
+                }
+                Err(e) => {
+                    eprintln!("[BCI/LSL] Impossible de lier le port UDP {port}: {e}");
+                    return;
+                }
+            };
+
+            let mut buf = [0u8; 4096];
+            let mut last_trigger = Instant::now() - Duration::from_secs(1);
+            let mut baseline_rms = 0.005f32;
+
+            while BCI_LSL_RUNNING.load(Ordering::Relaxed) {
+                match socket.recv_from(&mut buf) {
+                    Ok((len, _src)) if len > 0 => {
+                        process_bci_lsl_packet(&buf[..len], &mut last_trigger, &mut baseline_rms);
+                    }
+                    _ => {
+                        std::thread::sleep(Duration::from_millis(15));
+                    }
+                }
+            }
+        })
+        .expect("Échec lancement worker bci_lsl_udp_worker");
+
+    // 2. Thread d'écoute TCP pour les ponts LSL dédiés
+    std::thread::Builder::new()
+        .name("bci_lsl_tcp_worker".to_string())
+        .spawn(move || {
+            let bind_addr = format!("0.0.0.0:{}", port);
+            let listener = match TcpListener::bind(&bind_addr) {
+                Ok(l) => {
+                    let _ = l.set_nonblocking(true);
+                    println!("[BCI/LSL] Serveur TCP actif sur {}", bind_addr);
+                    l
+                }
+                Err(_) => return,
+            };
+
+            while BCI_LSL_RUNNING.load(Ordering::Relaxed) {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                    let mut buf = [0u8; 1024];
+                    let mut last_trigger = Instant::now() - Duration::from_secs(1);
+                    let mut baseline = 0.005f32;
+                    while BCI_LSL_RUNNING.load(Ordering::Relaxed) {
+                        match stream.read(&mut buf) {
+                            Ok(n) if n > 0 => {
+                                process_bci_lsl_packet(&buf[..n], &mut last_trigger, &mut baseline);
+                            }
+                            Ok(_) => break,
+                            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                                std::thread::sleep(Duration::from_millis(10));
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                } else {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        })
+        .expect("Échec lancement worker bci_lsl_tcp_worker");
+}
+
+pub fn stop_bci_lsl_receiver() {
+    BCI_LSL_RUNNING.store(false, Ordering::SeqCst);
+    BCI_LSL_CONNECTED.store(false, Ordering::Relaxed);
+}
+
 pub const AVAILABLE_REBIND_KEYS: &[(u32, &str)] = &[
     (0x70, "F1"),
     (0x71, "F2"),
@@ -1222,6 +1529,38 @@ pub fn load_keybindings() {
     KEY_BIND_STOP_SPEECH.store(load_vk("KEY_BIND_STOP_SPEECH", 0x13), Ordering::SeqCst);
     KEY_BIND_EMERGENCY.store(load_vk("KEY_BIND_EMERGENCY", 0x1B), Ordering::SeqCst);
 
+    if let Some(th_str) = std::env::var("BCI_EMG_THRESHOLD").ok().or_else(|| read_env_var_from_file(".env", "BCI_EMG_THRESHOLD")) {
+        if let Ok(th) = th_str.trim().parse::<f32>() {
+            BCI_EMG_THRESHOLD.store(th.to_bits(), Ordering::Relaxed);
+        }
+    }
+    if let Some(p_str) = std::env::var("LSL_BCI_PORT").ok().or_else(|| read_env_var_from_file(".env", "LSL_BCI_PORT")) {
+        if let Ok(p) = p_str.trim().parse::<u32>() {
+            BCI_LSL_PORT.store(p, Ordering::Relaxed);
+        }
+    }
+
+    if let Some(val) = std::env::var("STEADY_CLICK_ENABLED").ok().or_else(|| read_env_var_from_file(".env", "STEADY_CLICK_ENABLED")) {
+        STEADY_CLICK_ENABLED.store(val.trim().eq_ignore_ascii_case("true"), Ordering::Relaxed);
+    }
+    if let Some(val) = std::env::var("PREVENT_ACCIDENTAL_DRAG").ok().or_else(|| read_env_var_from_file(".env", "PREVENT_ACCIDENTAL_DRAG")) {
+        PREVENT_ACCIDENTAL_DRAG.store(val.trim().eq_ignore_ascii_case("true"), Ordering::Relaxed);
+    }
+    if let Some(val) = std::env::var("BOUNCE_KEYS_ENABLED").ok().or_else(|| read_env_var_from_file(".env", "BOUNCE_KEYS_ENABLED")) {
+        BOUNCE_KEYS_ENABLED.store(val.trim().eq_ignore_ascii_case("true"), Ordering::Relaxed);
+    }
+    if let Some(val) = std::env::var("BOUNCE_KEYS_MS").ok().or_else(|| read_env_var_from_file(".env", "BOUNCE_KEYS_MS")) {
+        if let Ok(ms) = val.trim().parse::<u64>() {
+            BOUNCE_KEYS_MS.store(ms, Ordering::Relaxed);
+        }
+    }
+    if let Some(val) = std::env::var("TREMOR_FILTER_ENABLED").ok().or_else(|| read_env_var_from_file(".env", "TREMOR_FILTER_ENABLED")) {
+        TREMOR_FILTER_ENABLED.store(val.trim().eq_ignore_ascii_case("true"), Ordering::Relaxed);
+    }
+    if let Some(val) = std::env::var("SPASM_SHOCK_GUARD").ok().or_else(|| read_env_var_from_file(".env", "SPASM_SHOCK_GUARD")) {
+        SPASM_SHOCK_GUARD.store(val.trim().eq_ignore_ascii_case("true"), Ordering::Relaxed);
+    }
+
     let mut lock = match CUSTOM_KEY_REMAPS.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -1372,6 +1711,17 @@ static HOOK_KEYS_DOWN: Mutex<[HookCaptureKind; 256]> = Mutex::new([HookCaptureKi
 static HOOK_KEYS_DOWN_TIME: Mutex<[Option<Instant>; 256]> = Mutex::new([None; 256]);
 #[cfg(windows)]
 static REMAPPED_KEYS_DOWN: Mutex<[Option<u32>; 256]> = Mutex::new([None; 256]);
+#[cfg(windows)]
+static BOUNCE_KEYS_LAST_UP: Mutex<[Option<Instant>; 256]> = Mutex::new([None; 256]);
+
+#[cfg(windows)]
+static MOUSE_ANCHOR_POS: Mutex<Option<POINT>> = Mutex::new(None);
+#[cfg(windows)]
+static MOUSE_BUTTON_DOWN: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static LAST_STABLE_MOUSE_POS: Mutex<Option<(POINT, Instant)>> = Mutex::new(None);
+#[cfg(windows)]
+static LAST_RAW_MOUSE_POS: Mutex<Option<(POINT, Instant)>> = Mutex::new(None);
 
 pub fn reset_switch_keys() {
     if let Ok(mut q) = SWITCH_KEY_QUEUE.lock() {
@@ -1390,6 +1740,23 @@ pub fn reset_switch_keys() {
     }
     if let Ok(mut times) = HOOK_KEYS_DOWN_TIME.lock() {
         *times = [None; 256];
+    }
+    #[cfg(windows)]
+    if let Ok(mut bu) = BOUNCE_KEYS_LAST_UP.lock() {
+        *bu = [None; 256];
+    }
+    #[cfg(windows)]
+    {
+        MOUSE_BUTTON_DOWN.store(false, Ordering::Relaxed);
+        if let Ok(mut a) = MOUSE_ANCHOR_POS.lock() {
+            *a = None;
+        }
+        if let Ok(mut s) = LAST_STABLE_MOUSE_POS.lock() {
+            *s = None;
+        }
+        if let Ok(mut r) = LAST_RAW_MOUSE_POS.lock() {
+            *r = None;
+        }
     }
 }
 
@@ -1514,6 +1881,31 @@ unsafe extern "system" fn switch_keyboard_hook_proc(
         let is_powertoys = kbd.dwExtraInfo == 0x1 || kbd.dwExtraInfo == 0x2;
 
         let vk_idx = (vk as usize) & 0xFF;
+
+        // 3. Filtre Anti-Mitraillette Clavier (Adaptive BounceKeys)
+        if is_bounce_keys_enabled() && !is_injected {
+            if is_up {
+                if let Ok(mut ups) = BOUNCE_KEYS_LAST_UP.lock() {
+                    ups[vk_idx] = Some(Instant::now());
+                }
+            } else if is_down {
+                let bounce_ms = get_bounce_keys_ms();
+                let mut is_bouncing = false;
+                if let Ok(mut ups) = BOUNCE_KEYS_LAST_UP.lock() {
+                    if let Some(last_up) = ups[vk_idx] {
+                        if last_up.elapsed() < Duration::from_millis(bounce_ms) {
+                            is_bouncing = true;
+                        } else {
+                            ups[vk_idx] = None;
+                        }
+                    }
+                }
+                if is_bouncing {
+                    return windows::Win32::Foundation::LRESULT(1);
+                }
+            }
+        }
+
         let is_alt = (kbd.flags.0 & 0x20) != 0
             || TRACKED_ALT.load(Ordering::Relaxed)
             || (!is_powertoys
@@ -1970,12 +2362,101 @@ unsafe extern "system" fn switch_mouse_hook_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
-    use windows::Win32::UI::WindowsAndMessaging::{WM_MOUSEHWHEEL, WM_MOUSEWHEEL};
-    if code >= 0 && SWITCH_HOOK_ENABLED.load(Ordering::Relaxed) {
-        let msg = wparam.0 as u32;
-        if msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL {
-            clear_screen_numbered_badges();
-            trigger_repaint();
+    if code >= 0 {
+        let ms = *(lparam.0 as *const MSLLHOOKSTRUCT);
+
+        if ms.dwExtraInfo != LIBERTIDE_EXTRA_INFO {
+            let msg = wparam.0 as u32;
+
+            if SWITCH_HOOK_ENABLED.load(Ordering::Relaxed) && (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL) {
+                clear_screen_numbered_badges();
+                trigger_repaint();
+            }
+
+            // 1 & 2. Steady-Click & Drag-Lock Guard (Pression physique sur bouton souris)
+            if msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN {
+                MOUSE_BUTTON_DOWN.store(true, Ordering::Relaxed);
+                if let Ok(mut anchor) = MOUSE_ANCHOR_POS.lock() {
+                    *anchor = Some(ms.pt);
+                }
+            } else if msg == WM_LBUTTONUP || msg == WM_RBUTTONUP || msg == WM_MBUTTONUP {
+                MOUSE_BUTTON_DOWN.store(false, Ordering::Relaxed);
+                let anchor_pt = if let Ok(mut anchor) = MOUSE_ANCHOR_POS.lock() {
+                    anchor.take()
+                } else {
+                    None
+                };
+                if is_steady_click_enabled() {
+                    if let Some(anchor) = anchor_pt {
+                        let _ = SetCursorPos(anchor.x, anchor.y);
+                    }
+                }
+            } else if msg == WM_MOUSEMOVE {
+                let button_is_down = MOUSE_BUTTON_DOWN.load(Ordering::Relaxed);
+                if button_is_down {
+                    let steady_on = is_steady_click_enabled();
+                    let prevent_drag_on = is_prevent_accidental_drag();
+
+                    let mods = get_currently_pressed_modifiers();
+                    let voluntary_drag = (mods & (MOD_CTRL | MOD_SHIFT)) != 0;
+
+                    if (steady_on || prevent_drag_on) && !voluntary_drag {
+                        if let Ok(anchor) = MOUSE_ANCHOR_POS.lock() {
+                            if let Some(pt) = *anchor {
+                                let _ = SetCursorPos(pt.x, pt.y);
+                                return windows::Win32::Foundation::LRESULT(1);
+                            }
+                        }
+                    }
+                }
+
+                let now = Instant::now();
+
+                // 5. Absorbeur de Choc / Myoclonies (Spasm Shock Guard)
+                if is_spasm_shock_guard() {
+                    if let Ok(mut last_raw) = LAST_RAW_MOUSE_POS.lock() {
+                        if let Some((prev_pt, prev_time)) = *last_raw {
+                            let dt = now.duration_since(prev_time);
+                            if dt <= Duration::from_millis(35) {
+                                let dx = (ms.pt.x - prev_pt.x) as f64;
+                                let dy = (ms.pt.y - prev_pt.y) as f64;
+                                let dist = (dx * dx + dy * dy).sqrt();
+                                // Détection d'accélération anormale (> 300 px en moins de 35 ms)
+                                if dist > 300.0 {
+                                    let _ = SetCursorPos(prev_pt.x, prev_pt.y);
+                                    *last_raw = Some((prev_pt, now));
+                                    return windows::Win32::Foundation::LRESULT(1);
+                                }
+                            }
+                        }
+                        *last_raw = Some((ms.pt, now));
+                    }
+                }
+
+                // 4. Filtre Anti-Tremblement Souris (Tremor Deadzone)
+                if is_tremor_filter_enabled() {
+                    if let Ok(mut last_stable) = LAST_STABLE_MOUSE_POS.lock() {
+                        if let Some((stable_pt, stable_time)) = *last_stable {
+                            let dx = ms.pt.x - stable_pt.x;
+                            let dy = ms.pt.y - stable_pt.y;
+                            let dist_sq = dx * dx + dy * dy;
+                            // Rayon de 7 px (7 * 7 = 49)
+                            if dist_sq <= 49 {
+                                if now.duration_since(stable_time) < Duration::from_millis(250) {
+                                    let _ = SetCursorPos(stable_pt.x, stable_pt.y);
+                                    return windows::Win32::Foundation::LRESULT(1);
+                                } else {
+                                    *last_stable = Some((ms.pt, now));
+                                }
+                            } else {
+                                *last_stable = Some((ms.pt, now));
+                            }
+                        } else {
+                            *last_stable = Some((ms.pt, now));
+                        }
+                    }
+                }
+            }
         }
     }
     CallNextHookEx(None, code, wparam, lparam)
@@ -1985,6 +2466,7 @@ unsafe extern "system" fn switch_mouse_hook_proc(
 pub fn install_switch_keyboard_hook() {
     load_keybindings();
     start_companion_switch_server();
+    start_bci_lsl_receiver();
 
     let mut guard = HOOK_WORKER.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_some() {
@@ -2061,6 +2543,7 @@ pub fn install_switch_keyboard_hook() {
 #[cfg(windows)]
 pub fn uninstall_switch_keyboard_hook() {
     stop_companion_switch_server();
+    stop_bci_lsl_receiver();
 
     let mut guard = HOOK_WORKER.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(state) = guard.take() {
@@ -2185,6 +2668,7 @@ pub fn rdev_key_to_vk(key: rdev::Key) -> Option<u32> {
 pub fn install_switch_keyboard_hook() {
     load_keybindings();
     start_companion_switch_server();
+    start_bci_lsl_receiver();
 
     if HOOK_THREAD_ACTIVE.swap(true, Ordering::SeqCst) {
         return;
@@ -2433,6 +2917,7 @@ pub fn install_switch_keyboard_hook() {
 #[cfg(not(windows))]
 pub fn uninstall_switch_keyboard_hook() {
     stop_companion_switch_server();
+    stop_bci_lsl_receiver();
 
     HOOK_THREAD_ACTIVE.store(false, Ordering::SeqCst);
 }

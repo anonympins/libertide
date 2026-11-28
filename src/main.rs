@@ -547,6 +547,12 @@ impl OverlayApp {
             });
         }
 
+        if app.has_visual_disability() {
+            app.mic_manually_disabled = false;
+            app.continuous_mode = true;
+            app.start_recording(None, true);
+        }
+
         app
     }
 
@@ -585,6 +591,10 @@ impl OverlayApp {
         self.active_disability_presets.contains(&DisabilityPreset::MotorSwitch)
             || self.active_disability_presets.contains(&DisabilityPreset::Tremor)
             || self.switch_access_mode
+    }
+
+    pub fn has_visual_disability(&self) -> bool {
+        self.active_disability_presets.contains(&DisabilityPreset::Visual)
     }
 
     pub fn should_show_hover_mode_button(&self) -> bool {

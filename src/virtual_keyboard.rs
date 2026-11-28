@@ -815,7 +815,7 @@ pub fn init_llm_predictor_engine() {
     let gpu_layers = std::env::var("KEYBOARD_LLM_GPU_LAYERS")
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(24);
+        .unwrap_or(0); // 0 couche GPU par défaut : tourne sur le CPU pour réserver la VRAM au modèle principal et à la vision
 
     match crate::local_llm::LocalLlamaEngine::load_with_layers(&model_path, gpu_layers) {
         Ok(engine) => {
