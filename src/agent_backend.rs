@@ -17,6 +17,9 @@ use crate::floating_window::{FloatingCard, FloatingContentType, OPEN_FLOATING_CA
 use crate::get_system_locale_language;
 use crate::{analyze_navigation_zones_with_llm, parse_agent_response, resolve_llm_config};
 
+/// Mémorise les dernières images analysées par le VLM pour permettre les questions de suivi
+pub static LAST_VLM_IMAGE_URIS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 /// Formate les éléments interactifs d'une fenêtre de manière ultra-compacte pour les petits LLMs locaux
 pub fn format_compact_window_elements(win_title: &str, targets: &[NumberedElementTarget]) -> String {
     let mut out = String::new();
@@ -495,7 +498,7 @@ pub async fn call_llm_prompt(
         DICTATION_SYSTEM_INSTRUCTIONS.to_string()
     } else {
         let clean_goal = local_llm::extract_clean_user_message(&user_instruction);
-        let tags = local_llm::resolve_query_tags(clean_goal, Some(&safe_full_prompt));
+        let tags = local_llm::resolve_query_tags(clean_goal, Some(&safe_full_prompt), None);
         println!(
             "[Universal LLM Router] Modèle: {:?} ({}) | Consigne: \"{}\" | Tags: {:?}",
             llm_config.provider, llm_config.model, clean_goal, tags
@@ -1409,7 +1412,7 @@ pub fn spawn_agent_backend(
                                     let truncated = &sum[..safe_limit];
                                     initial_screen_hint.push_str(truncated);
                                 }
-                                let mut detected_tags = local_llm::resolve_query_tags(clean_prompt, Some(&initial_screen_hint));
+                                let mut detected_tags = local_llm::resolve_query_tags(clean_prompt, Some(&initial_screen_hint), None);
 
                                 let has_file_or_doc = clean_prompt.contains(".pdf")
                                     || clean_prompt.contains(".png")
@@ -1442,6 +1445,8 @@ pub fn spawn_agent_backend(
                                     && !clean_prompt.to_lowercase().contains("summarize")
                                     && !clean_prompt.to_lowercase().contains("summary")
                                     && !clean_prompt.to_lowercase().contains("window")
+                                    && !clean_prompt.to_lowercase().contains("image")
+                                    && !clean_prompt.to_lowercase().contains("photo")
                                     && !clean_prompt.to_lowercase().contains("document")
                                     && !has_file_or_doc;
 
@@ -1615,6 +1620,7 @@ pub fn spawn_agent_backend(
                                     println!("[VLM] Tag VisualQuestionAnswering détecté : traitement multimodal par Qwen2-VL.");
                                     let _ = event_tx.send(AgentEvent::StatusChanged(AgentStatus::Thinking));
                                     let candidates_for_vlm = path_candidates.clone();
+                                    let clean_prompt_vlm = clean_prompt.to_string();
                                     let vlm_result = tokio::task::spawn_blocking(move || {
                                         let mut image_uris = Vec::new();
                                         for cand in &candidates_for_vlm {
@@ -1632,9 +1638,27 @@ pub fn spawn_agent_backend(
                                                 let preview: String = uri.chars().take(80).collect();
                                                 println!("[VLM] URI bitmap générée (longueur: {} octets, début: '{}...')", uri.len(), preview);
                                                 image_uris.push(uri);
-                                                break;
                                             } else if p_resolved.is_file() {
                                                 eprintln!("[VLM Erreur] image_file_to_data_uri a renvoyé None pour le fichier existant \"{}\"", p_resolved.display());
+                                            }
+                                        }
+
+                                        // Si aucun fichier direct n'est spécifié, vérifier si l'utilisateur fait référence aux images précédentes
+                                        let lower_vlm_prompt = clean_prompt_vlm.to_lowercase();
+                                        let wants_screen_capture = lower_vlm_prompt.contains("écran")
+                                            || lower_vlm_prompt.contains("ecran")
+                                            || lower_vlm_prompt.contains("screen")
+                                            || lower_vlm_prompt.contains("fenêtre")
+                                            || lower_vlm_prompt.contains("fenetre")
+                                            || lower_vlm_prompt.contains("bureau")
+                                            || lower_vlm_prompt.contains("desktop");
+
+                                        if image_uris.is_empty() && !wants_screen_capture {
+                                            if let Ok(guard) = LAST_VLM_IMAGE_URIS.lock() {
+                                                if !guard.is_empty() {
+                                                    println!("[VLM] Réutilisation des {} image(s) précédente(s) conservée(s) en mémoire pour la question de suivi.", guard.len());
+                                                    image_uris.extend(guard.iter().cloned());
+                                                }
                                             }
                                         }
                                         // À défaut, capture de la fenêtre active au premier plan
@@ -1689,12 +1713,33 @@ pub fn spawn_agent_backend(
                                         return;
                                     }
 
-                                    let vlm_prompt = format!("Analyse cette image ou vue d'écran pour répondre précisément à la question suivante : \"{}\". Décris les éléments visuels avec repères spatiaux (gauche, droite, centre, haut, bas), lis les schémas, graphiques ou textes manuscrits / captchas.", clean_prompt);
+                                    let prev_vlm_context = {
+                                        let hist_guard = history.lock().await;
+                                        hist_guard.iter().rev().take(4).rev()
+                                            .map(|m| format!("{}: {}", if m.role == "assistant" { "Assistant" } else { "Utilisateur" }, m.content))
+                                            .collect::<Vec<_>>()
+                                            .join("\n")
+                                    };
+
+                                    let vlm_prompt = if !prev_vlm_context.trim().is_empty() {
+                                        format!(
+                                            "Contexte de la conversation précédente :\n{}\n\nAnalyse cette image pour répondre à la nouvelle demande : \"{}\". Apporte des détails complémentaires et décris précisément ce qui n'a pas encore été développé avec repères spatiaux (gauche, droite, centre, haut, bas).",
+                                            truncate_with_notice(&prev_vlm_context, 1500),
+                                            clean_prompt
+                                        )
+                                    } else {
+                                        format!("Analyse cette image ou vue d'écran pour répondre précisément à la question suivante : \"{}\". Décris les éléments visuels avec repères spatiaux (gauche, droite, centre, haut, bas), lis les schémas, graphiques ou textes manuscrits / captchas.", clean_prompt)
+                                    };
                                     println!("[VLM] Appel de query_vlm_multimodal avec {} image(s)...", vlm_result.len());
                                     match local_llm::query_vlm_multimodal(&vlm_prompt, &vlm_result, Some(&event_tx)).await {
                                         Ok(vlm_desc) if !vlm_desc.trim().is_empty() => {
                                             let trimmed = vlm_desc.trim().to_string();
                                             println!("[VLM Screen Q&A] Réponse visuelle Qwen2-VL obtenue ({} caractères). Clôture directe sans appel au LLM distant.", trimmed.len());
+
+                                            // Mémoriser l'ensemble des images analysées pour les questions de suivi ultérieures
+                                            if let Ok(mut lock) = LAST_VLM_IMAGE_URIS.lock() {
+                                                *lock = vlm_result.clone();
+                                            }
 
                                             // Enregistrement dans l'historique conversationnel
                                             {
@@ -1824,6 +1869,9 @@ pub fn spawn_agent_backend(
                         history.lock().await.clear();
                         if let Ok(mut lock) = LAST_SCREEN_SUMMARY.lock() {
                             *lock = None;
+                        }
+                        if let Ok(mut lock) = LAST_VLM_IMAGE_URIS.lock() {
+                            lock.clear();
                         }
                     }
                     AgentCommand::SearchTwitch(query) => {

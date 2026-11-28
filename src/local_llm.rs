@@ -722,37 +722,7 @@ pub async fn query_vlm_multimodal(
         println!("[VLM Multimodal Image #{}] Taille: {} octets | Préfixe: '{}...'", idx + 1, uri.len(), preview);
     }
 
-    // 1. Priorité absolue : Moteur local Qwen-VL en mémoire (chargé ou téléchargé automatiquement)
-    println!("[VLM] [Route 1/3] Exécution prioritaire sur le moteur local Qwen-VL...");
-    let prompt_owned = prompt.to_string();
-    let uris_cloned = image_data_uris.to_vec();
-    let etx_cloned = event_tx.cloned();
-
-    let local_res: Result<String, String> = tokio::task::spawn_blocking(move || {
-        let enriched_prompt = enrich_prompt_with_local_visual_ocr(&prompt_owned, &uris_cloned);
-        if !is_vlm_ready() {
-            ensure_vlm_loaded_sync(etx_cloned.as_ref())?;
-        }
-        if let Some(answer) = query_vlm_grounding_local(&enriched_prompt) {
-            let cleaned = clean_vlm_description(&answer);
-            if !cleaned.is_empty() {
-                return Ok(cleaned);
-            }
-        }
-        Err("Le modèle VLM local a retourné une réponse vide.".to_string())
-    }).await.unwrap_or_else(|e| Err(format!("Tâche bloquante interrompue: {e}")));
-
-    match local_res {
-        Ok(cleaned) => {
-            println!("[VLM] Réponse reçue avec succès du moteur local.");
-            return Ok(cleaned);
-        }
-        Err(e) => {
-            eprintln!("[VLM] Moteur local non disponible ou échec : {e}. Bascule sur les fallbacks...");
-        }
-    }
-
-    // 2. Repli HTTP : tentative avec serveur local embarqué ou endpoints locaux / configurés
+    // 1. Route prioritaire : Endpoint multimodal réel (llama-server --mmproj, Ollama ou endpoint configuré)
     if find_local_vlm_model_file().is_some() {
         if let Ok(embedded_endpoint) = ensure_embedded_vlm_server_running(DEFAULT_INTERNAL_VLM_PORT).await {
             std::env::set_var("QWENVL_ENDPOINT", &embedded_endpoint);
@@ -781,7 +751,7 @@ pub async fn query_vlm_multimodal(
         .unwrap_or_else(|_| reqwest::Client::new());
 
     if let Some(endpoint) = explicit_endpoint.as_deref() {
-        println!("[VLM] [Route 2/3] Tentative sur l'endpoint configuré : {} (modèle: {})", endpoint, explicit_model);
+        println!("[VLM] [Route 1/3] Tentative sur l'endpoint configuré : {} (modèle: {})", endpoint, explicit_model);
         match send_vlm_request(&fast_client, endpoint, &explicit_model, &explicit_key, prompt, image_data_uris).await {
             Ok(res) => return Ok(clean_vlm_description(&res)),
             Err(e) => {
@@ -808,9 +778,9 @@ pub async fn query_vlm_multimodal(
         }
     }
 
-    // 3. Repli Vision Cloud (OpenAI / GLM)
+    // 2. Repli Vision Cloud (OpenAI / GLM)
     let cfg = crate::overlay::resolve_llm_config();
-    println!("[VLM] [Route 3/3] Vérification provider Vision Cloud : provider={:?}, endpoint={}, has_key={}", cfg.provider, cfg.endpoint, !cfg.api_key.is_empty());
+    println!("[VLM] [Route 2/3] Vérification provider Vision Cloud : provider={:?}, endpoint={}, has_key={}", cfg.provider, cfg.endpoint, !cfg.api_key.is_empty());
     if !cfg.api_key.is_empty() && (cfg.provider == crate::types::LlmProvider::OpenAI || cfg.provider == crate::types::LlmProvider::Glm) {
         println!("[VLM] Bascule sur le provider vision cloud : {:?} ({})", cfg.provider, cfg.endpoint);
         let cloud_client = reqwest::Client::builder()
@@ -825,7 +795,30 @@ pub async fn query_vlm_multimodal(
         }
     }
 
-    Err("Aucune méthode d'analyse VLM n'a pu aboutir (moteur local, serveur local et cloud ont échoué).".to_string())
+    // 3. Repli de secours : Inférence OCR locale si aucun serveur multimodal externe n'est disponible
+    println!("[VLM] [Route 3/3] Repli sur le moteur OCR textuel local...");
+    let prompt_owned = prompt.to_string();
+    let uris_cloned = image_data_uris.to_vec();
+    let etx_cloned = event_tx.cloned();
+
+    let local_res: Result<String, String> = tokio::task::spawn_blocking(move || {
+        let enriched_prompt = enrich_prompt_with_local_visual_ocr(&prompt_owned, &uris_cloned);
+        if !is_vlm_ready() {
+            ensure_vlm_loaded_sync(etx_cloned.as_ref())?;
+        }
+        if let Some(answer) = query_vlm_grounding_local(&enriched_prompt) {
+            let cleaned = clean_vlm_description(&answer);
+            if !cleaned.is_empty() {
+                return Ok(cleaned);
+            }
+        }
+        Err("Le modèle VLM local a retourné une réponse vide.".to_string())
+    }).await.unwrap_or_else(|e| Err(format!("Tâche bloquante interrompue: {e}")));
+
+    match local_res {
+        Ok(cleaned) => Ok(cleaned),
+        Err(e) => Err(format!("Aucune méthode d'analyse VLM n'a pu aboutir : {e}")),
+    }
 }
 
 /// Nettoie la description visuelle retournée par le LLM pour éliminer les formules robotiques
@@ -4106,8 +4099,8 @@ impl LocalLlamaEngine {
         event_tx: Option<&Sender<AgentEvent>>,
         tts_tx: Option<&Sender<TtsCommand>>,
     ) -> Result<String, String> {
-        // Contexte étendu à 8192 sur GPU, sécurisé à 4096 sur CPU (ou valeur personnalisée via LLAMA_CTX_SIZE)
-        let default_ctx = if self.gpu_enabled { 8192 } else { 4096 };
+        // Contexte modéré à 4096 sur GPU, 2048 sur CPU pour éviter la saturation de VRAM/RAM
+        let default_ctx = if self.gpu_enabled { 4096 } else { 2048 };
         let max_ctx = std::env::var("LLAMA_CTX_SIZE")
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
@@ -4412,7 +4405,7 @@ impl LocalLlamaEngine {
         let max_ctx = std::env::var("LLAMA_CTX_SIZE")
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
-            .unwrap_or(4096);
+            .unwrap_or(2048);
         let n_batch = 512;
         let threads = if self.gpu_enabled {
             4
